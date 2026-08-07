@@ -44,9 +44,10 @@
 //!
 //! A workspace's own spec says what a PERSON can attach to. The control plane
 //! has a second thing it wants of every repo — an always-on review loop on the
-//! deployment's loop node — and that is [`review_loop_spec`]: a spec nobody can
-//! edit through the workspace API, selected onto `role=loop`, running
-//! `nook-review` forever.
+//! deployment's loop node — and that is [`review_loop_spec`]: selected onto
+//! `role=loop`, running `nook-review` forever. Its shape is this build's and
+//! not a caller's; only its CEILING is a workspace declaration (MAIN-445), read
+//! from `review_loop_max_replicas` on every pass.
 //!
 //! It is the same planner, the same clone-on-demand and the same self-healing;
 //! the only additions are which checkouts it may use ([`Slots`]) and a
@@ -574,7 +575,7 @@ pub async fn pass(state: &AppState, clones: &CloneThrottle) -> crate::error::Api
                 state,
                 tenant,
                 ws.id,
-                &review_loop_spec(),
+                &review_loop_spec(ws.review_loop_max_replicas),
                 clones,
                 ManagedPurpose::ReviewLoop,
                 Slots::ClonesOnly,
@@ -588,27 +589,52 @@ pub async fn pass(state: &AppState, clones: &CloneThrottle) -> crate::error::Api
     Ok(())
 }
 
-/// The control plane's OWN declaration for a repo (MAIN-326): one always-on
-/// review loop, on the deployment's loop node.
+/// The control plane's OWN declaration for a repo (MAIN-326): an always-on
+/// review loop on the deployment's loop node, as many as the workspace asks for
+/// (MAIN-445).
 ///
-/// Not a `SessionSpec` on the workspace, and deliberately not editable through
-/// the workspace API — a repo asking to stop having its PRs reviewed, or asking
-/// for its review loop on somebody's laptop, is not a workspace-level choice.
-/// It is a spec only because that is what the planner reads; the values are
-/// this build's, and changing them is a code change.
+/// Still not the workspace's `SessionSpec` — that one says what a PERSON may
+/// attach to, and these two must not be able to adopt or stop each other's
+/// sessions. What MAIN-445 changed is the COUNT, and only the count: the
+/// runtime and the `role=loop` selector remain this build's, not a caller's. A
+/// repo still cannot ask for its reviewer on somebody's laptop.
 ///
-/// `Single`, not `All`: the loop posts review verdicts to GitHub and the board,
-/// so a second copy of it on a second loop node would double every comment. One
-/// reviewer per repo is the whole intent, and `Replicas::Single` is how the
-/// planner is told a number cannot be guessed from the fleet's size.
-pub(crate) fn review_loop_spec() -> SessionSpec {
+/// `max_replicas` is the workspace's column, and it is a CEILING rather than a
+/// count. The target shape is `desired = min(open_prs, max_replicas)` — a repo
+/// with two open PRs gets two reviewers, a quiet repo gets none. Nothing can
+/// measure open PRs yet (no forge), so today `desired = max_replicas` and the
+/// ceiling is the count. When the forge lands, only this function changes.
+///
+/// Its three states are three different statements:
+///
+/// - `None` — unset. `Replicas::Single`, the value every workspace had before
+///   this was settable, which is what makes the upgrade a no-op (AC-5).
+/// - `Some(0)` — off. `Count{0}` desires nothing, so the ordinary scale-down
+///   path stops a session this repo already has. Two things it is NOT: not
+///   "unmanaged" (skipping would leave the session running forever), and not
+///   the same as a repo idling at zero under a forge — that one scales back up
+///   when a PR appears, a zeroed one never does.
+/// - `Some(n)` — at most n reviewers. The planner still places at most one per
+///   node (NG-1), so on a one-loop-node fleet `n>1` reports honest shortfall
+///   until MAIN-446 makes the sharding real. Reporting the gap is the point;
+///   silently capping to one would hide a declaration nobody can satisfy.
+///
+/// A negative value cannot arrive — the route rejects it (AC-2) — but the cast
+/// saturates at zero rather than wrapping, because a column is a wider contract
+/// than the one endpoint that writes it today.
+pub(crate) fn review_loop_spec(max_replicas: Option<i32>) -> SessionSpec {
     SessionSpec {
         runtime: crate::services::jobs::LOOP_RUNTIME.into(),
         node_selector: [("role".to_string(), "loop".to_string())]
             .into_iter()
             .collect(),
         tolerations: vec![],
-        replicas: Replicas::Single,
+        replicas: match max_replicas {
+            None => Replicas::Single,
+            Some(n) => Replicas::Count {
+                count: n.max(0) as u32,
+            },
+        },
     }
 }
 
@@ -1606,7 +1632,13 @@ mod tests {
         let nodes = [user_box.clone(), loop_box.clone()];
         let cos = [checkout(1, 1), checkout(2, 2)];
 
-        let p = plan(&review_loop_spec(), &nodes, &cos, &[], PortSafety::Declared);
+        let p = plan(
+            &review_loop_spec(None),
+            &nodes,
+            &cos,
+            &[],
+            PortSafety::Declared,
+        );
         assert_eq!(starts(&p), vec![loop_box.id], "only the loop node");
         assert!(!starts(&p).contains(&user_box.id));
     }
@@ -1618,7 +1650,7 @@ mod tests {
     fn no_loop_node_is_a_shortfall_not_a_substitute() {
         let nodes = [loop_capable(1, &[]), loop_capable(2, &[])];
         let p = plan(
-            &review_loop_spec(),
+            &review_loop_spec(None),
             &nodes,
             &[checkout(1, 1)],
             &[],
@@ -1637,7 +1669,7 @@ mod tests {
             loop_capable(2, &[("role", "loop")]),
         ];
         let p = plan(
-            &review_loop_spec(),
+            &review_loop_spec(None),
             &nodes,
             &[checkout(1, 1), checkout(2, 2)],
             &[],
@@ -1673,12 +1705,115 @@ mod tests {
     /// place nothing at all, which reads as "no loop node" forever.
     #[test]
     fn the_review_loop_spec_is_what_the_card_declares() {
-        let s = review_loop_spec();
+        let s = review_loop_spec(None);
         assert_eq!(s.runtime, "claude");
         assert_eq!(
             s.node_selector.get("role").map(String::as_str),
             Some("loop")
         );
         assert_eq!(s.replicas, Replicas::Single);
+    }
+
+    /// MAIN-445 AC-5, the upgrade guarantee, stated where it can actually fail:
+    /// an unset workspace must produce the SAME PLAN as the hardcoded spec did,
+    /// not merely a non-empty one. The literal below is the pre-change
+    /// `Replicas::Single` — if a future edit makes "unset" mean anything else,
+    /// every existing deployment silently re-places its reviewers and this is
+    /// the test that says so.
+    #[test]
+    fn unset_reconciles_exactly_as_the_hardcoded_spec_did() {
+        let pre_change = SessionSpec {
+            runtime: crate::services::jobs::LOOP_RUNTIME.into(),
+            node_selector: [("role".to_string(), "loop".to_string())]
+                .into_iter()
+                .collect(),
+            tolerations: vec![],
+            replicas: Replicas::Single,
+        };
+        let nodes = [
+            loop_capable(1, &[("role", "loop")]),
+            loop_capable(2, &[("role", "loop")]),
+            loop_capable(3, &[]),
+        ];
+        let cos = [checkout(1, 1), checkout(2, 2), checkout(3, 3)];
+
+        let old = plan(&pre_change, &nodes, &cos, &[], PortSafety::Declared);
+        let new = plan(
+            &review_loop_spec(None),
+            &nodes,
+            &cos,
+            &[],
+            PortSafety::Declared,
+        );
+        assert_eq!(starts(&new), starts(&old));
+        assert_eq!(new.desired, old.desired);
+        assert_eq!(new.shortfall, old.shortfall);
+    }
+
+    /// AC-3's "0 means off, not unmanaged". The distinction is invisible in the
+    /// desired count — both are zero — and shows up only as the STOP: an
+    /// unmanaged workspace would leave the session running forever.
+    #[test]
+    fn zero_stops_the_review_loop_it_already_has() {
+        let loop_box = loop_capable(1, &[("role", "loop")]);
+        let cos = [checkout(1, 1)];
+        let running = [Actual {
+            session_id: SessionId(Uuid::from_u128(900)),
+            checkout_id: cos[0].checkout_id,
+            node_id: loop_box.id,
+        }];
+
+        let p = plan(
+            &review_loop_spec(Some(0)),
+            &[loop_box],
+            &cos,
+            &running,
+            PortSafety::Declared,
+        );
+        assert_eq!(p.desired, 0);
+        assert!(starts(&p).is_empty(), "0 starts nothing");
+        assert_eq!(stops(&p), vec![running[0].session_id], "and stops the one");
+    }
+
+    /// AC-3 again, from the other side: unset must NOT stop the session that 0
+    /// stops. Written as its own test because a bug collapsing None into
+    /// Some(0) would turn every workspace in the fleet off at once, and the
+    /// test above would still pass.
+    #[test]
+    fn unset_keeps_the_review_loop_zero_would_stop() {
+        let loop_box = loop_capable(1, &[("role", "loop")]);
+        let cos = [checkout(1, 1)];
+        let running = [Actual {
+            session_id: SessionId(Uuid::from_u128(900)),
+            checkout_id: cos[0].checkout_id,
+            node_id: loop_box.id,
+        }];
+
+        let p = plan(
+            &review_loop_spec(None),
+            &[loop_box],
+            &cos,
+            &running,
+            PortSafety::Declared,
+        );
+        assert_eq!(p.desired, 1);
+        assert!(stops(&p).is_empty(), "unset stops nothing");
+    }
+
+    /// N>1 on a one-loop-node fleet is honest shortfall, not a silent cap
+    /// (NG-1 — placement is MAIN-446's). The number matters: `placed 1,
+    /// shortfall 2` is what tells an operator the declaration is unsatisfiable,
+    /// where a cap to 1 would look like success.
+    #[test]
+    fn three_replicas_on_one_loop_node_is_placed_one_shortfall_two() {
+        let p = plan(
+            &review_loop_spec(Some(3)),
+            &[loop_capable(1, &[("role", "loop")])],
+            &[checkout(1, 1)],
+            &[],
+            PortSafety::Declared,
+        );
+        assert_eq!(starts(&p).len(), 1, "one node, so one placement");
+        assert_eq!(p.shortfall, 2, "the other two are reported, not hidden");
     }
 }

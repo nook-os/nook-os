@@ -1,0 +1,11 @@
+-- The SQLite twin of 0044, hand-authored in the same commit (CLAUDE.md).
+--
+-- The per-workspace ceiling on review loops (MAIN-445 AC-1). SQLite has no
+-- `ADD COLUMN IF NOT EXISTS`, so the add is unconditional — safe because the
+-- column is new in this migration and the ledger runs each version once.
+--
+-- `integer` is the same declared type on both engines and needs no entry in
+-- docs/db-dialect-audit.md's type map. Nullable with no default, so every
+-- existing row reads NULL — "unset, use the build's default ceiling of one" —
+-- exactly as on Postgres.
+ALTER TABLE workspaces ADD COLUMN review_loop_max_replicas INTEGER;

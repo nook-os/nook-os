@@ -662,6 +662,9 @@ async fn main() -> Result<()> {
         Command::Reviews(ReviewsCommand::Enqueue { workspace, seed }) => {
             cli::reviews_enqueue(&workspace, seed.as_deref()).await
         }
+        Command::Reviews(ReviewsCommand::Scale { workspace, count }) => {
+            cli::reviews_scale(&workspace, count.as_deref()).await
+        }
         Command::Reviews(ReviewsCommand::Sweep { state }) => cli::reviews_sweep(&state).await,
         Command::Notify {
             title,
@@ -1070,6 +1073,21 @@ enum ReviewsCommand {
         /// The opening brief for the run.
         #[arg(long)]
         seed: Option<String>,
+    },
+    /// The ceiling on a workspace's review loops, or read the current value.
+    ///
+    /// A ceiling, not a count: reviewers are meant to scale to open PRs and stop
+    /// here. Nothing counts PRs yet, so the ceiling is what runs today.
+    ///
+    /// `0` turns reviewing off for that repo and stops the session it has;
+    /// `unset` returns it to the build's default ceiling of one. Placement of
+    /// more than one per node is not built yet, so a ceiling above the fleet's
+    /// loop nodes reports a shortfall rather than silently capping.
+    Scale {
+        /// The workspace, by id, slug or name.
+        workspace: String,
+        /// The ceiling, `0` to turn it off, or `unset`. Omit to read.
+        count: Option<String>,
     },
     /// Turn the board-signal sweep on or off for this tenant, or ask its state.
     /// Default is OFF: a fresh deployment reviews nothing until asked.

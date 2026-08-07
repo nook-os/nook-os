@@ -149,6 +149,17 @@ pub trait WorkspaceRepository: Send + Sync {
         credential: Option<GitCredentialId>,
     ) -> ApiResult<Option<Workspace>>;
 
+    /// Set or clear how many review loops this repo is owed (MAIN-445).
+    /// `None` clears it back to unset, which is the build's default of one —
+    /// deliberately reachable, so a person can undo a 0 without knowing what
+    /// the default happens to be.
+    async fn set_review_loop_max_replicas(
+        &self,
+        tenant: TenantId,
+        id: WorkspaceId,
+        replicas: Option<i32>,
+    ) -> ApiResult<Option<Workspace>>;
+
     /// Every workspace that declares a spec, across every tenant (MAIN-316).
     ///
     /// Cross-tenant because the reconciler is one loop for the deployment, like
@@ -624,6 +635,26 @@ impl WorkspaceRepository for DbWorkspaceRepository {
                     type_mapping(self.db.engine()).now()
                 ),
                 params![tenant, id, credential.map(|c| c.0)],
+            )
+            .await?)
+    }
+
+    async fn set_review_loop_max_replicas(
+        &self,
+        tenant: TenantId,
+        id: WorkspaceId,
+        replicas: Option<i32>,
+    ) -> ApiResult<Option<Workspace>> {
+        Ok(self
+            .db
+            .query_opt(
+                &format!(
+                    "UPDATE workspaces SET review_loop_max_replicas = $3, updated_at = {}
+                     WHERE tenant_id = $1 AND id = $2
+                     RETURNING *",
+                    type_mapping(self.db.engine()).now()
+                ),
+                params![tenant, id, replicas],
             )
             .await?)
     }
@@ -1894,6 +1925,7 @@ impl FakeWorkspaceRepository {
             port_requirements: None,
             session_spec: None,
             git_credential_id: None,
+            review_loop_max_replicas: None,
         }
     }
 }
@@ -1930,6 +1962,22 @@ impl WorkspaceRepository for FakeWorkspaceRepository {
             .find(|w| w.id == id && w.tenant_id == tenant)
             .map(|w| {
                 w.git_credential_id = credential;
+                w.clone()
+            }))
+    }
+
+    async fn set_review_loop_max_replicas(
+        &self,
+        tenant: TenantId,
+        id: WorkspaceId,
+        replicas: Option<i32>,
+    ) -> ApiResult<Option<Workspace>> {
+        let mut s = self.inner.lock().unwrap();
+        Ok(s.workspaces
+            .iter_mut()
+            .find(|w| w.id == id && w.tenant_id == tenant)
+            .map(|w| {
+                w.review_loop_max_replicas = replicas;
                 w.clone()
             }))
     }

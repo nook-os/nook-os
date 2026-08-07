@@ -7524,6 +7524,86 @@
         }
       }
     },
+    "/api/v1/workspaces/{id}/review-loop": {
+      "get": {
+        "tags": [
+          "crate::routes::workspaces"
+        ],
+        "summary": "`GET /api/v1/workspaces/{id}/review-loop` — the ceiling on review loops for\nthis repo (MAIN-445 AC-2).",
+        "description": "Reports the RAW column, unlike `/ports` which resolves its default before\nanswering. The difference is deliberate: a port declaration's default is a\nfact about what will be leased, while `null` here is a fact about what\nnobody has decided. Resolving it to `1` would erase exactly the distinction\nAC-4 needs to print \"unset (default 1)\".",
+        "operationId": "get_review_loop",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewLoopDeclaration"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "crate::routes::workspaces"
+        ],
+        "summary": "`PUT /api/v1/workspaces/{id}/review-loop` — set it, or clear it back to\nunset with `{\"max_replicas\": null}` (MAIN-445 AC-2).",
+        "operationId": "set_review_loop",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetReviewLoopRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewLoopDeclaration"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/workspaces/{id}/secrets": {
       "get": {
         "tags": [
@@ -13368,6 +13448,19 @@
           }
         }
       },
+      "ReviewLoopDeclaration": {
+        "type": "object",
+        "description": "A workspace's review-loop declaration (MAIN-445), as the API reports it.\n\n`max_replicas: null` is UNSET — the build's default ceiling of one applies.\nIt is a different statement from `0`, which is an explicit \"do not review\nthis repo\", and the two must stay distinguishable all the way out to the\ncaller; flattening them here is what would make the CLI unable to say\n\"unset (default 1)\".",
+        "properties": {
+          "max_replicas": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          }
+        }
+      },
       "RuntimeAuthAccepted": {
         "type": "object",
         "required": [
@@ -13855,6 +13948,19 @@
               "$ref": "#/components/schemas/PortRequirement"
             },
             "description": "`null` clears the declaration, returning the workspace to the default\nsingle `NOOK_PORT` listener; an empty list means \"this workspace binds\nnothing\", which is a different statement and is honoured as one."
+          }
+        }
+      },
+      "SetReviewLoopRequest": {
+        "type": "object",
+        "description": "Set or clear a workspace's review-loop ceiling (MAIN-445).\n\nThe field is a raw JSON value on purpose. Typed as `Option<i32>` it would be\naxum's 422 that answered `{\"max_replicas\": \"3\"}` or `-1`, and AC-2 asks for\na 400 NAMING the field for anything that is not a non-negative integer — so\nthe parse has to happen where the error message can be written.\n\nThe key itself is required, matching [`SetSessionSpecRequest`]: an absent\nkey is a malformed request, not a silent \"leave it alone\".",
+        "properties": {
+          "max_replicas": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
           }
         }
       },
@@ -16115,6 +16221,14 @@
           },
           "port_requirements": {
             "description": "The workspace's declared port requirements (MAIN-301), as stored JSON —\n`[{\"name\":\"web\",\"env\":\"PORT\",…}]`. `None` means undeclared, which falls\nback to the default single listener; an empty array means \"binds\nnothing\" and is honoured as the different statement it is."
+          },
+          "review_loop_max_replicas": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The CEILING on always-on review loops for this repo (MAIN-445).\n\nA ceiling rather than a count: the target is\n`desired = min(open_prs, max_replicas)`, so reviewers scale to the work\nand stop here. Nothing can measure open PRs yet, so today the ceiling IS\nthe count — but the name has to be honest now, or the forge changes what\na shipped field means.\n\n`None` is UNSET, not zero: the build's default ceiling of one applies,\nwhich is what every workspace reads on upgrade. `Some(0)` is an explicit\n\"off\" — a managed review session it already has is stopped, and unlike a\nrepo idling at zero it never scales back up. `Some(n)` allows at most n;\nplacement beyond one per node is MAIN-446's, so n>1 currently reports\nshortfall rather than being silently capped."
           },
           "session_spec": {
             "description": "The desired session state (MAIN-315), or `None` for an UNMANAGED\nworkspace. Nothing reconciles it yet."

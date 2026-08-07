@@ -1,0 +1,30 @@
+-- The per-workspace CEILING on review loops (MAIN-445 AC-1).
+--
+-- How many always-on review loops the control plane may run for this repo.
+-- `review_loop_spec()` used to return a hardcoded `Replicas::Single` for every
+-- workspace in the tenant, so a repo could neither opt out nor ask for more.
+--
+-- A CEILING, not a count, and that is the whole reason for the name. The target
+-- shape is `desired = min(open_prs, max_replicas)`: reviewers scale to the work
+-- in front of them and stop at this number. No forge exists yet to ask how many
+-- PRs are open, so today `desired = max_replicas` — the ceiling IS the count
+-- until something can measure the work. Naming it `replicas` now would mean
+-- silently changing the meaning of a shipped column the day the forge lands.
+--
+-- NULLABLE IS THE DESIGN, and NULL is not 0. Three distinct states:
+--
+--   NULL  unset — use the build's default ceiling of one. Every existing row
+--         reads this on upgrade, which makes the change a no-op for the fleet.
+--   0     off — this repo is never reviewed. The reconciler still manages the
+--         workspace and STOPS a session it already has. Distinct from "idle at
+--         zero" under a forge: a quiet repo scales back up, a zeroed one does
+--         not.
+--   N>=1  at most N reviewers. Placement of more than one per node is MAIN-446's;
+--         until it lands N>1 reports an honest shortfall rather than capping
+--         silently.
+--
+-- A NOT NULL DEFAULT 1 would have collapsed unset into an explicit 1 and made
+-- the CLI unable to say "unset (default 1)" — the distinction a person needs to
+-- know whether anyone ever touched this.
+ALTER TABLE public.workspaces
+    ADD COLUMN IF NOT EXISTS review_loop_max_replicas integer;
