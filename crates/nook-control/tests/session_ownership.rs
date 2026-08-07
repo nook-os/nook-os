@@ -14,7 +14,7 @@
 use nook_control::repo::sessions::{NewSession, SessionFilter};
 use nook_control::repo::workspaces::CheckoutUpsert;
 use nook_control::services::session_reconcile::{
-    plan, Action, Actual, CheckoutSlot, NodeFacts, PortSafety,
+    plan, Action, Actual, CheckoutSlot, NodeFacts, PortSafety, Spread,
 };
 use nook_testkit::TestBed;
 use nook_types::*;
@@ -79,6 +79,8 @@ async fn made(
             checkout_id: Some(checkout),
             managed,
             managed_purpose: ManagedPurpose::Access,
+            managed_shard: 0,
+            managed_shards: 1,
         })
         .await
         .expect("create session")
@@ -101,6 +103,7 @@ fn facts(node: NodeId) -> NodeFacts {
         labels: Default::default(),
         taints: vec![],
         runtimes: vec!["bash".into()],
+        max_loop_jobs: None,
     }
 }
 
@@ -113,10 +116,14 @@ async fn actual(bed: &TestBed, tenant: TenantId, workspace: WorkspaceId) -> Vec<
         .await
         .expect("live managed")
         .into_iter()
-        .map(|(session_id, checkout_id, node_id)| Actual {
-            session_id,
-            checkout_id,
-            node_id,
+        .map(|m| Actual {
+            session_id: m.id,
+            checkout_id: m.checkout_id,
+            node_id: m.node_id,
+            shard: ShardAssignment {
+                index: m.managed_shard.max(0) as u32,
+                of: m.managed_shards.max(1) as u32,
+            },
         })
         .collect()
 }
@@ -193,6 +200,9 @@ async fn killing_a_managed_session_is_not_removing_it() {
         &slots,
         &actual(&bed, tenant, ws).await,
         PortSafety::Declared,
+        // A workspace's own declaration: replicas count nodes, one session per
+        // checkout. Sharding is the review loop's (MAIN-446).
+        Spread::PerCheckout,
     );
     assert!(
         converged.actions.is_empty(),
@@ -212,6 +222,9 @@ async fn killing_a_managed_session_is_not_removing_it() {
         &slots,
         &actual(&bed, tenant, ws).await,
         PortSafety::Declared,
+        // A workspace's own declaration: replicas count nodes, one session per
+        // checkout. Sharding is the review loop's (MAIN-446).
+        Spread::PerCheckout,
     );
     assert_eq!(
         after.actions,
@@ -219,6 +232,7 @@ async fn killing_a_managed_session_is_not_removing_it() {
             checkout: co,
             node,
             path: "/w/managed".into(),
+            shard: ShardAssignment::SOLO,
         }],
         "the declaration is unchanged, so the session comes back"
     );
@@ -253,6 +267,9 @@ async fn lowering_the_replicas_is_what_removes_one() {
         &slots,
         &actual(&bed, tenant, ws).await,
         PortSafety::Declared,
+        // A workspace's own declaration: replicas count nodes, one session per
+        // checkout. Sharding is the review loop's (MAIN-446).
+        Spread::PerCheckout,
     );
     assert_eq!(p.actions, vec![Action::Stop { session, node }]);
 
@@ -288,6 +305,9 @@ async fn an_ad_hoc_session_is_neither_a_replica_nor_a_victim() {
         &slots,
         &actual(&bed, tenant, ws).await,
         PortSafety::Declared,
+        // A workspace's own declaration: replicas count nodes, one session per
+        // checkout. Sharding is the review loop's (MAIN-446).
+        Spread::PerCheckout,
     );
     assert_eq!(
         wanted.actions,
@@ -295,6 +315,7 @@ async fn an_ad_hoc_session_is_neither_a_replica_nor_a_victim() {
             checkout: co,
             node,
             path: "/w/shared".into(),
+            shard: ShardAssignment::SOLO,
         }],
         "an ad-hoc session does not fill a managed slot"
     );
@@ -305,6 +326,9 @@ async fn an_ad_hoc_session_is_neither_a_replica_nor_a_victim() {
         &slots,
         &actual(&bed, tenant, ws).await,
         PortSafety::Declared,
+        // A workspace's own declaration: replicas count nodes, one session per
+        // checkout. Sharding is the review loop's (MAIN-446).
+        Spread::PerCheckout,
     );
     assert!(
         dropped.actions.is_empty(),

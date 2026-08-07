@@ -13767,6 +13767,16 @@
             "$ref": "#/components/schemas/ManagedPurpose",
             "description": "What the reconciler is keeping this session for (MAIN-326). Meaningless\non a hand-started session, where it reads [`ManagedPurpose::Access`]\nbecause the column is `NOT NULL`."
           },
+          "managed_shard": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Which slice of the repo's work this managed session owns (MAIN-446).\n\nStored on the row, not derived, for two reasons the planner depends on.\nIt is part of the unique index, so it is what lets several reviewers\nshare one clone instead of reading as each other's duplicate. And it is\nwhat a RESTART re-sends: a reviewer that came back as shard 0 when it\nhad been shard 2 would re-review another reviewer's PRs and skip its\nown.\n\n`0 of 1` on everything else — a hand-started terminal, and every row\nthat predates this column."
+          },
+          "managed_shards": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many shards the declaration was divided into when this session was\nplaced (MAIN-446). The divisor half of `managed_shard`; the two are only\nmeaningful together.\n\nStored rather than re-read from the workspace's ceiling, so a session\nkeeps partitioning the way it was told to. A ceiling that CHANGES makes\nevery live session's divisor stale, which the planner handles by\nreplacing them — a re-partition is a deliberate, visible event, not\nsomething a running agent discovers mid-review."
+          },
           "name": {
             "type": "string"
           },

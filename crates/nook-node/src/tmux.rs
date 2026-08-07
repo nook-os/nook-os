@@ -310,6 +310,11 @@ pub fn new_session(
     // unambiguous without a flag: the session already knows which org it is in,
     // so an agent never has to be told, and never has to guess.
     tenant_id: Option<&str>,
+    // Anything else the caller wants in the session's environment — today the
+    // review loop's shard pair (MAIN-446). Passed through rather than named
+    // here: this end exports what it was handed, which is what keeps `spawn`
+    // ignorant of what any particular managed purpose reads.
+    extra_env: &[(&str, &str)],
 ) -> Result<()> {
     // Preflight, so the failure names its own cause. tmux's own message for a
     // missing -c directory is terse and arrives with no session attached, and
@@ -335,6 +340,7 @@ pub fn new_session(
     if !skipped.is_empty() {
         extra.push(("NOOK_PORTS_UNSATISFIED", skipped.as_str()));
     }
+    extra.extend_from_slice(extra_env);
     spawn(
         name,
         cwd,
@@ -933,6 +939,28 @@ mod session_env_tests {
             !src.contains("NOOK_GH_TOKEN={"),
             "the node's own variable name must not be exported into a session; \
              `gh` would not read it and the session would look authenticated"
+        );
+    }
+
+    /// A caller's extra env rides the SAME list the leased ports do, so it
+    /// reaches the session as `-e` pairs on the one `new-session` (MAIN-446
+    /// AC-2). Building a second list, or setting it after the session exists,
+    /// is how it would arrive for some constructors and not others.
+    #[test]
+    fn extra_env_joins_the_ports_on_the_way_to_spawn() {
+        let src = source();
+        let body = src
+            .split("pub fn new_session(")
+            .nth(1)
+            .expect("new_session must exist");
+        let extended = body
+            .find("extra.extend_from_slice(extra_env)")
+            .expect("new_session must fold extra_env into the port list");
+        let spawned = body.find("    spawn(").expect("new_session must spawn");
+        assert!(
+            extended < spawned,
+            "extra_env has to be in the list BEFORE the session is created — \
+             tmux takes its environment at `new-session` and nothing sets it after"
         );
     }
 

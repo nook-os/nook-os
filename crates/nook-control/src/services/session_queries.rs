@@ -68,6 +68,20 @@ pub async fn hydrate_ports(
     Ok(())
 }
 
+/// The shard a RESTART must re-send (MAIN-446), read off the stored row.
+///
+/// Every path that re-issues `StartSession` for a session that already exists
+/// goes through this, so a restart and a port re-lease cannot disagree about
+/// which slice the session owns. `None` — one shard, or an unmanaged session —
+/// is "the whole of it", matching what a first start sends.
+pub fn shard_of(session: &Session) -> Option<ShardAssignment> {
+    let of = session.managed_shards.max(1) as u32;
+    (session.managed && of > 1).then_some(ShardAssignment {
+        index: session.managed_shard.max(0) as u32,
+        of,
+    })
+}
+
 /// Create a session and instruct the node to start it. Shared by the REST
 /// handler and the MCP backend. Resolves the checkout path from workspace +
 /// node (first match), then delegates to [`create_session_at`].
@@ -116,6 +130,8 @@ pub async fn create_session(
         false,
         // …so its purpose is never read. `Access` is the column's default.
         ManagedPurpose::Access,
+        // A person's terminal is not a slice of anything.
+        ShardAssignment::SOLO,
     )
     .await
 }
@@ -139,6 +155,11 @@ pub async fn create_session_at(
     // Which declaration this session answers (MAIN-326). Ignored when `managed`
     // is false, and `Access` is the only thing a person's session ever is.
     managed_purpose: ManagedPurpose,
+    // Which slice of that declaration (MAIN-446). `SOLO` is the whole of it,
+    // which is every session but a sharded reviewer — and it is passed rather
+    // than defaulted for the reason `PortSafety` is: the caller that forgot
+    // would silently place a second reviewer on top of the first one's shard.
+    shard: ShardAssignment,
 ) -> ApiResult<Session> {
     use crate::error::ApiError;
 
@@ -173,6 +194,8 @@ pub async fn create_session_at(
             checkout_id,
             managed,
             managed_purpose,
+            managed_shard: shard.index as i32,
+            managed_shards: shard.of.max(1) as i32,
         })
         .await?;
 
@@ -216,6 +239,10 @@ pub async fn create_session_at(
             // Only a managed session has a purpose to act on; a hand-started
             // one is a terminal and nothing drives it (MAIN-326).
             managed_purpose: managed.then_some(managed_purpose),
+            // Only a SHARDED one has a slice to name. One reviewer for the repo
+            // is the whole of it, and saying so on the wire would only give the
+            // node an env pair meaning "no partition" (MAIN-446).
+            shard: (shard.of > 1).then_some(shard),
         },
     );
     if !sent {
@@ -267,6 +294,8 @@ pub async fn create_ad_hoc_session(
             // Ad-hoc: an $HOME terminal or a runtime-authorize session.
             managed: false,
             managed_purpose: ManagedPurpose::Access,
+            managed_shard: ShardAssignment::SOLO.index as i32,
+            managed_shards: ShardAssignment::SOLO.of as i32,
         })
         .await?;
 
@@ -302,8 +331,10 @@ pub async fn create_ad_hoc_session(
             ports: ports.ports.clone(),
             unsatisfied: ports.unsatisfied.clone(),
             attempt: 0,
-            // An ad-hoc terminal is nobody's declaration.
+            // An ad-hoc terminal is nobody's declaration, and so no slice of
+            // one either.
             managed_purpose: None,
+            shard: None,
         },
     );
     if !sent {
@@ -357,6 +388,8 @@ pub async fn create_auth_session(
             // Ad-hoc: an $HOME terminal or a runtime-authorize session.
             managed: false,
             managed_purpose: ManagedPurpose::Access,
+            managed_shard: ShardAssignment::SOLO.index as i32,
+            managed_shards: ShardAssignment::SOLO.of as i32,
         })
         .await?;
 

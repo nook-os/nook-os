@@ -1,7 +1,7 @@
 ---
 name: nook-review
 description: "Review open PRs against their linked NookOS board issue and required GitHub checks, then post a three-group verdict with loop labels. Use when asked to run the loop's reviewer or review its PR queue. Designed for /loop; never merges or pushes code."
-version: 1.1.0
+version: 1.2.0
 author: NookOS
 license: MIT
 platforms: [linux, macos]
@@ -54,6 +54,28 @@ Skip a PR when that recorded SHA equals its current `headRefOid` and it already
 has `loop-approved`, `loop-changes-requested`, or `needs-human-review`. Review
 it again when new commits landed after the recorded SHA. If nothing needs
 review, say so and end the pass.
+
+### Your shard
+
+A repo may run several reviewers at once. `NOOK_REVIEW_SHARDS` says how many,
+and `NOOK_REVIEW_SHARD` says which one you are, counting from zero.
+
+**When `NOOK_REVIEW_SHARDS` is greater than 1, consider only PRs where
+`number % NOOK_REVIEW_SHARDS == NOOK_REVIEW_SHARD`.** That rule is about the
+set of open PRs needing review — *however that set is obtained*. It is stated
+that way on purpose: what lists the PRs may change, and this filter must
+survive the change untouched.
+
+Absent, empty, or `1` means every PR is yours. That is the case for a single
+reviewer and for every deployment that has never set these, so the ordinary
+run is unaffected.
+
+The arithmetic is the whole coordination mechanism — there is no claim, no
+lock, and no message between reviewers. Two shards therefore never pick the
+same PR, and every PR belongs to exactly one shard. If your shard's queue is
+empty, end the pass; do NOT take another shard's PR because you have nothing
+to do. A shard whose reviewer is down leaves its PRs until it comes back, and
+that is the accepted trade.
 
 ## 2. Read the contract and code
 

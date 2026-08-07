@@ -253,6 +253,7 @@ pub async fn start_work(
         // Start-work is a person taking a ticket: ad-hoc, not reconciled.
         false,
         ManagedPurpose::Access,
+        nook_types::ShardAssignment::SOLO,
     )
     .await?;
 

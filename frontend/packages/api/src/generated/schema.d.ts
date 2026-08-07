@@ -6090,6 +6090,34 @@ export interface components {
              *     because the column is `NOT NULL`.
              */
             managed_purpose?: components["schemas"]["ManagedPurpose"];
+            /**
+             * Format: int32
+             * @description Which slice of the repo's work this managed session owns (MAIN-446).
+             *
+             *     Stored on the row, not derived, for two reasons the planner depends on.
+             *     It is part of the unique index, so it is what lets several reviewers
+             *     share one clone instead of reading as each other's duplicate. And it is
+             *     what a RESTART re-sends: a reviewer that came back as shard 0 when it
+             *     had been shard 2 would re-review another reviewer's PRs and skip its
+             *     own.
+             *
+             *     `0 of 1` on everything else — a hand-started terminal, and every row
+             *     that predates this column.
+             */
+            managed_shard?: number;
+            /**
+             * Format: int32
+             * @description How many shards the declaration was divided into when this session was
+             *     placed (MAIN-446). The divisor half of `managed_shard`; the two are only
+             *     meaningful together.
+             *
+             *     Stored rather than re-read from the workspace's ceiling, so a session
+             *     keeps partitioning the way it was told to. A ceiling that CHANGES makes
+             *     every live session's divisor stale, which the planner handles by
+             *     replacing them — a re-partition is a deliberate, visible event, not
+             *     something a running agent discovers mid-review.
+             */
+            managed_shards?: number;
             name: string;
             node_id: components["schemas"]["NodeId"];
             /**

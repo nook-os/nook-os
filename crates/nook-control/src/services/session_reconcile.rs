@@ -50,9 +50,9 @@
 //! from `review_loop_max_replicas` on every pass.
 //!
 //! It is the same planner, the same clone-on-demand and the same self-healing;
-//! the only additions are which checkouts it may use ([`Slots`]) and a
-//! [`ManagedPurpose`] on the session so the two declarations cannot adopt or
-//! stop each other's work. Ticket-triggered spec/build jobs are a different
+//! the only additions are which checkouts it may use ([`Slots`]), how many
+//! sessions may share a node ([`Spread`]), and a [`ManagedPurpose`] on the
+//! session so the two declarations cannot adopt or stop each other's work. Ticket-triggered spec/build jobs are a different
 //! mechanism entirely (`job_dispatch`) and are untouched by any of this.
 
 use std::collections::BTreeMap;
@@ -134,6 +134,26 @@ pub struct NodeFacts {
     /// reported none (an older node) and is treated as unknown, not incapable —
     /// eligibility falls back to selector + taints alone.
     pub runtimes: Vec<String>,
+    /// How many loop jobs this node holds at once — `capabilities.max_loop_jobs`,
+    /// the number an operator already sets with `NOOK_MAX_LOOP_JOBS`.
+    ///
+    /// It is the ceiling on sharded placement (MAIN-446 AC-1), and it is the
+    /// node's EXISTING number rather than a second one: a review loop is agent
+    /// work on that machine exactly as a loop job is, and two answers to "how
+    /// much agent work does this box run" would immediately disagree.
+    ///
+    /// `None` is an unreported cap (an older agent), which reads as
+    /// [`jobs::CAPACITY_WHEN_UNREPORTED`] for the reason given there — the
+    /// shipped default, not permission to take everything.
+    pub max_loop_jobs: Option<u32>,
+}
+
+impl NodeFacts {
+    /// How many managed sessions of one declaration this node may hold.
+    fn capacity(&self) -> usize {
+        self.max_loop_jobs
+            .unwrap_or(crate::services::jobs::CAPACITY_WHEN_UNREPORTED) as usize
+    }
 }
 
 /// One present checkout of the workspace — a clone OR a worktree — as a
@@ -154,6 +174,15 @@ pub struct Actual {
     pub session_id: SessionId,
     pub checkout_id: NodeWorkspaceId,
     pub node_id: NodeId,
+    /// The slice of the declaration this session was placed to own (MAIN-446),
+    /// read off its row. `SOLO` for every unsharded session, which is what an
+    /// access session and a single reviewer both are.
+    ///
+    /// Part of the identity of a placement, not decoration: a session is held
+    /// only when its whole assignment still matches a desired one, so a changed
+    /// DIVISOR replaces every reviewer rather than leaving some partitioning by
+    /// the old number.
+    pub shard: nook_types::ShardAssignment,
 }
 
 /// One thing to do. Deliberately not "kill" — see [`Plan::stop`].
@@ -164,6 +193,10 @@ pub enum Action {
         checkout: NodeWorkspaceId,
         node: NodeId,
         path: String,
+        /// Which slice of the declaration it is being started to own
+        /// (MAIN-446). `SOLO` under [`Spread::PerCheckout`], where a checkout
+        /// holds one session and there is nothing to divide.
+        shard: nook_types::ShardAssignment,
     },
     /// Stop a managed session: its checkout is gone, or its node is no longer a
     /// chosen repo holder. Carries the node because stopping means killing the
@@ -257,12 +290,36 @@ pub enum PortSafety {
     Undeclared,
 }
 
+/// How a declaration turns `replicas` into placements.
+///
+/// The choice `Slots` asks a new managed purpose to make, in its other half:
+/// that one says WHICH checkouts a declaration may use, this one says how many
+/// sessions may share a node. They are named together at the one call site
+/// where placement is declared, so a purpose cannot inherit either by accident.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Spread {
+    /// `replicas` counts NODES, and every checkout on a chosen node gets its
+    /// own session. A workspace's own [`SessionSpec`] means this — "how many
+    /// machines hold my repo, with a terminal in each checkout" — and it is
+    /// what the reconcile-status endpoint reports against.
+    PerCheckout,
+    /// `replicas` counts SESSIONS, several of which may share one node — each
+    /// node holding up to its own `max_loop_jobs` (MAIN-446).
+    ///
+    /// The review loop's rule, and the difference is what the number is FOR: a
+    /// reviewer is not a copy of the repo, it is a share of the repo's open
+    /// PRs. Three of them on one machine is a sensible thing to ask for, where
+    /// three clones on one machine is not.
+    Sharded,
+}
+
 pub fn plan(
     spec: &SessionSpec,
     nodes: &[NodeFacts],
     checkouts: &[CheckoutSlot],
     actual: &[Actual],
     ports: PortSafety,
+    spread: Spread,
 ) -> Plan {
     let has_checkout = |id: NodeId| checkouts.iter().any(|c| c.node_id == id);
     // Eligible nodes, checkout-holders first so a bounded replica count prefers
@@ -270,6 +327,37 @@ pub fn plan(
     let mut eligible_nodes: Vec<&NodeFacts> = nodes.iter().filter(|n| eligible(spec, n)).collect();
     eligible_nodes.sort_by_key(|n| (!has_checkout(n.id), n.id.0));
 
+    // THE CAP (MAIN-361 AC-3). A workspace that has not said what it binds gets
+    // ONE session per node, whatever its spec asks for — because the second one
+    // would bind whatever the app hardcoded, and so would the first.
+    //
+    // Per NODE, not per fleet: the collision is between processes on one
+    // machine, so `Replicas::All` over three nodes still gets three sessions,
+    // one each. Nothing here inspects the repo (NG-2); "no declaration" is the
+    // whole detection.
+    //
+    // It binds a SHARDED declaration too, and deliberately: sharding divides
+    // the PRs, not the ports, so two reviewers in one checkout are still two
+    // agents that may each run whatever the repo's dev server is. A repo that
+    // wants several reviewers on one box declares its ports — an explicit empty
+    // declaration is enough — and the shortfall says so until it does.
+    let capped = ports == PortSafety::Undeclared;
+
+    match spread {
+        Spread::PerCheckout => plan_per_checkout(spec, &eligible_nodes, checkouts, actual, capped),
+        Spread::Sharded => plan_sharded(spec, &eligible_nodes, checkouts, actual, capped),
+    }
+}
+
+/// `replicas` counts nodes; every checkout on a chosen node gets a session.
+fn plan_per_checkout(
+    spec: &SessionSpec,
+    eligible_nodes: &[&NodeFacts],
+    checkouts: &[CheckoutSlot],
+    actual: &[Actual],
+    capped: bool,
+) -> Plan {
+    let has_checkout = |id: NodeId| checkouts.iter().any(|c| c.node_id == id);
     // How many NODES should hold the repo — the "repo replicas".
     let target_nodes = match spec.replicas {
         Replicas::Count { count } => count as usize,
@@ -292,18 +380,8 @@ pub fn plan(
         .collect();
     slots.sort_by_key(|c| c.checkout_id.0);
 
-    // THE CAP (MAIN-361 AC-3). A workspace that has not said what it binds gets
-    // ONE session per node, whatever its spec asks for — because the second one
-    // would bind whatever the app hardcoded, and so would the first.
-    //
-    // Per NODE, not per fleet: the collision is between processes on one
-    // machine, so `Replicas::All` over three nodes still gets three sessions,
-    // one each. Nothing here inspects the repo (NG-2); "no declaration" is the
-    // whole detection.
-    //
     // Applied AFTER the sort, so the surviving slot per node is deterministic —
     // two replicas planning the same instant must keep the same one.
-    let capped = ports == PortSafety::Undeclared;
     if capped {
         let mut seen: Vec<NodeId> = Vec::new();
         slots.retain(|c| {
@@ -347,6 +425,8 @@ pub fn plan(
                 checkout: c.checkout_id,
                 node: c.node_id,
                 path: c.path.clone(),
+                // One session per checkout, so there is nothing to divide.
+                shard: nook_types::ShardAssignment::SOLO,
             });
         }
     }
@@ -356,6 +436,154 @@ pub fn plan(
     out.placed = slots.len();
     out.desired = slots.len() + needs_clone.len() + unmet_nodes;
     out.shortfall = needs_clone.len() + unmet_nodes;
+    out.capped = capped;
+    out
+}
+
+/// `replicas` counts SESSIONS, and one node may hold several (MAIN-446).
+///
+/// Shards are dealt round-robin across the chosen nodes rather than filling one
+/// before starting the next, so two reviewers on a two-node fleet land on two
+/// machines. Within a node they cycle its checkouts, which for the review loop
+/// is the single primary clone — several reviewers in one working copy, which
+/// is fine because a reviewer reads PRs on the forge and never writes the tree.
+///
+/// The DIVISOR is the number actually PLACED, not the declared count. Dividing
+/// by what was asked for hands the survivors slices belonging to reviewers
+/// nobody created: an undeclared workspace at `max_replicas: 3` is held to one
+/// session by MAIN-361's cap, and that one would take only PRs where
+/// `number % 3 == 0` — two thirds of them unreviewed, permanently. NG-1's trade
+/// covers a reviewer that is TEMPORARILY down and will come back to its shard;
+/// a port cap is policy, and does not move the way capacity does.
+///
+/// This divides by capacity, not by liveness, which is what keeps AC-5 true: a
+/// reviewer dying does not shrink the fleet's room for it, so the divisor holds
+/// and the others keep their shards. Only a real capacity change — a node
+/// leaving, a clone landing, ports being declared — repartitions.
+fn plan_sharded(
+    spec: &SessionSpec,
+    eligible_nodes: &[&NodeFacts],
+    checkouts: &[CheckoutSlot],
+    actual: &[Actual],
+    capped: bool,
+) -> Plan {
+    let capacity = |n: &NodeFacts| if capped { 1 } else { n.capacity() };
+    let target = match spec.replicas {
+        Replicas::Count { count } => count as usize,
+        Replicas::Single => 1,
+        // Every eligible node, filled. Nothing produces this today — the review
+        // loop's spec is `Single` or a `Count` — but "all" has to mean the same
+        // "as much as the fleet has" it means for nodes, not silently one each.
+        Replicas::All => eligible_nodes.iter().map(|n| capacity(n)).sum(),
+    };
+
+    // The nodes worth involving: walk in order until their capacity covers the
+    // target. Stopping early is what keeps `Count{1}` from cloning the repo onto
+    // every loop node in the fleet just to leave it idle.
+    let mut chosen: Vec<&NodeFacts> = Vec::new();
+    let mut room = 0usize;
+    for n in eligible_nodes {
+        if room >= target {
+            break;
+        }
+        room += capacity(n);
+        chosen.push(n);
+    }
+
+    // A chosen node with NO checkout wants a clone — it can host nothing this
+    // pass, and the next one places against it.
+    let needs_clone: Vec<NodeId> = chosen
+        .iter()
+        .filter(|n| !checkouts.iter().any(|c| c.node_id == n.id))
+        .map(|n| n.id)
+        .collect();
+
+    // Each chosen node with its checkouts, in the deterministic order two
+    // replicas planning the same instant must agree on.
+    let hosts: Vec<(&NodeFacts, Vec<&CheckoutSlot>)> = chosen
+        .iter()
+        .filter_map(|n| {
+            let mut cos: Vec<&CheckoutSlot> =
+                checkouts.iter().filter(|c| c.node_id == n.id).collect();
+            cos.sort_by_key(|c| c.checkout_id.0);
+            (!cos.is_empty()).then_some((*n, cos))
+        })
+        .collect();
+
+    let mut slots: Vec<&CheckoutSlot> = Vec::new();
+    let mut round = 0usize;
+    while slots.len() < target {
+        let before = slots.len();
+        for (node, cos) in &hosts {
+            if slots.len() >= target {
+                break;
+            }
+            if round >= capacity(node) {
+                continue;
+            }
+            slots.push(cos[round % cos.len()]);
+        }
+        // Nothing landed this round: every host is at its capacity, so another
+        // round would spin forever on a target the fleet cannot reach.
+        if slots.len() == before {
+            break;
+        }
+        round += 1;
+    }
+
+    // WHERE they go is settled above; only now is WHAT they are handed knowable.
+    let of = slots.len().max(1) as u32;
+    let desired: Vec<(&CheckoutSlot, nook_types::ShardAssignment)> = slots
+        .into_iter()
+        .enumerate()
+        .map(|(i, c)| {
+            (
+                c,
+                nook_types::ShardAssignment {
+                    index: i as u32,
+                    of,
+                },
+            )
+        })
+        .collect();
+
+    let mut out = Plan {
+        needs_clone,
+        ..Default::default()
+    };
+
+    // A session is held only when its WHOLE assignment is still wanted — same
+    // checkout, same index, same divisor. Matching on the checkout alone would
+    // keep a reviewer partitioning by a count nobody declares any more.
+    let mut held: Vec<(NodeWorkspaceId, nook_types::ShardAssignment)> = Vec::new();
+    for a in actual {
+        let want = desired
+            .iter()
+            .any(|(c, s)| c.checkout_id == a.checkout_id && *s == a.shard);
+        if want && !held.contains(&(a.checkout_id, a.shard)) {
+            held.push((a.checkout_id, a.shard));
+        } else {
+            out.stop(a);
+        }
+    }
+
+    for (c, shard) in &desired {
+        if !held.contains(&(c.checkout_id, *shard)) {
+            out.actions.push(Action::Start {
+                checkout: c.checkout_id,
+                node: c.node_id,
+                path: c.path.clone(),
+                shard: *shard,
+            });
+        }
+    }
+
+    out.placed = desired.len();
+    out.desired = target;
+    // Everything the declaration asked for that no node could host: a pending
+    // clone, a fleet with no loop node at all, or a count past the capacity of
+    // the ones there are (AC-6). Reported, never capped away.
+    out.shortfall = target.saturating_sub(desired.len());
     out.capped = capped;
     out
 }
@@ -579,6 +807,7 @@ pub async fn pass(state: &AppState, clones: &CloneThrottle) -> crate::error::Api
                 clones,
                 ManagedPurpose::ReviewLoop,
                 Slots::ClonesOnly,
+                Spread::Sharded,
             )
             .await
             {
@@ -614,10 +843,11 @@ pub async fn pass(state: &AppState, clones: &CloneThrottle) -> crate::error::Api
 ///   "unmanaged" (skipping would leave the session running forever), and not
 ///   the same as a repo idling at zero under a forge — that one scales back up
 ///   when a PR appears, a zeroed one never does.
-/// - `Some(n)` — at most n reviewers. The planner still places at most one per
-///   node (NG-1), so on a one-loop-node fleet `n>1` reports honest shortfall
-///   until MAIN-446 makes the sharding real. Reporting the gap is the point;
-///   silently capping to one would hide a declaration nobody can satisfy.
+/// - `Some(n)` — at most n reviewers, which MAIN-446 places for real: several
+///   on one node if that is what the fleet has, each owning a shard of the
+///   repo's open PRs, bounded by the node's own `max_loop_jobs`. A count past
+///   what the fleet can host is still honest shortfall rather than a silent cap
+///   — reporting the gap is the point.
 ///
 /// A negative value cannot arrive — the route rejects it (AC-2) — but the cast
 /// saturates at zero rather than wrapping, because a column is a wider contract
@@ -714,7 +944,11 @@ fn placement_slots(
 /// Lifted out of [`reconcile_workspace`] so `GET /workspaces/{id}/
 /// review-loop-status` reports the plan the loop ACTS on instead of a parallel
 /// calculation (MAIN-447 AC-4). Two readers of one function cannot disagree;
-/// two functions computing the same number always eventually do.
+/// two functions computing the same number always eventually do — which is why
+/// `spread` is a parameter here rather than a constant chosen per caller: the
+/// status must divide the same way the pass does, or it reports somebody else's
+/// plan.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn plan_now(
     state: &AppState,
     tenant: TenantId,
@@ -722,6 +956,7 @@ pub(crate) async fn plan_now(
     spec: &SessionSpec,
     purpose: ManagedPurpose,
     slots: Slots,
+    spread: Spread,
 ) -> crate::error::ApiResult<(Plan, Vec<Actual>)> {
     let nodes = node_facts(state, tenant).await?;
     // Which checkouts this declaration may use. `clone_hosts` is the existing
@@ -750,10 +985,14 @@ pub(crate) async fn plan_now(
         .live_managed(tenant, workspace, Some(purpose))
         .await?
         .into_iter()
-        .map(|(session_id, checkout_id, node_id)| Actual {
-            session_id,
-            checkout_id,
-            node_id,
+        .map(|s| Actual {
+            session_id: s.id,
+            checkout_id: s.checkout_id,
+            node_id: s.node_id,
+            shard: nook_types::ShardAssignment {
+                index: s.managed_shard.max(0) as u32,
+                of: s.managed_shards.max(1) as u32,
+            },
         })
         .collect();
 
@@ -761,10 +1000,14 @@ pub(crate) async fn plan_now(
     // the stored declaration on every pass, never cached: a declaration landing
     // must lift the cap by itself on the next pass, with nothing to clear.
     let ports = port_safety(state, tenant, workspace).await?;
-    let plan = plan(spec, &nodes, &checkouts, &actual, ports);
+    let plan = plan(spec, &nodes, &checkouts, &actual, ports, spread);
     Ok((plan, actual))
 }
 
+// One declaration's convergence for one workspace: what it wants, where it may
+// go, and how it divides. Grouping them behind a struct would name the same
+// fields for the single call site that builds them.
+#[allow(clippy::too_many_arguments)]
 async fn reconcile_workspace(
     state: &AppState,
     tenant: TenantId,
@@ -773,8 +1016,9 @@ async fn reconcile_workspace(
     clones: &CloneThrottle,
     purpose: ManagedPurpose,
     slots: Slots,
+    spread: Spread,
 ) -> crate::error::ApiResult<()> {
-    let (plan, actual) = plan_now(state, tenant, workspace, spec, purpose, slots).await?;
+    let (plan, actual) = plan_now(state, tenant, workspace, spec, purpose, slots, spread).await?;
 
     // AC-4's "logs desired-vs-actual". One line per workspace per pass, and
     // only when there is something to say — a converged workspace is silent, or
@@ -790,6 +1034,10 @@ async fn reconcile_workspace(
             starting = plan.actions.iter().filter(|a| matches!(a, Action::Start { .. })).count(),
             stopping = plan.actions.iter().filter(|a| matches!(a, Action::Stop { .. })).count(),
             shortfall = plan.shortfall,
+            // Without this a port cap and a fleet that is simply too small read
+            // identically — `desired=3 actual=1 shortfall=2` forever — and they
+            // have completely different remedies.
+            capped = plan.capped,
             needs_clone = plan.needs_clone.len(),
             "reconciling workspace"
         );
@@ -801,14 +1049,16 @@ async fn reconcile_workspace(
                 checkout,
                 node,
                 path,
+                shard,
             } => {
                 // Losing the race is the NORMAL outcome on a multi-replica
                 // deployment — the unique index means the other replica already
                 // started it. Debug, not warn: it is the mechanism working.
                 if let Err(e) =
-                    start_managed(state, tenant, workspace, *node, path, spec, purpose).await
+                    start_managed(state, tenant, workspace, *node, path, spec, purpose, *shard)
+                        .await
                 {
-                    tracing::debug!(%workspace, node = %node, checkout = %checkout, error = %e, "managed start did not win");
+                    tracing::debug!(%workspace, node = %node, checkout = %checkout, shard = shard.index, error = %e, "managed start did not win");
                 }
             }
             Action::Stop { session, node } => {
@@ -1017,12 +1267,21 @@ pub(crate) async fn node_facts(
                     .collect()
             })
             .unwrap_or_default();
+        // The node's own loop-job ceiling (MAIN-446), read from the same
+        // `capabilities` blob the dispatcher reads it from — absent means an
+        // agent too old to report it, not a node that runs nothing.
+        let max_loop_jobs = node
+            .capabilities
+            .get("max_loop_jobs")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32);
         out.push(NodeFacts {
             id: node.id,
             online: state.registry.node_online(node.id),
             labels: placement.labels,
             taints: placement.taints,
             runtimes,
+            max_loop_jobs,
         });
     }
     Ok(out)
@@ -1032,9 +1291,20 @@ pub(crate) async fn node_facts(
 /// exactly like an access session otherwise — same runtime, same checkout, same
 /// node — and "claude (managed)" twice over is the one thing a reader cannot
 /// resolve for themselves.
-fn managed_name(spec: &SessionSpec, purpose: ManagedPurpose) -> String {
+fn managed_name(
+    spec: &SessionSpec,
+    purpose: ManagedPurpose,
+    shard: nook_types::ShardAssignment,
+) -> String {
     match purpose {
         ManagedPurpose::Access => format!("{} (managed)", spec.runtime),
+        // Several reviewers for one repo are otherwise identical in every list
+        // a person reads (MAIN-446), and "which one is stuck" is the first
+        // question anyone asks of them. Numbered from 1 because the name is for
+        // a reader, not for the arithmetic.
+        ManagedPurpose::ReviewLoop if shard.of > 1 => {
+            format!("review loop {}/{} (managed)", shard.index + 1, shard.of)
+        }
         ManagedPurpose::ReviewLoop => "review loop (managed)".to_string(),
     }
 }
@@ -1042,6 +1312,9 @@ fn managed_name(spec: &SessionSpec, purpose: ManagedPurpose) -> String {
 /// Start a managed session in a specific checkout. The `path` is that checkout's
 /// working directory — `create_session_at` re-resolves `checkout_id` from it, so
 /// the session binds to the exact clone or worktree the planner chose.
+// Every field of one session-start decision, already grouped as `Action::Start`
+// by the planner that made it.
+#[allow(clippy::too_many_arguments)]
 async fn start_managed(
     state: &AppState,
     tenant: TenantId,
@@ -1050,6 +1323,7 @@ async fn start_managed(
     path: &str,
     spec: &SessionSpec,
     purpose: ManagedPurpose,
+    shard: nook_types::ShardAssignment,
 ) -> crate::error::ApiResult<()> {
     // `managed: true` on the INSERT is the whole race arbitration. It used to be
     // a follow-up UPDATE, which meant the losing replica had ALREADY inserted an
@@ -1065,10 +1339,11 @@ async fn start_managed(
         workspace,
         node,
         &spec.runtime,
-        Some(managed_name(spec, purpose)),
+        Some(managed_name(spec, purpose, shard)),
         path,
         true,
         purpose,
+        shard,
     )
     .await?;
     Ok(())
@@ -1147,9 +1422,16 @@ mod tests {
         checkouts: &[CheckoutSlot],
         actual: &[Actual],
     ) -> Plan {
-        plan(spec, nodes, checkouts, actual, PortSafety::Declared)
+        plan(
+            spec,
+            nodes,
+            checkouts,
+            actual,
+            PortSafety::Declared,
+            Spread::PerCheckout,
+        )
     }
-    use nook_types::{NodeTaint, Toleration};
+    use nook_types::{NodeTaint, ShardAssignment, Toleration};
     use uuid::Uuid;
 
     fn node(n: u8, labels: &[(&str, &str)], taints: &[(&str, &str)]) -> NodeFacts {
@@ -1170,6 +1452,10 @@ mod tests {
             // Empty = "runtimes unknown", which `eligible` treats as no
             // constraint. The runtime-specific test below sets it explicitly.
             runtimes: vec![],
+            // Unreported, so the sharded cases below run against
+            // `CAPACITY_WHEN_UNREPORTED` unless they say otherwise — the same
+            // number a node in the field gets for not saying.
+            max_loop_jobs: None,
         }
     }
 
@@ -1227,10 +1513,16 @@ mod tests {
     }
 
     fn running(session: u8, cid: u8, on: u8) -> Actual {
+        sharded(session, cid, on, ShardAssignment::SOLO)
+    }
+
+    /// A running session that owns one shard of a divided declaration.
+    fn sharded(session: u8, cid: u8, on: u8, shard: ShardAssignment) -> Actual {
         Actual {
             session_id: SessionId(Uuid::from_u128(1000 + session as u128)),
             checkout_id: NodeWorkspaceId(Uuid::from_u128(2000 + cid as u128)),
             node_id: NodeId(Uuid::from_u128(on as u128)),
+            shard,
         }
     }
 
@@ -1485,6 +1777,7 @@ mod tests {
             &cos,
             &[],
             PortSafety::Undeclared,
+            Spread::PerCheckout,
         );
         assert_eq!(starts(&p).len(), 3, "one per node, all three nodes");
         assert!(p.capped);
@@ -1519,6 +1812,7 @@ mod tests {
             &cos,
             &[],
             PortSafety::Declared,
+            Spread::PerCheckout,
         );
         assert_eq!(starts(&declared).len(), 3, "declared: one per worktree");
 
@@ -1528,6 +1822,7 @@ mod tests {
             &cos,
             &[],
             PortSafety::Undeclared,
+            Spread::PerCheckout,
         );
         assert_eq!(starts(&capped).len(), 1, "undeclared: one for the machine");
         assert!(capped.capped);
@@ -1545,6 +1840,7 @@ mod tests {
             &cos,
             &[],
             PortSafety::Undeclared,
+            Spread::PerCheckout,
         );
         assert_eq!(starts(&p).len(), 2, "two nodes, one session each");
         // The ask is still reported honestly: desired reflects the spec, so the
@@ -1574,6 +1870,7 @@ mod tests {
             &[a.clone(), b.clone()],
             &[],
             PortSafety::Undeclared,
+            Spread::PerCheckout,
         );
         let other = plan(
             &spec(Replicas::All),
@@ -1581,6 +1878,7 @@ mod tests {
             &[b, a],
             &[],
             PortSafety::Undeclared,
+            Spread::PerCheckout,
         );
         assert_eq!(one.actions, other.actions);
     }
@@ -1609,6 +1907,7 @@ mod tests {
             &cos,
             &[],
             PortSafety::Undeclared,
+            Spread::PerCheckout,
         );
         let after = plan(
             &spec(Replicas::All),
@@ -1616,6 +1915,7 @@ mod tests {
             &cos,
             &[],
             PortSafety::Declared,
+            Spread::PerCheckout,
         );
         assert_eq!(starts(&before).len(), 1);
         assert_eq!(starts(&after).len(), 2);
@@ -1656,6 +1956,7 @@ mod tests {
             &cos,
             &[],
             PortSafety::Declared,
+            Spread::Sharded,
         );
         assert_eq!(starts(&p), vec![loop_box.id], "only the loop node");
         assert!(!starts(&p).contains(&user_box.id));
@@ -1673,6 +1974,7 @@ mod tests {
             &[checkout(1, 1)],
             &[],
             PortSafety::Declared,
+            Spread::Sharded,
         );
         assert!(starts(&p).is_empty());
         assert_eq!(p.shortfall, 1);
@@ -1692,6 +1994,7 @@ mod tests {
             &[checkout(1, 1), checkout(2, 2)],
             &[],
             PortSafety::Declared,
+            Spread::Sharded,
         );
         assert_eq!(starts(&p).len(), 1);
     }
@@ -1755,13 +2058,21 @@ mod tests {
         ];
         let cos = [checkout(1, 1), checkout(2, 2), checkout(3, 3)];
 
-        let old = plan(&pre_change, &nodes, &cos, &[], PortSafety::Declared);
+        let old = plan(
+            &pre_change,
+            &nodes,
+            &cos,
+            &[],
+            PortSafety::Declared,
+            Spread::Sharded,
+        );
         let new = plan(
             &review_loop_spec(None),
             &nodes,
             &cos,
             &[],
             PortSafety::Declared,
+            Spread::Sharded,
         );
         assert_eq!(starts(&new), starts(&old));
         assert_eq!(new.desired, old.desired);
@@ -1779,6 +2090,7 @@ mod tests {
             session_id: SessionId(Uuid::from_u128(900)),
             checkout_id: cos[0].checkout_id,
             node_id: loop_box.id,
+            shard: ShardAssignment::SOLO,
         }];
 
         let p = plan(
@@ -1787,6 +2099,7 @@ mod tests {
             &cos,
             &running,
             PortSafety::Declared,
+            Spread::Sharded,
         );
         assert_eq!(p.desired, 0);
         assert!(starts(&p).is_empty(), "0 starts nothing");
@@ -1805,6 +2118,7 @@ mod tests {
             session_id: SessionId(Uuid::from_u128(900)),
             checkout_id: cos[0].checkout_id,
             node_id: loop_box.id,
+            shard: ShardAssignment::SOLO,
         }];
 
         let p = plan(
@@ -1813,25 +2127,342 @@ mod tests {
             &cos,
             &running,
             PortSafety::Declared,
+            Spread::Sharded,
         );
         assert_eq!(p.desired, 1);
         assert!(stops(&p).is_empty(), "unset stops nothing");
     }
 
-    /// N>1 on a one-loop-node fleet is honest shortfall, not a silent cap
-    /// (NG-1 — placement is MAIN-446's). The number matters: `placed 1,
-    /// shortfall 2` is what tells an operator the declaration is unsatisfiable,
-    /// where a cap to 1 would look like success.
+    // ── MAIN-446: several reviewers on one node, sharded by PR ───────────────
+
+    /// A loop node that reports a capacity, so the sharded cases below are
+    /// bounded by a number the test names rather than by the unreported default.
+    fn loop_node(n: u8, cap: u32) -> NodeFacts {
+        NodeFacts {
+            max_loop_jobs: Some(cap),
+            ..loop_capable(n, &[("role", "loop")])
+        }
+    }
+
+    /// Every start, as (node, shard index, divisor) — the three things a
+    /// placement IS once a declaration can be divided.
+    fn placements(p: &Plan) -> Vec<(NodeId, u32, u32)> {
+        p.actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::Start { node, shard, .. } => Some((*node, shard.index, shard.of)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// AC-1, and the whole point of the card: the one loop node this fleet has
+    /// runs all three reviewers, instead of one and a shortfall of two.
     #[test]
-    fn three_replicas_on_one_loop_node_is_placed_one_shortfall_two() {
+    fn three_reviewers_fit_on_one_loop_node_with_the_capacity_for_them() {
         let p = plan(
             &review_loop_spec(Some(3)),
+            &[loop_node(1, 3)],
+            &[checkout(1, 1)],
+            &[],
+            PortSafety::Declared,
+            Spread::Sharded,
+        );
+        let node = NodeId(Uuid::from_u128(1));
+        assert_eq!(
+            placements(&p),
+            vec![(node, 0, 3), (node, 1, 3), (node, 2, 3)],
+            "three sessions, one machine, three distinct shards"
+        );
+        assert_eq!(p.shortfall, 0);
+        assert_eq!(p.desired, 3);
+    }
+
+    /// AC-1's other half: the cap is the NODE's existing `max_loop_jobs`, not a
+    /// number this declaration invents. A node quiesced to zero hosts no
+    /// reviewer at all, exactly as it takes no loop job.
+    #[test]
+    fn the_ceiling_is_the_nodes_own_max_loop_jobs() {
+        let quiesced = plan(
+            &review_loop_spec(Some(3)),
+            &[loop_node(1, 0)],
+            &[checkout(1, 1)],
+            &[],
+            PortSafety::Declared,
+            Spread::Sharded,
+        );
+        assert!(placements(&quiesced).is_empty(), "0 means 0");
+        assert_eq!(quiesced.shortfall, 3);
+
+        // Unreported reads as the shipped default, which is the same number a
+        // node that never set `NOOK_MAX_LOOP_JOBS` runs loop jobs at.
+        let unreported = plan(
+            &review_loop_spec(Some(9)),
             &[loop_capable(1, &[("role", "loop")])],
             &[checkout(1, 1)],
             &[],
             PortSafety::Declared,
+            Spread::Sharded,
         );
-        assert_eq!(starts(&p).len(), 1, "one node, so one placement");
-        assert_eq!(p.shortfall, 2, "the other two are reported, not hidden");
+        assert_eq!(
+            placements(&unreported).len(),
+            crate::services::jobs::CAPACITY_WHEN_UNREPORTED as usize
+        );
+    }
+
+    /// AC-6. Asking for more than the fleet can host is reported, never capped
+    /// away — and the reviewers that DID land divide the repo between just
+    /// themselves, so every PR still has an owner.
+    ///
+    /// Dividing by the declared count instead would hand these two `of=3` and
+    /// leave a third of the repo owned by a reviewer nobody placed. The count
+    /// is still reported as short, which is the honest part; the coverage is
+    /// not something to be honest about losing.
+    ///
+    /// This divides by CAPACITY, not by liveness — NG-1's trade is untouched.
+    /// A reviewer whose session died has not shrunk the room the fleet has for
+    /// it, so the divisor holds and its PRs wait for it to come back.
+    #[test]
+    fn a_count_past_capacity_divides_between_the_reviewers_that_landed() {
+        let p = plan(
+            &review_loop_spec(Some(3)),
+            &[loop_node(1, 2)],
+            &[checkout(1, 1)],
+            &[],
+            PortSafety::Declared,
+            Spread::Sharded,
+        );
+        let node = NodeId(Uuid::from_u128(1));
+        assert_eq!(placements(&p), vec![(node, 0, 2), (node, 1, 2)]);
+        assert_eq!(p.placed, 2);
+        assert_eq!(
+            p.desired, 3,
+            "what was asked for is still what was asked for"
+        );
+        assert_eq!(p.shortfall, 1, "the third is reported, not hidden");
+
+        // The two of them between them own everything — the property the
+        // declared divisor broke.
+        let shards: Vec<ShardAssignment> = placements(&p)
+            .into_iter()
+            .map(|(_, index, of)| ShardAssignment { index, of })
+            .collect();
+        assert!(
+            (1u64..200).all(|pr| shards.iter().filter(|s| s.owns(pr)).count() == 1),
+            "every PR owned exactly once by the reviewers that exist"
+        );
+    }
+
+    /// Two loop nodes get one reviewer each before either gets two. Not a
+    /// balancing requirement (NG-2) — it is that a reviewer is agent work, and
+    /// stacking the second onto the first machine while the second sits idle is
+    /// the surprising reading of "run two".
+    #[test]
+    fn reviewers_spread_across_nodes_before_they_stack() {
+        let p = plan(
+            &review_loop_spec(Some(3)),
+            &[loop_node(1, 2), loop_node(2, 2)],
+            &[checkout(1, 1), checkout(2, 2)],
+            &[],
+            PortSafety::Declared,
+            Spread::Sharded,
+        );
+        let (a, b) = (NodeId(Uuid::from_u128(1)), NodeId(Uuid::from_u128(2)));
+        assert_eq!(placements(&p), vec![(a, 0, 3), (b, 1, 3), (a, 2, 3)]);
+    }
+
+    /// A declaration the fleet already satisfies produces NO actions — the
+    /// baseline AC-5 is measured against, and the thing a per-pass reshuffle
+    /// would break first.
+    #[test]
+    fn a_satisfied_sharded_declaration_is_a_no_op() {
+        let spec = review_loop_spec(Some(3));
+        let nodes = [loop_node(1, 3)];
+        let cos = [checkout(1, 1)];
+        let live: Vec<Actual> = (0..3)
+            .map(|i| sharded(i as u8, 1, 1, ShardAssignment { index: i, of: 3 }))
+            .collect();
+
+        let p = plan(
+            &spec,
+            &nodes,
+            &cos,
+            &live,
+            PortSafety::Declared,
+            Spread::Sharded,
+        );
+        assert!(p.actions.is_empty(), "converged: {:?}", p.actions);
+    }
+
+    /// AC-5. One reviewer dying must not re-partition the two still running:
+    /// the pass starts its shard back, and touches nothing else. The failure
+    /// this pins is a placement derived from POSITION in the live list, which
+    /// renumbers every survivor the moment one is missing.
+    #[test]
+    fn restarting_one_reviewer_leaves_the_others_shards_alone() {
+        let spec = review_loop_spec(Some(3));
+        let nodes = [loop_node(1, 3)];
+        let cos = [checkout(1, 1)];
+        // Shard 1 is gone; 0 and 2 are still up.
+        let survivors = [
+            sharded(0, 1, 1, ShardAssignment { index: 0, of: 3 }),
+            sharded(2, 1, 1, ShardAssignment { index: 2, of: 3 }),
+        ];
+
+        let p = plan(
+            &spec,
+            &nodes,
+            &cos,
+            &survivors,
+            PortSafety::Declared,
+            Spread::Sharded,
+        );
+        assert_eq!(
+            placements(&p),
+            vec![(NodeId(Uuid::from_u128(1)), 1, 3)],
+            "only the missing shard comes back"
+        );
+        assert!(stops(&p).is_empty(), "and nothing running is disturbed");
+    }
+
+    /// The other side of AC-5: a changed DIVISOR is a real repartition, so
+    /// every reviewer is replaced rather than some carrying on dividing the
+    /// repo by a number nobody declares any more.
+    #[test]
+    fn changing_the_count_replaces_every_reviewer() {
+        let nodes = [loop_node(1, 3)];
+        let cos = [checkout(1, 1)];
+        let live = [
+            sharded(0, 1, 1, ShardAssignment { index: 0, of: 3 }),
+            sharded(1, 1, 1, ShardAssignment { index: 1, of: 3 }),
+            sharded(2, 1, 1, ShardAssignment { index: 2, of: 3 }),
+        ];
+
+        let p = plan(
+            &review_loop_spec(Some(2)),
+            &nodes,
+            &cos,
+            &live,
+            PortSafety::Declared,
+            Spread::Sharded,
+        );
+        assert_eq!(stops(&p).len(), 3, "all three divided by the old number");
+        assert_eq!(
+            placements(&p),
+            vec![
+                (NodeId(Uuid::from_u128(1)), 0, 2),
+                (NodeId(Uuid::from_u128(1)), 1, 2)
+            ]
+        );
+    }
+
+    /// AC-4, as a property over a range rather than one hand-picked example:
+    /// for every division, each PR belongs to exactly one shard — the union is
+    /// everything and the intersection is empty. This is the only thing keeping
+    /// two reviewers off the same PR, since nothing claims and nothing locks.
+    #[test]
+    fn the_shard_filter_partitions_every_pr_exactly_once() {
+        for of in 1..=5u32 {
+            for pr in 1..200u64 {
+                let owners: Vec<u32> = (0..of)
+                    .filter(|index| ShardAssignment { index: *index, of }.owns(pr))
+                    .collect();
+                assert_eq!(
+                    owners.len(),
+                    1,
+                    "PR #{pr} split {of} ways is owned by {owners:?}"
+                );
+            }
+        }
+    }
+
+    /// An unsharded reviewer owns everything, which is what makes the change a
+    /// no-op for every deployment that never sets a count — and what an absent
+    /// `NOOK_REVIEW_SHARDS` has to keep meaning in the skill.
+    #[test]
+    fn one_shard_owns_every_pr() {
+        assert!((1..50).all(|pr| ShardAssignment::SOLO.owns(pr)));
+    }
+
+    /// The MAIN-361 cap still binds a sharded declaration, and this is the test
+    /// that says so out loud: a repo that has not declared its ports gets ONE
+    /// reviewer per node however many it asks for. Sharding divides the PRs, not
+    /// the ports — two agents in one checkout can still each start whatever the
+    /// repo's dev server is. Declaring (even an empty list) lifts it.
+    #[test]
+    fn an_undeclared_workspace_still_gets_one_reviewer_per_node() {
+        let nodes = [loop_node(1, 3)];
+        let cos = [checkout(1, 1)];
+        let capped = plan(
+            &review_loop_spec(Some(3)),
+            &nodes,
+            &cos,
+            &[],
+            PortSafety::Undeclared,
+            Spread::Sharded,
+        );
+        // The `of` is the point, not just the count. Handing the survivor
+        // `of=3` would leave it reviewing only PRs divisible by three, with the
+        // other two shards belonging to reviewers the cap will never allow —
+        // permanently, because a port cap is policy and does not move.
+        assert_eq!(placements(&capped), vec![(nodes[0].id, 0, 1)]);
+        assert!(capped.capped, "and the plan says why");
+        assert_eq!(
+            capped.shortfall, 2,
+            "still honest about what it cannot host"
+        );
+
+        let declared = plan(
+            &review_loop_spec(Some(3)),
+            &nodes,
+            &cos,
+            &[],
+            PortSafety::Declared,
+            Spread::Sharded,
+        );
+        assert_eq!(placements(&declared).len(), 3);
+    }
+
+    /// A reviewer is placed with a NAME that tells one from another. Three rows
+    /// reading "review loop (managed)" is the one thing a person cannot resolve
+    /// when they need to know which shard is stuck.
+    #[test]
+    fn sharded_reviewers_are_named_apart() {
+        let spec = review_loop_spec(Some(3));
+        assert_eq!(
+            managed_name(
+                &spec,
+                ManagedPurpose::ReviewLoop,
+                ShardAssignment { index: 1, of: 3 }
+            ),
+            "review loop 2/3 (managed)"
+        );
+        // One reviewer keeps the name it has always had — an upgrade must not
+        // rename the session every existing deployment is looking at.
+        assert_eq!(
+            managed_name(
+                &review_loop_spec(None),
+                ManagedPurpose::ReviewLoop,
+                ShardAssignment::SOLO
+            ),
+            "review loop (managed)"
+        );
+    }
+
+    /// The skill and the reconciler must describe the SAME arithmetic. The
+    /// skill is prose an agent follows, so nothing but its text can be checked
+    /// — and its text is compiled into the node binary, which is what makes
+    /// this a test rather than a hope.
+    #[test]
+    fn the_skill_states_the_partition_rule_this_module_places_for() {
+        let skill = include_str!("../../../../skills/nook-review/SKILL.md");
+        assert!(
+            skill.contains("NOOK_REVIEW_SHARDS") && skill.contains("NOOK_REVIEW_SHARD"),
+            "the reviewer skill must read the pair the reconciler exports"
+        );
+        assert!(
+            skill.contains("number % NOOK_REVIEW_SHARDS == NOOK_REVIEW_SHARD"),
+            "the skill must state the same modulo partition `owns` implements"
+        );
     }
 }
