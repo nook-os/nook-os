@@ -602,6 +602,16 @@ pub enum ControlToNode {
         /// single-tenant fallback.
         #[serde(default)]
         gh_token: Option<String>,
+        /// The control plane's advertised API base URL (MAIN-465): what the
+        /// run's `nook` CLI should dial and report. The job's token is minted
+        /// by the control plane that raised the run, so it travels with its
+        /// ISSUER'S canonical address — not with whatever address this node
+        /// happened to dial (inside compose, an internal service name nobody
+        /// outside the network namespace can identify). `None` means the
+        /// deployment advertises nothing and the node's own configured server
+        /// address applies, exactly as before.
+        #[serde(default)]
+        server_url: Option<String>,
         /// The board key of the ticket the skill points at (e.g. `MAIN-42`).
         target_task_key: String,
         /// The clonable git remote, resolved by the control plane from the
