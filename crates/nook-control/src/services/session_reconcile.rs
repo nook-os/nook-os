@@ -986,7 +986,10 @@ pub async fn pass(state: &AppState, clones: &CloneThrottle) -> crate::error::Api
 /// its reviewer on somebody's laptop, and moving reviews from sessions to runs
 /// did not get to change that by omission.
 pub(crate) fn review_loop_selector() -> std::collections::BTreeMap<String, String> {
-    [("role".to_string(), "loop".to_string())]
+    // The per-role KEY, not `role=loop` (MAIN-463): one `role` key made loop
+    // and build mutually exclusive on a machine meant to do both. Old-style
+    // `role=loop` nodes still match — `placement_of` widens them to this key.
+    [("role/loop".to_string(), "true".to_string())]
         .into_iter()
         .collect()
 }
@@ -1977,10 +1980,39 @@ mod tests {
     /// A node that reports the `claude` runtime, so the review-loop spec's
     /// runtime check does not decide these cases for us.
     fn loop_capable(n: u8, labels: &[(&str, &str)]) -> NodeFacts {
-        NodeFacts {
+        // Fixtures describe what `placement_of` PRODUCES — so they go THROUGH
+        // the production widening rather than mirroring it. A mirrored copy is
+        // the prod reviewer's exact #350 finding: delete the production call
+        // and this suite stays green while every old-style node stops matching.
+        let mut facts = NodeFacts {
             runtimes: vec!["claude".into()],
             ..node(n, labels, &[])
-        }
+        };
+        crate::routes::nodes::widen_role_labels(&mut facts.labels);
+        facts
+    }
+
+    /// MAIN-463 AC-1's core promise, new-style only: a node labeled with
+    /// per-role KEYS — `role/loop=true` beside `role/build=true`, no `role=<v>`
+    /// anywhere — takes review work. Nothing here touches the widening shim,
+    /// which is the point: the keys are the native form and the old syntax is
+    /// the compatibility case.
+    #[test]
+    fn a_node_wearing_both_role_keys_takes_review_work() {
+        let both = loop_capable(1, &[("role/loop", "true"), ("role/build", "true")]);
+        let p = plan(
+            &review_loop_spec(None, None),
+            &[both],
+            &[checkout(1, 1)],
+            &[],
+            PortSafety::Declared,
+            Spread::Sharded,
+        );
+        assert_eq!(
+            placements(&p).len(),
+            1,
+            "per-role keys are the native form — no role=<v> label required"
+        );
     }
 
     /// AC-2. The whole targeting rule is one label, so this is the test that
@@ -2071,8 +2103,9 @@ mod tests {
         let s = review_loop_spec(None, None);
         assert_eq!(s.runtime, "claude");
         assert_eq!(
-            s.node_selector.get("role").map(String::as_str),
-            Some("loop")
+            s.node_selector.get("role/loop").map(String::as_str),
+            Some("true"),
+            "the per-role key (MAIN-463) — one `role` value made loop and build exclusive"
         );
         // A `Count`, not `Replicas::Single`, since MAIN-448: the spec is now
         // always the RESULT of `min(open_prs, ceiling)`, and `Single` cannot
@@ -2613,9 +2646,9 @@ mod tests {
         let busy = review_loop_spec(Some(9), Some(9));
         assert_eq!(busy.runtime, "claude");
         assert_eq!(
-            busy.node_selector.get("role").map(String::as_str),
-            Some("loop"),
-            "still `role=loop`, whatever the forge says"
+            busy.node_selector.get("role/loop").map(String::as_str),
+            Some("true"),
+            "still the loop-role key, whatever the forge says"
         );
 
         // Nine wanted, a node that runs two: two placed, seven reported.

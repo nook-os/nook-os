@@ -253,6 +253,26 @@ fn derived_labels(node: &Node) -> std::collections::BTreeMap<String, String> {
     out
 }
 
+/// Widen `role=<v>` into the per-role key `role/<v>=true` (MAIN-463).
+///
+/// A label map holds one value per key, so the single `role` key made loop and
+/// build mutually exclusive on a machine that should do both. Roles are
+/// per-role KEYS now — `role/loop=true`, `role/build=true`, any number at once
+/// — and this shim derives the new key from every old-style `role=<v>` label,
+/// custom or derived, so no existing node needs re-labeling and the old syntax
+/// keeps meaning what it always meant. Selectors match the per-role keys;
+/// ordinary labels keep exact-equality semantics untouched.
+pub(crate) fn widen_role_labels(labels: &mut std::collections::BTreeMap<String, String>) {
+    if let Some(v) = labels.get("role").cloned() {
+        let v = v.trim();
+        if !v.is_empty() {
+            labels
+                .entry(format!("role/{v}"))
+                .or_insert_with(|| "true".to_string());
+        }
+    }
+}
+
 /// The stored custom labels, ignoring anything that is not a string value —
 /// the column is jsonb and an operator could have written a number through the
 /// API before this route existed.
@@ -274,6 +294,7 @@ pub(crate) fn placement_of(node: &Node) -> NodePlacement {
     // Derived wins: a node cannot be relabelled into another operating system.
     let mut labels = custom.clone();
     labels.extend(derived_labels(node));
+    widen_role_labels(&mut labels);
     NodePlacement {
         labels,
         custom_labels: custom,
@@ -891,13 +912,12 @@ mod tests {
             serde_json::json!({ "shared_operator": true }),
             serde_json::json!({}),
         );
-        assert_eq!(
-            placement_of(&operator)
-                .labels
-                .get("role")
-                .map(String::as_str),
-            Some("loop")
-        );
+        let labels = placement_of(&operator).labels;
+        assert_eq!(labels.get("role").map(String::as_str), Some("loop"));
+        // …and the per-role key the selector actually matches (MAIN-463):
+        // asserting only `role=loop` left the widening deletable with the whole
+        // suite green, which was the prod reviewer's must-fix on #350.
+        assert_eq!(labels.get("role/loop").map(String::as_str), Some("true"));
     }
 
     #[test]
@@ -918,6 +938,11 @@ mod tests {
         );
         let p = placement_of(&chosen);
         assert_eq!(p.labels.get("role").map(String::as_str), Some("loop"));
+        assert_eq!(
+            p.labels.get("role/loop").map(String::as_str),
+            Some("true"),
+            "a hand-labelled old-style node widens exactly as a derived one does"
+        );
         assert_eq!(
             p.labels.get("os").map(String::as_str),
             Some("linux"),
