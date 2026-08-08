@@ -765,6 +765,14 @@ pub(crate) fn default_spec() -> SessionSpec {
 /// not anything calls it with `ManagedPurpose::Access`. That is the same shape
 /// of gap that let the Stop notification bug ship — a guard proved at the layer
 /// below the one the user experiences.
+/// NOTE (MAIN-455): this pass no longer starts SESSIONS at all. Access
+/// reconciliation went first (a terminal is not drift to be corrected), and the
+/// review loop has now moved to headless runs — so what is left is one job:
+/// converge review runs against the work the forge reports.
+///
+/// The session PLANNER below is still live, but only as the thing
+/// `/reconcile-status` and `/review-loop-status` report through. Nothing calls
+/// it to place anything any more.
 pub async fn pass(state: &AppState, clones: &CloneThrottle) -> crate::error::ApiResult<()> {
     for (tenant, value) in state.settings.tenants_with_value(KEY).await? {
         // The stored value is arbitrary JSON; a row can exist reading `false`.
@@ -775,6 +783,22 @@ pub async fn pass(state: &AppState, clones: &CloneThrottle) -> crate::error::Api
         // Once per tenant, not once per workspace: the review loop is agent
         // work, so it answers to the loops switch as well as to this one.
         let loops_on = crate::services::loops::enabled(&*state.settings, tenant).await;
+        // Who a converged run is attributed to: the tenant's owner, the same
+        // identity `nook operator` acts as. Resolved once per tenant rather than
+        // once per workspace, and a tenant without one raises nothing — a job
+        // whose `requested_by` dangles cannot mint an executor token, so an
+        // invented id would fail later and less clearly.
+        let owner = match state.identity.tenant_owner_user_id(tenant.0).await {
+            Ok(Some(u)) => nook_types::UserId(u),
+            Ok(None) => {
+                tracing::warn!(%tenant, "no tenant owner to attribute review runs to — skipped");
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(%tenant, error = %e, "could not resolve the tenant owner");
+                continue;
+            }
+        };
         for ws in state.workspaces.list(tenant).await? {
             // NO ACCESS RECONCILIATION. A terminal you opened is yours, and the
             // control plane does not have an opinion about how many of them
@@ -799,9 +823,17 @@ pub async fn pass(state: &AppState, clones: &CloneThrottle) -> crate::error::Api
             if !loops_on {
                 continue;
             }
-            // How much review work this repo actually has (MAIN-448). Cached
-            // behind a TTL, and `None` whenever nothing could measure it — which
-            // the spec reads as "run the declared ceiling", never as zero.
+            // A review is a RUN, not a session (MAIN-455). The declaration
+            // still rules — `review_loop_max_replicas` is the ceiling on how
+            // many run at once — but the unit is a pull request, and the
+            // reconciler converges one headless run per PR that has moved.
+            //
+            // Nothing here starts a tmux session. A managed run is not
+            // attachable on a machine, has a transcript, and cannot block on an
+            // interactive prompt nobody is there to answer.
+            // The repo still has to BE on the nodes that review it. This
+            // converges the checkouts (MAIN-317's clone-on-demand) and no
+            // longer starts anything — see `reconcile_workspace`.
             let open_prs = state
                 .review_demand
                 .open_prs(ws.id, ws.git_remote_url.as_deref())
@@ -818,7 +850,79 @@ pub async fn pass(state: &AppState, clones: &CloneThrottle) -> crate::error::Api
             )
             .await
             {
-                tracing::warn!(workspace = %ws.id, error = %e, "review-loop reconcile failed");
+                tracing::warn!(workspace = %ws.id, error = %e, "workspace clone reconcile failed");
+            }
+
+            // A fleet that deployed BEFORE MAIN-455 still carries live tmux
+            // review sessions, and deleting the reconciler's Stop arm left
+            // nothing that would ever end them — their rows sit `running`
+            // forever while headless runs do the actual reviewing beside them.
+            // This is the retired scale-down run to ZERO: kill first, mark the
+            // row only if the node took it, exactly the ordering the old arm
+            // used, and a node that is offline keeps its row live so the next
+            // pass tries again. On a fleet born after MAIN-455 the list is
+            // empty and this costs one query.
+            match state
+                .sessions
+                .live_managed(tenant, ws.id, Some(ManagedPurpose::ReviewLoop))
+                .await
+            {
+                Ok(stale) => {
+                    for sess in stale {
+                        let (session_id, node_id) = (sess.id, sess.node_id);
+                        if !state.registry.send_to_node(
+                            node_id,
+                            nook_proto::ControlToNode::KillSession { session_id },
+                        ) {
+                            tracing::warn!(
+                                workspace = %ws.id, session = %session_id,
+                                "cannot stop a legacy review session — node offline; retrying next pass"
+                            );
+                            continue;
+                        }
+                        if let Err(e) = state.sessions.mark_ended(tenant, session_id).await {
+                            tracing::warn!(workspace = %ws.id, session = %session_id, error = %e, "legacy review session stop failed");
+                        } else {
+                            tracing::info!(
+                                workspace = %ws.id, session = %session_id,
+                                "stopped a legacy tmux review session — reviews are headless runs now (MAIN-455)"
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(workspace = %ws.id, error = %e, "could not list legacy review sessions")
+                }
+            }
+
+            let ceiling = ws.review_loop_max_replicas.unwrap_or(1).max(0) as usize;
+            let source = crate::services::work_source::ReviewWork {
+                demand: &state.review_demand,
+            };
+            match crate::services::run_reconcile::converge(
+                state,
+                &source,
+                tenant,
+                owner,
+                ws.id,
+                ws.git_remote_url.as_deref(),
+                ceiling,
+                None,
+            )
+            .await
+            {
+                Ok(c) if c.raised > 0 || c.withheld > 0 => tracing::info!(
+                    workspace = %ws.id,
+                    raised = c.raised,
+                    live = c.live,
+                    withheld = c.withheld,
+                    ceiling,
+                    "raised review runs"
+                ),
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(workspace = %ws.id, error = %e, "review run reconcile failed")
+                }
             }
         }
     }
@@ -870,6 +974,18 @@ pub async fn pass(state: &AppState, clones: &CloneThrottle) -> crate::error::Api
 /// token, an outage that has never once succeeded — all of them mean nothing
 /// measured the demand, and the honest answer is to run what the repo declared.
 /// No forge must never mean no reviewers.
+/// WHERE a review may run: the fleet's loop nodes, and nowhere else.
+///
+/// One definition, read by the declaration that sizes reviewers and by the
+/// dispatcher that places a run (MAIN-455 AC-4). A repo still cannot ask for
+/// its reviewer on somebody's laptop, and moving reviews from sessions to runs
+/// did not get to change that by omission.
+pub(crate) fn review_loop_selector() -> std::collections::BTreeMap<String, String> {
+    [("role".to_string(), "loop".to_string())]
+        .into_iter()
+        .collect()
+}
+
 pub(crate) fn review_loop_spec(max_replicas: Option<i32>, open_prs: Option<u32>) -> SessionSpec {
     let ceiling = match max_replicas {
         None => 1,
@@ -877,9 +993,7 @@ pub(crate) fn review_loop_spec(max_replicas: Option<i32>, open_prs: Option<u32>)
     };
     SessionSpec {
         runtime: crate::services::jobs::LOOP_RUNTIME.into(),
-        node_selector: [("role".to_string(), "loop".to_string())]
-            .into_iter()
-            .collect(),
+        node_selector: review_loop_selector(),
         tolerations: vec![],
         replicas: Replicas::Count {
             count: match open_prs {
@@ -1065,55 +1179,18 @@ async fn reconcile_workspace(
         );
     }
 
-    for action in &plan.actions {
-        match action {
-            Action::Start {
-                checkout,
-                node,
-                path,
-                shard,
-            } => {
-                // Losing the race is the NORMAL outcome on a multi-replica
-                // deployment — the unique index means the other replica already
-                // started it. Debug, not warn: it is the mechanism working.
-                if let Err(e) =
-                    start_managed(state, tenant, workspace, *node, path, spec, purpose, *shard)
-                        .await
-                {
-                    tracing::debug!(%workspace, node = %node, checkout = %checkout, shard = shard.index, error = %e, "managed start did not win");
-                }
-            }
-            Action::Stop { session, node } => {
-                // Kill FIRST, and only mark the row ended if the node took it.
-                //
-                // Ending the row alone was a defect, not a shortcut: the tmux
-                // session keeps running, the reconciler can no longer see it —
-                // `live_managed` reads live rows — and the freed index slot lets
-                // the very next pass start a SECOND session on that machine. The
-                // scale-down would have doubled the thing it was scaling down.
-                //
-                // A node that is offline keeps its row live, so the next pass
-                // tries again. That is the honest state: the process is still
-                // out there, and the row saying so is what will eventually stop
-                // it.
-                if !state.registry.send_to_node(
-                    *node,
-                    nook_proto::ControlToNode::KillSession {
-                        session_id: *session,
-                    },
-                ) {
-                    tracing::warn!(
-                        %workspace, session = %session, node = %node,
-                        "cannot stop a managed session — node offline; retrying next pass"
-                    );
-                    continue;
-                }
-                if let Err(e) = state.sessions.mark_ended(tenant, *session).await {
-                    tracing::warn!(%workspace, session = %session, error = %e, "managed stop failed");
-                }
-            }
-        }
-    }
+    // NO SESSIONS ARE STARTED OR STOPPED HERE ANY MORE (MAIN-455).
+    //
+    // This function keeps the half of its job that is about the REPO: a node
+    // that matches the declaration but has no checkout still gets one, so the
+    // fleet's loop nodes hold the repos they are meant to review. What it no
+    // longer does is put a tmux session on them — review work is a headless run
+    // with a transcript now, raised per pull request by `run_reconcile`.
+    //
+    // The plan's `Start`/`Stop` actions are therefore computed and not acted
+    // on. They still drive the log line above (and `/review-loop-status`), which
+    // is what makes "this repo wants three reviewers and the fleet can host one"
+    // answerable; acting on them is what put an attachable terminal on a machine.
 
     // Clone-on-demand (MAIN-317): an eligible node that matched the spec but has
     // no checkout is no longer just a reported shortfall — we clone the workspace
@@ -1307,68 +1384,6 @@ pub(crate) async fn node_facts(
         });
     }
     Ok(out)
-}
-
-/// What the session is called in every list a person reads. A review loop looks
-/// exactly like an access session otherwise — same runtime, same checkout, same
-/// node — and "claude (managed)" twice over is the one thing a reader cannot
-/// resolve for themselves.
-fn managed_name(
-    spec: &SessionSpec,
-    purpose: ManagedPurpose,
-    shard: nook_types::ShardAssignment,
-) -> String {
-    match purpose {
-        ManagedPurpose::Access => format!("{} (managed)", spec.runtime),
-        // Several reviewers for one repo are otherwise identical in every list
-        // a person reads (MAIN-446), and "which one is stuck" is the first
-        // question anyone asks of them. Numbered from 1 because the name is for
-        // a reader, not for the arithmetic.
-        ManagedPurpose::ReviewLoop if shard.of > 1 => {
-            format!("review loop {}/{} (managed)", shard.index + 1, shard.of)
-        }
-        ManagedPurpose::ReviewLoop => "review loop (managed)".to_string(),
-    }
-}
-
-/// Start a managed session in a specific checkout. The `path` is that checkout's
-/// working directory — `create_session_at` re-resolves `checkout_id` from it, so
-/// the session binds to the exact clone or worktree the planner chose.
-// Every field of one session-start decision, already grouped as `Action::Start`
-// by the planner that made it.
-#[allow(clippy::too_many_arguments)]
-async fn start_managed(
-    state: &AppState,
-    tenant: TenantId,
-    workspace: WorkspaceId,
-    node: NodeId,
-    path: &str,
-    spec: &SessionSpec,
-    purpose: ManagedPurpose,
-    shard: nook_types::ShardAssignment,
-) -> crate::error::ApiResult<()> {
-    // `managed: true` on the INSERT is the whole race arbitration. It used to be
-    // a follow-up UPDATE, which meant the losing replica had ALREADY inserted an
-    // ad-hoc row and sent `StartSession` — a live session nothing would ever
-    // reconcile. Now the index refuses the row, `create_session_at` returns
-    // before it talks to the node, and the loser really does just lose.
-    crate::services::session_queries::create_session_at(
-        state,
-        tenant,
-        // No creator: the control plane declared this, not a person. MAIN-318
-        // is where the UI learns to say so.
-        None,
-        workspace,
-        node,
-        &spec.runtime,
-        Some(managed_name(spec, purpose, shard)),
-        path,
-        true,
-        purpose,
-        shard,
-    )
-    .await?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -2449,46 +2464,33 @@ mod tests {
         assert_eq!(placements(&declared).len(), 3);
     }
 
-    /// A reviewer is placed with a NAME that tells one from another. Three rows
-    /// reading "review loop (managed)" is the one thing a person cannot resolve
-    /// when they need to know which shard is stuck.
-    #[test]
-    fn sharded_reviewers_are_named_apart() {
-        let spec = review_loop_spec(Some(3), None);
-        assert_eq!(
-            managed_name(
-                &spec,
-                ManagedPurpose::ReviewLoop,
-                ShardAssignment { index: 1, of: 3 }
-            ),
-            "review loop 2/3 (managed)"
-        );
-        // One reviewer keeps the name it has always had — an upgrade must not
-        // rename the session every existing deployment is looking at.
-        assert_eq!(
-            managed_name(
-                &review_loop_spec(None, None),
-                ManagedPurpose::ReviewLoop,
-                ShardAssignment::SOLO
-            ),
-            "review loop (managed)"
-        );
-    }
-
-    /// The skill and the reconciler must describe the SAME arithmetic. The
+    /// The skill and the control plane must describe the SAME contract. The
     /// skill is prose an agent follows, so nothing but its text can be checked
     /// — and its text is compiled into the node binary, which is what makes
     /// this a test rather than a hope.
+    ///
+    /// The contract changed with MAIN-455: a run is TOLD its pull request
+    /// (`NOOK_REVIEW_PR`), and the shard arithmetic this used to assert is
+    /// retired — so the test now guards against the modulo INSTRUCTIONS
+    /// reappearing as much as for the directive being taught.
     #[test]
-    fn the_skill_states_the_partition_rule_this_module_places_for() {
+    fn the_skill_states_the_directive_this_module_raises_runs_for() {
         let skill = include_str!("../../../../skills/nook-review/SKILL.md");
         assert!(
-            skill.contains("NOOK_REVIEW_SHARDS") && skill.contains("NOOK_REVIEW_SHARD"),
-            "the reviewer skill must read the pair the reconciler exports"
+            skill.contains("NOOK_REVIEW_PR"),
+            "the reviewer skill must read the directive the run env carries"
         );
         assert!(
-            skill.contains("number % NOOK_REVIEW_SHARDS == NOOK_REVIEW_SHARD"),
-            "the skill must state the same modulo partition `owns` implements"
+            !skill.contains("number % NOOK_REVIEW_SHARDS"),
+            "the modulo partition is retired; teaching it again would have a directed reviewer filtering a queue it no longer owns"
+        );
+        assert!(
+            skill.contains("nook reviews verdict"),
+            "the skill must deliver its conclusion through the verdict call — the control plane posts, the agent only concludes"
+        );
+        assert!(
+            !skill.contains("gh pr comment"),
+            "posting by gh is retired; an agent-formatted comment is the drift the verdict call exists to end"
         );
     }
     // ── MAIN-448: the count comes from the forge ─────────────────────────────

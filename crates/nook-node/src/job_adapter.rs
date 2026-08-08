@@ -77,7 +77,25 @@ pub fn adapter_for(runtime: &str) -> Adapter {
 ///   these autonomous permissions exist for.
 /// - `--session-id` — pins the id so AC-5's resume has something to name.
 pub fn claude_stream_args(session_id: &str) -> Vec<String> {
-    [
+    stream_args(session_id, false)
+}
+
+/// The same run, but continuing the agent session a previous run left behind
+/// (MAIN-455 AC-3): `--resume <id>` instead of pinning a fresh `--session-id`.
+///
+/// This replaced `--from-pr`, which was tried first and PROVEN not to link on
+/// the live stack: two consecutive runs of the same PR produced two distinct
+/// agent sessions. Claude Code links a session to a PR when the session opens
+/// one — a session that merely reads a PR through `gh` never acquires the link,
+/// so for a reviewer the flag always came up empty. Resuming by an id WE derive
+/// (stable per workspace + PR) makes the continuation a fact the caller checks
+/// on disk, not a linkage hoped for.
+pub fn claude_resume_args(session_id: &str) -> Vec<String> {
+    stream_args(session_id, true)
+}
+
+fn stream_args(session_id: &str, resume: bool) -> Vec<String> {
+    let mut args: Vec<String> = [
         "-p",
         "--input-format",
         "stream-json",
@@ -86,12 +104,15 @@ pub fn claude_stream_args(session_id: &str) -> Vec<String> {
         "--verbose",
         "--replay-user-messages",
         "--dangerously-skip-permissions",
-        "--session-id",
-        session_id,
     ]
     .iter()
     .map(|s| s.to_string())
-    .collect()
+    .collect();
+    // `--resume` names an existing session to continue; `--session-id` pins a
+    // NEW one. Passing both would ask for two different things at once.
+    args.push(if resume { "--resume" } else { "--session-id" }.to_string());
+    args.push(session_id.to_string());
+    args
 }
 
 // ── The wire protocol ────────────────────────────────────────────────────────
@@ -440,6 +461,20 @@ mod tests {
         // The acknowledgement that a steering message actually arrived.
         assert!(a.contains(&"--replay-user-messages".to_string()));
         assert!(joined.contains("--session-id sess-1"));
+    }
+
+    /// The resume launch names an EXISTING session and must not also pin a new
+    /// one — the two flags ask for different things, and passing both is how a
+    /// warm reviewer silently becomes a cold one.
+    #[test]
+    fn resume_args_resume_and_never_pin() {
+        let a = claude_resume_args("sess-2");
+        let joined = a.join(" ");
+        assert!(joined.contains("--resume sess-2"));
+        assert!(!joined.contains("--session-id"));
+        // Same streaming contract as a pinned run — the caller cannot tell.
+        assert!(a.contains(&"-p".to_string()));
+        assert!(joined.contains("--output-format stream-json"));
     }
 
     #[test]

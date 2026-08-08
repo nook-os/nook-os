@@ -59,6 +59,19 @@ RUN npm install -g \
     && npm cache clean --force
 RUN curl -fsSL https://hermes-agent.nousresearch.com/install.sh | HERMES_REF="${HERMES_REF}" bash
 
+# `gh`. The review loop IS a `gh` client: `nook-review` opens by requiring
+# `gh auth status` to pass and then drives `gh pr list/view/checks`. Without the
+# binary a review run cannot read a single PR — and MAIN-407 provisioned the
+# TOKEN into the image without ever putting the tool that reads it here.
+RUN mkdir -p -m 755 /etc/apt/keyrings \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+         -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+         > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=build /out/nook /usr/local/bin/nook
 COPY deploy/docker/operator-node-entrypoint.sh /usr/local/bin/node-entrypoint.sh
 RUN chmod +x /usr/local/bin/node-entrypoint.sh
@@ -66,7 +79,7 @@ RUN chmod +x /usr/local/bin/node-entrypoint.sh
 # The whole point of this image is that the toolchain is present. Fail the build
 # — loudly, at build time — if any expected binary is missing from PATH, so a
 # renamed package or a failed installer never ships as a silently-degraded node.
-RUN set -eux; for bin in git tmux ssh claude hermes copilot codex nook; do \
+RUN set -eux; for bin in git tmux ssh gh claude hermes copilot codex nook; do \
       command -v "$bin" >/dev/null || { echo "FATAL: '$bin' not on PATH"; exit 1; }; \
     done
 
@@ -76,6 +89,7 @@ RUN { \
       echo "nook=$(nook --version 2>/dev/null | head -1)"; \
       echo "git=$(git --version)"; \
       echo "tmux=$(tmux -V)"; \
+      echo "gh=$(gh --version 2>/dev/null | head -1)"; \
       echo "node=$(node --version)"; \
       echo "claude=$(claude --version 2>/dev/null | head -1)"; \
       echo "codex=$(codex --version 2>/dev/null | head -1)"; \

@@ -57,15 +57,19 @@ export interface ChatViewMessage {
   /** Soft-deleted (MAIN-116 AC-4): render a placeholder, suppress reactions and
    *  per-message actions. The body already arrives redacted. */
   deleted?: boolean;
-  /** Render the body as markdown rather than plain text (MAIN-299).
+  /** How to render the body.
    *
-   *  Off by default, because a chat message is text a person typed and "**" in
-   *  it means asterisks. It is on for the one kind of message that IS a
-   *  document: a loop run's drafted issue, which is a whole spec in markdown and
-   *  is unreadable as a wall of literal `##`. The caller decides — the view has
-   *  no way to tell prose from a draft, and guessing would eventually render
-   *  someone's message wrong. */
-  markdown?: boolean;
+   *  - absent/false — plain pre-wrapped text, exactly as typed.
+   *  - `true` — a markdown DOCUMENT (MAIN-299): a loop run's drafted issue is a
+   *    whole spec, unreadable as a wall of literal `##`. CommonMark newline
+   *    rules apply, so a soft-wrapped paragraph stays one paragraph.
+   *  - `"chat"` — markdown with chat's newline semantics: a single newline is a
+   *    line break, because the person pressed Shift+Enter meaning "go down a
+   *    line", not "continue this paragraph".
+   *
+   *  The caller decides — the view has no way to tell prose from a draft, and
+   *  guessing would eventually render someone's message wrong. */
+  markdown?: boolean | "chat";
 }
 
 export interface ChatViewProps {
@@ -187,6 +191,7 @@ function copyText(body: string): void {
  */
 function MessageActions({
   message,
+  time,
   canReact,
   canReply,
   canEdit,
@@ -198,6 +203,10 @@ function MessageActions({
   onOpenThread,
 }: {
   message: ChatViewMessage;
+  /** Shown at the bar's left edge on grouped rows, which have no header of
+   *  their own — hovering is the only way to date one. Head rows pass nothing:
+   *  their header already says it. */
+  time?: string;
   canReact: boolean;
   canReply: boolean;
   canEdit: boolean;
@@ -284,6 +293,7 @@ function MessageActions({
     // body portal, where neither `:hover` on the row nor `:focus-within` on the
     // bar can still see it.
     <div className={`chat-msg-bar${picker || more ? " open" : ""}`}>
+      {time && <span className="chat-bar-time">{time}</span>}
       {canReact && (
         <div ref={pick.hostRef} className="chat-bar-wrap">
           <button
@@ -392,6 +402,7 @@ export function ChatView({
   hideComposer = false,
 }: ChatViewProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const [draft, setDraft] = useState("");
   // Which message's body is being edited inline (MAIN-116 AC-3), and the
   // in-progress draft. Each row's popups own their own open state — see
@@ -457,7 +468,23 @@ export function ChatView({
     if (disabled || (!body && !allowEmpty)) return;
     onSend(body);
     setDraft("");
+    // Collapse back to the one-line resting height the stylesheet pins.
+    const el = inputRef.current;
+    if (el) el.style.height = "";
   }, [draft, disabled, allowEmpty, onSend]);
+
+  /** Grow the box with its content instead of scrolling inside a 34px slot.
+   *  Inline style, cleared at rest, so the stylesheet keeps owning the resting
+   *  height and the Send button stays matched to it. The max mirrors the
+   *  stylesheet's `max-height` — past that the box scrolls, as it should. */
+  const autoGrow = useCallback(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "";
+    if (el.scrollHeight > el.clientHeight) {
+      el.style.height = `${Math.min(el.scrollHeight + 2, 160)}px`;
+    }
+  }, []);
 
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -538,7 +565,11 @@ export function ChatView({
                   />
                 ) : (
                   <div className={`chat-body${m.markdown ? " md" : ""}`}>
-                    {m.markdown ? <Markdown src={m.body} /> : m.body}
+                    {m.markdown ? (
+                      <Markdown src={m.body} breaks={m.markdown === "chat"} />
+                    ) : (
+                      m.body
+                    )}
                     {m.edited && <span className="chat-edited"> (edited)</span>}
                   </div>
                 )}
@@ -575,6 +606,7 @@ export function ChatView({
                   (canReact || canReply || canEdit || canDelete || canCopy) && (
                     <MessageActions
                       message={m}
+                      time={head ? undefined : timeLabel(m.createdAt)}
                       canReact={canReact}
                       canReply={canReply}
                       canEdit={canEdit}
@@ -619,13 +651,17 @@ export function ChatView({
       {!hideComposer && (
       <div className="chat-composer">
         <textarea
+          ref={inputRef}
           className="chat-input"
           value={draft}
           disabled={disabled}
           placeholder={placeholder}
           rows={1}
           aria-label="Message"
-          onChange={(e) => setDraft(e.target.value)}
+          onChange={(e) => {
+            setDraft(e.target.value);
+            autoGrow();
+          }}
           onKeyDown={onKeyDown}
         />
         <button

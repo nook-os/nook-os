@@ -18,6 +18,7 @@
 // (script, iframe, form, style) never added.
 import React, { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
+import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
@@ -100,12 +101,21 @@ const SCHEMA = {
 export function Markdown({
   src,
   onToggle,
+  breaks = false,
 }: {
   src: string;
   /** When present, rendered task-list checkboxes become clickable and call this
    *  with the checkbox's ordinal (0-based, source order) so the caller can flip
    *  the matching `- [ ] `/`- [x] ` in the source (MAIN-36). */
   onToggle?: (index: number) => void;
+  /** Chat semantics: a single newline is a line break (remark-breaks).
+   *
+   *  Off for documents on purpose — a spec's soft-wrapped paragraph must stay
+   *  one paragraph, which is what CommonMark says a single newline means. A
+   *  chat message is the opposite case: the person pressed Shift+Enter to go
+   *  down a line, and collapsing that into one run of prose renders their
+   *  message wrong. */
+  breaks?: boolean;
 }) {
   // Reset each render; react-markdown renders the inputs in document order, so
   // the Nth `input` is the Nth checkbox in source — the index `onToggle` gets.
@@ -113,7 +123,7 @@ export function Markdown({
   return (
     <div className="md">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={breaks ? [remarkGfm, remarkBreaks] : [remarkGfm]}
         // Order matters: parse the raw HTML first, THEN sanitise what parsing
         // produced. Reversed, the sanitiser runs over a tree that does not yet
         // contain the HTML it exists to check.

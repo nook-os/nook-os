@@ -40,6 +40,9 @@ const TAIL_BYTES: usize = 4096;
 pub struct LoopJob {
     pub job_id: String,
     pub kind: String,
+    /// The pull request a `review` run owns (MAIN-455): what the agent is told
+    /// it is reviewing, and the session it resumes.
+    pub review_pr_number: Option<u64>,
     pub target_task_key: String,
     pub repo_url: String,
     pub branch: String,
@@ -103,6 +106,54 @@ fn sanitize(s: &str) -> String {
 
 fn job_dirname(job_id: &str) -> String {
     sanitize(job_id)
+}
+
+/// The worktree directory a REVIEW run works in: stable per (workspace, PR),
+/// where every other kind gets a per-job path.
+///
+/// Stability is the whole point, and it is what per-job paths made impossible:
+/// Claude Code buckets its sessions by working directory, so a worktree named
+/// after the job id put every run in a brand-new empty bucket and there was
+/// never anything to resume — confirmed live, two runs of one PR, two
+/// unrelated agent sessions. Safe to share across runs because 0046's unique
+/// index means no two live runs ever hold the same PR.
+fn review_dirname(workspace_id: &str, pr: u64) -> String {
+    sanitize(&format!("review-{workspace_id}-pr{pr}"))
+}
+
+/// The agent session a REVIEW run pins on its first pass and resumes on every
+/// later one: UUIDv5 over (workspace, PR), so the same PR always names the same
+/// session without anything having to be stored or looked up.
+fn review_session_id(workspace_id: &str, pr: u64) -> String {
+    uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_OID,
+        format!("nook-review:{workspace_id}:{pr}").as_bytes(),
+    )
+    .to_string()
+}
+
+/// Does the agent already hold a session under this id?
+///
+/// Answered from the filesystem — `<config>/projects/*/<id>.jsonl` — because it
+/// decides which FLAG the launch gets: `--resume` on a session that exists,
+/// `--session-id` to pin one that does not. Guessing wrong is not recoverable
+/// after launch: resuming a missing session fails the run, and pinning an
+/// existing id collides with it. The scan crosses every project bucket rather
+/// than deriving this run's, so the answer does not depend on reproducing
+/// Claude Code's path-munging scheme.
+fn agent_session_exists(session_id: &str) -> bool {
+    let config = std::env::var("CLAUDE_CONFIG_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".claude")
+        });
+    let file = format!("{session_id}.jsonl");
+    let Ok(projects) = std::fs::read_dir(config.join("projects")) else {
+        return false;
+    };
+    projects
+        .flatten()
+        .any(|bucket| bucket.path().join(&file).is_file())
 }
 
 fn job_tmux_name(job_id: &str) -> String {
@@ -183,11 +234,11 @@ fn add_job_worktree_in(
     wt_base: &Path,
     cache: &Path,
     branch: &str,
-    job_id: &str,
+    dirname: &str,
 ) -> Result<PathBuf, String> {
     std::fs::create_dir_all(wt_base)
         .map_err(|e| format!("cannot create {}: {e}", wt_base.display()))?;
-    let dest = wt_base.join(sanitize(job_id));
+    let dest = wt_base.join(sanitize(dirname));
     if dest.exists() {
         return Err(format!("{} already exists", dest.display()));
     }
@@ -365,13 +416,27 @@ const UNMAPPED_KINDS: &[(&str, &str)] = &[
 
 /// Whether this kind may CREATE the clone cache, or only use one already there.
 ///
-/// A review job targets a WORKSPACE rather than a ticket, and runs on a shared
-/// operator whose whole point is that the repo is already cached (MAIN-406
-/// AC-1). Cloning on demand there would turn "review this repo" into an
-/// unbounded fetch of any repo a job names, on a machine several tenants share.
-/// So review uses what exists and says so when nothing does (AC-3).
-fn may_create_cache(kind: &str) -> bool {
-    kind != "review"
+/// **This was `kind != "review"` and is now true for every kind — a deliberate
+/// relaxation of a rule whose threat model no longer holds.**
+///
+/// MAIN-406 refused a review job the right to clone because "review this repo"
+/// arrived from a board signal and could name any repo, on a machine several
+/// tenants share — an unbounded fetch. The property that bar protected now
+/// holds by construction on EVERY path that raises a review: the reconciler
+/// resolves the repo from a workspace's own `git_remote_url`, and the manual
+/// path (`POST /api/v1/reviews`, still routed) requires a user token and
+/// resolves its workspace by key inside the caller's tenant — so no caller,
+/// manual or automatic, can name a remote the tenant never registered. Same
+/// standing as the `spec` and `decompose` runs that have always cached freely.
+///
+/// Keeping the refusal made the feature unbuildable rather than safe: the
+/// checkout clone-on-demand lands is a WORKING TREE in the node's workspace
+/// root, and a job reads a bare mirror under `~/.nook/clone-cache`. They are
+/// different things in different places, so "the repo is already cached" was
+/// never true for a repo nothing had run a job on — every review failed with
+/// "no clone cache", forever, however many times it was retried.
+fn may_create_cache(_kind: &str) -> bool {
+    true
 }
 
 /// Run one loop job to completion. Blocking; call under `spawn_blocking`.
@@ -379,6 +444,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
     let LoopJob {
         job_id,
         kind,
+        review_pr_number,
         target_task_key,
         repo_url,
         branch,
@@ -387,7 +453,13 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
         ssh_key,
         nook_token,
     } = job;
-    let dirname = job_dirname(&job_id);
+    // A review run keeps ONE working directory per (workspace, PR) across
+    // runs — the agent-session bucket is keyed on it (see `review_dirname`).
+    // Everything else stays per-job.
+    let dirname = match (review_pr_number, workspace_id.as_deref()) {
+        (Some(pr), Some(ws)) => review_dirname(ws, pr),
+        _ => job_dirname(&job_id),
+    };
     if let Ok(mut s) = running_jobs().lock() {
         s.insert(dirname.clone());
     }
@@ -432,7 +504,14 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
             }
         }
     };
-    let worktree = match add_job_worktree_in(&wt_base, &cache, &branch, &job_id) {
+    // A crashed run can leave the stable path behind; the unique index says no
+    // LIVE run holds this PR, so clearing the leftover is safe and starting
+    // over is right — the agent's session survives in the config dir, not here.
+    let leftover = wt_base.join(&dirname);
+    if leftover.exists() {
+        let _ = remove_job_worktree(&cache, &leftover);
+    }
+    let worktree = match add_job_worktree_in(&wt_base, &cache, &branch, &dirname) {
         Ok(w) => w,
         Err(e) => {
             finished(&out, &job_id, false, format!("worktree setup failed: {e}"));
@@ -507,9 +586,12 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
             &out,
             &job_id,
             &worktree,
-            skill,
-            &target_task_key,
-            seed.as_deref(),
+            RunBrief {
+                skill,
+                target: &target_task_key,
+                seed: seed.as_deref(),
+                review_pr: review_pr_number,
+            },
             AgentIdentity {
                 token: nook_token.as_deref(),
                 server: &cfg.server,
@@ -593,18 +675,54 @@ struct AgentIdentity<'a> {
     workspace_id: Option<&'a str>,
 }
 
+/// What a run is ABOUT: which skill, on which target, from which brief, and —
+/// for a review — which pull request.
+///
+/// Grouped for the reason [`AgentIdentity`] is: these travel together and
+/// nothing reads one without the others, and loose they push `drive_streaming`
+/// past clippy's argument limit — a fair complaint about the shape both times.
+struct RunBrief<'a> {
+    skill: &'a str,
+    target: &'a str,
+    seed: Option<&'a str>,
+    /// The pull request a review run owns (MAIN-455): what the agent is told it
+    /// is reviewing, and the session it resumes.
+    review_pr: Option<u64>,
+}
+
 fn drive_streaming(
     out: &Sender<NodeToControl>,
     job_id: &str,
     worktree: &Path,
-    skill: &str,
-    target: &str,
-    seed: Option<&str>,
+    brief: RunBrief<'_>,
     identity: AgentIdentity<'_>,
 ) -> (bool, String) {
+    let RunBrief {
+        skill,
+        target,
+        seed,
+        review_pr,
+    } = brief;
     use crate::job_adapter::{self, Event, StreamingSession, TurnState};
 
-    let args = job_adapter::claude_stream_args(job_id);
+    // A review run continues ITS pull request's agent session, so a second look
+    // after a push keeps the tree and the earlier reasoning instead of
+    // rebuilding both to read one new commit (MAIN-455 AC-3). The session id is
+    // derived (workspace + PR), the first pass pins it, and every later pass
+    // resumes it — decided by whether the session file exists, never by hope.
+    // Still best effort across machines: the session lives on ONE node, so a
+    // run placed elsewhere pins its own and is a cold start, not a failure.
+    let args = match (review_pr, identity.workspace_id) {
+        (Some(pr), Some(ws)) => {
+            let sid = review_session_id(ws, pr);
+            if agent_session_exists(&sid) {
+                job_adapter::claude_resume_args(&sid)
+            } else {
+                job_adapter::claude_stream_args(&sid)
+            }
+        }
+        _ => job_adapter::claude_stream_args(job_id),
+    };
     let mut env: Vec<(&str, &str)> = vec![
         ("NOOK_JOB_ID", job_id),
         // The agent runs headless with `--dangerously-skip-permissions`
@@ -617,6 +735,27 @@ fn drive_streaming(
     ];
     if let Some(s) = seed.filter(|s| !s.trim().is_empty()) {
         env.push(("NOOK_JOB_SEED", s));
+    }
+    // The one PR this run owns. It replaces MAIN-446's shard pair: a run that is
+    // told its item needs no arithmetic to work out which slice of the repo is
+    // its own, and cannot pick a PR another run is already on.
+    let pr_env;
+    if let Some(pr) = review_pr {
+        pr_env = pr.to_string();
+        env.push(("NOOK_REVIEW_PR", &pr_env));
+    }
+    // The fleet's GitHub credential, under the name `gh` actually reads — the
+    // SAME mapping the tmux path has done since MAIN-407, which this path
+    // never got. Without it the node holds `NOOK_GH_TOKEN` while the agent's
+    // `gh auth status` fails, and what happens next is agent improvisation:
+    // one run noticed the fleet variable and exported it by hand, the next run
+    // did not and died at preflight. A credential must not depend on the
+    // agent's mood. Absent, nothing is exported at all — an empty `GH_TOKEN`
+    // out-prefers a logged-in account, same reasoning as `tmux::spawn`.
+    let gh_env;
+    if let Some(t) = crate::config::fleet_gh_token() {
+        gh_env = t;
+        env.push(("GH_TOKEN", &gh_env));
     }
     // The agent's own identity, in the JOB's tenant. `AuthConfig::load` reads a
     // FILE, so without this `nook` inside the agent acts as whoever last ran
@@ -1034,17 +1173,41 @@ mod tests {
         }
     }
 
-    /// AC-1/AC-3: review uses an existing clone cache and never creates one.
-    ///
-    /// The distinction is the whole point — a shared operator caches the repos
-    /// it hosts, and letting a review job clone on demand would turn "review
-    /// this repo" into an unbounded fetch of whatever a job names, on a machine
-    /// several tenants share.
+    /// The warm layer's whole contract: the same PR always names the same
+    /// agent session and the same working directory, run after run — that is
+    /// what lets `--resume` find the earlier conversation. Confirmed broken the
+    /// other way live: per-job paths meant two runs of one PR produced two
+    /// unrelated sessions.
     #[test]
-    fn only_review_is_barred_from_creating_the_clone_cache() {
-        assert!(!may_create_cache("review"));
-        assert!(may_create_cache("spec"));
-        assert!(may_create_cache("decompose"));
+    fn a_pull_requests_session_and_worktree_are_stable_across_runs() {
+        let a = review_session_id("ws-1", 348);
+        let b = review_session_id("ws-1", 348);
+        assert_eq!(a, b, "same PR, same session, whatever run asks");
+        assert_ne!(
+            a,
+            review_session_id("ws-1", 349),
+            "another PR is another reviewer"
+        );
+        assert_ne!(
+            a,
+            review_session_id("ws-2", 348),
+            "another repo's #348 is unrelated"
+        );
+        assert_eq!(review_dirname("ws-1", 348), review_dirname("ws-1", 348));
+        assert_ne!(review_dirname("ws-1", 348), review_dirname("ws-1", 349));
+    }
+
+    /// MAIN-455: every kind may build its cache, review included — the inverse
+    /// of what this asserted under MAIN-406, whose bar existed for a sweep that
+    /// could name any repo on a shared machine. Barring it did not make the
+    /// operator safer; it made every review fail with "no clone cache",
+    /// because clone-on-demand lands a working tree and a job reads a bare
+    /// mirror.
+    #[test]
+    fn every_kind_may_build_its_clone_cache() {
+        for kind in ["review", "spec", "decompose"] {
+            assert!(may_create_cache(kind), "{kind} must be able to cache");
+        }
     }
 
     /// AC-4 / MAIN-143 AC-5: what counts as a credential.

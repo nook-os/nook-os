@@ -58,13 +58,6 @@ pub enum Cmd {
         /// WORKSPACE's tenant, not this node's — they differ under
         /// cross-tenant placement, which is the case it exists for.
         tenant_id: Option<String>,
-        /// What the control plane declared this session FOR (MAIN-326). `None`
-        /// — a person's terminal — just opens the runtime, which is everything
-        /// this ever did.
-        managed_purpose: Option<nook_types::ManagedPurpose>,
-        /// Which slice of the repo's work this session owns (MAIN-446), when it
-        /// is one of several sharing a declaration. `None` is the whole of it.
-        shard: Option<nook_types::ShardAssignment>,
     },
     StartAuth {
         session_id: SessionId,
@@ -157,8 +150,6 @@ impl Manager {
                 unsatisfied,
                 workspace_id,
                 tenant_id,
-                managed_purpose,
-                shard,
             } => self.start(
                 session_id,
                 &runtime,
@@ -169,8 +160,6 @@ impl Manager {
                 &unsatisfied,
                 workspace_id.as_deref(),
                 tenant_id.as_deref(),
-                managed_purpose,
-                shard,
             ),
             Cmd::StartAuth {
                 session_id,
@@ -222,8 +211,6 @@ impl Manager {
         unsatisfied: &[String],
         workspace_id: Option<&str>,
         tenant_id: Option<&str>,
-        managed_purpose: Option<nook_types::ManagedPurpose>,
-        shard: Option<nook_types::ShardAssignment>,
     ) {
         // The runtime string is the executable to launch. Restrict to the
         // known set so the control plane can't run arbitrary commands.
@@ -236,19 +223,6 @@ impl Manager {
         // the same call `loop_job` makes, and for the same reason. The
         // reconciler retries next pass, exactly as it does for a missing
         // runtime, so a node that gets the skill converges without help.
-        if let Some(skill) = managed_purpose.and_then(drive_skill) {
-            if !crate::wizard::skills::is_installed(skill) {
-                return self.session_failed(
-                    session_id,
-                    format!(
-                        "skill {skill} is not installed on this node — the loop skills ship \
-                         with the agent binary and are written on `nook run`; this node is \
-                         running a build that predates them, or could not write its agent \
-                         skill directory"
-                    ),
-                );
-            }
-        }
         // …and a review loop with no GitHub credential is worse than one with
         // no skill, because it does not look broken (MAIN-448 AC-7). `gh` with
         // no token lists nothing, so every PR reads as "nothing to review" and
@@ -259,18 +233,6 @@ impl Manager {
         //
         // The same predicate `loop_job` refuses a review JOB with, so a node
         // cannot pass one check and fail the other.
-        if managed_purpose.is_some_and(needs_github) {
-            if let Err(e) = crate::loop_job::gh_is_authenticated() {
-                return self.session_failed(
-                    session_id,
-                    format!(
-                        "{e} — a review loop needs a GitHub credential (NOOK_GH_TOKEN, or a \
-                         logged-in gh). Without one every PR reads as \"nothing to review\" \
-                         and the loop would report clean passes having examined none."
-                    ),
-                );
-            }
-        }
         let tmux_name = format!("{}{}", tmux::SESSION_PREFIX, session_id.0.simple());
         // Restart of an ended session: discard the old PTY before re-attaching.
         self.sessions.remove(&session_id);
@@ -283,11 +245,7 @@ impl Manager {
             // The canonical (hyphenated) uuid, not the tmux name's simple form,
             // so `GET /api/v1/sessions/{id}` inside the session resolves.
             let sid = session_id.0.to_string();
-            let shard_env = shard_env(shard);
-            let extra: Vec<(&str, &str)> = shard_env
-                .iter()
-                .map(|(k, v)| (k.as_str(), v.as_str()))
-                .collect();
+            let extra: Vec<(&str, &str)> = Vec::new();
             if let Err(e) = tmux::new_session(
                 &tmux_name,
                 workspace_path,
@@ -306,11 +264,6 @@ impl Manager {
         }
         match self.attach_pty(session_id, &tmux_name, cols, rows, false) {
             Ok(()) => {
-                if fresh {
-                    if let Some(skill) = managed_purpose.and_then(drive_skill) {
-                        drive_loop_skill(&tmux_name, skill);
-                    }
-                }
                 let _ = self.ctl.blocking_send(NodeToControl::SessionStarted {
                     session_id,
                     tmux_session: tmux_name,
@@ -584,156 +537,30 @@ impl Manager {
     }
 }
 
-/// The skill a declared purpose drives, if it drives one (MAIN-326).
-///
-/// A fixed table keyed by purpose — the node chooses the command, never the
-/// wire, exactly as it does for a runtime's login flow. `Access` drives nothing:
-/// it is a terminal for a person, and typing into it would be typing over them.
-fn drive_skill(purpose: nook_types::ManagedPurpose) -> Option<&'static str> {
-    match purpose {
-        nook_types::ManagedPurpose::Access => None,
-        nook_types::ManagedPurpose::ReviewLoop => Some("nook-review"),
-    }
-}
-
-/// Does this declared purpose need the fleet's GitHub credential (MAIN-448)?
-///
-/// A table keyed by purpose, beside `drive_skill` and for its reason: the two
-/// answers are about the same session, and a purpose added later should have to
-/// answer both here rather than inherit either by accident. `Access` is a
-/// person's terminal — it needs nothing, and refusing to open one because the
-/// fleet has no token would be absurd.
-fn needs_github(purpose: nook_types::ManagedPurpose) -> bool {
-    match purpose {
-        nook_types::ManagedPurpose::Access => false,
-        nook_types::ManagedPurpose::ReviewLoop => true,
-    }
-}
-
-/// The environment a shard assignment becomes (MAIN-446).
-///
-/// Named HERE and not in `tmux.rs` for the reason `drive_skill` is: which skill
-/// a purpose drives, and what that skill reads, are one fact about the review
-/// loop. `tmux::spawn` stays a general env-injection point that knows nothing
-/// about reviewing.
-///
-/// Nothing at all for an unsharded session. An absent variable has to keep
-/// meaning "review every PR" — that is what every existing deployment reads,
-/// and what a single reviewer must go on reading.
-fn shard_env(shard: Option<nook_types::ShardAssignment>) -> Vec<(String, String)> {
-    match shard.filter(|s| s.of > 1) {
-        Some(s) => vec![
-            ("NOOK_REVIEW_SHARD".to_string(), s.index.to_string()),
-            ("NOOK_REVIEW_SHARDS".to_string(), s.of.to_string()),
-        ],
-        None => Vec::new(),
-    }
-}
-
-/// The runtime needs a beat to come up before it can take input. We do not read
-/// its output to decide when it is ready — the same constraint `loop_job` works
-/// under — so wait a fixed moment, then type.
-const SKILL_STARTUP_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// Put a declared session to work: `/loop /<skill>`, typed once the runtime is
-/// up.
-///
-/// `/loop` with NO interval, so the agent paces its own iterations — a review
-/// pass takes as long as the PRs in front of it take, and a fixed interval would
-/// either stack passes on a busy repo or idle on a quiet one.
-///
-/// On its own thread because the delay must not block the session manager: that
-/// thread is what every other terminal on this machine gets its keystrokes
-/// through, and five seconds of it is five seconds of a frozen fleet.
-fn drive_loop_skill(tmux_name: &str, skill: &'static str) {
-    let tmux_name = tmux_name.to_string();
-    std::thread::spawn(move || {
-        std::thread::sleep(SKILL_STARTUP_DELAY);
-        let line = format!("/loop /{skill}");
-        match tmux::send_keys(&tmux_name, &line) {
-            Ok(()) => tracing::info!(session = %tmux_name, %line, "started the declared loop"),
-            // Loud, because the session is now a live agent sitting idle: it
-            // looks exactly like a working review loop from the control plane.
-            Err(e) => {
-                tracing::error!(session = %tmux_name, %line, error = %e, "could not start the declared loop")
-            }
-        }
-    });
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use nook_types::ManagedPurpose;
-
-    /// The node — never the wire — decides what runs, so this table IS the
-    /// contract. A purpose that mapped to the wrong skill would put a build
-    /// agent on the review loop's node with nobody having asked for one.
+    /// MAIN-455 AC-1. The regression that matters now is the opposite of the
+    /// one this module used to guard: a managed session must NOT drive a skill.
+    ///
+    /// Typing `/loop /nook-review` into an interactive agent is what put an
+    /// attachable TUI on a machine, blocked on Claude Code's onboarding prompt
+    /// with nobody to answer it, and left nothing to read when it died. Reviews
+    /// are headless runs now, and a session is a person's terminal again.
     #[test]
-    fn only_the_review_loop_drives_a_skill() {
-        assert_eq!(drive_skill(ManagedPurpose::ReviewLoop), Some("nook-review"));
-        assert_eq!(
-            drive_skill(ManagedPurpose::Access),
-            None,
-            "a person's terminal is theirs — typing into it types over them"
-        );
-    }
-
-    /// MAIN-448 AC-7. A review loop is the one purpose that cannot work without
-    /// a GitHub credential, and a person's terminal must never be refused for
-    /// the lack of one.
-    #[test]
-    fn only_the_review_loop_needs_a_github_credential() {
-        assert!(needs_github(ManagedPurpose::ReviewLoop));
-        assert!(
-            !needs_github(ManagedPurpose::Access),
-            "a terminal is a terminal whether or not the fleet can reach GitHub"
-        );
-    }
-
-    /// The refusal is the JOB's, reached rather than retyped. Two copies of
-    /// "can this node reach GitHub" is two answers about one machine, and the
-    /// confusing half is the one that passes: a session started against a check
-    /// the job would have failed reports clean passes having examined nothing.
-    #[test]
-    fn the_session_refuses_with_the_same_predicate_the_job_does() {
+    fn a_session_start_drives_no_skill() {
         let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/sessions.rs"))
             .expect("this file must be readable");
-        let body = src
-            .split("\n    pub fn start(")
-            .nth(1)
-            .expect("start must exist");
-        assert!(
-            body.contains("crate::loop_job::gh_is_authenticated()"),
-            "the managed-session guard must call the job's own predicate, not a \
-             second implementation of it"
-        );
-    }
-
-    /// MAIN-446 AC-2. The pair the reviewer skill reads, spelled exactly as the
-    /// skill spells it — a typo here is a reviewer that silently reviews every
-    /// PR, which looks like success until two of them post the same verdict.
-    #[test]
-    fn a_sharded_session_carries_the_pair_the_skill_reads() {
-        assert_eq!(
-            shard_env(Some(nook_types::ShardAssignment { index: 2, of: 3 })),
-            vec![
-                ("NOOK_REVIEW_SHARD".to_string(), "2".to_string()),
-                ("NOOK_REVIEW_SHARDS".to_string(), "3".to_string()),
-            ]
-        );
-    }
-
-    /// Absent has to keep meaning "review every PR": that is what a single
-    /// reviewer reads, and what every deployment that has never set a count
-    /// reads. Exporting `SHARDS=1` instead would work, but only until something
-    /// tested `[ -n "$NOOK_REVIEW_SHARDS" ]`.
-    #[test]
-    fn an_unsharded_session_carries_nothing_at_all() {
-        assert!(shard_env(None).is_empty());
-        assert!(
-            shard_env(Some(nook_types::ShardAssignment::SOLO)).is_empty(),
-            "one shard is no partition"
-        );
+        // Only the code, not this module: the banned words are spelled out
+        // below, so a whole-file scan would find its own list and fail forever.
+        let code = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("code precedes tests");
+        for banned in ["drive_loop_skill", "drive_skill", "/loop /"] {
+            assert!(
+                !code.contains(banned),
+                "`{banned}` is back — a managed session must never type into an agent"
+            );
+        }
     }
 }

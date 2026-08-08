@@ -35,15 +35,13 @@ import {
   jobKey,
   jobStateMeta,
   foldToolActivity,
-  looksLikeMarkdown,
   loopAction,
   postJobMessage,
-  stripAnsi,
   stuckCause,
   taskJobsKey,
 } from "../loop";
 import { answerInteraction } from "../Interactions";
-import { agentActivityLabel } from "../LoopPanel";
+import { agentActivityLabel, transcriptMessages } from "../LoopPanel";
 
 /** The ticket this workspace is anchored to. Keys and uuids both resolve
  *  server-side (MAIN-209), so the route accepts whichever the caller had. */
@@ -117,16 +115,10 @@ export function loopMessages(
   transcript: LoopJobTranscriptEntry[],
   asks: { id: string; prompt: string }[] = [],
 ): ChatViewMessage[] {
-  const lines = foldToolActivity(transcript).map((l) => ({
-    id: l.id,
-    authorId: l.source,
-    authorName: l.source,
-    // ANSI is stripped for the VIEW only; the stored line keeps every escape
-    // (MAIN-161 NG-2), exactly as the bespoke renderer did.
-    body: stripAnsi(l.content),
-    createdAt: l.at,
-    markdown: looksLikeMarkdown(l.content),
-  }));
+  // One mapping, shared with the Loop panel and the workspace Reviews panel —
+  // this file carried its own copy and the shared one drifted behind it, which
+  // is how the same transcript rendered differently on two surfaces.
+  const lines = transcriptMessages(foldToolActivity(transcript));
   // Appended, not interleaved: an ask is outstanding *now*, so it belongs at the
   // bottom where the reader is, next to the box they answer it in.
   return [

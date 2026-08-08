@@ -27,28 +27,21 @@ pub async fn create(
     ))
 }
 
-/// Raise a review job by hand (MAIN-408 AC-2) — the manual counterpart to the
-/// board-signal sweep, for reviewing something without waiting for the tick.
-///
-/// Deliberately NOT gated on `reviews.sweep.enabled`: that switch governs the
-/// automatic sweep, and a person asking for one review is not the thing an
-/// operator turns off when they say "stop sweeping". (An operator who wants no
-/// reviews at all removes the ability to reach this route, as with any other
-/// endpoint.)
-///
-/// **Dedupe is shared with the sweep, not reimplemented** (AC-3): a workspace
-/// that already has a review in flight returns that existing job with 200,
-/// because "already covered" is success from the caller's point of view and a
-/// 409 would push every caller into writing its own retry rule.
+/// "Review this workspace now" (MAIN-455) — the manual counterpart to the
+/// reconciler, and the SAME convergence: one directed run per pull request
+/// that is owed one, same dedupe, same ceiling. The response is what actually
+/// happened — the runs raised, plus how many PRs were already covered or held
+/// back — because "a job" stopped being the honest unit when a workspace can
+/// owe several.
 #[utoipa::path(post, path = "/api/v1/reviews",
     operation_id = "review_enqueue",
     request_body = CreateReviewJobRequest,
-    responses((status = 200, body = LoopJobDetail)))]
+    responses((status = 200, body = ReviewRaiseResult)))]
 pub async fn enqueue_review(
     State(state): State<AppState>,
     auth: AuthCtx,
     Json(req): Json<CreateReviewJobRequest>,
-) -> ApiResult<Json<LoopJobDetail>> {
+) -> ApiResult<Json<ReviewRaiseResult>> {
     // A person's action, like every other enqueue — a node token cannot raise
     // reviews on the tenant's behalf.
     auth.require_user()?;
@@ -60,20 +53,33 @@ pub async fn enqueue_review(
     .await
     .map_err(|e| crate::error::ApiError::BadRequest(e.to_string()))?;
 
-    match jobs::enqueue_review(&state, auth.tenant_id, auth.user_id, workspace, req.seed).await? {
-        Some(detail) => Ok(Json(detail)),
-        // Already in flight: hand back the existing run rather than a second one.
-        None => {
-            let existing = state
-                .jobs
-                .active_review_for_workspace(auth.tenant_id, workspace)
-                .await?
-                .ok_or(crate::error::ApiError::NotFound)?;
-            Ok(Json(
-                jobs::get(&state, auth.tenant_id, auth.user_id, existing).await?,
-            ))
-        }
-    }
+    let c = jobs::enqueue_review(&state, auth.tenant_id, auth.user_id, workspace, req.seed).await?;
+    Ok(Json(ReviewRaiseResult {
+        raised: c.jobs,
+        live: c.live as u32,
+        withheld: c.withheld as u32,
+    }))
+}
+
+/// `POST /api/v1/jobs/{id}/verdict` — a review run reports its conclusion
+/// (MAIN-455). The run's own minted token authorises it, the same identity its
+/// other writes travel as; the control plane posts the comment and labels, so
+/// the agent's last act is one call instead of a sequence of `gh` commands it
+/// could misperform.
+#[utoipa::path(post, path = "/api/v1/jobs/{id}/verdict",
+    operation_id = "job_verdict",
+    params(("id" = String, Path,)),
+    request_body = ReviewVerdictRequest,
+    responses((status = 200, body = LoopJob), (status = 400), (status = 409)))]
+pub async fn verdict(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<JobId>,
+    Json(req): Json<ReviewVerdictRequest>,
+) -> ApiResult<Json<LoopJob>> {
+    Ok(Json(
+        jobs::record_verdict(&state, auth.tenant_id, id, &req).await?,
+    ))
 }
 
 #[utoipa::path(get, path = "/api/v1/jobs/{id}",
@@ -105,6 +111,34 @@ pub async fn list_for_task(
         crate::services::tasks::resolve_id(state.tasks.as_ref(), auth.tenant_id, &task_id).await?;
     Ok(Json(
         jobs::list_for_task(&state, auth.tenant_id, auth.user_id, task_id).await?,
+    ))
+}
+
+/// `GET /api/v1/workspaces/{id}/reviews` — this repo's review runs, newest
+/// first (MAIN-455 AC-5).
+///
+/// The workspace's own window onto work the control plane raised for it. Each
+/// row is an ordinary loop job, so its transcript is read through the same
+/// endpoint and the same view a spec run's is — there is no second transcript
+/// mechanism to keep in step.
+#[utoipa::path(get, path = "/api/v1/workspaces/{id}/reviews",
+    operation_id = "list_workspace_reviews",
+    params(("id" = String, Path,)),
+    responses((status = 200, body = [LoopJob])))]
+pub async fn list_reviews_for_workspace(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<WorkspaceId>,
+) -> ApiResult<Json<Vec<LoopJob>>> {
+    // A page's worth. A repo that gets pushed to all day accumulates one run
+    // per push per PR, and none of the older ones tell you anything the newest
+    // does not.
+    const PAGE: i64 = 50;
+    Ok(Json(
+        state
+            .jobs
+            .list_reviews_for_workspace(auth.tenant_id, id, PAGE)
+            .await?,
     ))
 }
 

@@ -1,7 +1,7 @@
 ---
 name: nook-review
 description: "Review open PRs against their linked NookOS board issue and required GitHub checks, then post a three-group verdict with loop labels. Use when asked to run the loop's reviewer or review its PR queue. Designed for /loop; never merges or pushes code."
-version: 1.2.0
+version: 1.4.0
 author: NookOS
 license: MIT
 platforms: [linux, macos]
@@ -24,58 +24,39 @@ moves cards and never merges.
 
 ## 0. Preflight
 
-`nook whoami` must show a **workspace**, and `gh auth status` must pass. If
-either fails, end the pass and say which one.
+Every pass is DIRECTED: `NOOK_REVIEW_PR` names the one pull request this pass
+is about, set by the control plane that raised the run. If it is not set,
+something started this skill outside a review run — end the pass and say so;
+there is no queue to scan and picking one would be inventing work. (The manual
+path, `nook reviews enqueue`, raises directed runs too.)
 
-The workspace line is the real check, because it is what confines this pass to
-one repo. Two identities satisfy it:
+The directive IS the confinement: one PR, in the repo this run was placed in.
+Do not end a pass over `nook whoami`'s workspace line.
 
-- a **user token** (`nook login --token nook_user_…`) — a person, tenant-wide;
-- a **node token inside a managed session**, which the control plane scopes to
-  that session's tenant and workspace.
+`gh auth status` must pass — the run provides the fleet credential as
+`GH_TOKEN`; never improvise one from other variables. If it fails, end the
+pass with `nook reviews verdict skipped --body -` explaining why, so the
+failure is recorded rather than read as a review.
 
-The second is not a downgrade: a session-scoped node token reaches ONE
-workspace, where a user token reaches the whole tenant. What used to be true —
-"a node token cannot drive the board" — stopped being true when scope started
-coming from the session rather than the credential. What still disqualifies a
-run is `whoami` reporting **no workspace**: unconfined means the pick could
-return another repo's cards.
+## 1. Your pull request
 
-## 1. Find a PR needing review
+Read PR `$NOOK_REVIEW_PR`:
 
 ```bash
-gh pr list --state open --json number,title,labels,isDraft,headRefOid,updatedAt,url
+gh pr view "$NOOK_REVIEW_PR" --json number,title,body,labels,isDraft,headRefOid,url
 ```
 
-Skip drafts. For each PR, find the latest comment whose first line is
-`Loop review of COMMIT_SHA`.
+The control plane already deduplicates runs and paces re-review; your only
+skip-check is against work that reached GitHub without it noticing. Find the
+latest comment whose first line is `Loop review of COMMIT_SHA`. If that SHA
+equals the current `headRefOid` — or the PR is a draft — there is nothing new
+to conclude: record it and end the pass:
 
-Skip a PR when that recorded SHA equals its current `headRefOid` and it already
-has `loop-approved`, `loop-changes-requested`, or `needs-human-review`. Review
-it again when new commits landed after the recorded SHA. If nothing needs
-review, say so and end the pass.
+```bash
+nook reviews verdict skipped --body "already reviewed at $HEAD" 
+```
 
-### Your shard
-
-A repo may run several reviewers at once. `NOOK_REVIEW_SHARDS` says how many,
-and `NOOK_REVIEW_SHARD` says which one you are, counting from zero.
-
-**When `NOOK_REVIEW_SHARDS` is greater than 1, consider only PRs where
-`number % NOOK_REVIEW_SHARDS == NOOK_REVIEW_SHARD`.** That rule is about the
-set of open PRs needing review — *however that set is obtained*. It is stated
-that way on purpose: what lists the PRs may change, and this filter must
-survive the change untouched.
-
-Absent, empty, or `1` means every PR is yours. That is the case for a single
-reviewer and for every deployment that has never set these, so the ordinary
-run is unaffected.
-
-The arithmetic is the whole coordination mechanism — there is no claim, no
-lock, and no message between reviewers. Two shards therefore never pick the
-same PR, and every PR belongs to exactly one shard. If your shard's queue is
-empty, end the pass; do NOT take another shard's PR because you have nothing
-to do. A shard whose reviewer is down leaves its PRs until it comes back, and
-that is the accepted trade.
+Never touch another PR because yours needed nothing.
 
 ## 2. Read the contract and code
 
@@ -144,9 +125,10 @@ gh pr view NUMBER --json headRefOid,mergeable,mergeStateStatus
 gh pr checks NUMBER --required --json bucket,name,state,link
 ```
 
-- If required checks are pending or mergeability is still unknown, report that
-  the PR is waiting and end without posting a verdict or changing labels. A
-  later loop pass will retry it.
+- If required checks are pending or mergeability is still unknown, say so and
+  end the pass with NO verdict. The control plane holds a verdict-less pass
+  and raises a fresh run after the hold — do not wait CI out yourself, and do
+  not record `skipped`, which would mark this head reviewed when nothing was.
 - Failed required checks are `[CI]` must-fix findings.
 - A merge conflict is a `[DEFECT]` must-fix finding.
 - If the repository has no required checks, mark the PR for human escalation;
@@ -156,13 +138,19 @@ Review the exact `headRefOid` used for this evidence. Re-fetch it immediately
 before posting. If it changed, discard the review and start again on a future
 pass.
 
-## 4. Post one verdict
+## 4. Conclude
 
-Post one comment on the **PR** in this structure:
+Decide one verdict:
 
-```md
-Loop review of COMMIT_SHA
+- `approved` — no must-fix and no new escalation.
+- `changes_requested` — at least one must-fix.
+- `needs_human` — a scope conflict, no required CI, or anything only a person
+  can rule on.
 
+Then report it — one call, and it is the pass's LAST act:
+
+```bash
+nook reviews verdict changes_requested --body - <<'MD'
 CI: required checks passed | failed | not configured
 Mergeability: clean | conflicting
 
@@ -181,82 +169,39 @@ None.
 ## 3. Safe to merge
 
 Yes — automated review evidence is complete. A human still makes the merge decision.
+MD
 ```
 
-Mirror the verdict onto the board issue so the decision is durable where the
-contract lives:
+The control plane posts the `Loop review of COMMIT_SHA` comment and maintains
+the verdict labels (`loop-approved` / `loop-changes-requested` /
+`needs-human-review`) on the PR — never post the comment or edit PR labels
+through `gh` yourself. If the call fails, the verdict did NOT land: say so and end the pass
+as a failure, never post the comment by hand as a fallback.
+
+Then mirror the verdict onto the board card, which is what lets NookOS answer
+"does this PR need repair?" without holding GitHub credentials. The card key is
+the `Closes <KEY>` line in the PR body:
 
 ```bash
 nook comment <KEY> 'Loop review of COMMIT_SHA — <verdict line>: <pr url>'
+nook label <KEY> <the verdict label>          # and --remove the one it replaces
 ```
 
-Then set GitHub labels based on the verdict, checking existing labels before
-removing them so an absent label does not fail the command:
-
-- No must-fix and no new escalation: add `loop-approved`; remove
-  `loop-changes-requested`. Preserve a pre-existing `needs-human-review` label
-  because it may represent a separate high-risk human gate.
-- Must-fix present: add `loop-changes-requested`; remove `loop-approved`.
-- Scope conflict or no required CI: add `needs-human-review`; remove both
-  `loop-approved` and `loop-changes-requested`; set "Safe to merge" to
-  `No — human decision required.`
-
-Then put the same three names on the **board card**. That is what lets NookOS
-answer "does this PR need repair?" without reaching for GitHub: the control
-plane holds no GitHub credentials, and this one mirrored fact is what keeps the
-build loop from needing any.
-
-The board resolves a label by name and returns `404` for one that is not in the
-tenant's vocabulary yet — on removals as well as adds, because both go through
-the same lookup. So ensure the three exist first. `POST /api/v1/labels` returns
-the existing row instead of erroring, which makes this safe to re-run every
-pass:
-
-```bash
-NOOK_SERVER=$(grep '^server' ~/.config/nook/auth.toml | sed 's/.*"\(.*\)"/\1/')
-NOOK_TOKEN=$(grep '^token'  ~/.config/nook/auth.toml | sed 's/.*"\(.*\)"/\1/')
-for l in loop-approved loop-changes-requested needs-human-review; do
-  curl -s -X POST "$NOOK_SERVER/api/v1/labels" \
-    -H "Authorization: Bearer $NOOK_TOKEN" -H 'Content-Type: application/json' \
-    -d "{\"name\":\"$l\"}" -o /dev/null
-done
-```
-
-Then mirror whichever branch you just took, with the same adds and the same
-removals:
-
-```bash
-nook label <KEY> loop-approved                    # the verdict you set
-nook label <KEY> loop-changes-requested --remove  # each one that branch removes
-```
-
-Once the names exist, attach and detach are both idempotent — re-applying a
-verdict the card already carries, or removing one it does not, succeeds. The
-check-before-removing above is a `gh` workaround and is not needed here.
-
-The preservation rule crosses over intact: a pre-existing `needs-human-review`
-survives an otherwise-clean pass on the card exactly as it does on the PR, so a
-card can legitimately carry it alongside `loop-approved`. Only the escalation
-branch removes the other two outright.
-
-**Mirroring is best-effort.** If a call fails, say so in the pass output and
-carry on — the verdict comment is the record of truth, and a review that has
-already posted must not be failed by a label write. Best-effort is not silent:
-report it, because a mirror that quietly never ran would leave the build loop
-reading a card that looks unreviewed.
-
-The escalation path deliberately leaves the automated repair queue. A human
-must resolve the reason, change the issue or repository configuration as
-needed, and remove `needs-human-review` before the loop reviews that unchanged
-commit again.
+Attach and detach are idempotent once the label names exist
+(`POST /api/v1/labels` returns the existing row, so ensuring them is safe to
+re-run). A pre-existing `needs-human-review` on the card survives an otherwise
+clean pass — it may be a separate human gate. **Mirroring is best-effort**: if
+a board call fails, say so and carry on — the posted verdict is the record of
+truth — but never silently, or the build loop reads a card that looks
+unreviewed.
 
 ## 5. Hard limits
 
 - Never merge or enable auto-merge.
 - Never push commits to the PR branch.
-- Never approve or request changes through a formal GitHub review. Use one
-  comment plus labels because the loop may run on the PR author's token and
-  GitHub rejects self-reviews.
+- Never approve or request changes through a formal GitHub review, and never
+  post the verdict comment or edit PR labels with `gh` — `nook reviews
+  verdict` is the one delivery path, and the control plane does the posting.
 - Never apply `agent-ready` on the board. A reviewer that could mark work
   ready would be approving the queue it feeds.
 - `loop-approved` is evidence for a human, not merge authorization.

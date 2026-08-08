@@ -1540,6 +1540,53 @@
         }
       }
     },
+    "/api/v1/jobs/{id}/verdict": {
+      "post": {
+        "tags": [
+          "crate::routes::jobs"
+        ],
+        "summary": "`POST /api/v1/jobs/{id}/verdict` — a review run reports its conclusion\n(MAIN-455). The run's own minted token authorises it, the same identity its\nother writes travel as; the control plane posts the comment and labels, so\nthe agent's last act is one call instead of a sequence of `gh` commands it\ncould misperform.",
+        "operationId": "job_verdict",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewVerdictRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoopJob"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          },
+          "409": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/labels": {
       "get": {
         "tags": [
@@ -7639,6 +7686,41 @@
         }
       }
     },
+    "/api/v1/workspaces/{id}/reviews": {
+      "get": {
+        "tags": [
+          "crate::routes::jobs"
+        ],
+        "summary": "`GET /api/v1/workspaces/{id}/reviews` — this repo's review runs, newest\nfirst (MAIN-455 AC-5).",
+        "description": "The workspace's own window onto work the control plane raised for it. Each\nrow is an ordinary loop job, so its transcript is read through the same\nendpoint and the same view a spec run's is — there is no second transcript\nmechanism to keep in step.",
+        "operationId": "list_workspace_reviews",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/LoopJob"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/workspaces/{id}/secrets": {
       "get": {
         "tags": [
@@ -11178,6 +11260,27 @@
           "requested_by": {
             "$ref": "#/components/schemas/UserId"
           },
+          "review_head_sha": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "review_pr_number": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The pull request a `review` run is about, and the head it was raised\nfor. `None` for every other kind — a spec run is about a ticket.\n\nThe head is the wakeup rule: a PR whose head has not moved since the\nlast completed run for it is owed nothing. Without it the only available\nquestion was \"does this repo have PRs\", which is why the old design\nneeded a timer."
+          },
+          "review_verdict": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What a review run CONCLUDED: `approved` | `changes_requested` |\n`needs_human` | `skipped`. `None` means it concluded nothing — however\nthe process exited — and such a run does not count as having reviewed\nits head."
+          },
           "seed": {
             "type": [
               "string",
@@ -13555,6 +13658,56 @@
           }
         }
       },
+      "ReviewRaiseResult": {
+        "type": "object",
+        "description": "What a manual \"review this workspace now\" actually did (MAIN-455).\n\nNot a single job: the manual path converges exactly as the reconciler does\n— one directed run per pull request that is owed one — so the honest answer\nis the set it raised and the reasons anything was not.",
+        "required": [
+          "raised",
+          "live",
+          "withheld"
+        ],
+        "properties": {
+          "live": {
+            "type": "integer",
+            "format": "int32",
+            "description": "PRs already being reviewed right now — covered, not skipped.",
+            "minimum": 0
+          },
+          "raised": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LoopJob"
+            },
+            "description": "The runs this call raised, one per owed pull request."
+          },
+          "withheld": {
+            "type": "integer",
+            "format": "int32",
+            "description": "PRs owed a run that the workspace's ceiling held back this pass.",
+            "minimum": 0
+          }
+        }
+      },
+      "ReviewVerdictRequest": {
+        "type": "object",
+        "description": "A review run's conclusion, sent by the run itself (MAIN-455).",
+        "required": [
+          "verdict"
+        ],
+        "properties": {
+          "body": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The verdict body posted under `Loop review of <sha>`. Required unless\nthe verdict is `skipped`, which posts nothing — the earlier review it\ndefers to is already on the PR."
+          },
+          "verdict": {
+            "type": "string",
+            "description": "`approved` | `changes_requested` | `needs_human` | `skipped`."
+          }
+        }
+      },
       "RuntimeAuthAccepted": {
         "type": "object",
         "required": [
@@ -15433,7 +15586,7 @@
           },
           {
             "type": "object",
-            "description": "A loop job's transcript grew or its state changed (MAIN-128) — the nudge\nthat drives the ticket's live Loop panel. Carries the TARGET TICKET id\n(not the job id), the same \"what you have is stale\" contract as\n`TaskChanged`: the panel refetches the job + transcript for that ticket.\nVisibility is enforced on the refetch, so the nudge itself leaks nothing.",
+            "description": "A loop job's transcript grew or its state changed (MAIN-128) — the nudge\nthat drives every live job surface. Carries the TARGET TICKET id (not\nthe job id) when the job has one, the same \"what you have is stale\"\ncontract as `TaskChanged`. `None` for a REVIEW run (MAIN-455), which has\nno ticket — its surface is the workspace's Reviews panel, and skipping\nthe nudge for ticketless jobs is exactly what left that panel static\nwhile a spec's streamed. Visibility is enforced on the refetch, so the\nnudge itself leaks nothing.",
             "required": [
               "data",
               "type"
@@ -15441,13 +15594,17 @@
             "properties": {
               "data": {
                 "type": "object",
-                "description": "A loop job's transcript grew or its state changed (MAIN-128) — the nudge\nthat drives the ticket's live Loop panel. Carries the TARGET TICKET id\n(not the job id), the same \"what you have is stale\" contract as\n`TaskChanged`: the panel refetches the job + transcript for that ticket.\nVisibility is enforced on the refetch, so the nudge itself leaks nothing.",
-                "required": [
-                  "task_id"
-                ],
+                "description": "A loop job's transcript grew or its state changed (MAIN-128) — the nudge\nthat drives every live job surface. Carries the TARGET TICKET id (not\nthe job id) when the job has one, the same \"what you have is stale\"\ncontract as `TaskChanged`. `None` for a REVIEW run (MAIN-455), which has\nno ticket — its surface is the workspace's Reviews panel, and skipping\nthe nudge for ticketless jobs is exactly what left that panel static\nwhile a spec's streamed. Visibility is enforced on the refetch, so the\nnudge itself leaks nothing.",
                 "properties": {
                   "task_id": {
-                    "$ref": "#/components/schemas/TaskId"
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/TaskId"
+                      }
+                    ]
                   }
                 }
               },

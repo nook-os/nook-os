@@ -35,6 +35,19 @@ pub struct Repo {
     pub name: String,
 }
 
+/// One open pull request, as a unit of review work.
+///
+/// The head sha is what makes a wakeup PER-PR rather than per-repo: a run is
+/// owed for a PR whose head has moved since the last completed run for it, and
+/// owed for nothing otherwise. A count could only ever say "this repo has PRs",
+/// which is why the count-based version needed a timer to decide when to look
+/// again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequest {
+    pub number: u64,
+    pub head_sha: String,
+}
+
 /// What the reconciler needs to know about a repository's review queue.
 ///
 /// One operation, because one is all this card needs and a trait with methods
@@ -42,13 +55,20 @@ pub struct Repo {
 /// and mergeability are deliberately absent (NG-2).
 #[async_trait::async_trait]
 pub trait Forge: Send + Sync {
-    /// How many open pull requests need review right now.
+    /// The open pull requests a reviewer would pick up, with their heads.
     ///
-    /// An error is an OUTAGE, never a zero. The caller's whole failure policy
-    /// depends on those being different values, so an implementation that
+    /// An error is an OUTAGE, never an empty list. The caller's whole failure
+    /// policy depends on those being different values, so an implementation that
     /// cannot reach the forge must return `Err` rather than report an empty
-    /// queue.
-    async fn open_prs_needing_review(&self, repo: &Repo) -> anyhow::Result<u32>;
+    /// queue — otherwise an outage reads as "everything is reviewed" and the
+    /// reviewers scale to zero exactly when they are needed.
+    async fn prs_needing_review(&self, repo: &Repo) -> anyhow::Result<Vec<PullRequest>>;
+
+    /// How many, which is all MAIN-448's sizing ever wanted. DERIVED, so the
+    /// count can never disagree with the list it came from.
+    async fn open_prs_needing_review(&self, repo: &Repo) -> anyhow::Result<u32> {
+        Ok(self.prs_needing_review(repo).await?.len() as u32)
+    }
 }
 
 /// Is this remote a GitHub repository, and which one?
@@ -134,9 +154,91 @@ impl GithubForge {
 /// and a page-two count would still place the same reviewers.
 const PAGE: usize = 100;
 
+/// The verdict labels the loop maintains on a PR. Exactly one is present after
+/// a posted verdict — adding one means removing the other two, or a PR ends up
+/// simultaneously approved and changes-requested the first time a verdict
+/// changes.
+const VERDICT_LABELS: [&str; 3] = [
+    "loop-approved",
+    "loop-changes-requested",
+    "needs-human-review",
+];
+
+impl GithubForge {
+    /// Deliver a review verdict to the PR: the `Loop review of <sha>` comment
+    /// and the matching label, replacing whichever verdict label was there.
+    ///
+    /// This USED to be the agent's job — a sequence of `gh` calls the skill
+    /// asked it to perform, which is the last place a mood could misformat the
+    /// comment or forget a label (NG-4 of MAIN-448, overturned 2026-08-08).
+    /// Code posts now; the agent only concludes.
+    ///
+    /// An error is an error: an unposted verdict must fail the caller loudly,
+    /// because a verdict recorded in the database but missing from the PR is
+    /// invisible to every human working in GitHub.
+    pub async fn post_verdict(
+        &self,
+        repo: &Repo,
+        pr: u64,
+        head_sha: &str,
+        label: &str,
+        body: &str,
+    ) -> anyhow::Result<()> {
+        let base = format!(
+            "https://api.github.com/repos/{}/{}/issues/{pr}",
+            repo.owner, repo.name
+        );
+        self.send(
+            self.http.post(format!("{base}/comments")).json(
+                &serde_json::json!({ "body": format!("Loop review of {head_sha}\n\n{body}") }),
+            ),
+        )
+        .await?;
+        for old in VERDICT_LABELS.iter().filter(|l| **l != label) {
+            // 404 here means "was not set", which is the desired state, not a
+            // failure.
+            let resp = self
+                .authed(self.http.delete(format!("{base}/labels/{old}")))
+                .send()
+                .await?;
+            if !resp.status().is_success() && resp.status().as_u16() != 404 {
+                anyhow::bail!("removing label {old}: {}", resp.status());
+            }
+        }
+        self.send(
+            self.http
+                .post(format!("{base}/labels"))
+                .json(&serde_json::json!({ "labels": [label] })),
+        )
+        .await?;
+        Ok(())
+    }
+
+    fn authed(&self, rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        rb.bearer_auth(&self.token)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("User-Agent", "nook-control")
+    }
+
+    async fn send(&self, rb: reqwest::RequestBuilder) -> anyhow::Result<()> {
+        let resp = self.authed(rb).send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!(
+                "{} {}",
+                status.as_u16(),
+                body.trim().chars().take(300).collect::<String>()
+            );
+        }
+        Ok(())
+    }
+}
+
 #[async_trait::async_trait]
 impl Forge for GithubForge {
-    async fn open_prs_needing_review(&self, repo: &Repo) -> anyhow::Result<u32> {
+    async fn prs_needing_review(&self, repo: &Repo) -> anyhow::Result<Vec<PullRequest>> {
         let url = format!(
             "https://api.github.com/repos/{}/{}/pulls?state=open&per_page={PAGE}",
             repo.owner, repo.name
@@ -161,7 +263,7 @@ impl Forge for GithubForge {
             );
         }
         let prs: Vec<serde_json::Value> = resp.json().await?;
-        Ok(count_needing_review(&prs))
+        Ok(needing_review(&prs))
     }
 }
 
@@ -177,10 +279,19 @@ impl Forge for GithubForge {
 /// should be running. An over-count costs an idle agent doing a no-op pass; an
 /// under-count is a repo that silently goes unreviewed, which AC-3 names as the
 /// failure to design against. So the cheap, inclusive definition wins.
-fn count_needing_review(prs: &[serde_json::Value]) -> u32 {
+fn needing_review(prs: &[serde_json::Value]) -> Vec<PullRequest> {
     prs.iter()
         .filter(|pr| pr.get("draft").and_then(|d| d.as_bool()) != Some(true))
-        .count() as u32
+        .filter_map(|pr| {
+            Some(PullRequest {
+                number: pr.get("number")?.as_u64()?,
+                // A PR whose head we cannot read cannot be compared against its
+                // last run, so it is dropped rather than guessed at: an item we
+                // cannot tell has changed would re-run on every pass forever.
+                head_sha: pr.get("head")?.get("sha")?.as_str()?.to_string(),
+            })
+        })
+        .collect()
 }
 
 /// How long a count stands before it is asked for again.
@@ -194,9 +305,13 @@ const TTL: Duration = Duration::from_secs(60);
 
 /// What we last learned about one workspace.
 struct Cached {
-    /// The last count the forge actually answered. `None` means it has never
+    /// The last LIST the forge actually answered. `None` means it has never
     /// answered — a fresh boot into an outage.
-    count: Option<u32>,
+    ///
+    /// The list, not a count, because a per-PR wakeup needs the items and a
+    /// second cache holding the same answer in a different shape is how the two
+    /// come to disagree. The count is `.len()`.
+    items: Option<Vec<PullRequest>>,
     fetched: Instant,
     /// Whether the last attempt failed, so the log speaks once per transition
     /// rather than once per pass.
@@ -255,30 +370,52 @@ impl ReviewDemand {
     /// caller — *we do not know, so run what the repo declared* — and collapsing
     /// them here keeps that judgement in one place instead of four.
     pub async fn open_prs(&self, workspace: WorkspaceId, remote: Option<&str>) -> Option<u32> {
+        Some(self.prs(workspace, remote).await?.len() as u32)
+    }
+
+    /// The open PRs themselves — what a per-PR wakeup converges on. Same cache,
+    /// same failure policy; `open_prs` is this, counted.
+    pub async fn prs(
+        &self,
+        workspace: WorkspaceId,
+        remote: Option<&str>,
+    ) -> Option<Vec<PullRequest>> {
         let forge = self.forge.as_ref()?;
         let repo = github_repo(remote?)?;
 
         if let Some(fresh) = self.fresh(workspace) {
             return fresh;
         }
-        match forge.open_prs_needing_review(&repo).await {
-            Ok(count) => {
-                self.record_ok(workspace, count, &repo);
-                Some(count)
+        match forge.prs_needing_review(&repo).await {
+            Ok(items) => {
+                self.record_ok(workspace, items.clone(), &repo);
+                Some(items)
             }
             Err(e) => self.record_err(workspace, &repo, &e),
         }
     }
 
-    /// The cached answer if it is still inside the TTL. The outer `Option` is
-    /// "we have something to say", the inner one is what we would say.
-    fn fresh(&self, workspace: WorkspaceId) -> Option<Option<u32>> {
-        let seen = self.seen.lock().ok()?;
-        let cached = seen.get(&workspace)?;
-        (cached.fetched.elapsed() < self.ttl).then_some(cached.count)
+    /// Forget one workspace's cached answer, so the next ask hits the forge.
+    ///
+    /// The manual path calls this: a person clicking "review now" right after
+    /// opening a PR must not be told "nothing owed" by a list fetched up to a
+    /// TTL ago. The reconciler never calls it — its cadence is what the TTL is
+    /// FOR.
+    pub fn forget(&self, workspace: WorkspaceId) {
+        if let Ok(mut seen) = self.seen.lock() {
+            seen.remove(&workspace);
+        }
     }
 
-    fn record_ok(&self, workspace: WorkspaceId, count: u32, repo: &Repo) {
+    /// The cached answer if it is still inside the TTL. The outer `Option` is
+    /// "we have something to say", the inner one is what we would say.
+    fn fresh(&self, workspace: WorkspaceId) -> Option<Option<Vec<PullRequest>>> {
+        let seen = self.seen.lock().ok()?;
+        let cached = seen.get(&workspace)?;
+        (cached.fetched.elapsed() < self.ttl).then(|| cached.items.clone())
+    }
+
+    fn record_ok(&self, workspace: WorkspaceId, items: Vec<PullRequest>, repo: &Repo) {
         let Ok(mut seen) = self.seen.lock() else {
             return;
         };
@@ -286,14 +423,14 @@ impl ReviewDemand {
         if was_failing {
             tracing::info!(
                 %workspace, repo = %format!("{}/{}", repo.owner, repo.name),
-                open_prs = count,
+                open_prs = items.len(),
                 "forge recovered — review loops are scaling to the real count again"
             );
         }
         seen.insert(
             workspace,
             Cached {
-                count: Some(count),
+                items: Some(items),
                 fetched: Instant::now(),
                 failing: false,
             },
@@ -307,17 +444,17 @@ impl ReviewDemand {
         workspace: WorkspaceId,
         repo: &Repo,
         error: &anyhow::Error,
-    ) -> Option<u32> {
+    ) -> Option<Vec<PullRequest>> {
         let Ok(mut seen) = self.seen.lock() else {
             return None;
         };
-        let last = seen.get(&workspace).and_then(|c| c.count);
+        let last = seen.get(&workspace).and_then(|c| c.items.clone());
         let was_failing = seen.get(&workspace).is_some_and(|c| c.failing);
         if !was_failing {
             tracing::warn!(
                 %workspace, repo = %format!("{}/{}", repo.owner, repo.name),
                 error = %error,
-                last_known_open_prs = ?last,
+                last_known_open_prs = ?last.as_ref().map(Vec::len),
                 "forge unreachable — holding the last known review demand; \
                  this is NOT a scale-down"
             );
@@ -325,7 +462,7 @@ impl ReviewDemand {
         seen.insert(
             workspace,
             Cached {
-                count: last,
+                items: last.clone(),
                 fetched: Instant::now(),
                 failing: true,
             },
@@ -368,13 +505,23 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Forge for Fake {
-        async fn open_prs_needing_review(&self, _repo: &Repo) -> anyhow::Result<u32> {
+        async fn prs_needing_review(&self, _repo: &Repo) -> anyhow::Result<Vec<PullRequest>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let mut a = self.answers.lock().unwrap();
             if a.is_empty() {
                 anyhow::bail!("fake ran out of answers");
             }
-            a.remove(0)
+            // The fake still answers in COUNTS, because that is what the sizing
+            // tests are about; the items are synthesized so the one real
+            // implementation of "count" (the trait's default) is what runs.
+            a.remove(0).map(|n| {
+                (0..n)
+                    .map(|i| PullRequest {
+                        number: i as u64 + 1,
+                        head_sha: format!("sha{i}"),
+                    })
+                    .collect()
+            })
         }
     }
 
@@ -420,14 +567,30 @@ mod tests {
     #[test]
     fn drafts_do_not_count_and_everything_else_does() {
         let prs = serde_json::json!([
-            { "number": 1, "draft": false },
-            { "number": 2, "draft": true },
+            { "number": 1, "draft": false, "head": { "sha": "aaa" } },
+            { "number": 2, "draft": true, "head": { "sha": "bbb" } },
             // Absent `draft` is not a draft — an older API shape must not read
-            // as one and quietly shrink the count.
-            { "number": 3 },
+            // as one and quietly shrink the queue.
+            { "number": 3, "head": { "sha": "ccc" } },
+            // No head sha: undroppable otherwise, because nothing could ever
+            // say whether it had changed.
+            { "number": 4 },
         ]);
-        assert_eq!(count_needing_review(prs.as_array().unwrap()), 2);
-        assert_eq!(count_needing_review(&[]), 0);
+        // Numbers AND heads, because the head is what a per-PR wakeup compares.
+        assert_eq!(
+            needing_review(prs.as_array().unwrap()),
+            vec![
+                PullRequest {
+                    number: 1,
+                    head_sha: "aaa".into()
+                },
+                PullRequest {
+                    number: 3,
+                    head_sha: "ccc".into()
+                },
+            ]
+        );
+        assert!(needing_review(&[]).is_empty());
     }
 
     #[tokio::test]

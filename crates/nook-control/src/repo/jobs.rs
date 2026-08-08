@@ -49,6 +49,31 @@ pub struct NewLoopJob {
     pub seed: Option<String>,
     /// Set only by a re-run, which records what it descends from.
     pub predecessor_job_id: Option<JobId>,
+    /// The work item, for a `review` run: which PR, at which head.
+    pub review_pr_number: Option<i64>,
+    pub review_head_sha: Option<String>,
+}
+
+/// What the wakeup rule knows about one pull request's runs.
+#[derive(Debug, Clone, nook_db::FromDbRow)]
+pub struct ReviewRunHeads {
+    pub review_pr_number: i64,
+    /// The head of the newest run that CONCLUDED NOTHING, and when. Two states
+    /// land here: `failed`, and `completed` with no recorded verdict — an agent
+    /// that ends a pass early (checks pending, environment broken) exits zero
+    /// like any other, and the two mean the same thing to the wakeup rule.
+    /// Neither counts as reviewed (one bad run must not silence a PR until
+    /// somebody pushes), and neither is retried instantly (a run every poll
+    /// interval for the length of a CI cycle is the hot loop the hold
+    /// prevents).
+    pub attempted_head: Option<String>,
+    pub attempted_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The head a run is in flight for, if one is. Its presence is what stops a
+    /// second run being raised for the same PR.
+    pub live_head: Option<String>,
+    /// The head of the newest run that actually finished. A PR whose forge head
+    /// still equals this has been reviewed as it stands.
+    pub done_head: Option<String>,
 }
 
 /// A job the reaper found stranded on a node that stopped reporting, with the
@@ -90,19 +115,32 @@ pub trait LoopJobRepository: Send + Sync {
 
     async fn create(&self, new: NewLoopJob) -> ApiResult<LoopJob>;
 
-    /// The ONE definition of "this workspace already has a review in flight"
-    /// (AC-3). Returns the live job, if any: `queued`, `claimed`, `running` or
-    /// `waiting_on_human` all count — terminal states do not.
+    /// Per PR: the head of its newest LIVE run, and the head of its newest
+    /// COMPLETED run. Both `None` when that PR has no such run.
     ///
-    /// Both enqueue paths (the sweep and the manual endpoint) go through this
-    /// and nothing else. A second notion of "already queued" living beside it
-    /// is exactly how one workspace ends up reviewed twice concurrently, which
-    /// is the failure AC-3 names.
-    async fn active_review_for_workspace(
+    /// One query rather than two calls per pull request, because a repo with
+    /// forty open PRs would otherwise make forty round trips on every pass.
+    /// This is the whole state the wakeup rule reads: a run is owed when the
+    /// forge's head differs from the completed head and nothing is live.
+    async fn review_run_heads(
         &self,
         tenant: TenantId,
         workspace: WorkspaceId,
-    ) -> ApiResult<Option<JobId>>;
+    ) -> ApiResult<Vec<ReviewRunHeads>>;
+
+    /// A workspace's review runs, newest first — what the workspace's review
+    /// surface reads. Bounded, because a busy repo accumulates one per push per
+    /// PR and a page does not want all of them.
+    async fn list_reviews_for_workspace(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+        limit: i64,
+    ) -> ApiResult<Vec<LoopJob>>;
+
+    /// Record what a review run concluded. Guarded on a live review run — a
+    /// verdict on a finished or foreign job is a caller bug, answered with 0.
+    async fn set_review_verdict(&self, id: JobId, verdict: &str) -> ApiResult<u64>;
 
     async fn list_for_task(&self, tenant: TenantId, task: TaskId) -> ApiResult<Vec<LoopJob>>;
 
@@ -217,32 +255,14 @@ impl LoopJobRepository for DbLoopJobRepository {
             .await?)
     }
 
-    async fn active_review_for_workspace(
-        &self,
-        tenant: TenantId,
-        workspace: WorkspaceId,
-    ) -> ApiResult<Option<JobId>> {
-        Ok(self
-            .db
-            .query_scalar_opt::<JobId>(
-                "SELECT id FROM loop_jobs
-                  WHERE tenant_id = $1 AND workspace_id = $2 AND kind = 'review'
-                    AND state NOT IN ('completed', 'failed', 'canceled')
-                  ORDER BY created_at
-                  LIMIT 1",
-                params![tenant, workspace.0],
-            )
-            .await?)
-    }
-
     async fn create(&self, new: NewLoopJob) -> ApiResult<LoopJob> {
         Ok(self
             .db
             .query_one(
                 "INSERT INTO loop_jobs
                     (id, tenant_id, kind, target_task_id, workspace_id, requested_by,
-                     state, predecessor_job_id, seed)
-                 VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7, $8)
+                     state, predecessor_job_id, seed, review_pr_number, review_head_sha)
+                 VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7, $8, $9, $10)
                  RETURNING *",
                 params![
                     new.id,
@@ -252,8 +272,158 @@ impl LoopJobRepository for DbLoopJobRepository {
                     new.workspace_id.map(|w| w.0),
                     new.requested_by,
                     new.predecessor_job_id.map(|p| p.0),
-                    new.seed
+                    new.seed,
+                    new.review_pr_number,
+                    new.review_head_sha
                 ],
+            )
+            .await?)
+    }
+
+    async fn review_run_heads(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Vec<ReviewRunHeads>> {
+        // Two plain queries merged here rather than one clever one. A single
+        // statement wanting "the newest row per group" reaches for `DISTINCT ON`
+        // or `array_agg(... ORDER BY ...)`, both Postgres-only, and this file is
+        // held to SQL both engines run.
+        #[derive(nook_db::FromDbRow)]
+        struct Head {
+            review_pr_number: i64,
+            review_head_sha: Option<String>,
+        }
+
+        #[derive(nook_db::FromDbRow)]
+        struct FailedHead {
+            review_pr_number: i64,
+            review_head_sha: Option<String>,
+            updated_at: chrono::DateTime<chrono::Utc>,
+        }
+
+        // At most one row per PR: the partial unique index from 0046 is what
+        // makes that true, not an assumption here.
+        let live: Vec<Head> = self
+            .db
+            .query_all(
+                "SELECT review_pr_number, review_head_sha FROM loop_jobs
+                  WHERE tenant_id = $1 AND workspace_id = $2 AND kind = 'review'
+                    AND review_pr_number IS NOT NULL
+                    AND state IN ('queued', 'claimed', 'running', 'waiting_on_human')",
+                params![tenant, workspace.0],
+            )
+            .await?;
+
+        // The newest run per PR that CONCLUDED NOTHING — `failed`, or
+        // `completed` without a verdict (an early return exits zero like any
+        // other pass) — so both are held rather than mistaken for a review or
+        // retried hot.
+        let attempted: Vec<FailedHead> = self
+            .db
+            .query_all(
+                "SELECT review_pr_number, review_head_sha, updated_at FROM loop_jobs j
+                  WHERE tenant_id = $1 AND workspace_id = $2 AND kind = 'review'
+                    AND review_pr_number IS NOT NULL
+                    AND (state = 'failed' OR (state = 'completed' AND review_verdict IS NULL))
+                    AND updated_at = (
+                        SELECT MAX(updated_at) FROM loop_jobs k
+                         WHERE k.workspace_id = j.workspace_id
+                           AND k.review_pr_number = j.review_pr_number
+                           AND k.kind = 'review'
+                           AND (k.state = 'failed'
+                                OR (k.state = 'completed' AND k.review_verdict IS NULL)))",
+                params![tenant, workspace.0],
+            )
+            .await?;
+
+        // The newest FINISHED run per PR. `completed` only — a failed run has
+        // reviewed nothing, so treating it as a head would let one failure
+        // silence a PR until somebody pushed again.
+        let done: Vec<Head> = self
+            .db
+            .query_all(
+                "SELECT review_pr_number, review_head_sha FROM loop_jobs j
+                  WHERE tenant_id = $1 AND workspace_id = $2 AND kind = 'review'
+                    AND review_pr_number IS NOT NULL AND state = 'completed'
+                    AND review_verdict IS NOT NULL
+                    AND created_at = (
+                        SELECT MAX(created_at) FROM loop_jobs k
+                         WHERE k.workspace_id = j.workspace_id
+                           AND k.review_pr_number = j.review_pr_number
+                           AND k.kind = 'review' AND k.state = 'completed'
+                           AND k.review_verdict IS NOT NULL)",
+                params![tenant, workspace.0],
+            )
+            .await?;
+
+        let mut by_pr: std::collections::HashMap<i64, ReviewRunHeads> =
+            std::collections::HashMap::new();
+        for h in live {
+            by_pr
+                .entry(h.review_pr_number)
+                .or_insert_with(|| ReviewRunHeads {
+                    review_pr_number: h.review_pr_number,
+                    live_head: None,
+                    done_head: None,
+                    attempted_head: None,
+                    attempted_at: None,
+                })
+                .live_head = h.review_head_sha;
+        }
+        for h in done {
+            by_pr
+                .entry(h.review_pr_number)
+                .or_insert_with(|| ReviewRunHeads {
+                    review_pr_number: h.review_pr_number,
+                    live_head: None,
+                    done_head: None,
+                    attempted_head: None,
+                    attempted_at: None,
+                })
+                .done_head = h.review_head_sha;
+        }
+        for h in attempted {
+            let e = by_pr
+                .entry(h.review_pr_number)
+                .or_insert_with(|| ReviewRunHeads {
+                    review_pr_number: h.review_pr_number,
+                    live_head: None,
+                    done_head: None,
+                    attempted_head: None,
+                    attempted_at: None,
+                });
+            e.attempted_head = h.review_head_sha;
+            e.attempted_at = Some(h.updated_at);
+        }
+        Ok(by_pr.into_values().collect())
+    }
+
+    async fn set_review_verdict(&self, id: JobId, verdict: &str) -> ApiResult<u64> {
+        Ok(self
+            .db
+            .exec(
+                "UPDATE loop_jobs SET review_verdict = $2, updated_at = now()
+                  WHERE id = $1 AND kind = 'review'
+                    AND state IN ('claimed', 'running', 'waiting_on_human')",
+                params![id.0, verdict],
+            )
+            .await?)
+    }
+
+    async fn list_reviews_for_workspace(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+        limit: i64,
+    ) -> ApiResult<Vec<LoopJob>> {
+        Ok(self
+            .db
+            .query_all(
+                "SELECT * FROM loop_jobs
+                  WHERE tenant_id = $1 AND workspace_id = $2 AND kind = 'review'
+                  ORDER BY created_at DESC LIMIT $3",
+                params![tenant, workspace.0, limit],
             )
             .await?)
     }
@@ -628,24 +798,92 @@ impl LoopJobRepository for FakeLoopJobRepository {
             .and_then(|j| j.target_task_id))
     }
 
-    async fn active_review_for_workspace(
+    async fn set_review_verdict(&self, id: JobId, verdict: &str) -> ApiResult<u64> {
+        let mut s = self.inner.lock().unwrap();
+        let Some(j) = s.jobs.iter_mut().find(|j| {
+            j.id == id
+                && j.kind == "review"
+                && matches!(j.state.as_str(), "claimed" | "running" | "waiting_on_human")
+        }) else {
+            return Ok(0);
+        };
+        j.review_verdict = Some(verdict.to_string());
+        Ok(1)
+    }
+
+    async fn list_reviews_for_workspace(
         &self,
         tenant: TenantId,
         workspace: WorkspaceId,
-    ) -> ApiResult<Option<JobId>> {
+        limit: i64,
+    ) -> ApiResult<Vec<LoopJob>> {
         let s = self.inner.lock().unwrap();
-        let mut live: Vec<&LoopJob> = s
+        let mut mine: Vec<LoopJob> = s
+            .jobs
+            .iter()
+            .filter(|j| {
+                j.tenant_id == tenant && j.workspace_id == Some(workspace) && j.kind == "review"
+            })
+            .cloned()
+            .collect();
+        mine.sort_by_key(|j| std::cmp::Reverse(j.created_at));
+        mine.truncate(limit.max(0) as usize);
+        Ok(mine)
+    }
+
+    async fn review_run_heads(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Vec<ReviewRunHeads>> {
+        let s = self.inner.lock().unwrap();
+        let mut by_pr: std::collections::HashMap<i64, ReviewRunHeads> =
+            std::collections::HashMap::new();
+        let mut mine: Vec<&LoopJob> = s
             .jobs
             .iter()
             .filter(|j| {
                 j.tenant_id == tenant
-                    && j.kind == "review"
                     && j.workspace_id == Some(workspace)
-                    && !matches!(j.state.as_str(), "completed" | "failed" | "canceled")
+                    && j.kind == "review"
+                    && j.review_pr_number.is_some()
             })
             .collect();
-        live.sort_by_key(|j| j.created_at);
-        Ok(live.first().map(|j| j.id))
+        // Oldest first, so the last write per PR is the newest run — the same
+        // "newest wins" the SQL gets from MAX(created_at).
+        mine.sort_by_key(|j| j.created_at);
+        for j in mine {
+            let pr = j.review_pr_number.unwrap();
+            let e = by_pr.entry(pr).or_insert_with(|| ReviewRunHeads {
+                review_pr_number: pr,
+                live_head: None,
+                done_head: None,
+                attempted_head: None,
+                attempted_at: None,
+            });
+            match j.state.as_str() {
+                "queued" | "claimed" | "running" | "waiting_on_human" => {
+                    e.live_head = j.review_head_sha.clone()
+                }
+                // A completed run with no VERDICT reviewed nothing — a pass
+                // that died politely still exits zero, and counting its head as
+                // done is how a PR goes silently unreviewed until the next push.
+                "completed" if j.review_verdict.is_some() => {
+                    e.done_head = j.review_head_sha.clone()
+                }
+                "failed" => {
+                    e.attempted_head = j.review_head_sha.clone();
+                    e.attempted_at = Some(j.updated_at);
+                }
+                "completed" => {
+                    // No verdict: the run concluded nothing, whatever its exit.
+                    e.attempted_head = j.review_head_sha.clone();
+                    e.attempted_at = Some(j.updated_at);
+                }
+                _ => {}
+            }
+        }
+        Ok(by_pr.into_values().collect())
     }
 
     async fn create(&self, new: NewLoopJob) -> ApiResult<LoopJob> {
@@ -664,6 +902,9 @@ impl LoopJobRepository for FakeLoopJobRepository {
             seed: new.seed,
             created_at: now,
             updated_at: now,
+            review_pr_number: None,
+            review_head_sha: None,
+            review_verdict: None,
         };
         self.inner.lock().unwrap().jobs.push(job.clone());
         Ok(job)

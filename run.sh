@@ -80,6 +80,31 @@ claude_login_state() {
   esac
 }
 
+# A login is not enough to make the session USABLE BY AN AGENT.
+#
+# `claude auth login` writes the credential and the account, but not
+# `hasCompletedOnboarding`. The next interactive launch therefore opens on the
+# "Select login method" picker — and a loop run has nobody to press a key. That
+# is not a hypothetical: it stopped every managed review session on this stack,
+# one every five minutes overnight, while `claude auth status` cheerfully
+# reported `loggedIn: true` the whole time.
+#
+# Reviews are headless runs now and no longer go through that prompt, but a
+# person's `claude` session on a node still does, and it costs one line to make
+# the login mean what everybody already assumes it means.
+claude_mark_onboarded() {
+  docker compose exec -T "$CLAUDE_SVC" sh -lc '
+    f="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.claude.json"
+    [ -f "$f" ] || exit 0
+    node -e "
+      const fs=require(\"fs\"), p=process.argv[1];
+      const d=JSON.parse(fs.readFileSync(p,\"utf8\"));
+      if (d.hasCompletedOnboarding) process.exit(0);
+      d.hasCompletedOnboarding = true;
+      fs.writeFileSync(p, JSON.stringify(d, null, 2));
+    " "$f"' 2>/dev/null || true
+}
+
 # Run the device-authorization flow interactively. `claude auth login
 # --claudeai` prints a verification URL and a code, then waits — so this needs a
 # TTY and the operator's browser; it cannot be automated, by design.
@@ -89,6 +114,7 @@ claude_device_login() {
   echo "  browser, and this will continue once the session lands."
   echo
   if docker compose exec "$CLAUDE_SVC" sh -lc 'claude auth login --claudeai'; then
+    claude_mark_onboarded
     if claude_login_state; then
       say "Logged in. The node will report the claude runtime authorized on its next heartbeat."
       return 0

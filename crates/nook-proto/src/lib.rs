@@ -585,8 +585,18 @@ pub enum ControlToNode {
     /// Everything the node needs is on the message — no DB round-trip.
     RunLoopJob {
         job_id: String,
-        /// `spec` | `decompose` — selects the skill.
+        /// `spec` | `decompose` | `review` — selects the skill.
         kind: String,
+        /// The pull request a `review` run owns (MAIN-455). `None` for every
+        /// other kind.
+        ///
+        /// Two jobs at once: it tells the agent WHICH PR it is reviewing, so it
+        /// never has to search a list for its share of the work, and it names
+        /// the agent session to resume (`--from-pr`) so a second review of the
+        /// same PR keeps the tree and the earlier reasoning instead of
+        /// rebuilding both.
+        #[serde(default)]
+        review_pr_number: Option<u64>,
         /// The board key of the ticket the skill points at (e.g. `MAIN-42`).
         target_task_key: String,
         /// The clonable git remote, resolved by the control plane from the
@@ -801,12 +811,16 @@ pub enum UiEvent {
         task_id: Option<nook_types::TaskId>,
     },
     /// A loop job's transcript grew or its state changed (MAIN-128) — the nudge
-    /// that drives the ticket's live Loop panel. Carries the TARGET TICKET id
-    /// (not the job id), the same "what you have is stale" contract as
-    /// `TaskChanged`: the panel refetches the job + transcript for that ticket.
-    /// Visibility is enforced on the refetch, so the nudge itself leaks nothing.
+    /// that drives every live job surface. Carries the TARGET TICKET id (not
+    /// the job id) when the job has one, the same "what you have is stale"
+    /// contract as `TaskChanged`. `None` for a REVIEW run (MAIN-455), which has
+    /// no ticket — its surface is the workspace's Reviews panel, and skipping
+    /// the nudge for ticketless jobs is exactly what left that panel static
+    /// while a spec's streamed. Visibility is enforced on the refetch, so the
+    /// nudge itself leaks nothing.
     JobChanged {
-        task_id: nook_types::TaskId,
+        #[serde(default)]
+        task_id: Option<nook_types::TaskId>,
     },
     /// A loop job's agent started or stopped a turn (MAIN-240). Distinct from
     /// `JobChanged`, whose contract is "what you have is stale, refetch": this

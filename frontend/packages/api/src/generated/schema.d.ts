@@ -752,6 +752,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/jobs/{id}/verdict": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/jobs/{id}/verdict` — a review run reports its conclusion
+         *     (MAIN-455). The run's own minted token authorises it, the same identity its
+         *     other writes travel as; the control plane posts the comment and labels, so
+         *     the agent's last act is one call instead of a sequence of `gh` commands it
+         *     could misperform.
+         */
+        post: operations["job_verdict"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/labels": {
         parameters: {
             query?: never;
@@ -3254,6 +3277,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{id}/reviews": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/workspaces/{id}/reviews` — this repo's review runs, newest
+         *     first (MAIN-455 AC-5).
+         * @description The workspace's own window onto work the control plane raised for it. Each
+         *     row is an ordinary loop job, so its transcript is read through the same
+         *     endpoint and the same view a spec run's is — there is no second transcript
+         *     mechanism to keep in step.
+         */
+        get: operations["list_workspace_reviews"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{id}/secrets": {
         parameters: {
             query?: never;
@@ -4760,6 +4807,25 @@ export interface components {
              */
             queued_reason?: string | null;
             requested_by: components["schemas"]["UserId"];
+            review_head_sha?: string | null;
+            /**
+             * Format: int64
+             * @description The pull request a `review` run is about, and the head it was raised
+             *     for. `None` for every other kind — a spec run is about a ticket.
+             *
+             *     The head is the wakeup rule: a PR whose head has not moved since the
+             *     last completed run for it is owed nothing. Without it the only available
+             *     question was "does this repo have PRs", which is why the old design
+             *     needed a timer.
+             */
+            review_pr_number?: number | null;
+            /**
+             * @description What a review run CONCLUDED: `approved` | `changes_requested` |
+             *     `needs_human` | `skipped`. `None` means it concluded nothing — however
+             *     the process exited — and such a run does not count as having reviewed
+             *     its head.
+             */
+            review_verdict?: string | null;
             /**
              * @description The general idea the run starts from (MAIN-231) — the human's opening
              *     brief, set at create time and carried into the executor's session.
@@ -5978,6 +6044,38 @@ export interface components {
              */
             shortfall: number;
         };
+        /**
+         * @description What a manual "review this workspace now" actually did (MAIN-455).
+         *
+         *     Not a single job: the manual path converges exactly as the reconciler does
+         *     — one directed run per pull request that is owed one — so the honest answer
+         *     is the set it raised and the reasons anything was not.
+         */
+        ReviewRaiseResult: {
+            /**
+             * Format: int32
+             * @description PRs already being reviewed right now — covered, not skipped.
+             */
+            live: number;
+            /** @description The runs this call raised, one per owed pull request. */
+            raised: components["schemas"]["LoopJob"][];
+            /**
+             * Format: int32
+             * @description PRs owed a run that the workspace's ceiling held back this pass.
+             */
+            withheld: number;
+        };
+        /** @description A review run's conclusion, sent by the run itself (MAIN-455). */
+        ReviewVerdictRequest: {
+            /**
+             * @description The verdict body posted under `Loop review of <sha>`. Required unless
+             *     the verdict is `skipped`, which posts nothing — the earlier review it
+             *     defers to is already on the PR.
+             */
+            body?: string | null;
+            /** @description `approved` | `changes_requested` | `needs_human` | `skipped`. */
+            verdict: string;
+        };
         RuntimeAuthAccepted: {
             /**
              * Format: uuid
@@ -6849,13 +6947,16 @@ export interface components {
         } | {
             /**
              * @description A loop job's transcript grew or its state changed (MAIN-128) — the nudge
-             *     that drives the ticket's live Loop panel. Carries the TARGET TICKET id
-             *     (not the job id), the same "what you have is stale" contract as
-             *     `TaskChanged`: the panel refetches the job + transcript for that ticket.
-             *     Visibility is enforced on the refetch, so the nudge itself leaks nothing.
+             *     that drives every live job surface. Carries the TARGET TICKET id (not
+             *     the job id) when the job has one, the same "what you have is stale"
+             *     contract as `TaskChanged`. `None` for a REVIEW run (MAIN-455), which has
+             *     no ticket — its surface is the workspace's Reviews panel, and skipping
+             *     the nudge for ticketless jobs is exactly what left that panel static
+             *     while a spec's streamed. Visibility is enforced on the refetch, so the
+             *     nudge itself leaks nothing.
              */
             data: {
-                task_id: components["schemas"]["TaskId"];
+                task_id?: null | components["schemas"]["TaskId"];
             };
             /** @enum {string} */
             type: "job_changed";
@@ -8490,6 +8591,43 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["LoopJobDetail"];
                 };
+            };
+        };
+    };
+    job_verdict: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReviewVerdictRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LoopJob"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -13137,6 +13275,27 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    list_workspace_reviews: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LoopJob"][];
+                };
             };
         };
     };
