@@ -3039,8 +3039,8 @@ pub struct GitCredential {
 pub struct LoopJob {
     pub id: JobId,
     pub tenant_id: TenantId,
-    /// `spec` (fill in a ticket), `decompose` (break down an epic), or `review`
-    /// (review a repository).
+    /// `spec` (fill in a ticket), `decompose` (break down an epic), `review`
+    /// (review a repository), or `build` (build a ticket end to end).
     pub kind: String,
     /// The ticket a spec job targets, or the epic a decompose job breaks down.
     /// `None` for a `review` job, which is about a repository and has no ticket
