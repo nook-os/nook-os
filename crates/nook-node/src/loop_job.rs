@@ -394,31 +394,81 @@ pub fn deliver_message(job_id: &str, body: &str) -> Result<(), String> {
     crate::tmux::send_keys(&tmux_name, &line).map_err(|e| e.to_string())
 }
 
-/// Whether this node can act on GitHub at all (MAIN-406 AC-4 / MAIN-143 AC-5).
+/// Whether this JOB can act on GitHub (MAIN-406 AC-4 / MAIN-143 AC-5).
 ///
-/// The fleet token first — `NOOK_GH_TOKEN`, which MAIN-407 provisions, falling
-/// back to `GH_TOKEN`/`GITHUB_TOKEN` — then a logged-in `gh` for a developer
-/// machine. Checked as a PREFLIGHT rather than left to the skill: the skill's
-/// own escalation is a comment on a PR, which is precisely what it cannot post
-/// without this.
+/// The credential the run will actually use, in the run's own precedence
+/// (MAIN-456): the job's workspace token first — validated with `GH_TOKEN`
+/// set in the check's env, exactly how the run env delivers it — and the
+/// node's ambient reach only when the job carries none. Validating the node
+/// instead of the job is the MAIN-468 prod failure: the operator's stored
+/// login was revoked, the vault token was valid, and every review run died
+/// at this check on the 5-minute backoff while carrying a credential that
+/// worked. No fallback when a carried token is rejected, for the same
+/// reason: the run WOULD use that token, so "the node could" is not an
+/// answer.
 ///
-/// The lookup is [`crate::config::fleet_gh_token`], the same one the session
-/// export uses, so this cannot come to disagree with what a session receives.
+/// The ambient lookup is [`crate::config::fleet_gh_token`], the same one the
+/// session export uses, so this cannot come to disagree with what a session
+/// receives. Checked as a PREFLIGHT rather than left to the skill: the
+/// skill's own escalation is a comment on a PR, which is precisely what it
+/// cannot post without this.
 ///
 /// `pub(crate)` since MAIN-448: the managed review SESSION needs the identical
 /// preflight, and a second copy of "can this node reach GitHub" is two answers
 /// waiting to disagree about one machine.
-pub(crate) fn gh_is_authenticated() -> Result<(), String> {
-    if crate::config::fleet_gh_token().is_some() {
+pub(crate) fn gh_is_authenticated(delivered: Option<&str>) -> Result<(), String> {
+    gh_preflight(delivered, crate::config::fleet_gh_token(), gh_auth_status)
+}
+
+/// What one `gh auth status` said, with the credential under test in its env.
+enum GhProbe {
+    Authorized,
+    Refused,
+    NoGh,
+}
+
+fn gh_auth_status(env_token: Option<&str>) -> GhProbe {
+    let mut cmd = std::process::Command::new("gh");
+    cmd.args(["auth", "status"]);
+    if let Some(t) = env_token {
+        // `GH_TOKEN` outranks both `GITHUB_TOKEN` and any stored login in gh's
+        // own precedence, so setting it makes the probe answer for THIS token
+        // — the same override the run env performs.
+        cmd.env("GH_TOKEN", t);
+    }
+    match cmd.output() {
+        Ok(o) if o.status.success() => GhProbe::Authorized,
+        Ok(_) => GhProbe::Refused,
+        Err(_) => GhProbe::NoGh,
+    }
+}
+
+/// The decision, apart from the shelling-out, so AC-3's cases are testable
+/// without a network or a real `gh`: which credential gets probed, and which
+/// failure names which cause.
+fn gh_preflight(
+    delivered: Option<&str>,
+    fleet: Option<String>,
+    probe: impl Fn(Option<&str>) -> GhProbe,
+) -> Result<(), String> {
+    if let Some(token) = delivered.filter(|t| !t.trim().is_empty()) {
+        return match probe(Some(token)) {
+            GhProbe::Authorized => Ok(()),
+            GhProbe::Refused => Err("the workspace token was rejected by GitHub".into()),
+            GhProbe::NoGh => {
+                Err("the job carries a workspace token but gh is not on PATH to use it".into())
+            }
+        };
+    }
+    if fleet.is_some() {
         return Ok(());
     }
-    match std::process::Command::new("gh")
-        .args(["auth", "status"])
-        .output()
-    {
-        Ok(o) if o.status.success() => Ok(()),
-        Ok(_) => Err("gh is installed but not authenticated".into()),
-        Err(_) => Err("no GitHub token (NOOK_GH_TOKEN) and no gh on PATH".into()),
+    match probe(None) {
+        GhProbe::Authorized => Ok(()),
+        GhProbe::Refused => Err(
+            "no credential: the job carries none and gh is installed but not authenticated".into(),
+        ),
+        GhProbe::NoGh => Err("no GitHub token (NOOK_GH_TOKEN) and no gh on PATH".into()),
     }
 }
 
@@ -585,7 +635,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
     // card's duty is to fail cleanly when it is absent rather than report a pass
     // that examined nothing.
     if kind == "review" || kind == "epic-run" {
-        if let Err(e) = gh_is_authenticated() {
+        if let Err(e) = gh_is_authenticated(gh_token.as_deref()) {
             finished(
                 &out,
                 &job_id,
@@ -1295,6 +1345,76 @@ mod tests {
             !body.contains("std::env::var"),
             "a second env lookup here is how the preflight and the session export drift"
         );
+    }
+
+    /// MAIN-468 AC-1/AC-3: the preflight validates the credential the RUN will
+    /// use. The prod failure: a valid workspace token in the job, a revoked
+    /// login in the node's gh, every review run refused at preflight for hours.
+    /// The probe seam stands in for `gh auth status`, authorizing ONLY the
+    /// vault token exactly as GitHub would have.
+    #[test]
+    fn a_delivered_token_is_what_gets_validated_not_the_nodes_login() {
+        let probed = std::cell::RefCell::new(Vec::new());
+        let ok = gh_preflight(Some("vault-token"), Some("revoked-fleet".into()), |t| {
+            probed.borrow_mut().push(t.map(str::to_string));
+            if t == Some("vault-token") {
+                GhProbe::Authorized
+            } else {
+                GhProbe::Refused
+            }
+        });
+        assert!(
+            ok.is_ok(),
+            "a valid carried token must pass whatever the node holds: {ok:?}"
+        );
+        assert_eq!(
+            *probed.borrow(),
+            vec![Some("vault-token".to_string())],
+            "exactly the carried token is probed, in the check's env"
+        );
+    }
+
+    /// AC-2: a carried token GitHub refuses is ITS OWN failure — no falling
+    /// back to the node's reach, because the run would use the carried token.
+    #[test]
+    fn a_rejected_workspace_token_fails_without_falling_back() {
+        let err = gh_preflight(Some("revoked"), Some("fleet".into()), |_| GhProbe::Refused)
+            .expect_err("a rejected carried token is a refusal");
+        assert!(err.contains("workspace token was rejected"), "{err}");
+    }
+
+    /// AC-2/AC-3: no carried token, no fleet env, gh logged out — still
+    /// refused, with the existing phrase kept and the missing job token named.
+    #[test]
+    fn no_token_on_an_unauthenticated_node_keeps_the_existing_refusal() {
+        let err = gh_preflight(None, None, |t| {
+            assert_eq!(t, None, "no token means nothing in the probe's env");
+            GhProbe::Refused
+        })
+        .expect_err("an unauthenticated node with no job token is refused");
+        assert!(
+            err.contains("gh is installed but not authenticated"),
+            "{err}"
+        );
+        assert!(
+            err.contains("carries none"),
+            "names the missing side: {err}"
+        );
+
+        let missing = gh_preflight(None, None, |_| GhProbe::NoGh).expect_err("no gh at all");
+        assert_eq!(missing, "no GitHub token (NOOK_GH_TOKEN) and no gh on PATH");
+    }
+
+    /// A blank carried token is "carries none", and the fleet env then answers
+    /// without any probe — the short-circuit the node relied on before.
+    #[test]
+    fn blank_tokens_fall_back_and_the_fleet_env_short_circuits() {
+        let ok = gh_preflight(Some("  "), Some("fleet".into()), |_| {
+            panic!("the fleet env answers before any probe")
+        });
+        assert!(ok.is_ok());
+        let ok = gh_preflight(None, Some("fleet".into()), |_| panic!("no probe needed"));
+        assert!(ok.is_ok());
     }
 
     /// AC-3: a missing cache is a NAMED failure, not a hang and not a clone.
