@@ -40,6 +40,9 @@ const TAIL_BYTES: usize = 4096;
 pub struct LoopJob {
     pub job_id: String,
     pub kind: String,
+    /// The pull request a `review` run owns (MAIN-455): what the agent is told
+    /// it is reviewing, and the session it resumes.
+    pub review_pr_number: Option<u64>,
     pub target_task_key: String,
     pub repo_url: String,
     pub branch: String,
@@ -379,6 +382,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
     let LoopJob {
         job_id,
         kind,
+        review_pr_number,
         target_task_key,
         repo_url,
         branch,
@@ -515,6 +519,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
                 server: &cfg.server,
                 workspace_id: workspace_id.as_deref(),
             },
+            review_pr_number,
         ),
         crate::job_adapter::Adapter::Tmux => drive_session(
             &out,
@@ -601,10 +606,19 @@ fn drive_streaming(
     target: &str,
     seed: Option<&str>,
     identity: AgentIdentity<'_>,
+    review_pr: Option<u64>,
 ) -> (bool, String) {
     use crate::job_adapter::{self, Event, StreamingSession, TurnState};
 
-    let args = job_adapter::claude_stream_args(job_id);
+    // A review run resumes ITS pull request's session, so a second look at the
+    // same PR keeps the tree and the earlier reasoning instead of rebuilding
+    // both to read one new commit (MAIN-455 AC-3). Best effort by construction:
+    // the session lives on one node, so a run placed elsewhere simply starts
+    // cold rather than failing.
+    let args = match review_pr {
+        Some(pr) => job_adapter::claude_resume_pr_args(job_id, pr),
+        None => job_adapter::claude_stream_args(job_id),
+    };
     let mut env: Vec<(&str, &str)> = vec![
         ("NOOK_JOB_ID", job_id),
         // The agent runs headless with `--dangerously-skip-permissions`
@@ -617,6 +631,14 @@ fn drive_streaming(
     ];
     if let Some(s) = seed.filter(|s| !s.trim().is_empty()) {
         env.push(("NOOK_JOB_SEED", s));
+    }
+    // The one PR this run owns. It replaces MAIN-446's shard pair: a run that is
+    // told its item needs no arithmetic to work out which slice of the repo is
+    // its own, and cannot pick a PR another run is already on.
+    let pr_env;
+    if let Some(pr) = review_pr {
+        pr_env = pr.to_string();
+        env.push(("NOOK_REVIEW_PR", &pr_env));
     }
     // The agent's own identity, in the JOB's tenant. `AuthConfig::load` reads a
     // FILE, so without this `nook` inside the agent acts as whoever last ran

@@ -709,6 +709,30 @@ pub async fn select_executor(
         .eligible_loop_executors(tenant, person, LOOP_RUNTIME, &job.kind)
         .await?;
 
+    // A review run keeps the declaration's own placement rule (MAIN-455 AC-4).
+    // Moving reviews off sessions must not quietly widen where they run: the
+    // review loop has always been `role=loop` work, and the selector comes from
+    // `review_loop_spec` rather than a second copy of the string here.
+    let candidates = if job.kind == REVIEW_KIND {
+        let selector = crate::services::session_reconcile::review_loop_selector();
+        let mut kept = Vec::new();
+        for node in candidates {
+            let Some(row) = state.nodes.get(tenant, node).await? else {
+                continue;
+            };
+            let labels = crate::routes::nodes::placement_of(&row).labels;
+            if selector
+                .iter()
+                .all(|(k, v)| labels.get(k).is_some_and(|got| got == v))
+            {
+                kept.push(node);
+            }
+        }
+        kept
+    } else {
+        candidates
+    };
+
     // The last gate is how much each candidate is already holding, which is a
     // `loop_jobs` count rather than a node fact — so it is applied here.
     let mut chosen: Option<NodeId> = None;
@@ -962,6 +986,9 @@ pub async fn dispatch_to_node(state: &AppState, tenant: TenantId, job: &LoopJob)
             nook_token: mint_job_token(state, tenant, job.requested_by, job.id).await,
             job_id: job.id.0.to_string(),
             kind: job.kind.clone(),
+            // Which PR this run owns, so the agent is told rather than having to
+            // find its share, and so it can resume that PR's session.
+            review_pr_number: job.review_pr_number.map(|n| n.max(0) as u64),
             target_task_key,
             repo_url,
             branch,

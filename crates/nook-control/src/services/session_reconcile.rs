@@ -908,6 +908,18 @@ pub async fn pass(state: &AppState) -> crate::error::ApiResult<()> {
 /// token, an outage that has never once succeeded — all of them mean nothing
 /// measured the demand, and the honest answer is to run what the repo declared.
 /// No forge must never mean no reviewers.
+/// WHERE a review may run: the fleet's loop nodes, and nowhere else.
+///
+/// One definition, read by the declaration that sizes reviewers and by the
+/// dispatcher that places a run (MAIN-455 AC-4). A repo still cannot ask for
+/// its reviewer on somebody's laptop, and moving reviews from sessions to runs
+/// did not get to change that by omission.
+pub(crate) fn review_loop_selector() -> std::collections::BTreeMap<String, String> {
+    [("role".to_string(), "loop".to_string())]
+        .into_iter()
+        .collect()
+}
+
 pub(crate) fn review_loop_spec(max_replicas: Option<i32>, open_prs: Option<u32>) -> SessionSpec {
     let ceiling = match max_replicas {
         None => 1,
@@ -915,9 +927,7 @@ pub(crate) fn review_loop_spec(max_replicas: Option<i32>, open_prs: Option<u32>)
     };
     SessionSpec {
         runtime: crate::services::jobs::LOOP_RUNTIME.into(),
-        node_selector: [("role".to_string(), "loop".to_string())]
-            .into_iter()
-            .collect(),
+        node_selector: review_loop_selector(),
         tolerations: vec![],
         replicas: Replicas::Count {
             count: match open_prs {

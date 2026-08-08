@@ -77,7 +77,29 @@ pub fn adapter_for(runtime: &str) -> Adapter {
 ///   these autonomous permissions exist for.
 /// - `--session-id` — pins the id so AC-5's resume has something to name.
 pub fn claude_stream_args(session_id: &str) -> Vec<String> {
-    [
+    stream_args(session_id, None)
+}
+
+/// The same run, but resuming the agent session a previous run left behind
+/// (MAIN-455 AC-3).
+///
+/// `--from-pr` is Claude Code's own "resume the session linked to this PR", and
+/// it is what makes a second review of the same pull request cheap: the agent
+/// still has the tree, the diff and its own earlier reasoning instead of
+/// rebuilding all of it to say "one more commit landed". The flag is documented
+/// as working only with `--print`, which is the mode every run is in.
+///
+/// Resume is BEST EFFORT by construction. The session lives in the agent's home
+/// on one node, so a run for the same PR placed elsewhere finds nothing to
+/// resume — which is a cold start, not a failure, and the run proceeds either
+/// way. That is why the PR number is passed rather than a stored session id we
+/// would then have to keep true.
+pub fn claude_resume_pr_args(session_id: &str, pr_number: u64) -> Vec<String> {
+    stream_args(session_id, Some(pr_number))
+}
+
+fn stream_args(session_id: &str, from_pr: Option<u64>) -> Vec<String> {
+    let mut args: Vec<String> = [
         "-p",
         "--input-format",
         "stream-json",
@@ -86,12 +108,23 @@ pub fn claude_stream_args(session_id: &str) -> Vec<String> {
         "--verbose",
         "--replay-user-messages",
         "--dangerously-skip-permissions",
-        "--session-id",
-        session_id,
     ]
     .iter()
     .map(|s| s.to_string())
-    .collect()
+    .collect();
+    match from_pr {
+        // `--from-pr` names the session to continue, so pinning a fresh
+        // `--session-id` beside it would ask for two different things at once.
+        Some(pr) => {
+            args.push("--from-pr".to_string());
+            args.push(pr.to_string());
+        }
+        None => {
+            args.push("--session-id".to_string());
+            args.push(session_id.to_string());
+        }
+    }
+    args
 }
 
 // ── The wire protocol ────────────────────────────────────────────────────────

@@ -585,8 +585,18 @@ pub enum ControlToNode {
     /// Everything the node needs is on the message — no DB round-trip.
     RunLoopJob {
         job_id: String,
-        /// `spec` | `decompose` — selects the skill.
+        /// `spec` | `decompose` | `review` — selects the skill.
         kind: String,
+        /// The pull request a `review` run owns (MAIN-455). `None` for every
+        /// other kind.
+        ///
+        /// Two jobs at once: it tells the agent WHICH PR it is reviewing, so it
+        /// never has to search a list for its share of the work, and it names
+        /// the agent session to resume (`--from-pr`) so a second review of the
+        /// same PR keeps the tree and the earlier reasoning instead of
+        /// rebuilding both.
+        #[serde(default)]
+        review_pr_number: Option<u64>,
         /// The board key of the ticket the skill points at (e.g. `MAIN-42`).
         target_task_key: String,
         /// The clonable git remote, resolved by the control plane from the
