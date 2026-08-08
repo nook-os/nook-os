@@ -195,6 +195,7 @@ fn existing_mirror_in(
     base: &Path,
     repo_url: &str,
     ssh_key: Option<&str>,
+    own_worktree: &Path,
 ) -> Result<PathBuf, String> {
     let cache = base.join(format!("{}.git", repo_slug(repo_url)));
     if !cache.join("HEAD").exists() {
@@ -203,16 +204,21 @@ fn existing_mirror_in(
             cache.display()
         ));
     }
-    crate::gitops::run_git_remote(&["fetch", "--prune"], Some(&cache), ssh_key)?;
+    fetch_mirror(&cache, ssh_key, own_worktree)?;
     Ok(cache)
 }
 
-fn ensure_mirror_in(base: &Path, repo_url: &str, ssh_key: Option<&str>) -> Result<PathBuf, String> {
+fn ensure_mirror_in(
+    base: &Path,
+    repo_url: &str,
+    ssh_key: Option<&str>,
+    own_worktree: &Path,
+) -> Result<PathBuf, String> {
     let cache = base.join(format!("{}.git", repo_slug(repo_url)));
     if cache.join("HEAD").exists() {
         // The fetch needs the key too: a mirror that cloned once still pulls
         // from the same private remote on every later job.
-        crate::gitops::run_git_remote(&["fetch", "--prune"], Some(&cache), ssh_key)?;
+        fetch_mirror(&cache, ssh_key, own_worktree)?;
     } else {
         std::fs::create_dir_all(base)
             .map_err(|e| format!("cannot create {}: {e}", base.display()))?;
@@ -225,19 +231,54 @@ fn ensure_mirror_in(base: &Path, repo_url: &str, ssh_key: Option<&str>) -> Resul
     Ok(cache)
 }
 
+/// Fetch into the mirror, healing the one wedge a run may heal itself
+/// (MAIN-466 AC-2): git refuses to fetch into a branch any linked worktree has
+/// checked out, and a review worktree from before the detached-head fix pins
+/// the workspace branch at a stable path that outlives its run — so the moment
+/// the branch moves on the remote, every later fetch fails, forever. The
+/// refusal names the worktree holding the branch; when that is THIS run's own
+/// tree, it was about to be removed and recreated anyway (see `run`), so remove
+/// it now and retry the fetch once. Any other refusal stays an error: the
+/// pinning tree belongs to a live concurrent job, and removing it is not
+/// recovery.
+fn fetch_mirror(cache: &Path, ssh_key: Option<&str>, own_worktree: &Path) -> Result<(), String> {
+    match crate::gitops::run_git_remote(&["fetch", "--prune"], Some(cache), ssh_key) {
+        Err(e) if fetch_refused_by(&e, own_worktree) => {
+            remove_job_worktree(cache, own_worktree)?;
+            crate::gitops::run_git_remote(&["fetch", "--prune"], Some(cache), ssh_key).map(|_| ())
+        }
+        r => r.map(|_| ()),
+    }
+}
+
+/// Matched on the path, not just the phrase: git names the worktree holding
+/// the branch (`… checked out at '<path>'`), and only OUR OWN path makes
+/// removal safe. The quotes are part of the match — a bare substring would let
+/// `…-pr1` claim a refusal naming `…-pr10`, a sibling PR of the same repo.
+fn fetch_refused_by(err: &str, worktree: &Path) -> bool {
+    err.contains("refusing to fetch into")
+        && err.contains(&format!("'{}'", worktree.to_string_lossy()))
+}
+
 /// Add a per-job worktree off `cache`, into `<wt_base>/<job>` so concurrent jobs
 /// on the same workspace get distinct trees.
 ///
-/// Three attempts, because two worktrees cannot check out the same branch: the
-/// branch as-is (the lone-job case) → the branch tip detached (a second
-/// concurrent job on the *same* branch, which git refuses to check out twice) →
-/// creating the branch if it isn't present locally (mirroring
+/// `detach` is for review worktrees, and it is load-bearing (MAIN-466 AC-1):
+/// their stable path outlives the run, and an attached checkout pins `branch`
+/// in the mirror so every later fetch is refused (`fetch_mirror`). Detached,
+/// no ref is held and the mirror always fast-forwards.
+///
+/// Attached is three attempts, because two worktrees cannot check out the same
+/// branch: the branch as-is (the lone-job case) → the branch tip detached (a
+/// second concurrent job on the *same* branch, which git refuses to check out
+/// twice) → creating the branch if it isn't present locally (mirroring
 /// `gitops::add_worktree`). Either way the tree is based on `branch`.
 fn add_job_worktree_in(
     wt_base: &Path,
     cache: &Path,
     branch: &str,
     dirname: &str,
+    detach: bool,
 ) -> Result<PathBuf, String> {
     std::fs::create_dir_all(wt_base)
         .map_err(|e| format!("cannot create {}: {e}", wt_base.display()))?;
@@ -246,11 +287,13 @@ fn add_job_worktree_in(
         return Err(format!("{} already exists", dest.display()));
     }
     let dest_str = dest.to_string_lossy().to_string();
-    let attempts: [&[&str]; 3] = [
+    let detached: [&[&str]; 1] = [&["worktree", "add", "--detach", &dest_str, branch]];
+    let attached: [&[&str]; 3] = [
         &["worktree", "add", &dest_str, branch],
         &["worktree", "add", "--detach", &dest_str, branch],
         &["worktree", "add", "-b", branch, &dest_str],
     ];
+    let attempts: &[&[&str]] = if detach { &detached } else { &attached };
     let mut last = String::new();
     for args in attempts {
         match crate::gitops::run_git(args, Some(cache), None) {
@@ -460,6 +503,10 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
     // A review run keeps ONE working directory per (workspace, PR) across
     // runs — the agent-session bucket is keyed on it (see `review_dirname`).
     // Everything else stays per-job.
+    let is_review = matches!(
+        (review_pr_number, workspace_id.as_deref()),
+        (Some(_), Some(_))
+    );
     let dirname = match (review_pr_number, workspace_id.as_deref()) {
         (Some(pr), Some(ws)) => review_dirname(ws, pr),
         _ => job_dirname(&job_id),
@@ -470,6 +517,9 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
 
     let base = cache_base(&cfg.server);
     let wt_base = base.join("worktrees");
+    // Where THIS run's worktree will live — known before the fetch, which is
+    // what lets `fetch_mirror` tell a self-inflicted wedge from someone else's.
+    let own_worktree = wt_base.join(&dirname);
 
     note(
         &out,
@@ -477,7 +527,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
         format!("preparing workspace from {repo_url} @ {branch}"),
     );
     let cache = if may_create_cache(&kind) {
-        match ensure_mirror_in(&base, &repo_url, ssh_key.as_deref()) {
+        match ensure_mirror_in(&base, &repo_url, ssh_key.as_deref(), &own_worktree) {
             Ok(c) => c,
             Err(e) => {
                 finished(&out, &job_id, false, format!("clone cache failed: {e}"));
@@ -486,7 +536,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
             }
         }
     } else {
-        match existing_mirror_in(&base, &repo_url, ssh_key.as_deref()) {
+        match existing_mirror_in(&base, &repo_url, ssh_key.as_deref(), &own_worktree) {
             Ok(c) => c,
             Err(e) => {
                 // Names the workspace AND the node, because the reader of this
@@ -511,11 +561,10 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
     // A crashed run can leave the stable path behind; the unique index says no
     // LIVE run holds this PR, so clearing the leftover is safe and starting
     // over is right — the agent's session survives in the config dir, not here.
-    let leftover = wt_base.join(&dirname);
-    if leftover.exists() {
-        let _ = remove_job_worktree(&cache, &leftover);
+    if own_worktree.exists() {
+        let _ = remove_job_worktree(&cache, &own_worktree);
     }
-    let worktree = match add_job_worktree_in(&wt_base, &cache, &branch, &dirname) {
+    let worktree = match add_job_worktree_in(&wt_base, &cache, &branch, &dirname, is_review) {
         Ok(w) => w,
         Err(e) => {
             finished(&out, &job_id, false, format!("worktree setup failed: {e}"));
@@ -1252,8 +1301,13 @@ mod tests {
     #[test]
     fn a_missing_cache_names_the_path_and_the_repo_instead_of_cloning() {
         let empty = std::env::temp_dir().join(format!("nook-406-{}", std::process::id()));
-        let err = existing_mirror_in(&empty, "git@example.test:acme/api.git", None)
-            .expect_err("an absent mirror must not be created");
+        let err = existing_mirror_in(
+            &empty,
+            "git@example.test:acme/api.git",
+            None,
+            &empty.join("worktrees").join("review-x-pr1"),
+        )
+        .expect_err("an absent mirror must not be created");
         assert!(err.contains("no clone cache"), "{err}");
         assert!(err.contains("acme/api"), "names the repo: {err}");
         assert!(
@@ -1342,11 +1396,14 @@ mod tests {
         let repo_url = remote.to_string_lossy().to_string();
 
         // A local path needs no key — the `None` arm this fix deliberately kept.
-        let cache = ensure_mirror_in(&base, &repo_url, None).expect("mirror clone");
+        let cache =
+            ensure_mirror_in(&base, &repo_url, None, &wt_base.join("none")).expect("mirror clone");
         assert!(cache.join("HEAD").exists(), "mirror has a HEAD");
 
-        let w1 = add_job_worktree_in(&wt_base, &cache, "main", "job-aaa").expect("worktree 1");
-        let w2 = add_job_worktree_in(&wt_base, &cache, "main", "job-bbb").expect("worktree 2");
+        let w1 =
+            add_job_worktree_in(&wt_base, &cache, "main", "job-aaa", false).expect("worktree 1");
+        let w2 =
+            add_job_worktree_in(&wt_base, &cache, "main", "job-bbb", false).expect("worktree 2");
 
         assert_ne!(w1, w2, "distinct job ids get distinct dirs");
         assert!(
@@ -1363,6 +1420,155 @@ mod tests {
         assert!(!w1.exists(), "wt1 gone");
         assert!(!w2.exists(), "wt2 gone");
 
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    fn git_in(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A commit-bearing repo at `dir`, standing in for the remote. No network.
+    fn scratch_remote(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        git_in(dir, &["init", "-b", "main"]);
+        std::fs::write(dir.join("README.md"), "# demo\n").unwrap();
+        commit_all(dir, "init");
+    }
+
+    fn commit_all(dir: &Path, msg: &str) {
+        git_in(dir, &["add", "."]);
+        git_in(
+            dir,
+            &[
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "user.name=Test",
+                "commit",
+                "-m",
+                msg,
+            ],
+        );
+    }
+
+    /// The refusal is recognised by OUR quoted path, whatever git version
+    /// produced it — this pins the matching itself, since the live-repro test
+    /// below skips on a git too old to refuse.
+    #[test]
+    fn the_refusal_predicate_matches_only_our_own_worktree() {
+        let own = Path::new("/x/worktrees/review-ws-pr1");
+        let msg = |p: &str| {
+            format!("fatal: refusing to fetch into branch 'refs/heads/main' checked out at '{p}'")
+        };
+        assert!(fetch_refused_by(&msg("/x/worktrees/review-ws-pr1"), own));
+        assert!(
+            !fetch_refused_by(&msg("/x/worktrees/review-ws-pr10"), own),
+            "a sibling PR's worktree is not ours, even when ours is its prefix"
+        );
+        assert!(
+            !fetch_refused_by("Permission denied (publickey)", own),
+            "an unrelated fetch failure must not trigger removal"
+        );
+    }
+
+    /// MAIN-466 AC-1: a review worktree holds NO ref. Attached, it pins the
+    /// workspace branch in the mirror from a stable path that outlives the run,
+    /// and every fetch after the branch moves is refused — the prod wedge.
+    #[test]
+    fn a_review_worktree_is_detached() {
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let tmp =
+            std::env::temp_dir().join(format!("nook-466-det-{}", uuid::Uuid::now_v7().simple()));
+        let remote = tmp.join("remote");
+        scratch_remote(&remote);
+        let wt_base = tmp.join("worktrees");
+        let cache = ensure_mirror_in(
+            &tmp.join("cache"),
+            &remote.to_string_lossy(),
+            None,
+            &wt_base.join("none"),
+        )
+        .expect("mirror clone");
+
+        let wt = add_job_worktree_in(&wt_base, &cache, "main", &review_dirname("ws-1", 7), true)
+            .expect("review worktree");
+        assert_eq!(
+            git_in(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "HEAD",
+            "a review worktree must not pin a branch"
+        );
+        assert!(
+            wt.join("README.md").exists(),
+            "detached is still a real checkout of the branch tip"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// MAIN-466 AC-2: a wedged node heals on its next run. A pre-fix worktree
+    /// has the branch checked out by name; the branch moves on the remote; the
+    /// mirror fetch is refused. The run recognises its OWN worktree in the
+    /// refusal, removes it, and the retried fetch lands the new tip — while a
+    /// refusal naming someone ELSE's worktree removes nothing.
+    #[test]
+    fn a_wedged_fetch_removes_its_own_worktree_and_retries() {
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let tmp =
+            std::env::temp_dir().join(format!("nook-466-fix-{}", uuid::Uuid::now_v7().simple()));
+        let remote = tmp.join("remote");
+        scratch_remote(&remote);
+        let wt_base = tmp.join("worktrees");
+        let own = wt_base.join(review_dirname("ws-1", 9));
+        let cache = ensure_mirror_in(&tmp.join("cache"), &remote.to_string_lossy(), None, &own)
+            .expect("mirror clone");
+
+        // The pre-detach shape: the branch checked out BY NAME at the stable path.
+        let wedge =
+            add_job_worktree_in(&wt_base, &cache, "main", &review_dirname("ws-1", 9), false)
+                .expect("attached worktree");
+        assert_eq!(wedge, own);
+
+        // main moves on the remote — the moment prod wedged.
+        std::fs::write(remote.join("more.txt"), "merged\n").unwrap();
+        commit_all(&remote, "a merge lands");
+
+        let refused = match fetch_mirror(&cache, None, &wt_base.join("not-ours")) {
+            // git < 2.35 fast-forwards straight through a linked worktree — the
+            // wedge cannot exist there, so there is nothing to heal. The node
+            // images (bookworm) carry 2.39+, which refuses; that is where this
+            // path is exercised.
+            Ok(()) => {
+                eprintln!("skipping: this git does not protect linked worktrees");
+                let _ = std::fs::remove_dir_all(&tmp);
+                return;
+            }
+            Err(e) => e,
+        };
+        assert!(refused.contains("refusing to fetch into"), "{refused}");
+        assert!(own.exists(), "another run's worktree is not ours to remove");
+
+        fetch_mirror(&cache, None, &own).expect("the owning run's fetch recovers");
+        assert!(!own.exists(), "the wedging worktree is gone");
+        assert_eq!(
+            git_in(&cache, &["rev-parse", "refs/heads/main"]),
+            git_in(&remote, &["rev-parse", "refs/heads/main"]),
+            "the mirror caught up to the moved branch"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
