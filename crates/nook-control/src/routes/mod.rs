@@ -281,6 +281,7 @@ pub fn build_router(state: AppState) -> Router {
             "/tasks/{id}/comments",
             get(task_detail::list_comments).post(task_detail::create_comment),
         )
+        .route("/tasks/{id}/revisions", get(task_detail::list_revisions))
         .route(
             "/comments/{id}",
             patch(task_detail::update_comment).delete(task_detail::delete_comment),

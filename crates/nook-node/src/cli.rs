@@ -2439,8 +2439,11 @@ pub async fn tasks(
 }
 
 /// `nook task <key>` — one whole issue, the way an agent reads it.
-pub async fn task(key: &str, json: bool) -> Result<()> {
+pub async fn task(key: &str, json: bool, revisions: bool) -> Result<()> {
     let client = Client::from_config()?;
+    if revisions {
+        return task_revisions(&client, key, json).await;
+    }
     let resp = client.get(&format!("/api/v1/tasks/{key}")).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&resp)?);
@@ -2516,6 +2519,40 @@ pub async fn task(key: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// `nook task <key> --revisions` — the description bodies past replaces
+/// overwrote, newest first (MAIN-470 AC-3). This is the undo for a clobbered
+/// description: read the body here, put it back with `set-description -`.
+async fn task_revisions(client: &Client, key: &str, json: bool) -> Result<()> {
+    let resp = client
+        .get(&format!("/api/v1/tasks/{key}/revisions"))
+        .await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+    let rows = resp.as_array().cloned().unwrap_or_default();
+    if rows.is_empty() {
+        println!("no description revisions — the body has never been replaced");
+        return Ok(());
+    }
+    println!(
+        "{}",
+        crate::style::dim(&format!(
+            "── {} revision(s), newest first — each is the body a replace overwrote",
+            rows.len()
+        ))
+    );
+    for r in rows {
+        println!(
+            "\n{} {}",
+            crate::style::bold(r["created_at"].as_str().unwrap_or("?")),
+            crate::style::dim(r["author_id"].as_str().unwrap_or("(no user)")),
+        );
+        println!("{}", r["body"].as_str().unwrap_or(""));
+    }
+    Ok(())
+}
+
 /// `nook comment <key> <body>` — where the reasoning goes.
 pub async fn comment(key: &str, body: &str) -> Result<()> {
     let client = Client::from_config()?;
@@ -2537,13 +2574,46 @@ pub async fn comment(key: &str, body: &str) -> Result<()> {
     Ok(())
 }
 
+/// The argv body of `set-description`, honouring the Unix stdin convention
+/// (MAIN-470 AC-1): a lone `-` means "read stdin" and is never content —
+/// `nook create task --description -` already reads it that way, and storing
+/// the dash literally is exactly how a ticket's contract became the
+/// one-character string `-`. Anything else is the joined argv, verbatim.
+fn set_description_body(
+    argv: &[String],
+    stdin: impl FnOnce() -> std::io::Result<String>,
+) -> Result<String> {
+    if argv.len() == 1 && argv[0] == "-" {
+        return stdin().context("reading the description from stdin");
+    }
+    Ok(argv.join(" "))
+}
+
+/// The sanity floor (MAIN-470 AC-2): shrinking a non-trivial description to a
+/// near-empty body is almost always a lost payload, not an edit — refuse with
+/// both sizes so the caller can see the mismatch, and let `--force` say it is
+/// intentional.
+fn tiny_replacement_refusal(current_len: usize, new_len: usize, force: bool) -> Option<String> {
+    (!force && current_len > 200 && new_len < 20).then(|| {
+        format!(
+            "refusing to replace a {current_len}-char description with a {new_len}-char body — \
+             this looks like payload loss, not an edit; pass --force if it is intentional"
+        )
+    })
+}
+
 /// `nook set-description <key> <body>` — replace a task's description safely.
 ///
 /// Read the current version, PATCH with the optimistic-concurrency guard, and
 /// on a 409 (someone else edited it meanwhile) re-read and retry a bounded
 /// number of times. If it keeps conflicting, exit non-zero rather than silently
 /// losing the edit (AC-4).
-pub async fn set_description(key: &str, description: &str) -> Result<()> {
+pub async fn set_description(key: &str, argv: &[String], force: bool) -> Result<()> {
+    let description = set_description_body(argv, || {
+        let mut s = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?;
+        Ok(s)
+    })?;
     let client = Client::from_config()?;
     for attempt in 1..=4 {
         // The current version to guard against — from the whole-issue read.
@@ -2554,6 +2624,18 @@ pub async fn set_description(key: &str, description: &str) -> Result<()> {
             .and_then(Value::as_str)
             .context("the task response carried no version to guard against")?
             .to_string();
+
+        // Checked against the body this attempt would overwrite, so a retry
+        // after a concurrent edit judges the description it actually replaces.
+        let current_len = detail
+            .get("task")
+            .and_then(|t| t.get("description"))
+            .and_then(Value::as_str)
+            .map_or(0, |d| d.chars().count());
+        if let Some(msg) = tiny_replacement_refusal(current_len, description.chars().count(), force)
+        {
+            bail!("{key}: {msg}");
+        }
 
         let (status, body) = client
             .patch_status(
@@ -3240,6 +3322,71 @@ mod claim_guard_tests {
     fn no_session_workspace_never_blocks() {
         assert!(!claim_blocked(None, Some(OTHER), false));
         assert!(!claim_blocked(None, None, false));
+    }
+}
+
+#[cfg(test)]
+mod set_description_guard_tests {
+    use super::*;
+
+    fn args(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// MAIN-470 AC-1: a lone `-` is the stdin convention, never content — the
+    /// exact payload that replaced a ticket's contract with one character.
+    #[test]
+    fn a_lone_dash_reads_stdin_and_is_never_stored() {
+        let body =
+            set_description_body(&args(&["-"]), || Ok("piped body\n".into())).expect("stdin body");
+        assert_eq!(body, "piped body\n");
+    }
+
+    /// Ordinary argv is joined verbatim, and stdin is never touched.
+    #[test]
+    fn ordinary_argv_is_joined_without_touching_stdin() {
+        let body = set_description_body(&args(&["hello", "world"]), || {
+            panic!("stdin must not be read for a literal body")
+        })
+        .expect("literal body");
+        assert_eq!(body, "hello world");
+    }
+
+    /// Only the LONE dash is the convention: a dash among other words is
+    /// content (a real body could open with "- item one").
+    #[test]
+    fn a_dash_among_words_is_literal_content() {
+        let body = set_description_body(&args(&["-", "item", "one"]), || {
+            panic!("stdin must not be read")
+        })
+        .expect("literal body");
+        assert_eq!(body, "- item one");
+    }
+
+    /// MAIN-470 AC-2: the floor refuses a probable payload loss, naming both
+    /// sizes so the mismatch is visible.
+    #[test]
+    fn shrinking_a_real_description_to_a_stub_is_refused_naming_both_sizes() {
+        let msg = tiny_replacement_refusal(350, 5, false)
+            .expect("a 350 -> 5 char replace must be refused");
+        assert!(msg.contains("350"), "names the current size: {msg}");
+        assert!(msg.contains("5-char"), "names the new size: {msg}");
+        assert!(msg.contains("--force"), "names the override: {msg}");
+    }
+
+    /// `--force` says the shrink is intentional; the floor steps aside.
+    #[test]
+    fn force_overrides_the_floor() {
+        assert_eq!(tiny_replacement_refusal(350, 5, true), None);
+    }
+
+    /// The floor only bites on BOTH conditions: a short current body may be
+    /// replaced freely, and a substantial new body is a rewrite, not a loss.
+    #[test]
+    fn ordinary_edits_pass_the_floor() {
+        assert_eq!(tiny_replacement_refusal(100, 5, false), None);
+        assert_eq!(tiny_replacement_refusal(350, 50, false), None);
+        assert_eq!(tiny_replacement_refusal(0, 5, false), None);
     }
 }
 

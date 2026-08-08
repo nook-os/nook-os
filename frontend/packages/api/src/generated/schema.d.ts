@@ -2489,6 +2489,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tasks/{id}/revisions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_description_revisions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tasks/{id}/start-work": {
         parameters: {
             query?: never;
@@ -6493,6 +6509,28 @@ export interface components {
             tenant_id: components["schemas"]["TenantId"];
             /** Format: date-time */
             updated_at: string;
+        };
+        /**
+         * @description A description body the moment before a replace overwrote it (MAIN-470).
+         *
+         *     The task PATCH is a whole-body replace with no history, so one bad payload
+         *     destroys a contract with no undo — the row exists so it doesn't. Newest
+         *     first from the API: the reader is undoing the most recent clobber.
+         */
+        TaskDescriptionRevision: {
+            /**
+             * Format: uuid
+             * @description Who performed the replace; `None` for a node/system credential.
+             */
+            author_id?: string | null;
+            /** @description The body that was replaced — the thing to restore. */
+            body: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            id: string;
+            task_id: components["schemas"]["TaskId"];
+            tenant_id: components["schemas"]["TenantId"];
         };
         /** @description One whole issue: what the loop reads before it starts work. */
         TaskDetail: {
@@ -11872,6 +11910,33 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TaskItem"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_description_revisions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskDescriptionRevision"][];
                 };
             };
             404: {

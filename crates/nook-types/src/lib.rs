@@ -1617,6 +1617,24 @@ pub struct TaskComment {
     pub updated_at: DateTime<Utc>,
 }
 
+/// A description body the moment before a replace overwrote it (MAIN-470).
+///
+/// The task PATCH is a whole-body replace with no history, so one bad payload
+/// destroys a contract with no undo — the row exists so it doesn't. Newest
+/// first from the API: the reader is undoing the most recent clobber.
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
+pub struct TaskDescriptionRevision {
+    pub id: Uuid,
+    pub tenant_id: TenantId,
+    pub task_id: TaskId,
+    /// The body that was replaced — the thing to restore.
+    pub body: String,
+    /// Who performed the replace; `None` for a node/system credential.
+    #[serde(default)]
+    pub author_id: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct CreateCommentRequest {
     pub body_md: String,
