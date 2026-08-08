@@ -71,14 +71,10 @@ pub fn owed<'a>(
                     // Failed at this exact head, recently: hold. A push changes
                     // the fingerprint and clears the hold by itself, so a real
                     // fix is never waiting on a timer.
-                    match (h.failed_head.as_deref(), h.failed_at) {
-                        (Some(f), Some(at))
-                            if f == item.fingerprint && now - at < FAILURE_BACKOFF =>
-                        {
-                            false
-                        }
-                        _ => true,
-                    }
+                    !matches!(
+                        (h.failed_head.as_deref(), h.failed_at),
+                        (Some(f), Some(at)) if f == item.fingerprint && now - at < FAILURE_BACKOFF
+                    )
                 }
                 None => true,
             }

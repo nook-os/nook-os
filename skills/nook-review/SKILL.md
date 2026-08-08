@@ -1,7 +1,7 @@
 ---
 name: nook-review
 description: "Review open PRs against their linked NookOS board issue and required GitHub checks, then post a three-group verdict with loop labels. Use when asked to run the loop's reviewer or review its PR queue. Designed for /loop; never merges or pushes code."
-version: 1.2.0
+version: 1.3.0
 author: NookOS
 license: MIT
 platforms: [linux, macos]
@@ -24,22 +24,23 @@ moves cards and never merges.
 
 ## 0. Preflight
 
-`nook whoami` must show a **workspace**, and `gh auth status` must pass. If
-either fails, end the pass and say which one.
+`gh auth status` must pass. If it fails, end the pass and say so — a reviewer
+that cannot read GitHub would report every PR as "nothing to review", which is
+the silent lie this check exists to prevent. A control-plane run provides the
+fleet credential as `GH_TOKEN`; never improvise one from other variables.
 
-The workspace line is the real check, because it is what confines this pass to
-one repo. Two identities satisfy it:
+Confinement depends on how the pass was started:
 
-- a **user token** (`nook login --token nook_user_…`) — a person, tenant-wide;
-- a **node token inside a managed session**, which the control plane scopes to
-  that session's tenant and workspace.
-
-The second is not a downgrade: a session-scoped node token reaches ONE
-workspace, where a user token reaches the whole tenant. What used to be true —
-"a node token cannot drive the board" — stopped being true when scope started
-coming from the session rather than the credential. What still disqualifies a
-run is `whoami` reporting **no workspace**: unconfined means the pick could
-return another repo's cards.
+- **Directed** — `NOOK_REVIEW_PR` is set (a control-plane review run). The
+  directive IS the confinement: this pass is about exactly one PR in exactly
+  the repo the run was placed in, and there is no pick that could stray. Do
+  not end a directed pass over `nook whoami`'s workspace line.
+- **Undirected** — no `NOOK_REVIEW_PR` (a human-driven pass). `nook whoami`
+  must show a **workspace**, because the pick below could otherwise return
+  another repo's cards. Two identities satisfy it: a **user token** — a
+  person, tenant-wide — or a **node token inside a managed session**, which
+  the control plane scopes to that session's tenant and workspace. If it
+  shows no workspace, end the pass.
 
 ## 1. Find a PR needing review
 
@@ -55,27 +56,22 @@ has `loop-approved`, `loop-changes-requested`, or `needs-human-review`. Review
 it again when new commits landed after the recorded SHA. If nothing needs
 review, say so and end the pass.
 
-### Your shard
+### Your pull request
 
-A repo may run several reviewers at once. `NOOK_REVIEW_SHARDS` says how many,
-and `NOOK_REVIEW_SHARD` says which one you are, counting from zero.
+**When `NOOK_REVIEW_PR` is set, this pass is about exactly that PR — number
+`$NOOK_REVIEW_PR` — and no other.** The control plane raised this run for one
+pull request at one head; it already holds the open-PR list, deduplicates
+runs, and paces re-review, so there is no queue for you to scan and no PR to
+pick. Apply the skip rule above to your PR (it may already be reviewed at its
+head — then say so and end the pass), review it if not, and never touch
+another PR because yours needed nothing.
 
-**When `NOOK_REVIEW_SHARDS` is greater than 1, consider only PRs where
-`number % NOOK_REVIEW_SHARDS == NOOK_REVIEW_SHARD`.** That rule is about the
-set of open PRs needing review — *however that set is obtained*. It is stated
-that way on purpose: what lists the PRs may change, and this filter must
-survive the change untouched.
+This replaces the shard arithmetic (`NOOK_REVIEW_SHARD`/`NOOK_REVIEW_SHARDS`,
+retired with the sweep): coordination between reviewers is the control
+plane's, done by assignment rather than by modulo.
 
-Absent, empty, or `1` means every PR is yours. That is the case for a single
-reviewer and for every deployment that has never set these, so the ordinary
-run is unaffected.
-
-The arithmetic is the whole coordination mechanism — there is no claim, no
-lock, and no message between reviewers. Two shards therefore never pick the
-same PR, and every PR belongs to exactly one shard. If your shard's queue is
-empty, end the pass; do NOT take another shard's PR because you have nothing
-to do. A shard whose reviewer is down leaves its PRs until it comes back, and
-that is the accepted trade.
+Without `NOOK_REVIEW_PR`, the pick above is yours: take the first PR that
+needs review, and if nothing does, say so and end the pass.
 
 ## 2. Read the contract and code
 

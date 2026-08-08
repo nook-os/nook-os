@@ -2421,20 +2421,25 @@ mod tests {
         assert_eq!(placements(&declared).len(), 3);
     }
 
-    /// The skill and the reconciler must describe the SAME arithmetic. The
+    /// The skill and the control plane must describe the SAME contract. The
     /// skill is prose an agent follows, so nothing but its text can be checked
     /// — and its text is compiled into the node binary, which is what makes
     /// this a test rather than a hope.
+    ///
+    /// The contract changed with MAIN-455: a run is TOLD its pull request
+    /// (`NOOK_REVIEW_PR`), and the shard arithmetic this used to assert is
+    /// retired — so the test now guards against the modulo INSTRUCTIONS
+    /// reappearing as much as for the directive being taught.
     #[test]
-    fn the_skill_states_the_partition_rule_this_module_places_for() {
+    fn the_skill_states_the_directive_this_module_raises_runs_for() {
         let skill = include_str!("../../../../skills/nook-review/SKILL.md");
         assert!(
-            skill.contains("NOOK_REVIEW_SHARDS") && skill.contains("NOOK_REVIEW_SHARD"),
-            "the reviewer skill must read the pair the reconciler exports"
+            skill.contains("NOOK_REVIEW_PR"),
+            "the reviewer skill must read the directive the run env carries"
         );
         assert!(
-            skill.contains("number % NOOK_REVIEW_SHARDS == NOOK_REVIEW_SHARD"),
-            "the skill must state the same modulo partition `owns` implements"
+            !skill.contains("number % NOOK_REVIEW_SHARDS"),
+            "the modulo partition is retired; teaching it again would have a              directed reviewer filtering a queue it no longer owns"
         );
     }
     // ── MAIN-448: the count comes from the forge ─────────────────────────────

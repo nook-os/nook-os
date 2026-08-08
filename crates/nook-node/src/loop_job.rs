@@ -743,6 +743,19 @@ fn drive_streaming(
         pr_env = pr.to_string();
         env.push(("NOOK_REVIEW_PR", &pr_env));
     }
+    // The fleet's GitHub credential, under the name `gh` actually reads — the
+    // SAME mapping the tmux path has done since MAIN-407, which this path
+    // never got. Without it the node holds `NOOK_GH_TOKEN` while the agent's
+    // `gh auth status` fails, and what happens next is agent improvisation:
+    // one run noticed the fleet variable and exported it by hand, the next run
+    // did not and died at preflight. A credential must not depend on the
+    // agent's mood. Absent, nothing is exported at all — an empty `GH_TOKEN`
+    // out-prefers a logged-in account, same reasoning as `tmux::spawn`.
+    let gh_env;
+    if let Some(t) = crate::config::fleet_gh_token() {
+        gh_env = t;
+        env.push(("GH_TOKEN", &gh_env));
+    }
     // The agent's own identity, in the JOB's tenant. `AuthConfig::load` reads a
     // FILE, so without this `nook` inside the agent acts as whoever last ran
     // `nook login` on this machine — on a shared operator node, one human in one

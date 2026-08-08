@@ -818,7 +818,7 @@ impl LoopJobRepository for FakeLoopJobRepository {
             })
             .cloned()
             .collect();
-        mine.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        mine.sort_by_key(|j| std::cmp::Reverse(j.created_at));
         mine.truncate(limit.max(0) as usize);
         Ok(mine)
     }

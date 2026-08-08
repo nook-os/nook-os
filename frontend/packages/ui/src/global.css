@@ -6588,9 +6588,10 @@ tr:hover .row-action,
   overflow-y: auto;
   background: var(--nook-bg);
   border: 1px solid var(--nook-border);
-  border-radius: var(--nook-radius);
-  align-self: start;
-  max-height: 100%;
+  /* Full column height and square corners: the list sits flush against the
+     panel edge and the transcript, and a floating rounded card there read as
+     a different surface rather than a column of the same one. */
+  height: 100%;
   display: flex;
   flex-direction: column;
   gap: 2px;
