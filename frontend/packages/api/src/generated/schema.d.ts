@@ -4760,6 +4760,18 @@ export interface components {
              */
             queued_reason?: string | null;
             requested_by: components["schemas"]["UserId"];
+            review_head_sha?: string | null;
+            /**
+             * Format: int64
+             * @description The pull request a `review` run is about, and the head it was raised
+             *     for. `None` for every other kind — a spec run is about a ticket.
+             *
+             *     The head is the wakeup rule: a PR whose head has not moved since the
+             *     last completed run for it is owed nothing. Without it the only available
+             *     question was "does this repo have PRs", which is why the old design
+             *     needed a timer.
+             */
+            review_pr_number?: number | null;
             /**
              * @description The general idea the run starts from (MAIN-231) — the human's opening
              *     brief, set at create time and carried into the executor's session.

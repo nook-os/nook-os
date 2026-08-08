@@ -223,9 +223,13 @@ const TTL: Duration = Duration::from_secs(60);
 
 /// What we last learned about one workspace.
 struct Cached {
-    /// The last count the forge actually answered. `None` means it has never
+    /// The last LIST the forge actually answered. `None` means it has never
     /// answered — a fresh boot into an outage.
-    count: Option<u32>,
+    ///
+    /// The list, not a count, because a per-PR wakeup needs the items and a
+    /// second cache holding the same answer in a different shape is how the two
+    /// come to disagree. The count is `.len()`.
+    items: Option<Vec<PullRequest>>,
     fetched: Instant,
     /// Whether the last attempt failed, so the log speaks once per transition
     /// rather than once per pass.
@@ -284,16 +288,26 @@ impl ReviewDemand {
     /// caller — *we do not know, so run what the repo declared* — and collapsing
     /// them here keeps that judgement in one place instead of four.
     pub async fn open_prs(&self, workspace: WorkspaceId, remote: Option<&str>) -> Option<u32> {
+        Some(self.prs(workspace, remote).await?.len() as u32)
+    }
+
+    /// The open PRs themselves — what a per-PR wakeup converges on. Same cache,
+    /// same failure policy; `open_prs` is this, counted.
+    pub async fn prs(
+        &self,
+        workspace: WorkspaceId,
+        remote: Option<&str>,
+    ) -> Option<Vec<PullRequest>> {
         let forge = self.forge.as_ref()?;
         let repo = github_repo(remote?)?;
 
         if let Some(fresh) = self.fresh(workspace) {
             return fresh;
         }
-        match forge.open_prs_needing_review(&repo).await {
-            Ok(count) => {
-                self.record_ok(workspace, count, &repo);
-                Some(count)
+        match forge.prs_needing_review(&repo).await {
+            Ok(items) => {
+                self.record_ok(workspace, items.clone(), &repo);
+                Some(items)
             }
             Err(e) => self.record_err(workspace, &repo, &e),
         }
@@ -301,13 +315,13 @@ impl ReviewDemand {
 
     /// The cached answer if it is still inside the TTL. The outer `Option` is
     /// "we have something to say", the inner one is what we would say.
-    fn fresh(&self, workspace: WorkspaceId) -> Option<Option<u32>> {
+    fn fresh(&self, workspace: WorkspaceId) -> Option<Option<Vec<PullRequest>>> {
         let seen = self.seen.lock().ok()?;
         let cached = seen.get(&workspace)?;
-        (cached.fetched.elapsed() < self.ttl).then_some(cached.count)
+        (cached.fetched.elapsed() < self.ttl).then(|| cached.items.clone())
     }
 
-    fn record_ok(&self, workspace: WorkspaceId, count: u32, repo: &Repo) {
+    fn record_ok(&self, workspace: WorkspaceId, items: Vec<PullRequest>, repo: &Repo) {
         let Ok(mut seen) = self.seen.lock() else {
             return;
         };
@@ -315,14 +329,14 @@ impl ReviewDemand {
         if was_failing {
             tracing::info!(
                 %workspace, repo = %format!("{}/{}", repo.owner, repo.name),
-                open_prs = count,
+                open_prs = items.len(),
                 "forge recovered — review loops are scaling to the real count again"
             );
         }
         seen.insert(
             workspace,
             Cached {
-                count: Some(count),
+                items: Some(items),
                 fetched: Instant::now(),
                 failing: false,
             },
@@ -336,17 +350,17 @@ impl ReviewDemand {
         workspace: WorkspaceId,
         repo: &Repo,
         error: &anyhow::Error,
-    ) -> Option<u32> {
+    ) -> Option<Vec<PullRequest>> {
         let Ok(mut seen) = self.seen.lock() else {
             return None;
         };
-        let last = seen.get(&workspace).and_then(|c| c.count);
+        let last = seen.get(&workspace).and_then(|c| c.items.clone());
         let was_failing = seen.get(&workspace).is_some_and(|c| c.failing);
         if !was_failing {
             tracing::warn!(
                 %workspace, repo = %format!("{}/{}", repo.owner, repo.name),
                 error = %error,
-                last_known_open_prs = ?last,
+                last_known_open_prs = ?last.as_ref().map(Vec::len),
                 "forge unreachable — holding the last known review demand; \
                  this is NOT a scale-down"
             );
@@ -354,7 +368,7 @@ impl ReviewDemand {
         seen.insert(
             workspace,
             Cached {
-                count: last,
+                items: last.clone(),
                 fetched: Instant::now(),
                 failing: true,
             },

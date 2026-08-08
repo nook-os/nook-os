@@ -49,6 +49,21 @@ pub struct NewLoopJob {
     pub seed: Option<String>,
     /// Set only by a re-run, which records what it descends from.
     pub predecessor_job_id: Option<JobId>,
+    /// The work item, for a `review` run: which PR, at which head.
+    pub review_pr_number: Option<i64>,
+    pub review_head_sha: Option<String>,
+}
+
+/// What the wakeup rule knows about one pull request's runs.
+#[derive(Debug, Clone, nook_db::FromDbRow)]
+pub struct ReviewRunHeads {
+    pub review_pr_number: i64,
+    /// The head a run is in flight for, if one is. Its presence is what stops a
+    /// second run being raised for the same PR.
+    pub live_head: Option<String>,
+    /// The head of the newest run that actually finished. A PR whose forge head
+    /// still equals this has been reviewed as it stands.
+    pub done_head: Option<String>,
 }
 
 /// A job the reaper found stranded on a node that stopped reporting, with the
@@ -103,6 +118,19 @@ pub trait LoopJobRepository: Send + Sync {
         tenant: TenantId,
         workspace: WorkspaceId,
     ) -> ApiResult<Option<JobId>>;
+
+    /// Per PR: the head of its newest LIVE run, and the head of its newest
+    /// COMPLETED run. Both `None` when that PR has no such run.
+    ///
+    /// One query rather than two calls per pull request, because a repo with
+    /// forty open PRs would otherwise make forty round trips on every pass.
+    /// This is the whole state the wakeup rule reads: a run is owed when the
+    /// forge's head differs from the completed head and nothing is live.
+    async fn review_run_heads(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Vec<ReviewRunHeads>>;
 
     async fn list_for_task(&self, tenant: TenantId, task: TaskId) -> ApiResult<Vec<LoopJob>>;
 
@@ -241,8 +269,8 @@ impl LoopJobRepository for DbLoopJobRepository {
             .query_one(
                 "INSERT INTO loop_jobs
                     (id, tenant_id, kind, target_task_id, workspace_id, requested_by,
-                     state, predecessor_job_id, seed)
-                 VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7, $8)
+                     state, predecessor_job_id, seed, review_pr_number, review_head_sha)
+                 VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7, $8, $9, $10)
                  RETURNING *",
                 params![
                     new.id,
@@ -252,10 +280,83 @@ impl LoopJobRepository for DbLoopJobRepository {
                     new.workspace_id.map(|w| w.0),
                     new.requested_by,
                     new.predecessor_job_id.map(|p| p.0),
-                    new.seed
+                    new.seed,
+                    new.review_pr_number,
+                    new.review_head_sha
                 ],
             )
             .await?)
+    }
+
+    async fn review_run_heads(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Vec<ReviewRunHeads>> {
+        // Two plain queries merged here rather than one clever one. A single
+        // statement wanting "the newest row per group" reaches for `DISTINCT ON`
+        // or `array_agg(... ORDER BY ...)`, both Postgres-only, and this file is
+        // held to SQL both engines run.
+        #[derive(nook_db::FromDbRow)]
+        struct Head {
+            review_pr_number: i64,
+            review_head_sha: Option<String>,
+        }
+
+        // At most one row per PR: the partial unique index from 0046 is what
+        // makes that true, not an assumption here.
+        let live: Vec<Head> = self
+            .db
+            .query_all(
+                "SELECT review_pr_number, review_head_sha FROM loop_jobs
+                  WHERE tenant_id = $1 AND workspace_id = $2 AND kind = 'review'
+                    AND review_pr_number IS NOT NULL
+                    AND state IN ('queued', 'claimed', 'running', 'waiting_on_human')",
+                params![tenant, workspace.0],
+            )
+            .await?;
+
+        // The newest FINISHED run per PR. `completed` only — a failed run has
+        // reviewed nothing, so treating it as a head would let one failure
+        // silence a PR until somebody pushed again.
+        let done: Vec<Head> = self
+            .db
+            .query_all(
+                "SELECT review_pr_number, review_head_sha FROM loop_jobs j
+                  WHERE tenant_id = $1 AND workspace_id = $2 AND kind = 'review'
+                    AND review_pr_number IS NOT NULL AND state = 'completed'
+                    AND created_at = (
+                        SELECT MAX(created_at) FROM loop_jobs k
+                         WHERE k.workspace_id = j.workspace_id
+                           AND k.review_pr_number = j.review_pr_number
+                           AND k.kind = 'review' AND k.state = 'completed')",
+                params![tenant, workspace.0],
+            )
+            .await?;
+
+        let mut by_pr: std::collections::HashMap<i64, ReviewRunHeads> =
+            std::collections::HashMap::new();
+        for h in live {
+            by_pr
+                .entry(h.review_pr_number)
+                .or_insert_with(|| ReviewRunHeads {
+                    review_pr_number: h.review_pr_number,
+                    live_head: None,
+                    done_head: None,
+                })
+                .live_head = h.review_head_sha;
+        }
+        for h in done {
+            by_pr
+                .entry(h.review_pr_number)
+                .or_insert_with(|| ReviewRunHeads {
+                    review_pr_number: h.review_pr_number,
+                    live_head: None,
+                    done_head: None,
+                })
+                .done_head = h.review_head_sha;
+        }
+        Ok(by_pr.into_values().collect())
     }
 
     async fn list_for_task(&self, tenant: TenantId, task: TaskId) -> ApiResult<Vec<LoopJob>> {
@@ -628,6 +729,45 @@ impl LoopJobRepository for FakeLoopJobRepository {
             .and_then(|j| j.target_task_id))
     }
 
+    async fn review_run_heads(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Vec<ReviewRunHeads>> {
+        let s = self.inner.lock().unwrap();
+        let mut by_pr: std::collections::HashMap<i64, ReviewRunHeads> =
+            std::collections::HashMap::new();
+        let mut mine: Vec<&LoopJob> = s
+            .jobs
+            .iter()
+            .filter(|j| {
+                j.tenant_id == tenant
+                    && j.workspace_id == Some(workspace)
+                    && j.kind == "review"
+                    && j.review_pr_number.is_some()
+            })
+            .collect();
+        // Oldest first, so the last write per PR is the newest run — the same
+        // "newest wins" the SQL gets from MAX(created_at).
+        mine.sort_by_key(|j| j.created_at);
+        for j in mine {
+            let pr = j.review_pr_number.unwrap();
+            let e = by_pr.entry(pr).or_insert_with(|| ReviewRunHeads {
+                review_pr_number: pr,
+                live_head: None,
+                done_head: None,
+            });
+            match j.state.as_str() {
+                "queued" | "claimed" | "running" | "waiting_on_human" => {
+                    e.live_head = j.review_head_sha.clone()
+                }
+                "completed" => e.done_head = j.review_head_sha.clone(),
+                _ => {}
+            }
+        }
+        Ok(by_pr.into_values().collect())
+    }
+
     async fn active_review_for_workspace(
         &self,
         tenant: TenantId,
@@ -664,6 +804,8 @@ impl LoopJobRepository for FakeLoopJobRepository {
             seed: new.seed,
             created_at: now,
             updated_at: now,
+            review_pr_number: None,
+            review_head_sha: None,
         };
         self.inner.lock().unwrap().jobs.push(job.clone());
         Ok(job)

@@ -3025,6 +3025,17 @@ pub struct LoopJob {
     /// `None` when the job was opened with nothing but its ticket.
     #[serde(default)]
     pub seed: Option<String>,
+    /// The pull request a `review` run is about, and the head it was raised
+    /// for. `None` for every other kind — a spec run is about a ticket.
+    ///
+    /// The head is the wakeup rule: a PR whose head has not moved since the
+    /// last completed run for it is owed nothing. Without it the only available
+    /// question was "does this repo have PRs", which is why the old design
+    /// needed a timer.
+    #[serde(default)]
+    pub review_pr_number: Option<i64>,
+    #[serde(default)]
+    pub review_head_sha: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

@@ -11178,6 +11178,20 @@
           "requested_by": {
             "$ref": "#/components/schemas/UserId"
           },
+          "review_head_sha": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "review_pr_number": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The pull request a `review` run is about, and the head it was raised\nfor. `None` for every other kind — a spec run is about a ticket.\n\nThe head is the wakeup rule: a PR whose head has not moved since the\nlast completed run for it is owed nothing. Without it the only available\nquestion was \"does this repo have PRs\", which is why the old design\nneeded a timer."
+          },
           "seed": {
             "type": [
               "string",

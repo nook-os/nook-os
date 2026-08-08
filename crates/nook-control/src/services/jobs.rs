@@ -182,6 +182,8 @@ pub async fn create(
             requested_by,
             seed: seed.clone(),
             predecessor_job_id: None,
+            review_pr_number: None,
+            review_head_sha: None,
         })
         .await?;
 
@@ -223,6 +225,68 @@ pub async fn create(
 /// what makes AC-4 hold: the sweep may run forever without the queue growing,
 /// since a `queued`, `claimed`, `running` or `waiting_on_human` review all count
 /// as in flight.
+/// Raise one managed run for one work item (MAIN-455).
+///
+/// The dedupe is the DATABASE's: 0046's partial unique index refuses a second
+/// live run for the same (workspace, item). Two control-plane replicas
+/// converging the same instant therefore cannot both raise one, and the loser
+/// gets `None` rather than an error — the same shape `claim_for_executor` uses
+/// for the same reason.
+///
+/// The item's label is the seed, so the agent is TOLD which PR it owns instead
+/// of filtering a list to discover it. That is what retired the shard
+/// arithmetic: a run that knows its item needs no partition.
+pub async fn raise_run(
+    state: &AppState,
+    tenant: TenantId,
+    requested_by: UserId,
+    workspace: WorkspaceId,
+    kind: &str,
+    item: &crate::services::work_source::WorkItem,
+) -> ApiResult<Option<LoopJob>> {
+    let job = match state
+        .jobs
+        .create(crate::repo::jobs::NewLoopJob {
+            id: JobId::new(),
+            tenant,
+            kind: kind.to_string(),
+            target_task_id: None,
+            workspace_id: Some(workspace),
+            requested_by,
+            seed: Some(item.label.clone()),
+            predecessor_job_id: None,
+            review_pr_number: Some(item.key),
+            review_head_sha: Some(item.fingerprint.clone()),
+        })
+        .await
+    {
+        Ok(j) => j,
+        // A unique-index violation here is the dedupe WORKING, not a fault:
+        // another replica raised this run between our read and our write, which
+        // is precisely what 0046's index exists to arbitrate.
+        Err(crate::error::ApiError::Db(e)) if e.is_unique_violation() => return Ok(None),
+        Err(e) => return Err(e),
+    };
+
+    append_transcript(state, job.id, "human", &item.label)
+        .await
+        .ok();
+
+    // Enqueue AFTER the row exists, so a consumer racing us always finds it —
+    // the same ordering `enqueue_review` relies on.
+    state
+        .queue
+        .enqueue(NewWork::new(
+            tenant.0,
+            WORK_TYPE,
+            serde_json::to_vec(&job.id).unwrap_or_default(),
+        ))
+        .await?;
+
+    record_job_event(state, tenant, "job.created", &job, false).await;
+    Ok(Some(job))
+}
+
 pub async fn enqueue_review(
     state: &AppState,
     tenant: TenantId,
@@ -257,6 +321,8 @@ pub async fn enqueue_review(
             requested_by,
             seed: seed.clone(),
             predecessor_job_id: None,
+            review_pr_number: None,
+            review_head_sha: None,
         })
         .await?;
 
@@ -422,6 +488,8 @@ pub async fn rerun(
             requested_by,
             seed: prev.seed.clone(),
             predecessor_job_id: Some(prev.id),
+            review_pr_number: None,
+            review_head_sha: None,
         })
         .await?;
 
