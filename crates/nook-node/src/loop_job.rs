@@ -108,6 +108,54 @@ fn job_dirname(job_id: &str) -> String {
     sanitize(job_id)
 }
 
+/// The worktree directory a REVIEW run works in: stable per (workspace, PR),
+/// where every other kind gets a per-job path.
+///
+/// Stability is the whole point, and it is what per-job paths made impossible:
+/// Claude Code buckets its sessions by working directory, so a worktree named
+/// after the job id put every run in a brand-new empty bucket and there was
+/// never anything to resume — confirmed live, two runs of one PR, two
+/// unrelated agent sessions. Safe to share across runs because 0046's unique
+/// index means no two live runs ever hold the same PR.
+fn review_dirname(workspace_id: &str, pr: u64) -> String {
+    sanitize(&format!("review-{workspace_id}-pr{pr}"))
+}
+
+/// The agent session a REVIEW run pins on its first pass and resumes on every
+/// later one: UUIDv5 over (workspace, PR), so the same PR always names the same
+/// session without anything having to be stored or looked up.
+fn review_session_id(workspace_id: &str, pr: u64) -> String {
+    uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_OID,
+        format!("nook-review:{workspace_id}:{pr}").as_bytes(),
+    )
+    .to_string()
+}
+
+/// Does the agent already hold a session under this id?
+///
+/// Answered from the filesystem — `<config>/projects/*/<id>.jsonl` — because it
+/// decides which FLAG the launch gets: `--resume` on a session that exists,
+/// `--session-id` to pin one that does not. Guessing wrong is not recoverable
+/// after launch: resuming a missing session fails the run, and pinning an
+/// existing id collides with it. The scan crosses every project bucket rather
+/// than deriving this run's, so the answer does not depend on reproducing
+/// Claude Code's path-munging scheme.
+fn agent_session_exists(session_id: &str) -> bool {
+    let config = std::env::var("CLAUDE_CONFIG_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".claude")
+        });
+    let file = format!("{session_id}.jsonl");
+    let Ok(projects) = std::fs::read_dir(config.join("projects")) else {
+        return false;
+    };
+    projects
+        .flatten()
+        .any(|bucket| bucket.path().join(&file).is_file())
+}
+
 fn job_tmux_name(job_id: &str) -> String {
     format!("{}job_{}", crate::tmux::SESSION_PREFIX, sanitize(job_id))
 }
@@ -186,11 +234,11 @@ fn add_job_worktree_in(
     wt_base: &Path,
     cache: &Path,
     branch: &str,
-    job_id: &str,
+    dirname: &str,
 ) -> Result<PathBuf, String> {
     std::fs::create_dir_all(wt_base)
         .map_err(|e| format!("cannot create {}: {e}", wt_base.display()))?;
-    let dest = wt_base.join(sanitize(job_id));
+    let dest = wt_base.join(sanitize(dirname));
     if dest.exists() {
         return Err(format!("{} already exists", dest.display()));
     }
@@ -404,7 +452,13 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
         ssh_key,
         nook_token,
     } = job;
-    let dirname = job_dirname(&job_id);
+    // A review run keeps ONE working directory per (workspace, PR) across
+    // runs — the agent-session bucket is keyed on it (see `review_dirname`).
+    // Everything else stays per-job.
+    let dirname = match (review_pr_number, workspace_id.as_deref()) {
+        (Some(pr), Some(ws)) => review_dirname(ws, pr),
+        _ => job_dirname(&job_id),
+    };
     if let Ok(mut s) = running_jobs().lock() {
         s.insert(dirname.clone());
     }
@@ -449,7 +503,14 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
             }
         }
     };
-    let worktree = match add_job_worktree_in(&wt_base, &cache, &branch, &job_id) {
+    // A crashed run can leave the stable path behind; the unique index says no
+    // LIVE run holds this PR, so clearing the leftover is safe and starting
+    // over is right — the agent's session survives in the config dir, not here.
+    let leftover = wt_base.join(&dirname);
+    if leftover.exists() {
+        let _ = remove_job_worktree(&cache, &leftover);
+    }
+    let worktree = match add_job_worktree_in(&wt_base, &cache, &branch, &dirname) {
         Ok(w) => w,
         Err(e) => {
             finished(&out, &job_id, false, format!("worktree setup failed: {e}"));
@@ -643,14 +704,23 @@ fn drive_streaming(
     } = brief;
     use crate::job_adapter::{self, Event, StreamingSession, TurnState};
 
-    // A review run resumes ITS pull request's session, so a second look at the
-    // same PR keeps the tree and the earlier reasoning instead of rebuilding
-    // both to read one new commit (MAIN-455 AC-3). Best effort by construction:
-    // the session lives on one node, so a run placed elsewhere simply starts
-    // cold rather than failing.
-    let args = match review_pr {
-        Some(pr) => job_adapter::claude_resume_pr_args(job_id, pr),
-        None => job_adapter::claude_stream_args(job_id),
+    // A review run continues ITS pull request's agent session, so a second look
+    // after a push keeps the tree and the earlier reasoning instead of
+    // rebuilding both to read one new commit (MAIN-455 AC-3). The session id is
+    // derived (workspace + PR), the first pass pins it, and every later pass
+    // resumes it — decided by whether the session file exists, never by hope.
+    // Still best effort across machines: the session lives on ONE node, so a
+    // run placed elsewhere pins its own and is a cold start, not a failure.
+    let args = match (review_pr, identity.workspace_id) {
+        (Some(pr), Some(ws)) => {
+            let sid = review_session_id(ws, pr);
+            if agent_session_exists(&sid) {
+                job_adapter::claude_resume_args(&sid)
+            } else {
+                job_adapter::claude_stream_args(&sid)
+            }
+        }
+        _ => job_adapter::claude_stream_args(job_id),
     };
     let mut env: Vec<(&str, &str)> = vec![
         ("NOOK_JOB_ID", job_id),
@@ -1098,6 +1168,30 @@ mod tests {
     /// make the operator safer — it made every review fail with "no clone
     /// cache", because clone-on-demand lands a working tree and a job reads a
     /// bare mirror.
+    /// The warm layer's whole contract: the same PR always names the same
+    /// agent session and the same working directory, run after run — that is
+    /// what lets `--resume` find the earlier conversation. Confirmed broken the
+    /// other way live: per-job paths meant two runs of one PR produced two
+    /// unrelated sessions.
+    #[test]
+    fn a_pull_requests_session_and_worktree_are_stable_across_runs() {
+        let a = review_session_id("ws-1", 348);
+        let b = review_session_id("ws-1", 348);
+        assert_eq!(a, b, "same PR, same session, whatever run asks");
+        assert_ne!(
+            a,
+            review_session_id("ws-1", 349),
+            "another PR is another reviewer"
+        );
+        assert_ne!(
+            a,
+            review_session_id("ws-2", 348),
+            "another repo's #348 is unrelated"
+        );
+        assert_eq!(review_dirname("ws-1", 348), review_dirname("ws-1", 348));
+        assert_ne!(review_dirname("ws-1", 348), review_dirname("ws-1", 349));
+    }
+
     #[test]
     fn every_kind_may_build_its_clone_cache() {
         for kind in ["review", "spec", "decompose"] {

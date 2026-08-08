@@ -77,28 +77,24 @@ pub fn adapter_for(runtime: &str) -> Adapter {
 ///   these autonomous permissions exist for.
 /// - `--session-id` — pins the id so AC-5's resume has something to name.
 pub fn claude_stream_args(session_id: &str) -> Vec<String> {
-    stream_args(session_id, None)
+    stream_args(session_id, false)
 }
 
-/// The same run, but resuming the agent session a previous run left behind
-/// (MAIN-455 AC-3).
+/// The same run, but continuing the agent session a previous run left behind
+/// (MAIN-455 AC-3): `--resume <id>` instead of pinning a fresh `--session-id`.
 ///
-/// `--from-pr` is Claude Code's own "resume the session linked to this PR", and
-/// it is what makes a second review of the same pull request cheap: the agent
-/// still has the tree, the diff and its own earlier reasoning instead of
-/// rebuilding all of it to say "one more commit landed". The flag is documented
-/// as working only with `--print`, which is the mode every run is in.
-///
-/// Resume is BEST EFFORT by construction. The session lives in the agent's home
-/// on one node, so a run for the same PR placed elsewhere finds nothing to
-/// resume — which is a cold start, not a failure, and the run proceeds either
-/// way. That is why the PR number is passed rather than a stored session id we
-/// would then have to keep true.
-pub fn claude_resume_pr_args(session_id: &str, pr_number: u64) -> Vec<String> {
-    stream_args(session_id, Some(pr_number))
+/// This replaced `--from-pr`, which was tried first and PROVEN not to link on
+/// the live stack: two consecutive runs of the same PR produced two distinct
+/// agent sessions. Claude Code links a session to a PR when the session opens
+/// one — a session that merely reads a PR through `gh` never acquires the link,
+/// so for a reviewer the flag always came up empty. Resuming by an id WE derive
+/// (stable per workspace + PR) makes the continuation a fact the caller checks
+/// on disk, not a linkage hoped for.
+pub fn claude_resume_args(session_id: &str) -> Vec<String> {
+    stream_args(session_id, true)
 }
 
-fn stream_args(session_id: &str, from_pr: Option<u64>) -> Vec<String> {
+fn stream_args(session_id: &str, resume: bool) -> Vec<String> {
     let mut args: Vec<String> = [
         "-p",
         "--input-format",
@@ -112,18 +108,10 @@ fn stream_args(session_id: &str, from_pr: Option<u64>) -> Vec<String> {
     .iter()
     .map(|s| s.to_string())
     .collect();
-    match from_pr {
-        // `--from-pr` names the session to continue, so pinning a fresh
-        // `--session-id` beside it would ask for two different things at once.
-        Some(pr) => {
-            args.push("--from-pr".to_string());
-            args.push(pr.to_string());
-        }
-        None => {
-            args.push("--session-id".to_string());
-            args.push(session_id.to_string());
-        }
-    }
+    // `--resume` names an existing session to continue; `--session-id` pins a
+    // NEW one. Passing both would ask for two different things at once.
+    args.push(if resume { "--resume" } else { "--session-id" }.to_string());
+    args.push(session_id.to_string());
     args
 }
 
@@ -473,6 +461,20 @@ mod tests {
         // The acknowledgement that a steering message actually arrived.
         assert!(a.contains(&"--replay-user-messages".to_string()));
         assert!(joined.contains("--session-id sess-1"));
+    }
+
+    /// The resume launch names an EXISTING session and must not also pin a new
+    /// one — the two flags ask for different things, and passing both is how a
+    /// warm reviewer silently becomes a cold one.
+    #[test]
+    fn resume_args_resume_and_never_pin() {
+        let a = claude_resume_args("sess-2");
+        let joined = a.join(" ");
+        assert!(joined.contains("--resume sess-2"));
+        assert!(!joined.contains("--session-id"));
+        // Same streaming contract as a pinned run — the caller cannot tell.
+        assert!(a.contains(&"-p".to_string()));
+        assert!(joined.contains("--output-format stream-json"));
     }
 
     #[test]
