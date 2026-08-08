@@ -13,7 +13,7 @@ use rand::Rng;
 
 use crate::error::ApiResult;
 use crate::events::{self, EventDraft};
-use crate::repo::workspaces::{CheckoutUpsert, PathMove, WorkspaceRepository};
+use crate::repo::workspaces::CheckoutUpsert;
 use crate::services::identity::slugify;
 use crate::state::AppState;
 
@@ -295,66 +295,6 @@ pub async fn reconcile(
         },
     );
     Ok(())
-}
-
-/// Coordinated path rewrite for `nook migrate-workspaces` (MAIN-107 AC-4).
-///
-/// The counterpart to [`reconcile`]: where reconcile is destructive by path —
-/// a checkout that stops being reported is DELETED and its new location is a
-/// brand-new row — this rewrites the two durable path records in place, in one
-/// transaction, preserving row identity. That is the whole point of a migration
-/// that renames directories: no checkout should look new (which would announce
-/// a fresh `.env` delivery), and no task's `worktree_path` should go stale.
-///
-/// Every write is pinned to `node_id`, so a caller can only ever move rows that
-/// belong to the node it is acting as. And an `old` path that is not currently
-/// a checkout of this node is refused BEFORE any write — a mistake, or an
-/// attempt to name another node's paths, aborts the whole request rather than
-/// silently updating nothing.
-pub async fn migrate_paths(
-    repo: &dyn WorkspaceRepository,
-    node_id: NodeId,
-    pairs: &[nook_types::MigratePathPair],
-) -> ApiResult<nook_types::MigratePathsResponse> {
-    // Nothing to do is success (the CLI's already-migrated node sends none).
-    if pairs.is_empty() {
-        return Ok(nook_types::MigratePathsResponse {
-            node_workspaces_updated: 0,
-            tasks_updated: 0,
-        });
-    }
-
-    // Belonging check, before any write.
-    let olds: Vec<String> = pairs.iter().map(|p| p.old.clone()).collect();
-    let mine: std::collections::HashSet<String> = repo
-        .existing_paths(node_id, &olds)
-        .await?
-        .into_iter()
-        .collect();
-    if let Some(stray) = olds.iter().find(|p| !mine.contains(*p)) {
-        return Err(crate::error::ApiError::BadRequest(format!(
-            "{stray} is not a checkout of this node — refusing to rewrite paths \
-             that do not belong to it"
-        )));
-    }
-
-    // One transaction inside the repository: every path record moves together
-    // or none does. `path` on node_workspaces and `worktree_path` on tasks are
-    // the only two durable on-disk path records (0001_init). Row ids are never
-    // touched.
-    let moves: Vec<PathMove> = pairs
-        .iter()
-        .map(|p| PathMove {
-            old: p.old.clone(),
-            new: p.new.clone(),
-        })
-        .collect();
-    let moved = repo.migrate_checkout_paths(node_id, &moves).await?;
-
-    Ok(nook_types::MigratePathsResponse {
-        node_workspaces_updated: moved.checkouts,
-        tasks_updated: moved.tasks,
-    })
 }
 
 async fn create_workspace_for(

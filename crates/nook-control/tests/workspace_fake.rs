@@ -12,9 +12,8 @@
 //! the DB-backed suites.
 
 use nook_control::repo::workspaces::{
-    CheckoutUpsert, FakeWorkspaceRepository, KeyMatch, PathMove, WorkspaceRepository,
+    CheckoutUpsert, FakeWorkspaceRepository, KeyMatch, WorkspaceRepository,
 };
-use nook_control::services::discovery::migrate_paths;
 use nook_control::services::workspace_queries;
 use nook_types::*;
 
@@ -221,81 +220,6 @@ async fn a_freshly_tombstoned_checkout_survives_the_reaper() {
 
 // ── path migration (MAIN-107 AC-4) ──────────────────────────────────────────
 
-#[tokio::test]
-async fn a_path_migration_moves_checkouts_and_task_worktrees_together() {
-    let repo = FakeWorkspaceRepository::new();
-    let t = tenant();
-    let node = NodeId::new();
-    let ws = repo.create(t, "w", "w", None, None).await.unwrap();
-    scanned(&repo, t, node, ws.id, "/old/w", "clone").await;
-    repo.add_task_worktree(node, "/old/w");
-
-    let resp = migrate_paths(
-        &repo,
-        node,
-        &[MigratePathPair {
-            old: "/old/w".into(),
-            new: "/new/w".into(),
-        }],
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(resp.node_workspaces_updated, 1);
-    assert_eq!(
-        resp.tasks_updated, 1,
-        "a task's worktree_path must move with the directory, or it goes stale"
-    );
-    assert_eq!(
-        repo.checkout_path(t, ws.id, node).await.unwrap().as_deref(),
-        Some("/new/w")
-    );
-}
-
-#[tokio::test]
-async fn a_path_that_is_not_this_nodes_checkout_is_refused_before_any_write() {
-    let repo = FakeWorkspaceRepository::new();
-    let t = tenant();
-    let (mine, theirs) = (NodeId::new(), NodeId::new());
-    let ws = repo.create(t, "w", "w", None, None).await.unwrap();
-    scanned(&repo, t, mine, ws.id, "/srv/mine", "clone").await;
-    scanned(&repo, t, theirs, ws.id, "/srv/theirs", "clone").await;
-
-    let err = migrate_paths(
-        &repo,
-        mine,
-        &[
-            MigratePathPair {
-                old: "/srv/mine".into(),
-                new: "/moved/mine".into(),
-            },
-            // Another node's path, named by a caller acting as `mine`.
-            MigratePathPair {
-                old: "/srv/theirs".into(),
-                new: "/moved/theirs".into(),
-            },
-        ],
-    )
-    .await
-    .expect_err("naming another node's path aborts the request");
-    assert!(err.to_string().contains("/srv/theirs"), "{err}");
-
-    // The whole request aborts: the legitimate half must not have landed.
-    assert_eq!(
-        repo.checkout_path(t, ws.id, mine).await.unwrap().as_deref(),
-        Some("/srv/mine"),
-        "the belonging check runs BEFORE any write"
-    );
-}
-
-#[tokio::test]
-async fn migrating_nothing_is_success() {
-    let repo = FakeWorkspaceRepository::new();
-    let resp = migrate_paths(&repo, NodeId::new(), &[]).await.unwrap();
-    assert_eq!(resp.node_workspaces_updated, 0);
-    assert_eq!(resp.tasks_updated, 0);
-}
-
 // ── remote adoption guards (MAIN-223) ───────────────────────────────────────
 
 #[tokio::test]
@@ -485,23 +409,6 @@ async fn resolve_key_matches_the_enum_the_service_translates() {
 }
 
 // ── the path-move struct is not silently lossy ──────────────────────────────
-
-#[tokio::test]
-async fn a_move_that_matches_nothing_reports_zero_rather_than_failing() {
-    let repo = FakeWorkspaceRepository::new();
-    let node = NodeId::new();
-    let moved = repo
-        .migrate_checkout_paths(
-            node,
-            &[PathMove {
-                old: "/absent".into(),
-                new: "/elsewhere".into(),
-            }],
-        )
-        .await
-        .unwrap();
-    assert_eq!((moved.checkouts, moved.tasks), (0, 0));
-}
 
 // ── placement hosts, absorbed from services::schedule (MAIN-292) ────────────
 
