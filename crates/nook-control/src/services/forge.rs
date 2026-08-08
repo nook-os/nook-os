@@ -35,6 +35,19 @@ pub struct Repo {
     pub name: String,
 }
 
+/// One open pull request, as a unit of review work.
+///
+/// The head sha is what makes a wakeup PER-PR rather than per-repo: a run is
+/// owed for a PR whose head has moved since the last completed run for it, and
+/// owed for nothing otherwise. A count could only ever say "this repo has PRs",
+/// which is why the count-based version needed a timer to decide when to look
+/// again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequest {
+    pub number: u64,
+    pub head_sha: String,
+}
+
 /// What the reconciler needs to know about a repository's review queue.
 ///
 /// One operation, because one is all this card needs and a trait with methods
@@ -42,13 +55,20 @@ pub struct Repo {
 /// and mergeability are deliberately absent (NG-2).
 #[async_trait::async_trait]
 pub trait Forge: Send + Sync {
-    /// How many open pull requests need review right now.
+    /// The open pull requests a reviewer would pick up, with their heads.
     ///
-    /// An error is an OUTAGE, never a zero. The caller's whole failure policy
-    /// depends on those being different values, so an implementation that
+    /// An error is an OUTAGE, never an empty list. The caller's whole failure
+    /// policy depends on those being different values, so an implementation that
     /// cannot reach the forge must return `Err` rather than report an empty
-    /// queue.
-    async fn open_prs_needing_review(&self, repo: &Repo) -> anyhow::Result<u32>;
+    /// queue — otherwise an outage reads as "everything is reviewed" and the
+    /// reviewers scale to zero exactly when they are needed.
+    async fn prs_needing_review(&self, repo: &Repo) -> anyhow::Result<Vec<PullRequest>>;
+
+    /// How many, which is all MAIN-448's sizing ever wanted. DERIVED, so the
+    /// count can never disagree with the list it came from.
+    async fn open_prs_needing_review(&self, repo: &Repo) -> anyhow::Result<u32> {
+        Ok(self.prs_needing_review(repo).await?.len() as u32)
+    }
 }
 
 /// Is this remote a GitHub repository, and which one?
@@ -136,7 +156,7 @@ const PAGE: usize = 100;
 
 #[async_trait::async_trait]
 impl Forge for GithubForge {
-    async fn open_prs_needing_review(&self, repo: &Repo) -> anyhow::Result<u32> {
+    async fn prs_needing_review(&self, repo: &Repo) -> anyhow::Result<Vec<PullRequest>> {
         let url = format!(
             "https://api.github.com/repos/{}/{}/pulls?state=open&per_page={PAGE}",
             repo.owner, repo.name
@@ -161,7 +181,7 @@ impl Forge for GithubForge {
             );
         }
         let prs: Vec<serde_json::Value> = resp.json().await?;
-        Ok(count_needing_review(&prs))
+        Ok(needing_review(&prs))
     }
 }
 
@@ -177,10 +197,19 @@ impl Forge for GithubForge {
 /// should be running. An over-count costs an idle agent doing a no-op pass; an
 /// under-count is a repo that silently goes unreviewed, which AC-3 names as the
 /// failure to design against. So the cheap, inclusive definition wins.
-fn count_needing_review(prs: &[serde_json::Value]) -> u32 {
+fn needing_review(prs: &[serde_json::Value]) -> Vec<PullRequest> {
     prs.iter()
         .filter(|pr| pr.get("draft").and_then(|d| d.as_bool()) != Some(true))
-        .count() as u32
+        .filter_map(|pr| {
+            Some(PullRequest {
+                number: pr.get("number")?.as_u64()?,
+                // A PR whose head we cannot read cannot be compared against its
+                // last run, so it is dropped rather than guessed at: an item we
+                // cannot tell has changed would re-run on every pass forever.
+                head_sha: pr.get("head")?.get("sha")?.as_str()?.to_string(),
+            })
+        })
+        .collect()
 }
 
 /// How long a count stands before it is asked for again.
@@ -368,13 +397,23 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Forge for Fake {
-        async fn open_prs_needing_review(&self, _repo: &Repo) -> anyhow::Result<u32> {
+        async fn prs_needing_review(&self, _repo: &Repo) -> anyhow::Result<Vec<PullRequest>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let mut a = self.answers.lock().unwrap();
             if a.is_empty() {
                 anyhow::bail!("fake ran out of answers");
             }
-            a.remove(0)
+            // The fake still answers in COUNTS, because that is what the sizing
+            // tests are about; the items are synthesized so the one real
+            // implementation of "count" (the trait's default) is what runs.
+            a.remove(0).map(|n| {
+                (0..n)
+                    .map(|i| PullRequest {
+                        number: i as u64 + 1,
+                        head_sha: format!("sha{i}"),
+                    })
+                    .collect()
+            })
         }
     }
 
@@ -420,14 +459,30 @@ mod tests {
     #[test]
     fn drafts_do_not_count_and_everything_else_does() {
         let prs = serde_json::json!([
-            { "number": 1, "draft": false },
-            { "number": 2, "draft": true },
+            { "number": 1, "draft": false, "head": { "sha": "aaa" } },
+            { "number": 2, "draft": true, "head": { "sha": "bbb" } },
             // Absent `draft` is not a draft — an older API shape must not read
-            // as one and quietly shrink the count.
-            { "number": 3 },
+            // as one and quietly shrink the queue.
+            { "number": 3, "head": { "sha": "ccc" } },
+            // No head sha: undroppable otherwise, because nothing could ever
+            // say whether it had changed.
+            { "number": 4 },
         ]);
-        assert_eq!(count_needing_review(prs.as_array().unwrap()), 2);
-        assert_eq!(count_needing_review(&[]), 0);
+        // Numbers AND heads, because the head is what a per-PR wakeup compares.
+        assert_eq!(
+            needing_review(prs.as_array().unwrap()),
+            vec![
+                PullRequest {
+                    number: 1,
+                    head_sha: "aaa".into()
+                },
+                PullRequest {
+                    number: 3,
+                    head_sha: "ccc".into()
+                },
+            ]
+        );
+        assert!(needing_review(&[]).is_empty());
     }
 
     #[tokio::test]
