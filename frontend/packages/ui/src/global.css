@@ -6587,10 +6587,12 @@ tr:hover .row-action,
   padding: 4px;
   overflow-y: auto;
   background: var(--nook-bg);
-  border: 1px solid var(--nook-border);
-  /* Full column height and square corners: the list sits flush against the
-     panel edge and the transcript, and a floating rounded card there read as
-     a different surface rather than a column of the same one. */
+  /* Only the RIGHT edge draws: the column sits flush inside the panel, whose
+     own chrome already bounds the top, left and bottom — a full border there
+     doubled against it and read bolder on three sides. The one edge this
+     column owns is the seam against the transcript. */
+  border: 0;
+  border-right: 1px solid var(--nook-border);
   height: 100%;
   display: flex;
   flex-direction: column;
