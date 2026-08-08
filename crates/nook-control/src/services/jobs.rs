@@ -1073,6 +1073,11 @@ pub async fn dispatch_to_node(state: &AppState, tenant: TenantId, job: &LoopJob)
             // the agent's `gh` speaks as the tenant, not as the fleet. `None`
             // falls back to the node's env on the other end.
             gh_token: crate::services::workspace_gh_token(state, tenant, workspace_id).await,
+            // The deployment's advertised API URL (MAIN-465) — NOOK_AGENT_PUBLIC_URL,
+            // the same address a joining agent is told to dial. Deliberately NOT
+            // public_base_url: that is the browser URL, wrong from inside a
+            // container on a dev stack.
+            server_url: state.cfg.agent_public_url.clone(),
             // The agent's own identity, in the JOB's tenant, as the person who
             // asked for the run. Revoked in `finish`.
             nook_token: mint_job_token(state, tenant, job.requested_by, job.id).await,

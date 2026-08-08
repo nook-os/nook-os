@@ -46,6 +46,9 @@ pub struct LoopJob {
     /// The workspace's own forge token (MAIN-456); outranks the node's fleet
     /// env when set.
     pub gh_token: Option<String>,
+    /// The control plane's advertised API base URL (MAIN-465). The run's
+    /// `NOOK_SERVER` when present; absent, this node's own `cfg.server`.
+    pub server_url: Option<String>,
     pub target_task_key: String,
     pub repo_url: String,
     pub branch: String,
@@ -449,6 +452,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
         kind,
         review_pr_number,
         gh_token,
+        server_url,
         target_task_key,
         repo_url,
         branch,
@@ -598,7 +602,12 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
             },
             AgentIdentity {
                 token: nook_token.as_deref(),
-                server: &cfg.server,
+                // The advertised API outranks the dialing address (MAIN-465):
+                // the token was minted by the control plane that raised this
+                // run, and it should be spent — and reported — against that
+                // plane's canonical URL, not the internal name this node
+                // happens to reach it by.
+                server: server_url.as_deref().unwrap_or(&cfg.server),
                 workspace_id: workspace_id.as_deref(),
                 gh_token: gh_token.as_deref(),
             },

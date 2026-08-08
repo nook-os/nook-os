@@ -31,6 +31,17 @@ helm install operator ./charts/nook-operator-node \
 `values.server` and `values.existingSecret` are both required — the chart
 refuses to render half a join configuration.
 
+## Runs report the CONTROL PLANE's advertised URL (MAIN-465)
+
+`values.server` is the address THIS NODE dials — in-cluster or in-compose,
+typically an internal service name (`control-plane:8080`). A headless run's
+`nook` CLI should not inherit that: the run's token is minted by the control
+plane, and its transcripts and escalations should name an address a human can
+recognize. Set `NOOK_AGENT_PUBLIC_URL` **on the control plane** (e.g.
+`https://nook.example.com`) and every run it raises is told to dial and report
+that canonical URL instead; unset, runs fall back to the node's own dial
+address, which is only readable when nodes join from outside the network.
+
 ## The fleet's GitHub token (MAIN-407)
 
 Review jobs read pull requests and post their verdict, so the operator needs a
