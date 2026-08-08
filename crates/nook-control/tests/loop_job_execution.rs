@@ -7,6 +7,7 @@
 //! Needs Postgres: `DATABASE_URL` (`NOOK_REQUIRE_DB=1` in the suite).
 
 use nook_control::services::jobs;
+use nook_control::state::AppState;
 use nook_control::ws::registry::NodeHandle;
 use nook_db::{params, Db};
 use nook_types::*;
@@ -192,12 +193,71 @@ async fn dispatch_runs_the_job_and_sends_run_to_the_node() {
             target_task_key,
             repo_url,
             branch,
+            server_url,
             ..
         } => {
             assert_eq!(kind, "spec");
             assert_eq!(target_task_key, "ACME-7");
             assert_eq!(repo_url, "git@example.test:acme/repo.git");
             assert_eq!(branch, "trunk");
+            // A deployment that advertises no agent URL sends none (MAIN-465):
+            // the node falls back to its own configured server address.
+            assert_eq!(server_url, None);
+        }
+        other => panic!("expected RunLoopJob, got {other:?}"),
+    }
+
+    bed.teardown().await;
+}
+
+/// MAIN-465: a deployment that advertises its HTTP API (`NOOK_PUBLIC_API_URL`)
+/// sends that address with every run, so the run's `nook` CLI dials — and its
+/// transcript names — the canonical control plane rather than the internal
+/// service name the executor node happens to reach it by.
+#[tokio::test]
+async fn dispatch_carries_the_advertised_api_url_when_configured() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("lje-url").await;
+    let ws = bed.workspace(tenant).await;
+    let target = task_with_key(&bed, tenant, "ACME", 8).await;
+    let n = node(&bed, tenant).await;
+    node_workspace(
+        &bed,
+        tenant,
+        n,
+        ws,
+        Some("git@example.test:acme/repo.git"),
+        Some("trunk"),
+    )
+    .await;
+    let j = job(&bed, tenant, target, Some(ws), "claimed", Some(n)).await;
+
+    let mut cfg = bed.config();
+    cfg.public_api_url = Some("https://cp.example.test".into());
+    // The agent listener's address must NOT leak into the run (the reviewer's
+    // scope-conflict catch on the first cut of this PR): set it to a decoy and
+    // assert the API URL is what rides the message.
+    cfg.agent_public_url = Some("https://agents.example.test:8081".into());
+    let state = AppState::new(bed.db(), cfg, None).await;
+
+    let (tx, mut rx) = mpsc::channel(4);
+    state.registry.register_node(
+        n,
+        NodeHandle {
+            tenant_id: tenant,
+            tx,
+        },
+    );
+
+    jobs::dispatch_to_node(&state, tenant, &load(&bed, j).await)
+        .await
+        .expect("dispatch");
+
+    match rx.try_recv().expect("a RunLoopJob was sent") {
+        nook_proto::ControlToNode::RunLoopJob { server_url, .. } => {
+            assert_eq!(server_url.as_deref(), Some("https://cp.example.test"));
         }
         other => panic!("expected RunLoopJob, got {other:?}"),
     }
