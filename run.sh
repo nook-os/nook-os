@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Recreates the entire NookOS dev environment from scratch.
-# `docker compose down -v` destroys everything; this script brings it all back.
+# `docker compose down -v` destroys the DATA volumes; this script brings it all
+# back. Build caches live in ./.cache as bind mounts and deliberately survive.
 #
 #   ./run.sh                  full recreate, reusing the images already built
 #   ./run.sh --build          the same, but rebuild the images first
@@ -283,6 +284,9 @@ refresh_dev_cli_context() {
   fi
 }
 
+# shellcheck source=scripts/compose-project.sh
+. ./scripts/compose-project.sh
+
 say "Checking prerequisites..."
 command -v docker >/dev/null || { echo "docker is required"; exit 1; }
 docker compose version >/dev/null || { echo "docker compose v2 is required"; exit 1; }
@@ -293,7 +297,12 @@ docker compose version >/dev/null || { echo "docker compose v2 is required"; exi
 ./scripts/dev-bootstrap.sh
 echo "  Edit .env to point OIDC_* at your IdP, or leave AUTH_DEV_MODE=true for dev-login."
 
-say "Destroying previous environment (docker compose down -v)..."
+# `-v` now takes only the DATA volumes — pgdata, minio, the seeded workspaces
+# and node config. The build caches (cargo registry, both cargo targets, the
+# web node_modules) are bind mounts under ./.cache, so a reset destroys the
+# database without throwing away the compile cache. That is the difference
+# between a reset costing seconds and costing a full cold rebuild.
+say "Destroying previous environment (data volumes; build caches kept)..."
 docker compose down -v --remove-orphans
 
 if command -v cargo >/dev/null && command -v pnpm >/dev/null; then
