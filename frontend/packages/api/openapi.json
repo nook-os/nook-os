@@ -11269,7 +11269,7 @@
           },
           "kind": {
             "type": "string",
-            "description": "`spec` (fill in a ticket), `decompose` (break down an epic), or `review`\n(review a repository)."
+            "description": "`spec` (fill in a ticket), `decompose` (break down an epic), `review`\n(review a repository), or `build` (build a ticket end to end)."
           },
           "predecessor_job_id": {
             "oneOf": [

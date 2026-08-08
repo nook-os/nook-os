@@ -29,11 +29,16 @@ pub const WORK_TYPE: &str = "loop.job";
 /// `review` is deliberately absent: it targets a workspace, not a ticket, so it
 /// cannot be raised through a path whose whole input is a task id. It has its
 /// own entry point, [`enqueue_review`], which is also where the dedupe lives.
-const KINDS: [&str; 3] = ["spec", "decompose", "epic-run"];
+const KINDS: [&str; 4] = ["spec", "decompose", "epic-run", "build"];
 
 /// The workspace-targeted job kind (MAIN-408). Matches the `loop_jobs_kind_check`
 /// constraint added by migration 0040.
 pub const REVIEW_KIND: &str = "review";
+
+/// The ticket-targeted builder kind (MAIN-383). In the kind CHECK since
+/// migration 0050; enqueue is manual here — triggers and convergence are the
+/// arc's split 2, not this one.
+pub const BUILD_KIND: &str = "build";
 
 /// The runtime a loop job needs authorized on its executor (MAIN-160). Both
 /// kinds drive the `nook-spec` / `nook-epic` skills under Claude Code, so the
@@ -137,7 +142,7 @@ pub async fn create(
 ) -> ApiResult<LoopJobDetail> {
     if !KINDS.contains(&req.kind.as_str()) {
         return Err(ApiError::BadRequest(format!(
-            "unknown job kind {:?} — expected spec, decompose or epic-run. A review \
+            "unknown job kind {:?} — expected spec, decompose, epic-run or build. A review \
              job targets a workspace, not a ticket: raise it with POST /api/v1/reviews.",
             req.kind
         )));
@@ -173,6 +178,16 @@ pub async fn create(
         if let Some(existing) = state.jobs.active_epic_run_for(tenant, target_id).await? {
             return Err(ApiError::Conflict(format!(
                 "an epic-run for this epic is already in flight: job {existing}"
+            )));
+        }
+    }
+    if req.kind == BUILD_KIND {
+        // One live build run per card (AC-4). The partial unique index added by
+        // 0050 is the atomic backstop; this check is what turns the second
+        // enqueue into an answer — the job already on it — instead of a 500.
+        if let Some(existing) = state.jobs.active_build_for(tenant, target_id).await? {
+            return Err(ApiError::Conflict(format!(
+                "a build for this card is already in flight: job {existing}"
             )));
         }
     }
@@ -813,12 +828,12 @@ pub async fn select_executor(
         .eligible_loop_executors(tenant, person, LOOP_RUNTIME, &job.kind)
         .await?;
 
-    // A review run keeps the declaration's own placement rule (MAIN-455 AC-4).
-    // Moving reviews off sessions must not quietly widen where they run: the
-    // review loop has always been `role=loop` work, and the selector comes from
-    // `review_loop_spec` rather than a second copy of the string here.
-    let candidates = if job.kind == REVIEW_KIND {
-        let selector = crate::services::session_reconcile::review_loop_selector();
+    // A kind with a placement selector runs on labeled nodes and nowhere else.
+    // Review keeps the declaration's own rule (MAIN-455 AC-4) and build filters
+    // to `role=build` the same way (MAIN-383 AC-3) — each selector has ONE
+    // definition, read here, rather than a second copy of the string.
+    let had_candidates = !candidates.is_empty();
+    let candidates = if let Some(selector) = placement_selector(&job.kind) {
         let mut kept = Vec::new();
         for node in candidates {
             let Some(row) = state.nodes.get(tenant, node).await? else {
@@ -836,6 +851,7 @@ pub async fn select_executor(
     } else {
         candidates
     };
+    let label_filtered_all = had_candidates && candidates.is_empty();
 
     // The last gate is how much each candidate is already holding, which is a
     // `loop_jobs` count rather than a node fact — so it is applied here.
@@ -865,6 +881,12 @@ pub async fn select_executor(
     let Some(node) = chosen else {
         let reason = if blocked_by_capacity {
             "no eligible executor: every eligible node is at its loop-job capacity".to_string()
+        } else if job.kind == BUILD_KIND && label_filtered_all {
+            // Honest, and never a fallback (AC-3): eligible nodes exist but
+            // none wears the label, and the reason says which label to set
+            // rather than blaming auth or declarations that are in fact fine.
+            "no eligible executor: no online eligible node carries the role=build label              — set it on a node that may build (Nodes page edits labels)"
+                .to_string()
         } else {
             no_executor_reason(state, tenant, person, &job.kind).await?
         };
@@ -899,6 +921,27 @@ pub async fn select_executor(
 /// unlimited: an unreported cap should behave like the configuration everything
 /// else ships with, not like permission to take every job in the queue.
 pub const CAPACITY_WHEN_UNREPORTED: u32 = 2;
+
+/// WHERE a build may run: nodes the owner labeled `role=build`, and nowhere
+/// else (MAIN-383 AC-3). A builder pushes code with credentials; placement is
+/// an owner's explicit act — a label set on the Nodes page — never an accident
+/// of being online. Old-style `role=build` labels widen to this per-role key
+/// exactly as `role=loop` does (MAIN-463).
+fn build_selector() -> std::collections::BTreeMap<String, String> {
+    [("role/build".to_string(), "true".to_string())]
+        .into_iter()
+        .collect()
+}
+
+/// The placement selector a kind requires, if any — the single point dispatch
+/// reads, so a new labeled kind is one arm here and one selector definition.
+fn placement_selector(kind: &str) -> Option<std::collections::BTreeMap<String, String>> {
+    match kind {
+        REVIEW_KIND => Some(crate::services::session_reconcile::review_loop_selector()),
+        BUILD_KIND => Some(build_selector()),
+        _ => None,
+    }
+}
 
 /// The wall, asked of the STORED node row and answered as the refusal message
 /// (MAIN-142 AC-2/AC-3), or `None` when this node may run this kind.

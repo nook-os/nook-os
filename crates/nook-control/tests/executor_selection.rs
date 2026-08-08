@@ -534,3 +534,62 @@ async fn a_zero_capacity_node_never_claims() {
 
     bed.teardown().await;
 }
+
+/// MAIN-383 AC-3: build placement is `role=build`, an owner's explicit label.
+/// An otherwise perfectly eligible node — owned, online, authorized, declaring
+/// `build` — gets no build work until it wears the label, and the queued
+/// reason says exactly that instead of blaming auth or declarations. The label
+/// is set old-style (`role=build`) on purpose: `placement_of` widens it to the
+/// `role/build=true` key the selector reads (MAIN-463), so the test also
+/// proves the widening is in the dispatch path.
+#[tokio::test]
+async fn a_build_job_waits_for_a_role_build_label_and_places_once_it_exists() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, tenant, user, person, _spec_job) = setup(&bed).await;
+    let mine = node(
+        &bed,
+        tenant,
+        Some(person),
+        "online",
+        caps_declaring(&["build"], false),
+    )
+    .await;
+
+    let target = target_task(&bed, tenant, user).await;
+    let job = JobId::new();
+    bed.db()
+        .exec(
+            "INSERT INTO loop_jobs (id, tenant_id, kind, target_task_id, requested_by, state)
+         VALUES ($1,$2,'build',$3,$4,'queued')",
+            params![job, tenant, target, user],
+        )
+        .await
+        .expect("build job");
+
+    let placed = jobs::select_executor(&state, tenant, job)
+        .await
+        .expect("select");
+    assert_eq!(placed.state, "queued", "no labeled node, no placement");
+    let reason = placed.queued_reason.clone().unwrap_or_default();
+    assert!(
+        reason.contains("role=build"),
+        "the reason names the missing label, not auth or kinds: {reason}"
+    );
+
+    bed.db()
+        .exec(
+            r#"UPDATE nodes SET labels = '{"role": "build"}' WHERE id = $1"#,
+            params![mine],
+        )
+        .await
+        .expect("label");
+    let placed = jobs::select_executor(&state, tenant, job)
+        .await
+        .expect("select again");
+    assert_eq!(placed.state, "claimed", "the label is the whole difference");
+    assert_eq!(placed.executor_node_id, Some(mine));
+
+    bed.teardown().await;
+}

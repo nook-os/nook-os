@@ -4791,8 +4791,8 @@ export interface components {
             executor_node_id?: null | components["schemas"]["NodeId"];
             id: components["schemas"]["JobId"];
             /**
-             * @description `spec` (fill in a ticket), `decompose` (break down an epic), or `review`
-             *     (review a repository).
+             * @description `spec` (fill in a ticket), `decompose` (break down an epic), `review`
+             *     (review a repository), or `build` (build a ticket end to end).
              */
             kind: string;
             predecessor_job_id?: null | components["schemas"]["JobId"];

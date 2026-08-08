@@ -236,6 +236,92 @@ async fn epic_run_requires_an_epic_target() {
     bed.teardown().await;
 }
 
+/// MAIN-383: `build` is a creatable kind, and a card holds ONE live build run.
+/// The service refusal names the job already on it (a 409, not a 500), and the
+/// 0049 partial unique index is the atomic backstop underneath — both proven
+/// here, plus that a terminal run frees the card.
+#[tokio::test]
+async fn build_jobs_enqueue_and_dedupe_to_one_live_run_per_card() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, tenant, user, b, c) = fixture(&bed).await;
+    let card = task(&bed, tenant, b, c, "task", user, None).await;
+
+    let detail = jobs::create(
+        &state,
+        tenant,
+        user,
+        CreateLoopJobRequest {
+            kind: "build".into(),
+            target_task_id: card.to_string(),
+            seed: None,
+        },
+    )
+    .await
+    .expect("a build job enqueues");
+    assert_eq!(detail.job.kind, "build");
+    assert_eq!(detail.job.state, "queued");
+
+    let err = jobs::create(
+        &state,
+        tenant,
+        user,
+        CreateLoopJobRequest {
+            kind: "build".into(),
+            target_task_id: card.to_string(),
+            seed: None,
+        },
+    )
+    .await
+    .expect_err("a second live build on the same card is refused");
+    match err {
+        nook_control::error::ApiError::Conflict(msg) => assert!(
+            msg.contains(&detail.job.id.to_string()),
+            "the refusal names the job already in flight: {msg}"
+        ),
+        other => panic!("expected Conflict, got {other:?}"),
+    }
+
+    // The index is the atomic version of the same rule: a write that skips the
+    // service check entirely is still refused by the database.
+    let direct = bed
+        .db()
+        .exec(
+            "INSERT INTO loop_jobs (id, tenant_id, kind, target_task_id, requested_by, state)
+             VALUES ($1,$2,'build',$3,$4,'queued')",
+            params![JobId::new(), tenant, card, user],
+        )
+        .await;
+    assert!(
+        direct.is_err(),
+        "the 0050 partial unique index refuses a second live build row"
+    );
+
+    // A finished run is not "in flight": the card is buildable again.
+    bed.db()
+        .exec(
+            "UPDATE loop_jobs SET state = 'completed' WHERE id = $1",
+            params![detail.job.id],
+        )
+        .await
+        .expect("finish");
+    jobs::create(
+        &state,
+        tenant,
+        user,
+        CreateLoopJobRequest {
+            kind: "build".into(),
+            target_task_id: card.to_string(),
+            seed: None,
+        },
+    )
+    .await
+    .expect("a completed run frees the card");
+
+    bed.teardown().await;
+}
+
 #[tokio::test]
 async fn lifecycle_allows_legal_transitions_and_refuses_illegal_ones() {
     let Some(mut bed) = TestBed::new().await else {
