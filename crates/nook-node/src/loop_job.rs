@@ -417,16 +417,17 @@ const UNMAPPED_KINDS: &[(&str, &str)] = &[
 /// Whether this kind may CREATE the clone cache, or only use one already there.
 ///
 /// **This was `kind != "review"` and is now true for every kind — a deliberate
-/// relaxation of a rule written against a threat that no longer exists.**
+/// relaxation of a rule whose threat model no longer holds.**
 ///
-/// MAIN-406 refused a review job the right to clone because a review was
-/// enqueued from a board signal and could name any repo, on a machine several
-/// tenants share: "review this repo" would have become an unbounded fetch. That
-/// caller is gone. A review RUN is raised by the reconciler from a workspace's
-/// own `git_remote_url` (MAIN-455) — control-plane resolved, never supplied by
-/// whoever asked — so the repo a run can fetch is one the tenant already
-/// declared, exactly like the `spec` and `decompose` runs that have always
-/// cached freely.
+/// MAIN-406 refused a review job the right to clone because "review this repo"
+/// arrived from a board signal and could name any repo, on a machine several
+/// tenants share — an unbounded fetch. The property that bar protected now
+/// holds by construction on EVERY path that raises a review: the reconciler
+/// resolves the repo from a workspace's own `git_remote_url`, and the manual
+/// path (`POST /api/v1/reviews`, still routed) requires a user token and
+/// resolves its workspace by key inside the caller's tenant — so no caller,
+/// manual or automatic, can name a remote the tenant never registered. Same
+/// standing as the `spec` and `decompose` runs that have always cached freely.
 ///
 /// Keeping the refusal made the feature unbuildable rather than safe: the
 /// checkout clone-on-demand lands is a WORKING TREE in the node's workspace
@@ -1172,15 +1173,6 @@ mod tests {
         }
     }
 
-    /// MAIN-455: every kind may build its cache, review included.
-    ///
-    /// The inverse of what this asserted. MAIN-406 barred review because a
-    /// board-signal sweep could name any repo on a shared machine; the
-    /// reconciler names only a workspace's own declared remote, so the repo a
-    /// run may fetch is one the tenant already registered. Barring it did not
-    /// make the operator safer — it made every review fail with "no clone
-    /// cache", because clone-on-demand lands a working tree and a job reads a
-    /// bare mirror.
     /// The warm layer's whole contract: the same PR always names the same
     /// agent session and the same working directory, run after run — that is
     /// what lets `--resume` find the earlier conversation. Confirmed broken the
@@ -1205,6 +1197,12 @@ mod tests {
         assert_ne!(review_dirname("ws-1", 348), review_dirname("ws-1", 349));
     }
 
+    /// MAIN-455: every kind may build its cache, review included — the inverse
+    /// of what this asserted under MAIN-406, whose bar existed for a sweep that
+    /// could name any repo on a shared machine. Barring it did not make the
+    /// operator safer; it made every review fail with "no clone cache",
+    /// because clone-on-demand lands a working tree and a job reads a bare
+    /// mirror.
     #[test]
     fn every_kind_may_build_its_clone_cache() {
         for kind in ["review", "spec", "decompose"] {

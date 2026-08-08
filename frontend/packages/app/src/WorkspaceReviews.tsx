@@ -20,7 +20,6 @@ type Run = {
   created_at: string;
 };
 
-/** What a run is ABOUT, in the words the panel can show without a lookup. */
 /** The loop's state tones, in the design system's words. */
 export function pillTone(
   tone: "info" | "warn" | "err" | "ok" | "muted",
@@ -28,6 +27,7 @@ export function pillTone(
   return tone === "muted" ? "dim" : tone;
 }
 
+/** What a run is ABOUT, in the words the panel can show without a lookup. */
 export function runLabel(run: Run): string {
   return run.review_pr_number ? `PR #${run.review_pr_number}` : "review";
 }

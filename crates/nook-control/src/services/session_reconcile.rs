@@ -853,6 +853,48 @@ pub async fn pass(state: &AppState, clones: &CloneThrottle) -> crate::error::Api
                 tracing::warn!(workspace = %ws.id, error = %e, "workspace clone reconcile failed");
             }
 
+            // A fleet that deployed BEFORE MAIN-455 still carries live tmux
+            // review sessions, and deleting the reconciler's Stop arm left
+            // nothing that would ever end them — their rows sit `running`
+            // forever while headless runs do the actual reviewing beside them.
+            // This is the retired scale-down run to ZERO: kill first, mark the
+            // row only if the node took it, exactly the ordering the old arm
+            // used, and a node that is offline keeps its row live so the next
+            // pass tries again. On a fleet born after MAIN-455 the list is
+            // empty and this costs one query.
+            match state
+                .sessions
+                .live_managed(tenant, ws.id, Some(ManagedPurpose::ReviewLoop))
+                .await
+            {
+                Ok(stale) => {
+                    for sess in stale {
+                        let (session_id, node_id) = (sess.id, sess.node_id);
+                        if !state.registry.send_to_node(
+                            node_id,
+                            nook_proto::ControlToNode::KillSession { session_id },
+                        ) {
+                            tracing::warn!(
+                                workspace = %ws.id, session = %session_id,
+                                "cannot stop a legacy review session — node offline; retrying next pass"
+                            );
+                            continue;
+                        }
+                        if let Err(e) = state.sessions.mark_ended(tenant, session_id).await {
+                            tracing::warn!(workspace = %ws.id, session = %session_id, error = %e, "legacy review session stop failed");
+                        } else {
+                            tracing::info!(
+                                workspace = %ws.id, session = %session_id,
+                                "stopped a legacy tmux review session — reviews are headless runs now (MAIN-455)"
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(workspace = %ws.id, error = %e, "could not list legacy review sessions")
+                }
+            }
+
             let ceiling = ws.review_loop_max_replicas.unwrap_or(1).max(0) as usize;
             let source = crate::services::work_source::ReviewWork {
                 demand: &state.review_demand,
@@ -2440,7 +2482,7 @@ mod tests {
         );
         assert!(
             !skill.contains("number % NOOK_REVIEW_SHARDS"),
-            "the modulo partition is retired; teaching it again would have a              directed reviewer filtering a queue it no longer owns"
+            "the modulo partition is retired; teaching it again would have a directed reviewer filtering a queue it no longer owns"
         );
         assert!(
             skill.contains("nook reviews verdict"),

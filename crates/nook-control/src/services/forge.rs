@@ -395,6 +395,18 @@ impl ReviewDemand {
         }
     }
 
+    /// Forget one workspace's cached answer, so the next ask hits the forge.
+    ///
+    /// The manual path calls this: a person clicking "review now" right after
+    /// opening a PR must not be told "nothing owed" by a list fetched up to a
+    /// TTL ago. The reconciler never calls it — its cadence is what the TTL is
+    /// FOR.
+    pub fn forget(&self, workspace: WorkspaceId) {
+        if let Ok(mut seen) = self.seen.lock() {
+            seen.remove(&workspace);
+        }
+    }
+
     /// The cached answer if it is still inside the TTL. The outer `Option` is
     /// "we have something to say", the inner one is what we would say.
     fn fresh(&self, workspace: WorkspaceId) -> Option<Option<Vec<PullRequest>>> {

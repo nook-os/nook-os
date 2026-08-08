@@ -405,6 +405,9 @@ pub async fn enqueue_review(
         .await?
         .ok_or(ApiError::NotFound)?;
     let ceiling = ws.review_loop_max_replicas.unwrap_or(1).max(0) as usize;
+    // A person asking NOW deserves an answer about now, not about the cache's
+    // last look up to a TTL ago — they may have opened the PR ten seconds back.
+    state.review_demand.forget(workspace);
     let source = crate::services::work_source::ReviewWork {
         demand: &state.review_demand,
     };

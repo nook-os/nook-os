@@ -58,12 +58,16 @@ pub struct NewLoopJob {
 #[derive(Debug, Clone, nook_db::FromDbRow)]
 pub struct ReviewRunHeads {
     pub review_pr_number: i64,
-    /// The head of the newest run that FAILED, and when it failed. A failure is
-    /// not a review — the head must not count as done, or one bad run silences
-    /// a PR until somebody pushes — but it must not be retried instantly
-    /// either, which is a run every poll interval forever.
-    pub failed_head: Option<String>,
-    pub failed_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The head of the newest run that CONCLUDED NOTHING, and when. Two states
+    /// land here: `failed`, and `completed` with no recorded verdict — an agent
+    /// that ends a pass early (checks pending, environment broken) exits zero
+    /// like any other, and the two mean the same thing to the wakeup rule.
+    /// Neither counts as reviewed (one bad run must not silence a PR until
+    /// somebody pushes), and neither is retried instantly (a run every poll
+    /// interval for the length of a CI cycle is the hot loop the hold
+    /// prevents).
+    pub attempted_head: Option<String>,
+    pub attempted_at: Option<chrono::DateTime<chrono::Utc>>,
     /// The head a run is in flight for, if one is. Its presence is what stops a
     /// second run being raised for the same PR.
     pub live_head: Option<String>,
@@ -311,19 +315,24 @@ impl LoopJobRepository for DbLoopJobRepository {
             )
             .await?;
 
-        // The newest FAILED run per PR, so a failure can be backed off without
-        // being mistaken for a review.
-        let failed: Vec<FailedHead> = self
+        // The newest run per PR that CONCLUDED NOTHING — `failed`, or
+        // `completed` without a verdict (an early return exits zero like any
+        // other pass) — so both are held rather than mistaken for a review or
+        // retried hot.
+        let attempted: Vec<FailedHead> = self
             .db
             .query_all(
                 "SELECT review_pr_number, review_head_sha, updated_at FROM loop_jobs j
                   WHERE tenant_id = $1 AND workspace_id = $2 AND kind = 'review'
-                    AND review_pr_number IS NOT NULL AND state = 'failed'
+                    AND review_pr_number IS NOT NULL
+                    AND (state = 'failed' OR (state = 'completed' AND review_verdict IS NULL))
                     AND updated_at = (
                         SELECT MAX(updated_at) FROM loop_jobs k
                          WHERE k.workspace_id = j.workspace_id
                            AND k.review_pr_number = j.review_pr_number
-                           AND k.kind = 'review' AND k.state = 'failed')",
+                           AND k.kind = 'review'
+                           AND (k.state = 'failed'
+                                OR (k.state = 'completed' AND k.review_verdict IS NULL)))",
                 params![tenant, workspace.0],
             )
             .await?;
@@ -357,8 +366,8 @@ impl LoopJobRepository for DbLoopJobRepository {
                     review_pr_number: h.review_pr_number,
                     live_head: None,
                     done_head: None,
-                    failed_head: None,
-                    failed_at: None,
+                    attempted_head: None,
+                    attempted_at: None,
                 })
                 .live_head = h.review_head_sha;
         }
@@ -369,23 +378,23 @@ impl LoopJobRepository for DbLoopJobRepository {
                     review_pr_number: h.review_pr_number,
                     live_head: None,
                     done_head: None,
-                    failed_head: None,
-                    failed_at: None,
+                    attempted_head: None,
+                    attempted_at: None,
                 })
                 .done_head = h.review_head_sha;
         }
-        for h in failed {
+        for h in attempted {
             let e = by_pr
                 .entry(h.review_pr_number)
                 .or_insert_with(|| ReviewRunHeads {
                     review_pr_number: h.review_pr_number,
                     live_head: None,
                     done_head: None,
-                    failed_head: None,
-                    failed_at: None,
+                    attempted_head: None,
+                    attempted_at: None,
                 });
-            e.failed_head = h.review_head_sha;
-            e.failed_at = Some(h.updated_at);
+            e.attempted_head = h.review_head_sha;
+            e.attempted_at = Some(h.updated_at);
         }
         Ok(by_pr.into_values().collect())
     }
@@ -849,8 +858,8 @@ impl LoopJobRepository for FakeLoopJobRepository {
                 review_pr_number: pr,
                 live_head: None,
                 done_head: None,
-                failed_head: None,
-                failed_at: None,
+                attempted_head: None,
+                attempted_at: None,
             });
             match j.state.as_str() {
                 "queued" | "claimed" | "running" | "waiting_on_human" => {
@@ -863,8 +872,13 @@ impl LoopJobRepository for FakeLoopJobRepository {
                     e.done_head = j.review_head_sha.clone()
                 }
                 "failed" => {
-                    e.failed_head = j.review_head_sha.clone();
-                    e.failed_at = Some(j.updated_at);
+                    e.attempted_head = j.review_head_sha.clone();
+                    e.attempted_at = Some(j.updated_at);
+                }
+                "completed" => {
+                    // No verdict: the run concluded nothing, whatever its exit.
+                    e.attempted_head = j.review_head_sha.clone();
+                    e.attempted_at = Some(j.updated_at);
                 }
                 _ => {}
             }

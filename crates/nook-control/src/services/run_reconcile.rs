@@ -29,27 +29,28 @@ pub struct Converged {
     pub live: usize,
 }
 
-/// Which items are owed a run, given what is already running or finished.
+/// How long a run that concluded nothing holds its item back — a failure, or a
+/// zero-exit pass with no verdict (checks pending, environment broken).
+///
+/// Neither may count as a review — one bad run would silence a pull request
+/// until somebody happened to push again. But retrying on the next pass is a
+/// run every ten seconds, which is what the first end-to-end produced: fifteen
+/// identical failures in two and a half minutes, each one a clone attempt on a
+/// shared machine. Held, not forgotten: long enough that a broken repo is not
+/// a hot loop, short enough that a transient fault heals unwatched.
+pub const FAILURE_BACKOFF: chrono::Duration = chrono::Duration::minutes(5);
+
+/// Which items are owed a run, given what already ran or is running.
 ///
 /// Split out from the IO so the rule is testable as a function of its inputs —
 /// it is the whole of the wakeup policy, and it is the thing most likely to be
 /// got subtly wrong.
 ///
-/// An item is owed a run when nothing is live for it AND its fingerprint is not
-/// what the last completed run recorded. A never-run item is owed one, because
-/// `None` is not equal to a fingerprint.
-/// How long a failed run holds its item back.
-///
-/// A failure must not count as a review — one bad run would silence a pull
-/// request until somebody happened to push again. But retrying it on the next
-/// pass is a run every ten seconds forever, which is what the first end-to-end
-/// produced: fifteen identical failures in two and a half minutes, each one a
-/// clone attempt on a shared machine.
-///
-/// So a failure is held, not forgotten. Long enough that a broken repo is not a
-/// hot loop, short enough that a transient fault heals without anyone watching.
-pub const FAILURE_BACKOFF: chrono::Duration = chrono::Duration::minutes(5);
-
+/// An item is owed a run when nothing is live for it, its fingerprint is not
+/// what the last VERDICTED run recorded (a never-run item qualifies, because
+/// `None` equals no fingerprint), and it is not inside a concluded-nothing
+/// hold — see [`FAILURE_BACKOFF`]. A push changes the fingerprint and clears
+/// the hold immediately, so a real fix never waits on the timer.
 pub fn owed<'a>(
     items: &'a [WorkItem],
     heads: &[crate::repo::jobs::ReviewRunHeads],
@@ -70,11 +71,12 @@ pub fn owed<'a>(
                     if h.done_head.as_deref() == Some(item.fingerprint.as_str()) {
                         return false;
                     }
-                    // Failed at this exact head, recently: hold. A push changes
-                    // the fingerprint and clears the hold by itself, so a real
-                    // fix is never waiting on a timer.
+                    // Attempted at this exact head recently — failed, or ended
+                    // without a verdict (checks pending, environment broken):
+                    // hold. A push changes the fingerprint and clears the hold
+                    // by itself, so a real fix is never waiting on a timer.
                     !matches!(
-                        (h.failed_head.as_deref(), h.failed_at),
+                        (h.attempted_head.as_deref(), h.attempted_at),
                         (Some(f), Some(at)) if f == item.fingerprint && now - at < FAILURE_BACKOFF
                     )
                 }
@@ -164,8 +166,8 @@ mod tests {
             review_pr_number: key,
             live_head: None,
             done_head: None,
-            failed_head: None,
-            failed_at: None,
+            attempted_head: None,
+            attempted_at: None,
         }
     }
 
@@ -221,8 +223,8 @@ mod tests {
     fn a_recent_failure_at_this_head_is_held_rather_than_retried() {
         let items = [item(341, "aaa")];
         let failed = ReviewRunHeads {
-            failed_head: Some("aaa".into()),
-            failed_at: Some(now() - chrono::Duration::seconds(30)),
+            attempted_head: Some("aaa".into()),
+            attempted_at: Some(now() - chrono::Duration::seconds(30)),
             ..heads(341)
         };
         assert!(owed(&items, &[failed], 2, now()).0.is_empty());
@@ -232,8 +234,8 @@ mod tests {
     fn the_hold_expires_so_a_transient_fault_heals_itself() {
         let items = [item(341, "aaa")];
         let failed = ReviewRunHeads {
-            failed_head: Some("aaa".into()),
-            failed_at: Some(now() - FAILURE_BACKOFF - chrono::Duration::seconds(1)),
+            attempted_head: Some("aaa".into()),
+            attempted_at: Some(now() - FAILURE_BACKOFF - chrono::Duration::seconds(1)),
             ..heads(341)
         };
         assert_eq!(owed(&items, &[failed], 2, now()).0.len(), 1);
@@ -245,11 +247,41 @@ mod tests {
     fn a_push_clears_a_failure_hold_immediately() {
         let items = [item(341, "bbb")];
         let failed = ReviewRunHeads {
-            failed_head: Some("aaa".into()),
-            failed_at: Some(now()),
+            attempted_head: Some("aaa".into()),
+            attempted_at: Some(now()),
             ..heads(341)
         };
         assert_eq!(owed(&items, &[failed], 2, now()).0.len(), 1);
+    }
+
+    /// The other way to conclude nothing: exit ZERO without a verdict — checks
+    /// pending, environment broken, any polite early return. Before the verdict
+    /// column, that consumed the head and the PR went silent until the next
+    /// push; gating done on the verdict alone would instead retry it every
+    /// poll interval for the length of a CI cycle. Held, like a failure,
+    /// because to the wakeup rule they are the same fact.
+    #[test]
+    fn a_verdictless_completion_is_held_then_owed_like_a_failure() {
+        let items = [item(341, "aaa")];
+        let hold = ReviewRunHeads {
+            attempted_head: Some("aaa".into()),
+            attempted_at: Some(now() - chrono::Duration::seconds(30)),
+            ..heads(341)
+        };
+        assert!(
+            owed(&items, &[hold], 2, now()).0.is_empty(),
+            "held inside the window"
+        );
+        let expired = ReviewRunHeads {
+            attempted_head: Some("aaa".into()),
+            attempted_at: Some(now() - FAILURE_BACKOFF - chrono::Duration::seconds(1)),
+            ..heads(341)
+        };
+        assert_eq!(
+            owed(&items, &[expired], 2, now()).0.len(),
+            1,
+            "owed after it"
+        );
     }
 
     /// A failure is not a review. Holding it must never look like "done", or a
@@ -258,8 +290,8 @@ mod tests {
     fn a_failure_does_not_count_as_having_reviewed_the_head() {
         let items = [item(341, "aaa")];
         let failed = ReviewRunHeads {
-            failed_head: Some("aaa".into()),
-            failed_at: Some(now() - FAILURE_BACKOFF * 2),
+            attempted_head: Some("aaa".into()),
+            attempted_at: Some(now() - FAILURE_BACKOFF * 2),
             ..heads(341)
         };
         assert_eq!(
