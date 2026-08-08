@@ -865,6 +865,7 @@ pub async fn pass(state: &AppState, clones: &CloneThrottle) -> crate::error::Api
                 ws.id,
                 ws.git_remote_url.as_deref(),
                 ceiling,
+                None,
             )
             .await
             {
@@ -2440,6 +2441,14 @@ mod tests {
         assert!(
             !skill.contains("number % NOOK_REVIEW_SHARDS"),
             "the modulo partition is retired; teaching it again would have a              directed reviewer filtering a queue it no longer owns"
+        );
+        assert!(
+            skill.contains("nook reviews verdict"),
+            "the skill must deliver its conclusion through the verdict call — the control plane posts, the agent only concludes"
+        );
+        assert!(
+            !skill.contains("gh pr comment"),
+            "posting by gh is retired; an agent-formatted comment is the drift the verdict call exists to end"
         );
     }
     // ── MAIN-448: the count comes from the forge ─────────────────────────────

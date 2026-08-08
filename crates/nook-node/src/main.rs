@@ -662,6 +662,9 @@ async fn main() -> Result<()> {
         Command::Reviews(ReviewsCommand::Enqueue { workspace, seed }) => {
             cli::reviews_enqueue(&workspace, seed.as_deref()).await
         }
+        Command::Reviews(ReviewsCommand::Verdict { verdict, body }) => {
+            cli::reviews_verdict(&verdict, body.as_deref()).await
+        }
         Command::Reviews(ReviewsCommand::Scale { workspace, count }) => {
             cli::reviews_scale(&workspace, count.as_deref()).await
         }
@@ -1061,12 +1064,9 @@ enum OperatorCommand {
 
 #[derive(clap::Subcommand)]
 enum ReviewsCommand {
-    /// Raise a review of a workspace now, out of band.
-    ///
-    /// The reconciler raises a run per pull request by itself (MAIN-455); this
-    /// is the manual path for a repo with no forge, or for asking again without
-    /// pushing. Deduped by the same rule: a review already queued or running for
-    /// that workspace prints rather than starting a second one.
+    /// Review this workspace now: the reconciler's own convergence on demand.
+    /// One directed run per pull request owed one — same rule, same dedupe,
+    /// same ceiling — reporting what was raised and why anything was not.
     Enqueue {
         /// The workspace, by id, slug or name.
         workspace: String,
@@ -1087,6 +1087,15 @@ enum ReviewsCommand {
         workspace: String,
         /// The ceiling, `0` to turn it off, or `unset`. Omit to read.
         count: Option<String>,
+    },
+    /// Report this review run's conclusion (runs inside a review job; the
+    /// control plane posts the comment and labels).
+    Verdict {
+        /// approved | changes_requested | needs_human | skipped
+        verdict: String,
+        /// The verdict body; `-` reads stdin. Omit only for `skipped`.
+        #[arg(long)]
+        body: Option<String>,
     },
 }
 

@@ -154,6 +154,88 @@ impl GithubForge {
 /// and a page-two count would still place the same reviewers.
 const PAGE: usize = 100;
 
+/// The verdict labels the loop maintains on a PR. Exactly one is present after
+/// a posted verdict — adding one means removing the other two, or a PR ends up
+/// simultaneously approved and changes-requested the first time a verdict
+/// changes.
+const VERDICT_LABELS: [&str; 3] = [
+    "loop-approved",
+    "loop-changes-requested",
+    "needs-human-review",
+];
+
+impl GithubForge {
+    /// Deliver a review verdict to the PR: the `Loop review of <sha>` comment
+    /// and the matching label, replacing whichever verdict label was there.
+    ///
+    /// This USED to be the agent's job — a sequence of `gh` calls the skill
+    /// asked it to perform, which is the last place a mood could misformat the
+    /// comment or forget a label (NG-4 of MAIN-448, overturned 2026-08-08).
+    /// Code posts now; the agent only concludes.
+    ///
+    /// An error is an error: an unposted verdict must fail the caller loudly,
+    /// because a verdict recorded in the database but missing from the PR is
+    /// invisible to every human working in GitHub.
+    pub async fn post_verdict(
+        &self,
+        repo: &Repo,
+        pr: u64,
+        head_sha: &str,
+        label: &str,
+        body: &str,
+    ) -> anyhow::Result<()> {
+        let base = format!(
+            "https://api.github.com/repos/{}/{}/issues/{pr}",
+            repo.owner, repo.name
+        );
+        self.send(
+            self.http.post(format!("{base}/comments")).json(
+                &serde_json::json!({ "body": format!("Loop review of {head_sha}\n\n{body}") }),
+            ),
+        )
+        .await?;
+        for old in VERDICT_LABELS.iter().filter(|l| **l != label) {
+            // 404 here means "was not set", which is the desired state, not a
+            // failure.
+            let resp = self
+                .authed(self.http.delete(format!("{base}/labels/{old}")))
+                .send()
+                .await?;
+            if !resp.status().is_success() && resp.status().as_u16() != 404 {
+                anyhow::bail!("removing label {old}: {}", resp.status());
+            }
+        }
+        self.send(
+            self.http
+                .post(format!("{base}/labels"))
+                .json(&serde_json::json!({ "labels": [label] })),
+        )
+        .await?;
+        Ok(())
+    }
+
+    fn authed(&self, rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        rb.bearer_auth(&self.token)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("User-Agent", "nook-control")
+    }
+
+    async fn send(&self, rb: reqwest::RequestBuilder) -> anyhow::Result<()> {
+        let resp = self.authed(rb).send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!(
+                "{} {}",
+                status.as_u16(),
+                body.trim().chars().take(300).collect::<String>()
+            );
+        }
+        Ok(())
+    }
+}
+
 #[async_trait::async_trait]
 impl Forge for GithubForge {
     async fn prs_needing_review(&self, repo: &Repo) -> anyhow::Result<Vec<PullRequest>> {

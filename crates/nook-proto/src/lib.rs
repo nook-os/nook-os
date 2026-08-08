@@ -811,12 +811,16 @@ pub enum UiEvent {
         task_id: Option<nook_types::TaskId>,
     },
     /// A loop job's transcript grew or its state changed (MAIN-128) — the nudge
-    /// that drives the ticket's live Loop panel. Carries the TARGET TICKET id
-    /// (not the job id), the same "what you have is stale" contract as
-    /// `TaskChanged`: the panel refetches the job + transcript for that ticket.
-    /// Visibility is enforced on the refetch, so the nudge itself leaks nothing.
+    /// that drives every live job surface. Carries the TARGET TICKET id (not
+    /// the job id) when the job has one, the same "what you have is stale"
+    /// contract as `TaskChanged`. `None` for a REVIEW run (MAIN-455), which has
+    /// no ticket — its surface is the workspace's Reviews panel, and skipping
+    /// the nudge for ticketless jobs is exactly what left that panel static
+    /// while a spec's streamed. Visibility is enforced on the refetch, so the
+    /// nudge itself leaks nothing.
     JobChanged {
-        task_id: nook_types::TaskId,
+        #[serde(default)]
+        task_id: Option<nook_types::TaskId>,
     },
     /// A loop job's agent started or stopped a turn (MAIN-240). Distinct from
     /// `JobChanged`, whose contract is "what you have is stale, refetch": this

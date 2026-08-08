@@ -111,20 +111,6 @@ pub trait LoopJobRepository: Send + Sync {
 
     async fn create(&self, new: NewLoopJob) -> ApiResult<LoopJob>;
 
-    /// The ONE definition of "this workspace already has a review in flight"
-    /// (AC-3). Returns the live job, if any: `queued`, `claimed`, `running` or
-    /// `waiting_on_human` all count — terminal states do not.
-    ///
-    /// Both enqueue paths (the sweep and the manual endpoint) go through this
-    /// and nothing else. A second notion of "already queued" living beside it
-    /// is exactly how one workspace ends up reviewed twice concurrently, which
-    /// is the failure AC-3 names.
-    async fn active_review_for_workspace(
-        &self,
-        tenant: TenantId,
-        workspace: WorkspaceId,
-    ) -> ApiResult<Option<JobId>>;
-
     /// Per PR: the head of its newest LIVE run, and the head of its newest
     /// COMPLETED run. Both `None` when that PR has no such run.
     ///
@@ -147,6 +133,10 @@ pub trait LoopJobRepository: Send + Sync {
         workspace: WorkspaceId,
         limit: i64,
     ) -> ApiResult<Vec<LoopJob>>;
+
+    /// Record what a review run concluded. Guarded on a live review run — a
+    /// verdict on a finished or foreign job is a caller bug, answered with 0.
+    async fn set_review_verdict(&self, id: JobId, verdict: &str) -> ApiResult<u64>;
 
     async fn list_for_task(&self, tenant: TenantId, task: TaskId) -> ApiResult<Vec<LoopJob>>;
 
@@ -261,24 +251,6 @@ impl LoopJobRepository for DbLoopJobRepository {
             .await?)
     }
 
-    async fn active_review_for_workspace(
-        &self,
-        tenant: TenantId,
-        workspace: WorkspaceId,
-    ) -> ApiResult<Option<JobId>> {
-        Ok(self
-            .db
-            .query_scalar_opt::<JobId>(
-                "SELECT id FROM loop_jobs
-                  WHERE tenant_id = $1 AND workspace_id = $2 AND kind = 'review'
-                    AND state NOT IN ('completed', 'failed', 'canceled')
-                  ORDER BY created_at
-                  LIMIT 1",
-                params![tenant, workspace.0],
-            )
-            .await?)
-    }
-
     async fn create(&self, new: NewLoopJob) -> ApiResult<LoopJob> {
         Ok(self
             .db
@@ -365,11 +337,13 @@ impl LoopJobRepository for DbLoopJobRepository {
                 "SELECT review_pr_number, review_head_sha FROM loop_jobs j
                   WHERE tenant_id = $1 AND workspace_id = $2 AND kind = 'review'
                     AND review_pr_number IS NOT NULL AND state = 'completed'
+                    AND review_verdict IS NOT NULL
                     AND created_at = (
                         SELECT MAX(created_at) FROM loop_jobs k
                          WHERE k.workspace_id = j.workspace_id
                            AND k.review_pr_number = j.review_pr_number
-                           AND k.kind = 'review' AND k.state = 'completed')",
+                           AND k.kind = 'review' AND k.state = 'completed'
+                           AND k.review_verdict IS NOT NULL)",
                 params![tenant, workspace.0],
             )
             .await?;
@@ -414,6 +388,18 @@ impl LoopJobRepository for DbLoopJobRepository {
             e.failed_at = Some(h.updated_at);
         }
         Ok(by_pr.into_values().collect())
+    }
+
+    async fn set_review_verdict(&self, id: JobId, verdict: &str) -> ApiResult<u64> {
+        Ok(self
+            .db
+            .exec(
+                "UPDATE loop_jobs SET review_verdict = $2, updated_at = now()
+                  WHERE id = $1 AND kind = 'review'
+                    AND state IN ('claimed', 'running', 'waiting_on_human')",
+                params![id.0, verdict],
+            )
+            .await?)
     }
 
     async fn list_reviews_for_workspace(
@@ -803,6 +789,19 @@ impl LoopJobRepository for FakeLoopJobRepository {
             .and_then(|j| j.target_task_id))
     }
 
+    async fn set_review_verdict(&self, id: JobId, verdict: &str) -> ApiResult<u64> {
+        let mut s = self.inner.lock().unwrap();
+        let Some(j) = s.jobs.iter_mut().find(|j| {
+            j.id == id
+                && j.kind == "review"
+                && matches!(j.state.as_str(), "claimed" | "running" | "waiting_on_human")
+        }) else {
+            return Ok(0);
+        };
+        j.review_verdict = Some(verdict.to_string());
+        Ok(1)
+    }
+
     async fn list_reviews_for_workspace(
         &self,
         tenant: TenantId,
@@ -857,7 +856,12 @@ impl LoopJobRepository for FakeLoopJobRepository {
                 "queued" | "claimed" | "running" | "waiting_on_human" => {
                     e.live_head = j.review_head_sha.clone()
                 }
-                "completed" => e.done_head = j.review_head_sha.clone(),
+                // A completed run with no VERDICT reviewed nothing — a pass
+                // that died politely still exits zero, and counting its head as
+                // done is how a PR goes silently unreviewed until the next push.
+                "completed" if j.review_verdict.is_some() => {
+                    e.done_head = j.review_head_sha.clone()
+                }
                 "failed" => {
                     e.failed_head = j.review_head_sha.clone();
                     e.failed_at = Some(j.updated_at);
@@ -866,26 +870,6 @@ impl LoopJobRepository for FakeLoopJobRepository {
             }
         }
         Ok(by_pr.into_values().collect())
-    }
-
-    async fn active_review_for_workspace(
-        &self,
-        tenant: TenantId,
-        workspace: WorkspaceId,
-    ) -> ApiResult<Option<JobId>> {
-        let s = self.inner.lock().unwrap();
-        let mut live: Vec<&LoopJob> = s
-            .jobs
-            .iter()
-            .filter(|j| {
-                j.tenant_id == tenant
-                    && j.kind == "review"
-                    && j.workspace_id == Some(workspace)
-                    && !matches!(j.state.as_str(), "completed" | "failed" | "canceled")
-            })
-            .collect();
-        live.sort_by_key(|j| j.created_at);
-        Ok(live.first().map(|j| j.id))
     }
 
     async fn create(&self, new: NewLoopJob) -> ApiResult<LoopJob> {
@@ -906,6 +890,7 @@ impl LoopJobRepository for FakeLoopJobRepository {
             updated_at: now,
             review_pr_number: None,
             review_head_sha: None,
+            review_verdict: None,
         };
         self.inner.lock().unwrap().jobs.push(job.clone());
         Ok(job)

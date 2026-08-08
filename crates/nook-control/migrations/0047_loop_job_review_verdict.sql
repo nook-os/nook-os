@@ -1,0 +1,13 @@
+-- The verdict is a RECORDED FACT, not a side effect buried in GitHub comments
+-- (MAIN-455, NG-4 of MAIN-448 overturned by owner ruling 2026-08-08).
+--
+-- Until now "this run reviewed head X" was inferred from the run having exited
+-- zero — and a pass that ended at preflight exited zero too, so a head could be
+-- marked reviewed by a run that reviewed nothing. The wakeup rule then owed
+-- that head nothing, and the gap was invisible until somebody pushed again.
+--
+-- `review_verdict` is what the run CONCLUDED: approved | changes_requested |
+-- needs_human | skipped. NULL means the run concluded nothing, however it
+-- exited — and a completed run with no verdict no longer counts as having
+-- reviewed its head.
+ALTER TABLE loop_jobs ADD COLUMN IF NOT EXISTS review_verdict text;

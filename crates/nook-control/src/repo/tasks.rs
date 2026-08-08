@@ -415,19 +415,6 @@ pub trait TaskRepository: Send + Sync {
     /// A column's type, unscoped — the caller already holds a task that names it.
     async fn column_type_of(&self, column: ColumnId) -> ApiResult<Option<String>>;
 
-    /// Every `(tenant, workspace)` with at least one live card sitting in a
-    /// `review`-type column — the board signal MAIN-143 AC-3 defines, and the
-    /// only thing MAIN-408's sweep reads.
-    ///
-    /// Cross-tenant because the sweep is; the caller gates each tenant on its
-    /// own setting before acting. Distinct, so a workspace with twenty cards in
-    /// review appears once — the "one review per workspace" half of the signal
-    /// is expressed here, and the "no review already in flight" half is
-    /// [`super::jobs::LoopJobRepository::active_review_for_workspace`]. Archived
-    /// cards are excluded: an archived card is off the board and must not keep
-    /// raising reviews forever.
-    async fn workspaces_with_cards_in_review(&self) -> ApiResult<Vec<(TenantId, WorkspaceId)>>;
-
     /// A board's automation rules blob (MAIN-256 moved this off `triggers.rs`).
     async fn board_automation(
         &self,
@@ -1684,21 +1671,6 @@ impl TaskRepository for DbTaskRepository {
             .query_scalar_opt(
                 "SELECT c.type FROM board_columns c WHERE c.id = $1",
                 params![column],
-            )
-            .await?)
-    }
-
-    async fn workspaces_with_cards_in_review(&self) -> ApiResult<Vec<(TenantId, WorkspaceId)>> {
-        Ok(self
-            .db
-            .query_all(
-                "SELECT DISTINCT t.tenant_id, t.workspace_id
-                   FROM tasks t
-                   JOIN board_columns c ON c.id = t.column_id
-                  WHERE c.type = 'review'
-                    AND t.workspace_id IS NOT NULL
-                    AND t.archived_at IS NULL",
-                params![],
             )
             .await?)
     }
@@ -3218,25 +3190,6 @@ impl TaskRepository for FakeTaskRepository {
             .iter()
             .find(|c| c.id == column)
             .map(|c| c.r#type.clone()))
-    }
-
-    async fn workspaces_with_cards_in_review(&self) -> ApiResult<Vec<(TenantId, WorkspaceId)>> {
-        let st = self.inner.lock().unwrap();
-        let review: std::collections::HashSet<ColumnId> = st
-            .columns
-            .iter()
-            .filter(|c| c.r#type == "review")
-            .map(|c| c.id)
-            .collect();
-        let mut out: Vec<(TenantId, WorkspaceId)> = st
-            .tasks
-            .iter()
-            .filter(|t| t.archived_at.is_none() && review.contains(&t.column_id))
-            .filter_map(|t| t.workspace_id.map(|w| (t.tenant_id, w)))
-            .collect();
-        out.sort_by_key(|(t, w)| (t.0, w.0));
-        out.dedup();
-        Ok(out)
     }
 
     async fn column_type_in_tenant(

@@ -936,6 +936,33 @@ pub struct ReviewLoopDeclaration {
     pub max_replicas: Option<i32>,
 }
 
+/// A review run's conclusion, sent by the run itself (MAIN-455).
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct ReviewVerdictRequest {
+    /// `approved` | `changes_requested` | `needs_human` | `skipped`.
+    pub verdict: String,
+    /// The verdict body posted under `Loop review of <sha>`. Required unless
+    /// the verdict is `skipped`, which posts nothing — the earlier review it
+    /// defers to is already on the PR.
+    #[serde(default)]
+    pub body: Option<String>,
+}
+
+/// What a manual "review this workspace now" actually did (MAIN-455).
+///
+/// Not a single job: the manual path converges exactly as the reconciler does
+/// — one directed run per pull request that is owed one — so the honest answer
+/// is the set it raised and the reasons anything was not.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReviewRaiseResult {
+    /// The runs this call raised, one per owed pull request.
+    pub raised: Vec<LoopJob>,
+    /// PRs already being reviewed right now — covered, not skipped.
+    pub live: u32,
+    /// PRs owed a run that the workspace's ceiling held back this pass.
+    pub withheld: u32,
+}
+
 /// Desired versus actual for a workspace's REVIEW LOOP (MAIN-447 AC-4).
 ///
 /// Separate from [`ReconcileStatus`], which reports the workspace's own
@@ -3036,6 +3063,12 @@ pub struct LoopJob {
     pub review_pr_number: Option<i64>,
     #[serde(default)]
     pub review_head_sha: Option<String>,
+    /// What a review run CONCLUDED: `approved` | `changes_requested` |
+    /// `needs_human` | `skipped`. `None` means it concluded nothing — however
+    /// the process exited — and such a run does not count as having reviewed
+    /// its head.
+    #[serde(default)]
+    pub review_verdict: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

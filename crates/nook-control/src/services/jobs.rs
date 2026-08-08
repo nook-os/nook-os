@@ -236,6 +236,7 @@ pub async fn create(
 /// The item's label is the seed, so the agent is TOLD which PR it owns instead
 /// of filtering a list to discover it. That is what retired the shard
 /// arithmetic: a run that knows its item needs no partition.
+#[allow(clippy::too_many_arguments)]
 pub async fn raise_run(
     state: &AppState,
     tenant: TenantId,
@@ -243,6 +244,7 @@ pub async fn raise_run(
     workspace: WorkspaceId,
     kind: &str,
     item: &crate::services::work_source::WorkItem,
+    note: Option<&str>,
 ) -> ApiResult<Option<LoopJob>> {
     let job = match state
         .jobs
@@ -271,6 +273,9 @@ pub async fn raise_run(
     append_transcript(state, job.id, "human", &item.label)
         .await
         .ok();
+    if let Some(note) = note.map(str::trim).filter(|n| !n.is_empty()) {
+        append_transcript(state, job.id, "human", note).await.ok();
+    }
 
     // Enqueue AFTER the row exists, so a consumer racing us always finds it —
     // the same ordering `enqueue_review` relies on.
@@ -287,63 +292,133 @@ pub async fn raise_run(
     Ok(Some(job))
 }
 
+/// Record what a review run concluded, and deliver it (MAIN-455; NG-4 of
+/// MAIN-448 overturned by owner ruling 2026-08-08 — code posts, the agent only
+/// concludes).
+///
+/// Ordering is deliberate: GitHub FIRST, the database second. A verdict stored
+/// but unposted is invisible to every human working in GitHub, while a verdict
+/// posted but unstored merely re-raises one run at this head — which will then
+/// skip against the comment it finds. The failure that costs less is the one
+/// left possible.
+pub async fn record_verdict(
+    state: &AppState,
+    tenant: TenantId,
+    job_id: JobId,
+    req: &nook_types::ReviewVerdictRequest,
+) -> ApiResult<LoopJob> {
+    const VERDICTS: [(&str, Option<&str>); 4] = [
+        ("approved", Some("loop-approved")),
+        ("changes_requested", Some("loop-changes-requested")),
+        ("needs_human", Some("needs-human-review")),
+        // A skip posts nothing: it defers to a review already on the PR.
+        ("skipped", None),
+    ];
+    let Some((_, label)) = VERDICTS.iter().find(|(v, _)| *v == req.verdict) else {
+        return Err(ApiError::BadRequest(format!(
+            "verdict must be one of approved|changes_requested|needs_human|skipped, got {:?}",
+            req.verdict
+        )));
+    };
+
+    let job = state
+        .jobs
+        .get(tenant, job_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let (Some(pr), Some(head), Some(workspace)) = (
+        job.review_pr_number,
+        job.review_head_sha.as_deref(),
+        job.workspace_id,
+    ) else {
+        return Err(ApiError::BadRequest(
+            "only a directed review run records a verdict".into(),
+        ));
+    };
+
+    if let Some(label) = label {
+        let body = req
+            .body
+            .as_deref()
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
+            .ok_or_else(|| ApiError::BadRequest("a posted verdict needs a body".into()))?;
+        let ws = state
+            .workspaces
+            .get(tenant, workspace)
+            .await?
+            .ok_or(ApiError::NotFound)?;
+        let repo = ws
+            .git_remote_url
+            .as_deref()
+            .and_then(crate::services::forge::github_repo)
+            .ok_or_else(|| {
+                ApiError::BadRequest("this workspace's remote is not a GitHub repository".into())
+            })?;
+        let forge = crate::services::forge::GithubForge::from_env().ok_or_else(|| {
+            ApiError::BadRequest(
+                "no fleet GitHub token — the verdict cannot be posted, so it is not recorded"
+                    .into(),
+            )
+        })?;
+        forge
+            .post_verdict(&repo, pr.max(0) as u64, head, label, body)
+            .await
+            .map_err(|e| ApiError::BadRequest(format!("posting the verdict failed: {e}")))?;
+    }
+
+    if state.jobs.set_review_verdict(job_id, &req.verdict).await? == 0 {
+        return Err(ApiError::Conflict(
+            "this run is not live — a verdict lands before the run finishes".into(),
+        ));
+    }
+    append_transcript(
+        state,
+        job_id,
+        "system",
+        &format!("verdict: {}", req.verdict),
+    )
+    .await
+    .ok();
+    state.jobs.reload(job_id).await
+}
+
+/// "Review this workspace NOW" — the manual path, and it is the SAME
+/// convergence the reconciler runs, not a second kind of review (MAIN-455).
+///
+/// It used to raise one undirected job and leave the agent to scan the queue
+/// and pick — the last place selection reasoning lived. Directed runs ended
+/// that: this raises one run per pull request that is owed one, through the
+/// same `owed()` rule, the same dedupe index, and the same ceiling. A repo
+/// with no forge raises nothing, and the counts say so rather than a job that
+/// would have found nothing to scan.
 pub async fn enqueue_review(
     state: &AppState,
     tenant: TenantId,
     requested_by: UserId,
     workspace: WorkspaceId,
     seed: Option<String>,
-) -> ApiResult<Option<LoopJobDetail>> {
-    if state
-        .jobs
-        .active_review_for_workspace(tenant, workspace)
+) -> ApiResult<crate::services::run_reconcile::Converged> {
+    let ws = state
+        .workspaces
+        .get(tenant, workspace)
         .await?
-        .is_some()
-    {
-        return Ok(None);
-    }
-
-    let seed = seed
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-
-    let job: LoopJob = state
-        .jobs
-        .create(crate::repo::jobs::NewLoopJob {
-            id: JobId::new(),
-            tenant,
-            kind: REVIEW_KIND.to_string(),
-            // No ticket, by design — 0040's CHECK requires the workspace instead.
-            target_task_id: None,
-            workspace_id: Some(workspace),
-            requested_by,
-            seed: seed.clone(),
-            predecessor_job_id: None,
-            review_pr_number: None,
-            review_head_sha: None,
-        })
-        .await?;
-
-    if let Some(seed) = seed.as_deref() {
-        append_transcript(state, job.id, "human", seed).await.ok();
-    }
-
-    // Enqueue AFTER the row exists, so a consumer racing us always finds it —
-    // the same ordering `create` relies on.
-    state
-        .queue
-        .enqueue(NewWork::new(
-            tenant.0,
-            WORK_TYPE,
-            serde_json::to_vec(&job.id).unwrap_or_default(),
-        ))
-        .await?;
-
-    // Tenant-visible by ruling, so never suppressed as private.
-    record_job_event(state, tenant, "job.created", &job, false).await;
-    Ok(Some(detail(state, job).await?))
+        .ok_or(ApiError::NotFound)?;
+    let ceiling = ws.review_loop_max_replicas.unwrap_or(1).max(0) as usize;
+    let source = crate::services::work_source::ReviewWork {
+        demand: &state.review_demand,
+    };
+    crate::services::run_reconcile::converge(
+        state,
+        &source,
+        tenant,
+        requested_by,
+        workspace,
+        ws.git_remote_url.as_deref(),
+        ceiling,
+        seed.as_deref(),
+    )
+    .await
 }
 
 /// Read a job with its transcript (AC-3). 404 if it is not this tenant's, or if
@@ -405,13 +480,14 @@ pub async fn transition(
     // bell. A vanished target is treated as private (fail closed).
     let private = target_is_private(state, tenant, updated.target_task_id).await;
     record_job_event(state, tenant, "job.state_changed", &updated, private).await;
-    // Nudge the ticket's live Loop panel that the job changed (MAIN-128 AC-2).
-    // Only a ticketed job has a Loop panel to nudge; a review job has none.
-    if let Some(task_id) = updated.target_task_id {
-        state
-            .registry
-            .publish(tenant, nook_proto::UiEvent::JobChanged { task_id });
-    }
+    // Nudge every live job surface that the job changed (MAIN-128 AC-2). A
+    // ticketless review run nudges too — its surface is the Reviews panel.
+    state.registry.publish(
+        tenant,
+        nook_proto::UiEvent::JobChanged {
+            task_id: updated.target_task_id,
+        },
+    );
 
     // MAIN-162: a job that fails or is canceled cancels any pending interaction
     // it raised — a paused human ask on dead work is moot. (A human who then
@@ -599,11 +675,13 @@ pub async fn append_transcript(
 ) -> ApiResult<LoopJobTranscriptEntry> {
     let entry: LoopJobTranscriptEntry = state.jobs.append_transcript(id, source, content).await?;
 
-    // Nudge the ticket's live Loop panel that a new transcript line landed
-    // (MAIN-128 AC-2 — the run "streams" as narration arrives). Best-effort: a
-    // missing job row just means no live nudge, never a failed append.
-    // A review job has no ticket and therefore no Loop panel — nothing to nudge.
-    if let Ok(Some((tenant, Some(task_id)))) = state.jobs.tenant_and_target_of(id).await {
+    // Nudge the live surfaces that a new transcript line landed (MAIN-128 AC-2
+    // — the run "streams" as narration arrives). Best-effort: a missing job row
+    // just means no live nudge, never a failed append. A review run has no
+    // ticket, but it streams all the same — its surface is the workspace's
+    // Reviews panel, and the ticketless skip here is what left reviews static
+    // while specs streamed (MAIN-455).
+    if let Ok(Some((tenant, task_id))) = state.jobs.tenant_and_target_of(id).await {
         state
             .registry
             .publish(tenant, nook_proto::UiEvent::JobChanged { task_id });

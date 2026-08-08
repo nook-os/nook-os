@@ -15,9 +15,11 @@ use nook_types::{TenantId, UserId, WorkspaceId};
 
 /// What the reconciler decided for one workspace, so the caller can log it once
 /// rather than this deciding how loud it is.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default)]
 pub struct Converged {
-    /// Runs raised this pass.
+    /// The runs raised this pass, one per owed item.
+    pub jobs: Vec<nook_types::LoopJob>,
+    /// `jobs.len()`, kept for the log line.
     pub raised: usize,
     /// Items with work owing that the ceiling would not let us start yet. Not a
     /// failure — the declaration is doing its job — but the number people look
@@ -92,6 +94,7 @@ pub fn owed<'a>(
 }
 
 /// Raise the runs one workspace is owed.
+#[allow(clippy::too_many_arguments)]
 pub async fn converge(
     state: &AppState,
     source: &dyn WorkSource,
@@ -100,6 +103,9 @@ pub async fn converge(
     workspace: WorkspaceId,
     remote: Option<&str>,
     ceiling: usize,
+    // A human's brief for the runs raised by THIS call (the manual path);
+    // `None` on the reconciler's own passes.
+    note: Option<&str>,
 ) -> crate::error::ApiResult<Converged> {
     // `None` is UNKNOWN, never "no work" — an outage must not read as a clean
     // repo. Holding is right: whatever is live keeps running, and nothing new is
@@ -110,7 +116,7 @@ pub async fn converge(
     let heads = state.jobs.review_run_heads(tenant, workspace).await?;
     let (owed, withheld, live) = owed(&items, &heads, ceiling, chrono::Utc::now());
 
-    let mut raised = 0;
+    let mut jobs = Vec::new();
     for item in owed {
         match crate::services::jobs::raise_run(
             state,
@@ -119,10 +125,11 @@ pub async fn converge(
             workspace,
             source.kind(),
             item,
+            note,
         )
         .await
         {
-            Ok(Some(_)) => raised += 1,
+            Ok(Some(job)) => jobs.push(job),
             // Lost the race to another replica: the unique index refused the
             // second row, which is exactly what it is for.
             Ok(None) => {}
@@ -132,7 +139,8 @@ pub async fn converge(
         }
     }
     Ok(Converged {
-        raised,
+        raised: jobs.len(),
+        jobs,
         withheld,
         live,
     })

@@ -4241,14 +4241,71 @@ pub async fn reviews_enqueue(workspace: &str, seed: Option<&str>) -> Result<()> 
     if let Some(seed) = seed {
         body["seed"] = serde_json::Value::String(seed.to_string());
     }
-    let job = client.post("/api/v1/reviews", body).await?;
+    let r = client.post("/api/v1/reviews", body).await?;
 
-    let id = job["id"].as_str().unwrap_or("?");
-    let state = job["state"].as_str().unwrap_or("?");
-    println!("review job {} — {}", crate::style::ok_c(id), state);
-    if state != "queued" {
-        println!("  A review of this workspace was already in flight; this is that job.");
+    let raised = r["raised"].as_array().cloned().unwrap_or_default();
+    let live = r["live"].as_u64().unwrap_or(0);
+    let withheld = r["withheld"].as_u64().unwrap_or(0);
+    for job in &raised {
+        println!(
+            "raised {} — PR #{}",
+            crate::style::ok_c(job["id"].as_str().unwrap_or("?")),
+            job["review_pr_number"].as_u64().unwrap_or(0),
+        );
     }
+    if raised.is_empty() {
+        // Zero raised has FOUR causes and they need different fixes, so say
+        // which: covered already, held by the ceiling, no forge, or all quiet.
+        if live > 0 {
+            println!("nothing raised — {live} PR(s) already being reviewed");
+        } else if withheld > 0 {
+            println!("nothing raised — {withheld} PR(s) owed but held by the review ceiling");
+        } else {
+            println!(
+                "nothing raised — no PR owes a review (quiet repo, all reviewed, or no forge \
+                 for this remote)"
+            );
+        }
+    } else if withheld > 0 {
+        println!("  +{withheld} more owed, held by the review ceiling");
+    }
+    Ok(())
+}
+
+/// `nook reviews verdict <verdict> [--body …]` (MAIN-455) — a review run
+/// reports its conclusion. Job-scoped: reads `NOOK_JOB_ID` from the run's own
+/// environment, so an agent cannot verdict a job it is not.
+///
+/// The control plane posts the comment and labels; this call is the agent's
+/// LAST act, replacing the `gh pr comment` / label sequence the skill used to
+/// drive by prose.
+pub async fn reviews_verdict(verdict: &str, body: Option<&str>) -> Result<()> {
+    let job_id = std::env::var("NOOK_JOB_ID")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .context("NOOK_JOB_ID is not set — this command runs inside a review run")?;
+    let client = Client::from_config()?;
+    let mut payload = serde_json::json!({ "verdict": verdict });
+    if let Some(b) = body {
+        // `-` reads stdin, the same convention `gh --body-file -` taught.
+        let text = if b == "-" {
+            use std::io::Read;
+            let mut t = String::new();
+            std::io::stdin().read_to_string(&mut t)?;
+            t
+        } else {
+            b.to_string()
+        };
+        payload["body"] = serde_json::Value::String(text);
+    }
+    let job = client
+        .post(&format!("/api/v1/jobs/{job_id}/verdict"), payload)
+        .await?;
+    println!(
+        "verdict {} recorded for PR #{}",
+        crate::style::ok_c(job["review_verdict"].as_str().unwrap_or("?")),
+        job["review_pr_number"].as_u64().unwrap_or(0),
+    );
     Ok(())
 }
 
