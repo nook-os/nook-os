@@ -492,23 +492,21 @@ fn skill_for(kind: &str) -> Option<&'static str> {
         // The MERGE authority (MAIN-144): one manually-enqueued pass over one
         // epic's children. Same headless run machinery as everything else.
         "epic-run" => Some("nook-epic-runner"),
+        "build" => Some("nook-build"),
         _ => None,
     }
 }
 
 /// Kinds a node may advertise that deliberately have no mapping here YET.
 ///
-/// `skills/nook-build/` and `skills/nook-epic-runner/` both exist on disk, so
-/// what is missing is the mapping, not the skill. Giving them arms would change
-/// how those kinds execute, which MAIN-406 NG-4 forbids — so they are recorded
-/// as a known gap with an owner rather than silently falling back with nothing
-/// naming it. The test below fails if a kind is neither mapped nor listed here,
-/// which is what the mapping test was meant to do all along.
+/// Empty since MAIN-383 mapped `build`, the last unmapped kind — kept (with
+/// its guard test) so the NEXT new kind must either get an arm above or a
+/// recorded owner here, never a silent fall-through to the spec skill.
 // Read only by the test below — the record is the point, not a runtime lookup.
 // Scoped to the non-test build, where it genuinely is unused: in the test
 // build it IS read, and a blanket allow there would hide a real orphan.
 #[cfg_attr(not(test), allow(dead_code))]
-const UNMAPPED_KINDS: &[(&str, &str)] = &[("build", "MAIN-383 owns the build job kind")];
+const UNMAPPED_KINDS: &[(&str, &str)] = &[];
 
 /// Whether this kind may CREATE the clone cache, or only use one already there.
 ///
@@ -694,6 +692,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
                 target: &target_task_key,
                 seed: seed.as_deref(),
                 review_pr: review_pr_number,
+                build_task: (kind == "build").then_some(target_task_key.as_str()),
             },
             AgentIdentity {
                 token: nook_token.as_deref(),
@@ -795,6 +794,9 @@ struct RunBrief<'a> {
     /// The pull request a review run owns (MAIN-455): what the agent is told it
     /// is reviewing, and the session it resumes.
     review_pr: Option<u64>,
+    /// The ticket a build run owns (MAIN-383 AC-5): same contract as
+    /// `review_pr`, for the kind whose unit is a card rather than a PR.
+    build_task: Option<&'a str>,
 }
 
 fn drive_streaming(
@@ -809,6 +811,7 @@ fn drive_streaming(
         target,
         seed,
         review_pr,
+        build_task,
     } = brief;
     use crate::job_adapter::{self, Event, StreamingSession, TurnState};
 
@@ -850,6 +853,12 @@ fn drive_streaming(
     if let Some(pr) = review_pr {
         pr_env = pr.to_string();
         env.push(("NOOK_REVIEW_PR", &pr_env));
+    }
+    // The one ticket this run owns — `NOOK_REVIEW_PR`'s twin for builds
+    // (MAIN-383 AC-5): the skill reads which card it was enqueued for instead
+    // of re-deriving it from a pick.
+    if let Some(key) = build_task.filter(|k| !k.is_empty()) {
+        env.push(("NOOK_BUILD_TASK", key));
     }
     // The fleet's GitHub credential, under the name `gh` actually reads — the
     // SAME mapping the tmux path has done since MAIN-407, which this path
@@ -1255,6 +1264,8 @@ mod tests {
         assert_eq!(skill_for("spec"), Some("nook-spec"));
         assert_eq!(skill_for("decompose"), Some("nook-epic"));
         assert_eq!(skill_for("review"), Some("nook-review"));
+        assert_eq!(skill_for("epic-run"), Some("nook-epic-runner"));
+        assert_eq!(skill_for("build"), Some("nook-build"));
 
         for k in crate::capabilities::KNOWN_LOOP_KINDS {
             let mapped = skill_for(k).is_some();
