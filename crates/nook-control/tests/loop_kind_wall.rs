@@ -1,9 +1,10 @@
 //! The build-loop wall on the task-claim route (MAIN-142 AC-4).
 //!
-//! The build loop as it runs TODAY is a person or an agent typing `nook claim`
-//! inside a session — there is no `build` job kind yet for the executor wall to
-//! catch. So the wall is applied at the claim, against the node the claiming
-//! session actually runs on.
+//! A build that runs as a person or an agent typing `nook claim` inside a
+//! session never becomes a job, so the executor wall cannot catch it (the
+//! `build` job KIND has its own wall — `kind_wall_refusal`, tested in
+//! executor_selection). So here the wall is applied at the claim, against the
+//! node the claiming session actually runs on.
 //!
 //! The third case is the one worth having: a claim with NO session context is
 //! deliberately out of reach. The control plane cannot tell where it came from,

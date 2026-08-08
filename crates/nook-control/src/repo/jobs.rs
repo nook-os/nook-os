@@ -174,6 +174,11 @@ pub trait LoopJobRepository: Send + Sync {
     /// Jobs still believed to be running on a node — what a disconnect strands.
     async fn in_flight_on_node(&self, node: NodeId) -> ApiResult<Vec<JobId>>;
 
+    /// The live build run already on a card, if any (MAIN-383 AC-4) — what the
+    /// create path names in its refusal. The 0049 partial unique index is the
+    /// atomic version of the same rule.
+    async fn active_build_for(&self, tenant: TenantId, task: TaskId) -> ApiResult<Option<JobId>>;
+
     /// Fail every job whose executor stopped reporting more than `grace_secs`
     /// ago, returning what was reaped. One guarded `UPDATE … RETURNING`, so two
     /// reapers cannot double-fail a job and a job that resumed between scan and
@@ -525,6 +530,19 @@ impl LoopJobRepository for DbLoopJobRepository {
                 "SELECT id FROM loop_jobs
                  WHERE executor_node_id = $1 AND state IN ('claimed', 'running')",
                 params![node],
+            )
+            .await?)
+    }
+
+    async fn active_build_for(&self, tenant: TenantId, task: TaskId) -> ApiResult<Option<JobId>> {
+        Ok(self
+            .db
+            .query_scalar_opt(
+                "SELECT id FROM loop_jobs
+                 WHERE tenant_id = $1 AND target_task_id = $2 AND kind = 'build'
+                   AND state IN ('queued', 'claimed', 'running', 'waiting_on_human')
+                 LIMIT 1",
+                params![tenant, task],
             )
             .await?)
     }
@@ -1017,6 +1035,25 @@ impl LoopJobRepository for FakeLoopJobRepository {
             })
             .map(|j| j.id)
             .collect())
+    }
+
+    async fn active_build_for(&self, tenant: TenantId, task: TaskId) -> ApiResult<Option<JobId>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .jobs
+            .iter()
+            .find(|j| {
+                j.tenant_id == tenant
+                    && j.target_task_id == Some(task)
+                    && j.kind == "build"
+                    && matches!(
+                        j.state.as_str(),
+                        "queued" | "claimed" | "running" | "waiting_on_human"
+                    )
+            })
+            .map(|j| j.id))
     }
 
     async fn reap_stale_executors(&self, grace_secs: i64) -> ApiResult<Vec<ReapedJob>> {
