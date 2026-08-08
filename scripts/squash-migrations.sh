@@ -274,11 +274,9 @@ echo "  detected (and reverted)"
 # --- 5. Verification (b): seed rows must match, table by table. ---------------
 say "verify (b): seed-row counts"
 counts() {
-  psql "${DATABASE_URL%/*}/$1" -tAF' ' -c "
-    SELECT relname, n_live_tup FROM pg_stat_user_tables
-     WHERE schemaname = '$SCHEMA' AND relname <> '_sqlx_migrations'
-     ORDER BY relname" 2>/dev/null || true
-  # pg_stat is sampled; count for real, which is what the check is worth.
+  # count(*) only: pg_stat's n_live_tup is an async-sampled counter, so two
+  # freshly-built databases can disagree on it purely on stats-flush timing —
+  # a flaky refusal in the one check that must be deterministic (MAIN-308).
   psql "${DATABASE_URL%/*}/$1" -tA -c "
     SELECT string_agg(t || '=' || c, E'\n' ORDER BY t) FROM (
       SELECT table_name AS t,
@@ -290,13 +288,40 @@ counts() {
          AND table_name <> '_sqlx_migrations'
     ) s"
 }
-counts "$FROM_N" | tail -n +2 > "$WORK/ca.txt"
-counts "$FROM_1" | tail -n +2 > "$WORK/cb.txt"
+counts "$FROM_N" > "$WORK/ca.txt"
+counts "$FROM_1" > "$WORK/cb.txt"
 if ! diff -u "$WORK/ca.txt" "$WORK/cb.txt" > "$WORK/counts.diff"; then
   cat "$WORK/counts.diff" >&2
   die "seed-row counts differ — refusing to write"
 fi
 echo "  identical ($(grep -c . "$WORK/ca.txt") tables)"
+
+# The check must be able to FAIL, proven the same way verification (a) proves
+# the schema diff: the same empty table on both sides, one extra row on one —
+# a genuine seed-row difference and nothing else.
+psql "${DATABASE_URL%/*}/$FROM_N" -q -c \
+  "CREATE TABLE $SCHEMA.squash_selftest_rows (x int)" >/dev/null
+psql "${DATABASE_URL%/*}/$FROM_1" -q -c \
+  "CREATE TABLE $SCHEMA.squash_selftest_rows (x int)" >/dev/null
+psql "${DATABASE_URL%/*}/$FROM_1" -q -c \
+  "INSERT INTO $SCHEMA.squash_selftest_rows VALUES (1)" >/dev/null
+counts "$FROM_N" > "$WORK/ca_canary.txt"
+counts "$FROM_1" > "$WORK/cb_canary.txt"
+if diff -q "$WORK/ca_canary.txt" "$WORK/cb_canary.txt" >/dev/null; then
+  die "the seed-row check did NOT notice an injected row — the check is broken, \
+refusing to trust its verdict"
+fi
+psql "${DATABASE_URL%/*}/$FROM_N" -q -c \
+  "DROP TABLE $SCHEMA.squash_selftest_rows" >/dev/null
+psql "${DATABASE_URL%/*}/$FROM_1" -q -c \
+  "DROP TABLE $SCHEMA.squash_selftest_rows" >/dev/null
+# …and the counts must read exactly as before, or the self-test left residue.
+counts "$FROM_N" > "$WORK/ca2.txt"
+counts "$FROM_1" > "$WORK/cb2.txt"
+{ diff -q "$WORK/ca.txt" "$WORK/ca2.txt" >/dev/null \
+    && diff -q "$WORK/cb.txt" "$WORK/cb2.txt" >/dev/null; } \
+  || die "the self-test left the scratch databases changed — refusing to write"
+echo "  detected (and reverted)"
 
 # --- 6. The manifest: exactly which ledger rows the re-stamp may collapse. ----
 NEW_CHECKSUM="$(checksum_of "$WORK/$NEW_NAME")"
