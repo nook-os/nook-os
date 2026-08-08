@@ -161,6 +161,10 @@ pub fn build_router(state: AppState) -> Router {
             get(workspaces::review_loop_status),
         )
         .route(
+            "/workspaces/{id}/reviews",
+            get(jobs::list_reviews_for_workspace),
+        )
+        .route(
             "/workspaces/{id}/ports",
             get(workspaces::get_port_requirements).put(workspaces::set_port_requirements),
         )

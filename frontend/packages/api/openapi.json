@@ -7639,6 +7639,41 @@
         }
       }
     },
+    "/api/v1/workspaces/{id}/reviews": {
+      "get": {
+        "tags": [
+          "crate::routes::jobs"
+        ],
+        "summary": "`GET /api/v1/workspaces/{id}/reviews` — this repo's review runs, newest\nfirst (MAIN-455 AC-5).",
+        "description": "The workspace's own window onto work the control plane raised for it. Each\nrow is an ordinary loop job, so its transcript is read through the same\nendpoint and the same view a spec run's is — there is no second transcript\nmechanism to keep in step.",
+        "operationId": "list_workspace_reviews",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/LoopJob"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/workspaces/{id}/secrets": {
       "get": {
         "tags": [

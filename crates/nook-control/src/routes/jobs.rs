@@ -108,6 +108,34 @@ pub async fn list_for_task(
     ))
 }
 
+/// `GET /api/v1/workspaces/{id}/reviews` — this repo's review runs, newest
+/// first (MAIN-455 AC-5).
+///
+/// The workspace's own window onto work the control plane raised for it. Each
+/// row is an ordinary loop job, so its transcript is read through the same
+/// endpoint and the same view a spec run's is — there is no second transcript
+/// mechanism to keep in step.
+#[utoipa::path(get, path = "/api/v1/workspaces/{id}/reviews",
+    operation_id = "list_workspace_reviews",
+    params(("id" = String, Path,)),
+    responses((status = 200, body = [LoopJob])))]
+pub async fn list_reviews_for_workspace(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<WorkspaceId>,
+) -> ApiResult<Json<Vec<LoopJob>>> {
+    // A page's worth. A repo that gets pushed to all day accumulates one run
+    // per push per PR, and none of the older ones tell you anything the newest
+    // does not.
+    const PAGE: i64 = 50;
+    Ok(Json(
+        state
+            .jobs
+            .list_reviews_for_workspace(auth.tenant_id, id, PAGE)
+            .await?,
+    ))
+}
+
 #[utoipa::path(post, path = "/api/v1/jobs/{id}/cancel",
     operation_id = "job_cancel",
     params(("id" = String, Path,)),

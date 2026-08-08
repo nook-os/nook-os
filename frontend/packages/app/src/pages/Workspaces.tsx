@@ -13,6 +13,7 @@ import { fetchCredentials } from "../GitCredentials";
 import { PORT_CAP_SENTENCE, PortSafetyNotice } from "../PortSafetyNotice";
 import { hasPortDeclaration } from "../portSafety";
 import { SessionPolicy } from "../SessionPolicy";
+import { WorkspaceReviews } from "../WorkspaceReviews";
 import { WorkspaceLocations } from "../WorkspaceLocations";
 import { WorkspacePorts } from "../WorkspacePorts";
 import { SectionedPage, type PageSection } from "../SectionedPage";
@@ -613,6 +614,13 @@ export function WorkspaceDetail() {
           )}
         </Panel>
       ),
+    },
+    {
+      id: "reviews",
+      title: "Reviews",
+      group: "Work",
+      keywords: ["review", "loop", "pr", "pull request", "transcript", "verdict", "agent"],
+      render: () => (id ? <WorkspaceReviews workspaceId={id} /> : null),
     },
     {
       id: "policy",

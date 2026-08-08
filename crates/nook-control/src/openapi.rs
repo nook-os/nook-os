@@ -170,6 +170,7 @@ use utoipa::OpenApi;
         crate::routes::jobs::create,
         crate::routes::jobs::get,
         crate::routes::jobs::list_for_task,
+        crate::routes::jobs::list_reviews_for_workspace,
         crate::routes::jobs::cancel,
         crate::routes::jobs::rerun,
         crate::routes::jobs::message,

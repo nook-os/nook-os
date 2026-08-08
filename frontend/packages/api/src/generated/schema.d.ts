@@ -3254,6 +3254,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{id}/reviews": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/workspaces/{id}/reviews` — this repo's review runs, newest
+         *     first (MAIN-455 AC-5).
+         * @description The workspace's own window onto work the control plane raised for it. Each
+         *     row is an ordinary loop job, so its transcript is read through the same
+         *     endpoint and the same view a spec run's is — there is no second transcript
+         *     mechanism to keep in step.
+         */
+        get: operations["list_workspace_reviews"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{id}/secrets": {
         parameters: {
             query?: never;
@@ -13149,6 +13173,27 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    list_workspace_reviews: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LoopJob"][];
+                };
             };
         };
     };

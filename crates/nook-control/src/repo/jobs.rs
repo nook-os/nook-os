@@ -132,6 +132,16 @@ pub trait LoopJobRepository: Send + Sync {
         workspace: WorkspaceId,
     ) -> ApiResult<Vec<ReviewRunHeads>>;
 
+    /// A workspace's review runs, newest first — what the workspace's review
+    /// surface reads. Bounded, because a busy repo accumulates one per push per
+    /// PR and a page does not want all of them.
+    async fn list_reviews_for_workspace(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+        limit: i64,
+    ) -> ApiResult<Vec<LoopJob>>;
+
     async fn list_for_task(&self, tenant: TenantId, task: TaskId) -> ApiResult<Vec<LoopJob>>;
 
     async fn transition(&self, id: JobId, to: &str) -> ApiResult<LoopJob>;
@@ -357,6 +367,23 @@ impl LoopJobRepository for DbLoopJobRepository {
                 .done_head = h.review_head_sha;
         }
         Ok(by_pr.into_values().collect())
+    }
+
+    async fn list_reviews_for_workspace(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+        limit: i64,
+    ) -> ApiResult<Vec<LoopJob>> {
+        Ok(self
+            .db
+            .query_all(
+                "SELECT * FROM loop_jobs
+                  WHERE tenant_id = $1 AND workspace_id = $2 AND kind = 'review'
+                  ORDER BY created_at DESC LIMIT $3",
+                params![tenant, workspace.0, limit],
+            )
+            .await?)
     }
 
     async fn list_for_task(&self, tenant: TenantId, task: TaskId) -> ApiResult<Vec<LoopJob>> {
@@ -727,6 +754,26 @@ impl LoopJobRepository for FakeLoopJobRepository {
             .iter()
             .find(|j| j.id == id)
             .and_then(|j| j.target_task_id))
+    }
+
+    async fn list_reviews_for_workspace(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+        limit: i64,
+    ) -> ApiResult<Vec<LoopJob>> {
+        let s = self.inner.lock().unwrap();
+        let mut mine: Vec<LoopJob> = s
+            .jobs
+            .iter()
+            .filter(|j| {
+                j.tenant_id == tenant && j.workspace_id == Some(workspace) && j.kind == "review"
+            })
+            .cloned()
+            .collect();
+        mine.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        mine.truncate(limit.max(0) as usize);
+        Ok(mine)
     }
 
     async fn review_run_heads(
