@@ -550,9 +550,15 @@ mod tests {
     fn a_session_start_drives_no_skill() {
         let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/sessions.rs"))
             .expect("this file must be readable");
+        // Only the code, not this module: the banned words are spelled out
+        // below, so a whole-file scan would find its own list and fail forever.
+        let code = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("code precedes tests");
         for banned in ["drive_loop_skill", "drive_skill", "/loop /"] {
             assert!(
-                !src.contains(banned),
+                !code.contains(banned),
                 "`{banned}` is back — a managed session must never type into an agent"
             );
         }

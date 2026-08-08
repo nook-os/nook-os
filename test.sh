@@ -19,6 +19,14 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# The SAME project name `run.sh` and `dev-up.sh` use. Without it a bare
+# `docker compose` here addresses compose's default project — the bare
+# directory name — and finds none of the containers the stack actually started,
+# so every in-container run reported "the dev stack is not running" while it
+# was running perfectly well.
+# shellcheck source=scripts/compose-project.sh
+. ./scripts/compose-project.sh
+
 HOST=0
 [ "${1:-}" = "--host" ] && { HOST=1; shift; }
 
