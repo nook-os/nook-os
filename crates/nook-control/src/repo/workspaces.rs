@@ -13,13 +13,6 @@
 //! Two boundary decisions worth stating, because both look like leaks and
 //! neither is:
 //!
-//! - **`migrate_checkout_paths` writes `tasks`.** Renaming a directory has to
-//!   move `node_workspaces.path` and `tasks.worktree_path` together or not at
-//!   all — they are the only two durable on-disk path records, and a partial
-//!   move leaves a task pointing at a directory that no longer exists. That is
-//!   one transaction, so it is one method here (AC-1: no cross-repo transaction
-//!   semantics). Splitting it across two repositories would mean either two
-//!   transactions or a transaction handle in a trait signature; both are worse.
 //! - **A few narrow reads answer about `nodes` and `sessions`.**
 //!   Those aggregates have no repository yet (MAIN-252/253). They are
 //!   named for the workspace-level question they answer, not the table they
@@ -81,20 +74,6 @@ pub struct CheckoutUpsert {
     /// `clone` or `worktree` — the node's report drives this directly
     /// (MAIN-222 AC-1).
     pub kind: String,
-}
-
-/// A path rename, both ends.
-#[derive(Debug, Clone)]
-pub struct PathMove {
-    pub old: String,
-    pub new: String,
-}
-
-/// How many rows each half of a path migration moved.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct MigratedPaths {
-    pub checkouts: u32,
-    pub tasks: u32,
 }
 
 /// Resolving a user-supplied workspace key. `Ambiguous` carries the slugs to
@@ -483,19 +462,6 @@ pub trait WorkspaceRepository: Send + Sync {
         node: NodeId,
         reported_paths: &[String],
     ) -> ApiResult<u64>;
-
-    /// Which of these paths this node actually holds. The belonging check that
-    /// runs before any path rewrite.
-    async fn existing_paths(&self, node: NodeId, paths: &[String]) -> ApiResult<Vec<String>>;
-
-    /// Rewrite checkout paths **and the task worktree paths that reference
-    /// them**, in one transaction, preserving row identity (MAIN-107 AC-4).
-    /// Both tables move together or neither does — see the module note.
-    async fn migrate_checkout_paths(
-        &self,
-        node: NodeId,
-        moves: &[PathMove],
-    ) -> ApiResult<MigratedPaths>;
 
     /// Hard-delete every checkout tombstoned longer than `retention_secs`,
     /// returning what was reclaimed. Delete-and-return in one statement so a
@@ -1501,55 +1467,6 @@ impl WorkspaceRepository for DbWorkspaceRepository {
                 params![node, DbValue::TextList(reported_paths.to_vec())],
             )
             .await?)
-    }
-
-    async fn existing_paths(&self, node: NodeId, paths: &[String]) -> ApiResult<Vec<String>> {
-        Ok(self
-            .db
-            .query_scalar_all(
-                "SELECT path FROM node_workspaces WHERE node_id = $1 AND path = ANY($2)",
-                params![node, DbValue::TextList(paths.to_vec())],
-            )
-            .await?)
-    }
-
-    async fn migrate_checkout_paths(
-        &self,
-        node: NodeId,
-        moves: &[PathMove],
-    ) -> ApiResult<MigratedPaths> {
-        let mut tx = self.db.begin().await.map_err(nook_db::DbError::from)?;
-        let mut out = MigratedPaths::default();
-        for m in moves {
-            let checkouts = tx
-                .exec(
-                    &format!(
-                        "UPDATE node_workspaces SET path = $3, last_scanned_at = {}
-                         WHERE node_id = $1 AND path = $2",
-                        type_mapping(self.db.engine()).now()
-                    ),
-                    params![node, &m.old, &m.new],
-                )
-                .await?;
-            out.checkouts += checkouts as u32;
-
-            // A task's worktree lives on a specific node; scope the rewrite to
-            // this one so an identical relative path on another machine is
-            // never touched.
-            let tasks = tx
-                .exec(
-                    &format!(
-                        "UPDATE tasks SET worktree_path = $3, updated_at = {}
-                         WHERE worktree_node_id = $1 AND worktree_path = $2",
-                        type_mapping(self.db.engine()).now()
-                    ),
-                    params![node, &m.old, &m.new],
-                )
-                .await?;
-            out.tasks += tasks as u32;
-        }
-        tx.commit().await?;
-        Ok(out)
     }
 
     async fn reap_tombstoned(&self, retention_secs: i64) -> ApiResult<Vec<ReapedCheckout>> {
@@ -2842,42 +2759,6 @@ impl WorkspaceRepository for FakeWorkspaceRepository {
             }
         }
         Ok(n)
-    }
-
-    async fn existing_paths(&self, node: NodeId, paths: &[String]) -> ApiResult<Vec<String>> {
-        Ok(self
-            .inner
-            .lock()
-            .unwrap()
-            .checkouts
-            .iter()
-            .filter(|c| c.node_id == node && paths.contains(&c.path))
-            .map(|c| c.path.clone())
-            .collect())
-    }
-
-    async fn migrate_checkout_paths(
-        &self,
-        node: NodeId,
-        moves: &[PathMove],
-    ) -> ApiResult<MigratedPaths> {
-        let mut s = self.inner.lock().unwrap();
-        let mut out = MigratedPaths::default();
-        for m in moves {
-            for c in s.checkouts.iter_mut() {
-                if c.node_id == node && c.path == m.old {
-                    c.path = m.new.clone();
-                    out.checkouts += 1;
-                }
-            }
-            for (n, p) in s.task_worktrees.iter_mut() {
-                if *n == node && *p == m.old {
-                    *p = m.new.clone();
-                    out.tasks += 1;
-                }
-            }
-        }
-        Ok(out)
     }
 
     async fn reap_tombstoned(&self, retention_secs: i64) -> ApiResult<Vec<ReapedCheckout>> {

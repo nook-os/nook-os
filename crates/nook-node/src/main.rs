@@ -385,20 +385,6 @@ enum Command {
         cmd: SetCmd,
     },
 
-    /// Migrate this machine's checkouts from the flat legacy workspace root
-    /// into this control plane's per-control-plane slugged root.
-    ///
-    /// Dry-run by default: prints the plan (old → new for every checkout, its
-    /// worktrees included) and changes nothing. `--apply` performs the moves,
-    /// tells the control plane to rewrite its path records, and points
-    /// `node.toml` at the slugged root. `--apply` refuses while `nook run` is
-    /// live — stop the agent first.
-    MigrateWorkspaces {
-        /// Perform the migration instead of only printing the plan.
-        #[arg(long)]
-        apply: bool,
-    },
-
     /// Act as yourself rather than as this machine, so the CLI can drive the
     /// whole fleet: `nook login --token nook_user_…`.
     Login {
@@ -906,9 +892,10 @@ async fn main() -> Result<()> {
             tmux::set_socket(cfg.tmux_socket.clone());
             // Reaches sessions that already exist (mouse/scrollback/clipboard).
             tmux::apply_server_defaults();
-            // Mark this agent live so `nook migrate-workspaces --apply` refuses
-            // to move checkouts while discovery could report a half-moved tree
-            // (MAIN-107 AC-2). Removed on clean exit; stale copies are ignored.
+            // Mark this agent live (MAIN-107 AC-2 established this for the
+            // since-retired workspace migration; the pidfile remains useful as
+            // the general "is an agent already running here" signal). Removed
+            // on clean exit; stale copies are ignored.
             let _pidfile = config::PidFile::write()?;
             // The loop skills have to BE here before a job types `/nook-spec`
             // at an agent (MAIN-344). Done on every boot rather than once at
@@ -976,7 +963,6 @@ async fn main() -> Result<()> {
                 tenant,
             } => cli::rollout_restart(&target, yes, tenant.as_deref()).await,
         },
-        Command::MigrateWorkspaces { apply } => cli::migrate_workspaces(apply).await,
         Command::Login { token, server } => match token {
             Some(t) => cli::login(&t, server.as_deref()).await,
             None => cli::login_with_provider(server.as_deref()).await,
@@ -1961,7 +1947,6 @@ mod cli_surface {
         "label",
         "login",
         "logout",
-        "migrate-workspaces",
         "notify",
         "read",
         "relate",

@@ -376,23 +376,6 @@ fn is_branch_collision(git_stderr: &str) -> bool {
     s.contains("already checked out") || s.contains("already used by worktree")
 }
 
-/// `git worktree repair` from a primary checkout, to fix the `.git` links after
-/// its worktrees have been moved on disk (MAIN-107 AC-3).
-///
-/// A moved worktree's `.git` file still points at the primary's old gitdir, and
-/// the primary's `.git/worktrees/<id>/gitdir` still points at the worktree's old
-/// location. Running repair from the primary with the moved worktrees' NEW paths
-/// reestablishes the link in both directions, so discovery sees a valid repo.
-pub fn repair_worktrees(primary: &Path, worktrees: &[PathBuf]) -> Result<(), String> {
-    let owned: Vec<String> = worktrees
-        .iter()
-        .map(|p| p.to_string_lossy().to_string())
-        .collect();
-    let mut args: Vec<&str> = vec!["worktree", "repair"];
-    args.extend(owned.iter().map(String::as_str));
-    run_git(&args, Some(primary), None).map(|_| ())
-}
-
 /// Stage everything and commit. The UI's "commit" button, which is aimed at
 /// the common case: you looked at the diff, you want it saved.
 ///

@@ -107,7 +107,8 @@ impl NodeConfig {
 /// Where `nook run` records its PID while the agent is live (MAIN-107 AC-2).
 ///
 /// Beside `node.toml`, in the config/state dir. It exists so
-/// `nook migrate-workspaces --apply` can refuse to move checkouts out from
+/// an agent is already running here (the since-retired workspace migration
+/// established this; the liveness signal outlives it).
 /// under a running agent: a periodic or gitop-triggered discovery mid-move
 /// would report a half-emptied tree, and the reconcile deletes every
 /// `node_workspaces` row whose path is no longer reported.
