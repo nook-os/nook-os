@@ -665,7 +665,6 @@ async fn main() -> Result<()> {
         Command::Reviews(ReviewsCommand::Scale { workspace, count }) => {
             cli::reviews_scale(&workspace, count.as_deref()).await
         }
-        Command::Reviews(ReviewsCommand::Sweep { state }) => cli::reviews_sweep(&state).await,
         Command::Notify {
             title,
             body,
@@ -1062,11 +1061,12 @@ enum OperatorCommand {
 
 #[derive(clap::Subcommand)]
 enum ReviewsCommand {
-    /// Raise a review of a workspace now, without waiting for the sweep.
+    /// Raise a review of a workspace now, out of band.
     ///
-    /// Deduped against the sweep by the SAME rule the sweep uses: if a review
-    /// of that workspace is already queued or running, this prints that job
-    /// rather than starting a second one.
+    /// The reconciler raises a run per pull request by itself (MAIN-455); this
+    /// is the manual path for a repo with no forge, or for asking again without
+    /// pushing. Deduped by the same rule: a review already queued or running for
+    /// that workspace prints rather than starting a second one.
     Enqueue {
         /// The workspace, by id, slug or name.
         workspace: String,
@@ -1076,25 +1076,17 @@ enum ReviewsCommand {
     },
     /// The ceiling on a workspace's review loops, or read the current value.
     ///
-    /// A ceiling, not a count: reviewers are meant to scale to open PRs and stop
-    /// here. Nothing counts PRs yet, so the ceiling is what runs today.
+    /// A ceiling, not a count: it caps how many review runs are in flight for
+    /// the repo at once, and the forge decides how many are wanted (MAIN-448).
     ///
-    /// `0` turns reviewing off for that repo and stops the session it has;
-    /// `unset` returns it to the build's default ceiling of one. Placement of
-    /// more than one per node is not built yet, so a ceiling above the fleet's
-    /// loop nodes reports a shortfall rather than silently capping.
+    /// `0` turns reviewing off for that repo; `unset` returns it to the build's
+    /// default of one. A repo with more open PRs than the ceiling reviews them
+    /// as runs finish, rather than all at once.
     Scale {
         /// The workspace, by id, slug or name.
         workspace: String,
         /// The ceiling, `0` to turn it off, or `unset`. Omit to read.
         count: Option<String>,
-    },
-    /// Turn the board-signal sweep on or off for this tenant, or ask its state.
-    /// Default is OFF: a fresh deployment reviews nothing until asked.
-    Sweep {
-        /// `on` | `off` | `status` (omit for status).
-        #[arg(default_value = "status")]
-        state: String,
     },
 }
 

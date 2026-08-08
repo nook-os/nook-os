@@ -45,7 +45,6 @@ need "required secretKeyRefs"      'key: (DATABASE_URL|SESSION_SECRET)' 2
 # switch that turns the sweep ON is a per-tenant runtime setting, not a chart
 # value — deliberately, so enabling agents to review repositories is a decision
 # made against a live tenant rather than baked into a deploy.
-need "review sweep interval"       'NOOK_REVIEW_SWEEP_INTERVAL_SECS' 1
 need "liveness /livez"             'path: /livez' 2
 need "readiness /healthz"          'path: /healthz' 1
 

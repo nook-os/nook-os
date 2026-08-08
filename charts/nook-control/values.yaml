@@ -206,11 +206,6 @@ secretKeys:
 
 # ── Non-secret config (rendered into a ConfigMap) ────────────────────────────
 config:
-  # How often the board-signal review sweep scans, in seconds (MAIN-408).
-  # The sweep itself is OFF by default and turned on per tenant with
-  # `nook reviews sweep on`; this only sets how often an ENABLED sweep looks.
-  # Idempotent, so this is a responsiveness dial, never a correctness one.
-  reviewSweepIntervalSecs: 60
   # -- APP_ENV. Use "production" in real deployments (disables the dev-login hatch).
   appEnv: production
   # -- AUTH_DEV_MODE: the dev-login hatch. false (default) is omitted from the
