@@ -135,6 +135,14 @@ impl GithubForge {
     /// the one answer that must never be guessed, because it reads as "nothing
     /// to review" and stops every reviewer. Without a token the deployment
     /// falls back to the pre-MAIN-448 behaviour: the ceiling is the count.
+    /// A forge speaking as one WORKSPACE's own token (MAIN-456).
+    pub fn from_token(token: &str) -> Self {
+        Self {
+            http: reqwest::Client::new(),
+            token: token.to_string(),
+        }
+    }
+
     pub fn from_env() -> Option<Self> {
         let token = fleet_gh_token()?;
         Some(Self {
@@ -369,8 +377,13 @@ impl ReviewDemand {
     /// has failed every time we have asked. All four mean the same thing to the
     /// caller — *we do not know, so run what the repo declared* — and collapsing
     /// them here keeps that judgement in one place instead of four.
-    pub async fn open_prs(&self, workspace: WorkspaceId, remote: Option<&str>) -> Option<u32> {
-        Some(self.prs(workspace, remote).await?.len() as u32)
+    pub async fn open_prs(
+        &self,
+        workspace: WorkspaceId,
+        remote: Option<&str>,
+        token: Option<&str>,
+    ) -> Option<u32> {
+        Some(self.prs(workspace, remote, token).await?.len() as u32)
     }
 
     /// The open PRs themselves — what a per-PR wakeup converges on. Same cache,
@@ -379,8 +392,20 @@ impl ReviewDemand {
         &self,
         workspace: WorkspaceId,
         remote: Option<&str>,
+        token: Option<&str>,
     ) -> Option<Vec<PullRequest>> {
-        let forge = self.forge.as_ref()?;
+        // The workspace's own token OUTRANKS the deployment's forge: a tenant
+        // that configured its identity asks GitHub as itself (MAIN-456). The
+        // deployment forge — fleet env, or a test's injected fake — is the
+        // fallback, and no token plus no forge is the pre-forge "unknown".
+        let own;
+        let forge: &dyn Forge = match token {
+            Some(t) => {
+                own = GithubForge::from_token(t);
+                &own
+            }
+            None => self.forge.as_deref()?,
+        };
         let repo = github_repo(remote?)?;
 
         if let Some(fresh) = self.fresh(workspace) {
@@ -598,24 +623,27 @@ mod tests {
         let (fake, calls) = Fake::answering(vec![Ok(5)]);
         let d = ReviewDemand::new(Some(fake), TTL);
         // No remote at all, and a remote that is not a forge.
-        assert_eq!(d.open_prs(ws(), None).await, None);
-        assert_eq!(d.open_prs(ws(), Some("/workspace/local.git")).await, None);
+        assert_eq!(d.open_prs(ws(), None, None).await, None);
+        assert_eq!(
+            d.open_prs(ws(), Some("/workspace/local.git"), None).await,
+            None
+        );
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
     async fn a_deployment_with_no_token_never_asks() {
         let d = ReviewDemand::new(None, TTL);
-        assert_eq!(d.open_prs(ws(), Some(REMOTE)).await, None);
+        assert_eq!(d.open_prs(ws(), Some(REMOTE), None).await, None);
     }
 
     #[tokio::test]
     async fn the_count_is_cached_for_its_ttl() {
         let (fake, calls) = Fake::answering(vec![Ok(4), Ok(9)]);
         let d = ReviewDemand::new(Some(fake), Duration::from_secs(300));
-        assert_eq!(d.open_prs(ws(), Some(REMOTE)).await, Some(4));
+        assert_eq!(d.open_prs(ws(), Some(REMOTE), None).await, Some(4));
         assert_eq!(
-            d.open_prs(ws(), Some(REMOTE)).await,
+            d.open_prs(ws(), Some(REMOTE), None).await,
             Some(4),
             "still cached"
         );
@@ -630,8 +658,8 @@ mod tests {
     async fn an_expired_entry_is_asked_again() {
         let (fake, calls) = Fake::answering(vec![Ok(4), Ok(9)]);
         let d = ReviewDemand::new(Some(fake), Duration::ZERO);
-        assert_eq!(d.open_prs(ws(), Some(REMOTE)).await, Some(4));
-        assert_eq!(d.open_prs(ws(), Some(REMOTE)).await, Some(9));
+        assert_eq!(d.open_prs(ws(), Some(REMOTE), None).await, Some(4));
+        assert_eq!(d.open_prs(ws(), Some(REMOTE), None).await, Some(9));
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
@@ -646,14 +674,22 @@ mod tests {
             Ok(1),
         ]);
         let d = ReviewDemand::new(Some(fake), Duration::ZERO);
-        assert_eq!(d.open_prs(ws(), Some(REMOTE)).await, Some(3));
+        assert_eq!(d.open_prs(ws(), Some(REMOTE), None).await, Some(3));
         assert_eq!(
-            d.open_prs(ws(), Some(REMOTE)).await,
+            d.open_prs(ws(), Some(REMOTE), None).await,
             Some(3),
             "outage holds"
         );
-        assert_eq!(d.open_prs(ws(), Some(REMOTE)).await, Some(3), "still holds");
-        assert_eq!(d.open_prs(ws(), Some(REMOTE)).await, Some(1), "recovered");
+        assert_eq!(
+            d.open_prs(ws(), Some(REMOTE), None).await,
+            Some(3),
+            "still holds"
+        );
+        assert_eq!(
+            d.open_prs(ws(), Some(REMOTE), None).await,
+            Some(1),
+            "recovered"
+        );
     }
 
     /// An outage that starts before we ever get an answer falls back to "we do
@@ -664,7 +700,7 @@ mod tests {
     async fn a_failure_with_nothing_cached_is_unknown_not_zero() {
         let (fake, _) = Fake::answering(vec![Err(anyhow::anyhow!("network down"))]);
         let d = ReviewDemand::new(Some(fake), Duration::ZERO);
-        assert_eq!(d.open_prs(ws(), Some(REMOTE)).await, None);
+        assert_eq!(d.open_prs(ws(), Some(REMOTE), None).await, None);
     }
 
     /// Two processes read the fleet credential and they must read the same

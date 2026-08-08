@@ -7247,6 +7247,86 @@
         }
       }
     },
+    "/api/v1/workspaces/{id}/gh-token": {
+      "get": {
+        "tags": [
+          "crate::routes::workspaces"
+        ],
+        "summary": "`GET /api/v1/workspaces/{id}/gh-token` — does this workspace hold its own\nforge token (MAIN-456)? Reports ONLY the fact; the token never leaves the\nvault through any read path.",
+        "operationId": "get_workspace_gh_token",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceGhTokenState"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "crate::routes::workspaces"
+        ],
+        "summary": "`PUT /api/v1/workspaces/{id}/gh-token` — set or clear the workspace's own\nforge token (MAIN-456). Sealed with the same vault the git credentials use.",
+        "description": "Multi-tenant is the reason this exists: one fleet-wide token means every\ntenant's verdicts post as one identity and the control plane holds a\ncredential with reach into every tenant's forge. The workspace token\nOUTRANKS the fleet variable everywhere a forge is spoken to.",
+        "operationId": "set_workspace_gh_token",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetWorkspaceGhTokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceGhTokenState"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/workspaces/{id}/git": {
       "get": {
         "tags": [
@@ -14294,6 +14374,18 @@
           }
         }
       },
+      "SetWorkspaceGhTokenRequest": {
+        "type": "object",
+        "description": "Set or clear a workspace's own forge token (MAIN-456). `token: null`\nclears; the write path never echoes the value back.",
+        "properties": {
+          "token": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "Setting": {
         "type": "object",
         "description": "Scope values: `tenant` | `user`.",
@@ -16549,6 +16641,18 @@
             }
           }
         ]
+      },
+      "WorkspaceGhTokenState": {
+        "type": "object",
+        "description": "Whether a workspace holds its own forge token — and never the token itself.\n`set: false` means the fleet fallback (if any) applies.",
+        "required": [
+          "set"
+        ],
+        "properties": {
+          "set": {
+            "type": "boolean"
+          }
+        }
       },
       "WorkspaceId": {
         "type": "string",

@@ -1,0 +1,14 @@
+-- A workspace's OWN forge credential (MAIN-456).
+--
+-- The fleet token (`NOOK_GH_TOKEN`, MAIN-407) was written for a single-tenant
+-- fleet, and a multi-tenant control plane cannot stand behind it: every
+-- tenant's verdicts would post as one identity, and the control plane would
+-- hold one credential with reach into every tenant's forge. The token belongs
+-- to the workspace, sealed with the same vault the git credentials use; the
+-- fleet variable remains only as the single-tenant/dev fallback.
+--
+-- A raw sealed column on the workspace rather than a row in `git_credentials`:
+-- that table's `kind` CHECK is frozen into the SQLite twin's table definition,
+-- and widening it costs a table rebuild on that engine for no gain — nothing
+-- about a forge token wants the shared named-pool semantics an ssh key has.
+ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS gh_token_enc bytea;

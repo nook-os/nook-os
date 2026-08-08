@@ -71,6 +71,9 @@ pub trait WorkSource: Send + Sync {
 /// nothing else does. This is the whole of what replaced the five-minute sweep.
 pub struct ReviewWork<'a> {
     pub demand: &'a crate::services::forge::ReviewDemand,
+    /// The workspace's own forge token (MAIN-456); `None` falls back to the
+    /// deployment forge. Resolved by the CALLER, which holds the vault.
+    pub token: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -86,7 +89,7 @@ impl WorkSource for ReviewWork<'_> {
     async fn items(&self, workspace: WorkspaceId, remote: Option<&str>) -> Option<Vec<WorkItem>> {
         Some(
             self.demand
-                .prs(workspace, remote)
+                .prs(workspace, remote, self.token.as_deref())
                 .await?
                 .into_iter()
                 .map(|pr| WorkItem {

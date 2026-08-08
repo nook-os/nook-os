@@ -355,12 +355,18 @@ pub async fn record_verdict(
             .ok_or_else(|| {
                 ApiError::BadRequest("this workspace's remote is not a GitHub repository".into())
             })?;
-        let forge = crate::services::forge::GithubForge::from_env().ok_or_else(|| {
-            ApiError::BadRequest(
-                "no fleet GitHub token — the verdict cannot be posted, so it is not recorded"
-                    .into(),
-            )
-        })?;
+        // The workspace's own identity first (MAIN-456): a tenant that
+        // configured a token posts as itself, and the fleet variable is only
+        // the single-tenant fallback.
+        let forge = match crate::services::workspace_gh_token(state, tenant, workspace).await {
+            Some(t) => crate::services::forge::GithubForge::from_token(&t),
+            None => crate::services::forge::GithubForge::from_env().ok_or_else(|| {
+                ApiError::BadRequest(
+                    "no GitHub token — set one on the workspace (or NOOK_GH_TOKEN for the                      fleet); the verdict cannot be posted, so it is not recorded"
+                        .into(),
+                )
+            })?,
+        };
         forge
             .post_verdict(&repo, pr.max(0) as u64, head, label, body)
             .await
@@ -410,6 +416,7 @@ pub async fn enqueue_review(
     state.review_demand.forget(workspace);
     let source = crate::services::work_source::ReviewWork {
         demand: &state.review_demand,
+        token: crate::services::workspace_gh_token(state, tenant, workspace).await,
     };
     crate::services::run_reconcile::converge(
         state,
@@ -1062,6 +1069,10 @@ pub async fn dispatch_to_node(state: &AppState, tenant: TenantId, job: &LoopJob)
             // step on the node's own generated key and a private repo refused it
             // at "preparing workspace". Same delivery `CloneRepo` uses.
             ssh_key: crate::services::workspace_git_key(state, tenant, workspace_id).await,
+            // The workspace's own forge token rides with the run (MAIN-456), so
+            // the agent's `gh` speaks as the tenant, not as the fleet. `None`
+            // falls back to the node's env on the other end.
+            gh_token: crate::services::workspace_gh_token(state, tenant, workspace_id).await,
             // The agent's own identity, in the JOB's tenant, as the person who
             // asked for the run. Revoked in `finish`.
             nook_token: mint_job_token(state, tenant, job.requested_by, job.id).await,

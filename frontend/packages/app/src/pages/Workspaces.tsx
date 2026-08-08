@@ -102,6 +102,95 @@ function WorkspaceCredential({
   );
 }
 
+/** The workspace's OWN forge token (MAIN-456).
+ *
+ *  Multi-tenant is the whole reason: one fleet-wide token would post every
+ *  tenant's verdicts as one identity and hand the control plane a credential
+ *  with reach into every tenant's forge. This token outranks the fleet
+ *  variable everywhere a forge is spoken to — listing PRs, posting verdicts,
+ *  and the `gh` inside a review run.
+ *
+ *  Write-only on purpose: the server reports whether one is SET and never
+ *  echoes the value, so there is nothing here to leak. */
+export function WorkspaceForgeToken({ workspaceId }: { workspaceId: string }) {
+  const queryClient = useQueryClient();
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const { data: state } = useQuery({
+    queryKey: ["workspace-gh-token", workspaceId],
+    queryFn: async () =>
+      (
+        await api.GET("/api/v1/workspaces/{id}/gh-token", {
+          params: { path: { id: workspaceId } },
+        })
+      ).data ?? null,
+  });
+
+  const save = async (token: string | null) => {
+    setBusy(true);
+    const { error } = await api.PUT("/api/v1/workspaces/{id}/gh-token", {
+      params: { path: { id: workspaceId } },
+      body: { token },
+    });
+    setBusy(false);
+    if (error) {
+      await notify("Could not store the token", JSON.stringify(error));
+      return;
+    }
+    setDraft("");
+    queryClient.invalidateQueries({ queryKey: ["workspace-gh-token", workspaceId] });
+  };
+
+  return (
+    <Panel title="forge token">
+      <div className="field">
+        <label>
+          GitHub token for this repo's reviews{" "}
+          {state?.set ? (
+            <Pill tone="ok">set</Pill>
+          ) : (
+            <Pill tone="dim">not set — fleet fallback applies</Pill>
+          )}
+        </label>
+        <div style={{ display: "flex", gap: 6 }}>
+          <input
+            className="input"
+            type="password"
+            placeholder={state?.set ? "replace token…" : "github_pat_… or gho_…"}
+            value={draft}
+            disabled={busy}
+            autoComplete="off"
+            onChange={(e) => setDraft(e.target.value)}
+          />
+          <button
+            className="btn primary small"
+            disabled={busy || draft.trim().length === 0}
+            onClick={() => save(draft.trim())}
+          >
+            save
+          </button>
+          {state?.set && (
+            <button
+              className="btn small"
+              disabled={busy}
+              title="remove this workspace's token — the fleet fallback (if any) applies again"
+              onClick={() => save(null)}
+            >
+              clear
+            </button>
+          )}
+        </div>
+      </div>
+      <div className="muted">
+        Verdicts and PR reads for this workspace use this identity. Least-privilege
+        scopes: repo read, PR read/write, issue comments/labels. The value is
+        sealed server-side and never shown again.
+      </div>
+    </Panel>
+  );
+}
+
 /**
  * One click from a repo to a Loop page with a seed box (MAIN-298).
  *
@@ -573,8 +662,13 @@ export function WorkspaceDetail() {
       id: "credential",
       title: "Git credential",
       group: "Repo",
-      keywords: ["ssh", "key", "deploy key", "private repo", "clone", "credential"],
-      render: () => <WorkspaceCredential workspaceId={ws.id} pinned={ws.git_credential_id ?? null} />,
+      keywords: ["ssh", "key", "deploy key", "private repo", "clone", "credential", "github", "token", "forge", "pat"],
+      render: () => (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10, minHeight: 0 }}>
+          <WorkspaceCredential workspaceId={ws.id} pinned={ws.git_credential_id ?? null} />
+          <WorkspaceForgeToken workspaceId={ws.id} />
+        </div>
+      ),
     },
     {
       id: "sessions",

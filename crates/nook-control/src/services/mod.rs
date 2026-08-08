@@ -15,6 +15,23 @@
 /// this process, and it exists to be written to a node's disk for the life of a
 /// single git command. It must never be logged, recorded on an event, or
 /// returned from an API that a browser can reach.
+/// A workspace's OWN forge token, unsealed (MAIN-456), or `None` when it has
+/// not set one. Callers fall back to the fleet's `NOOK_GH_TOKEN` — the
+/// single-tenant/dev case — but the workspace token always wins: a tenant that
+/// configured its own identity must never post as the fleet's.
+pub async fn workspace_gh_token(
+    state: &crate::state::AppState,
+    tenant: nook_types::TenantId,
+    workspace: nook_types::WorkspaceId,
+) -> Option<String> {
+    let sealed = state
+        .workspaces
+        .gh_token_sealed(tenant, workspace)
+        .await
+        .ok()??;
+    state.vault.decrypt_string(&sealed).ok()
+}
+
 pub async fn workspace_git_key(
     state: &crate::state::AppState,
     tenant: nook_types::TenantId,

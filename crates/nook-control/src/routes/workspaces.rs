@@ -251,6 +251,73 @@ fn validate_spec(spec: &SessionSpec) -> ApiResult<()> {
     Ok(())
 }
 
+/// `GET /api/v1/workspaces/{id}/gh-token` — does this workspace hold its own
+/// forge token (MAIN-456)? Reports ONLY the fact; the token never leaves the
+/// vault through any read path.
+#[utoipa::path(get, path = "/api/v1/workspaces/{id}/gh-token",
+    operation_id = "get_workspace_gh_token",
+    params(("id" = String, Path,)),
+    responses((status = 200, body = WorkspaceGhTokenState), (status = 404)))]
+pub async fn get_gh_token(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<WorkspaceId>,
+) -> ApiResult<Json<WorkspaceGhTokenState>> {
+    if state.workspaces.get(auth.tenant_id, id).await?.is_none() {
+        return Err(ApiError::NotFound);
+    }
+    Ok(Json(WorkspaceGhTokenState {
+        set: state
+            .workspaces
+            .gh_token_sealed(auth.tenant_id, id)
+            .await?
+            .is_some(),
+    }))
+}
+
+/// `PUT /api/v1/workspaces/{id}/gh-token` — set or clear the workspace's own
+/// forge token (MAIN-456). Sealed with the same vault the git credentials use.
+///
+/// Multi-tenant is the reason this exists: one fleet-wide token means every
+/// tenant's verdicts post as one identity and the control plane holds a
+/// credential with reach into every tenant's forge. The workspace token
+/// OUTRANKS the fleet variable everywhere a forge is spoken to.
+#[utoipa::path(put, path = "/api/v1/workspaces/{id}/gh-token",
+    operation_id = "set_workspace_gh_token",
+    params(("id" = String, Path,)),
+    request_body = SetWorkspaceGhTokenRequest,
+    responses((status = 200, body = WorkspaceGhTokenState), (status = 400), (status = 404)))]
+pub async fn set_gh_token(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<WorkspaceId>,
+    Json(req): Json<SetWorkspaceGhTokenRequest>,
+) -> ApiResult<Json<WorkspaceGhTokenState>> {
+    // A person configures a credential; a node token is not a person — the
+    // same rule every workspace declaration applies.
+    auth.require_user()?;
+    let sealed = match req.token.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(t) => Some(
+            state
+                .vault
+                .encrypt(t.as_bytes())
+                .map_err(|_| ApiError::BadRequest("could not seal the token".into()))?,
+        ),
+    };
+    let set = sealed.is_some();
+    if !state
+        .workspaces
+        .set_gh_token_sealed(auth.tenant_id, id, sealed)
+        .await?
+    {
+        return Err(ApiError::NotFound);
+    }
+    // The forge cache may hold an answer fetched with the OLD identity.
+    state.review_demand.forget(id);
+    Ok(Json(WorkspaceGhTokenState { set }))
+}
+
 /// `GET /api/v1/workspaces/{id}/review-loop` — the ceiling on review loops for
 /// this repo (MAIN-445 AC-2).
 ///
@@ -361,7 +428,13 @@ pub async fn review_loop_status(
     // `min(open_prs, ceiling)` would be the drift it warns about.
     let open_prs = state
         .review_demand
-        .open_prs(id, ws.git_remote_url.as_deref())
+        .open_prs(
+            id,
+            ws.git_remote_url.as_deref(),
+            crate::services::workspace_gh_token(&state, auth.tenant_id, id)
+                .await
+                .as_deref(),
+        )
         .await;
     let spec = recon::review_loop_spec(ws.review_loop_max_replicas, open_prs);
     // The same call `pass()` makes, with the same purpose and the same slots —

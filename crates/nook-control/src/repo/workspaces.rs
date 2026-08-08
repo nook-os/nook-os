@@ -160,6 +160,25 @@ pub trait WorkspaceRepository: Send + Sync {
         replicas: Option<i32>,
     ) -> ApiResult<Option<Workspace>>;
 
+    /// Seal or clear a workspace's own forge token (MAIN-456). The SEALED
+    /// bytes, never plaintext — the vault is the caller's, and this layer must
+    /// not know how to read what it stores.
+    async fn set_gh_token_sealed(
+        &self,
+        tenant: TenantId,
+        id: WorkspaceId,
+        sealed: Option<Vec<u8>>,
+    ) -> ApiResult<bool>;
+
+    /// The sealed forge token, if the workspace holds one. Separate from the
+    /// `Workspace` row on purpose: a secret must never ride a struct that
+    /// serializes to the UI.
+    async fn gh_token_sealed(
+        &self,
+        tenant: TenantId,
+        id: WorkspaceId,
+    ) -> ApiResult<Option<Vec<u8>>>;
+
     /// Every workspace that declares a spec, across every tenant (MAIN-316).
     ///
     /// Cross-tenant because the reconciler is one loop for the deployment, like
@@ -657,6 +676,41 @@ impl WorkspaceRepository for DbWorkspaceRepository {
                 params![tenant, id, replicas],
             )
             .await?)
+    }
+
+    async fn set_gh_token_sealed(
+        &self,
+        tenant: TenantId,
+        id: WorkspaceId,
+        sealed: Option<Vec<u8>>,
+    ) -> ApiResult<bool> {
+        Ok(self
+            .db
+            .exec(
+                &format!(
+                    "UPDATE workspaces SET gh_token_enc = $3, updated_at = {}
+                     WHERE tenant_id = $1 AND id = $2",
+                    type_mapping(self.db.engine()).now()
+                ),
+                params![tenant, id, sealed],
+            )
+            .await?
+            > 0)
+    }
+
+    async fn gh_token_sealed(
+        &self,
+        tenant: TenantId,
+        id: WorkspaceId,
+    ) -> ApiResult<Option<Vec<u8>>> {
+        Ok(self
+            .db
+            .query_scalar_opt(
+                "SELECT gh_token_enc FROM workspaces WHERE tenant_id = $1 AND id = $2",
+                params![tenant, id],
+            )
+            .await?
+            .flatten())
     }
 
     async fn set_port_requirements(
@@ -1823,6 +1877,7 @@ struct FakeState {
     /// (id, tenant, name, status) — the join `locations` needs.
     nodes: Vec<(NodeId, TenantId, String, String)>,
     live_sessions: HashMap<WorkspaceId, i64>,
+    gh_tokens: HashMap<WorkspaceId, Vec<u8>>,
     /// (node, worktree_path) pairs, so a path migration can report task moves.
     task_worktrees: Vec<(NodeId, String)>,
     seq: u64,
@@ -1932,6 +1987,47 @@ impl FakeWorkspaceRepository {
 
 #[async_trait]
 impl WorkspaceRepository for FakeWorkspaceRepository {
+    async fn set_gh_token_sealed(
+        &self,
+        tenant: TenantId,
+        id: WorkspaceId,
+        sealed: Option<Vec<u8>>,
+    ) -> ApiResult<bool> {
+        let mut st = self.inner.lock().unwrap();
+        if !st
+            .workspaces
+            .iter()
+            .any(|w| w.tenant_id == tenant && w.id == id)
+        {
+            return Ok(false);
+        }
+        match sealed {
+            Some(b) => {
+                st.gh_tokens.insert(id, b);
+            }
+            None => {
+                st.gh_tokens.remove(&id);
+            }
+        }
+        Ok(true)
+    }
+
+    async fn gh_token_sealed(
+        &self,
+        tenant: TenantId,
+        id: WorkspaceId,
+    ) -> ApiResult<Option<Vec<u8>>> {
+        let st = self.inner.lock().unwrap();
+        if !st
+            .workspaces
+            .iter()
+            .any(|w| w.tenant_id == tenant && w.id == id)
+        {
+            return Ok(None);
+        }
+        Ok(st.gh_tokens.get(&id).cloned())
+    }
+
     async fn set_session_spec(
         &self,
         tenant: TenantId,
