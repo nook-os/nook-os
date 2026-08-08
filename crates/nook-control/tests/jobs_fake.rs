@@ -32,6 +32,8 @@ async fn queued(repo: &FakeLoopJobRepository, t: TenantId, task: TaskId) -> JobI
         requested_by: UserId::new(),
         seed: None,
         predecessor_job_id: None,
+        review_pr_number: None,
+        review_head_sha: None,
     })
     .await
     .unwrap();

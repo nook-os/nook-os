@@ -711,7 +711,6 @@ impl CloneThrottle {
 
 async fn run(state: AppState) {
     let mut switch = SwitchLog::default();
-    let clones = CloneThrottle::default();
     loop {
         // Re-read every tick, so a flip lands within one interval with no
         // restart. With every tenant off this is one indexed lookup and the
@@ -720,7 +719,7 @@ async fn run(state: AppState) {
             tokio::time::sleep(POLL_INTERVAL).await;
             continue;
         }
-        if let Err(e) = pass(&state, &clones).await {
+        if let Err(e) = pass(&state).await {
             // A failed pass is not fatal: the next one re-reads the world from
             // scratch, which is the point of a reconciler over a queue.
             tracing::warn!(error = %e, "session reconcile pass failed");
@@ -765,7 +764,15 @@ pub(crate) fn default_spec() -> SessionSpec {
 /// not anything calls it with `ManagedPurpose::Access`. That is the same shape
 /// of gap that let the Stop notification bug ship — a guard proved at the layer
 /// below the one the user experiences.
-pub async fn pass(state: &AppState, clones: &CloneThrottle) -> crate::error::ApiResult<()> {
+/// NOTE (MAIN-455): this pass no longer starts SESSIONS at all. Access
+/// reconciliation went first (a terminal is not drift to be corrected), and the
+/// review loop has now moved to headless runs — so what is left is one job:
+/// converge review runs against the work the forge reports.
+///
+/// The session PLANNER below is still live, but only as the thing
+/// `/reconcile-status` and `/review-loop-status` report through. Nothing calls
+/// it to place anything any more.
+pub async fn pass(state: &AppState) -> crate::error::ApiResult<()> {
     for (tenant, value) in state.settings.tenants_with_value(KEY).await? {
         // The stored value is arbitrary JSON; a row can exist reading `false`.
         // Same truthiness as the per-tenant gate, so on/off agree everywhere.
@@ -775,6 +782,22 @@ pub async fn pass(state: &AppState, clones: &CloneThrottle) -> crate::error::Api
         // Once per tenant, not once per workspace: the review loop is agent
         // work, so it answers to the loops switch as well as to this one.
         let loops_on = crate::services::loops::enabled(&*state.settings, tenant).await;
+        // Who a converged run is attributed to: the tenant's owner, the same
+        // identity `nook operator` acts as. Resolved once per tenant rather than
+        // once per workspace, and a tenant without one raises nothing — a job
+        // whose `requested_by` dangles cannot mint an executor token, so an
+        // invented id would fail later and less clearly.
+        let owner = match state.identity.tenant_owner_user_id(tenant.0).await {
+            Ok(Some(u)) => nook_types::UserId(u),
+            Ok(None) => {
+                tracing::warn!(%tenant, "no tenant owner to attribute review runs to — skipped");
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(%tenant, error = %e, "could not resolve the tenant owner");
+                continue;
+            }
+        };
         for ws in state.workspaces.list(tenant).await? {
             // NO ACCESS RECONCILIATION. A terminal you opened is yours, and the
             // control plane does not have an opinion about how many of them
@@ -799,26 +822,41 @@ pub async fn pass(state: &AppState, clones: &CloneThrottle) -> crate::error::Api
             if !loops_on {
                 continue;
             }
-            // How much review work this repo actually has (MAIN-448). Cached
-            // behind a TTL, and `None` whenever nothing could measure it — which
-            // the spec reads as "run the declared ceiling", never as zero.
-            let open_prs = state
-                .review_demand
-                .open_prs(ws.id, ws.git_remote_url.as_deref())
-                .await;
-            if let Err(e) = reconcile_workspace(
+            // A review is a RUN, not a session (MAIN-455). The declaration
+            // still rules — `review_loop_max_replicas` is the ceiling on how
+            // many run at once — but the unit is a pull request, and the
+            // reconciler converges one headless run per PR that has moved.
+            //
+            // Nothing here starts a tmux session. A managed run is not
+            // attachable on a machine, has a transcript, and cannot block on an
+            // interactive prompt nobody is there to answer.
+            let ceiling = ws.review_loop_max_replicas.unwrap_or(1).max(0) as usize;
+            let source = crate::services::work_source::ReviewWork {
+                demand: &state.review_demand,
+            };
+            match crate::services::run_reconcile::converge(
                 state,
+                &source,
                 tenant,
+                owner,
                 ws.id,
-                &review_loop_spec(ws.review_loop_max_replicas, open_prs),
-                clones,
-                ManagedPurpose::ReviewLoop,
-                Slots::ClonesOnly,
-                Spread::Sharded,
+                ws.git_remote_url.as_deref(),
+                ceiling,
             )
             .await
             {
-                tracing::warn!(workspace = %ws.id, error = %e, "review-loop reconcile failed");
+                Ok(c) if c.raised > 0 || c.withheld > 0 => tracing::info!(
+                    workspace = %ws.id,
+                    raised = c.raised,
+                    live = c.live,
+                    withheld = c.withheld,
+                    ceiling,
+                    "raised review runs"
+                ),
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(workspace = %ws.id, error = %e, "review run reconcile failed")
+                }
             }
         }
     }

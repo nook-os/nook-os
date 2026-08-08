@@ -444,8 +444,11 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 ports,
                 unsatisfied,
                 attempt,
-                managed_purpose,
-                shard,
+                // The wire still carries both — the control plane records a
+                // purpose on the row — but a session no longer does anything
+                // different because of them (MAIN-455).
+                managed_purpose: _,
+                shard: _,
             } => {
                 // THE authoritative check (MAIN-301 follow-on). Everything
                 // upstream of here is a belief: the range is a promise that
@@ -494,8 +497,6 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                         rows,
                         ports,
                         unsatisfied,
-                        managed_purpose,
-                        shard,
                     });
                 }
             }

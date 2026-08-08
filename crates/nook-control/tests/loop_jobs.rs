@@ -689,6 +689,8 @@ async fn a_second_dispatcher_cannot_re_place_a_job_that_is_already_claimed() {
             requested_by: user,
             seed: None,
             predecessor_job_id: None,
+            review_pr_number: None,
+            review_head_sha: None,
         })
         .await
         .expect("queued job");
