@@ -556,7 +556,8 @@ async fn a_reconcile_pass_creates_no_access_sessions() {
         },
     );
 
-    nook_control::services::session_reconcile::pass(&state)
+    let throttle = nook_control::services::session_reconcile::CloneThrottle::default();
+    nook_control::services::session_reconcile::pass(&state, &throttle)
         .await
         .expect("one pass");
 

@@ -511,15 +511,17 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
             &out,
             &job_id,
             &worktree,
-            skill,
-            &target_task_key,
-            seed.as_deref(),
+            RunBrief {
+                skill,
+                target: &target_task_key,
+                seed: seed.as_deref(),
+                review_pr: review_pr_number,
+            },
             AgentIdentity {
                 token: nook_token.as_deref(),
                 server: &cfg.server,
                 workspace_id: workspace_id.as_deref(),
             },
-            review_pr_number,
         ),
         crate::job_adapter::Adapter::Tmux => drive_session(
             &out,
@@ -598,16 +600,34 @@ struct AgentIdentity<'a> {
     workspace_id: Option<&'a str>,
 }
 
+/// What a run is ABOUT: which skill, on which target, from which brief, and —
+/// for a review — which pull request.
+///
+/// Grouped for the reason [`AgentIdentity`] is: these travel together and
+/// nothing reads one without the others, and loose they push `drive_streaming`
+/// past clippy's argument limit — a fair complaint about the shape both times.
+struct RunBrief<'a> {
+    skill: &'a str,
+    target: &'a str,
+    seed: Option<&'a str>,
+    /// The pull request a review run owns (MAIN-455): what the agent is told it
+    /// is reviewing, and the session it resumes.
+    review_pr: Option<u64>,
+}
+
 fn drive_streaming(
     out: &Sender<NodeToControl>,
     job_id: &str,
     worktree: &Path,
-    skill: &str,
-    target: &str,
-    seed: Option<&str>,
+    brief: RunBrief<'_>,
     identity: AgentIdentity<'_>,
-    review_pr: Option<u64>,
 ) -> (bool, String) {
+    let RunBrief {
+        skill,
+        target,
+        seed,
+        review_pr,
+    } = brief;
     use crate::job_adapter::{self, Event, StreamingSession, TurnState};
 
     // A review run resumes ITS pull request's session, so a second look at the
