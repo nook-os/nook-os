@@ -1,16 +1,8 @@
-// A repo's review runs, read the way a spec run is read (MAIN-455 AC-5).
-//
-// A review used to be a tmux session on a machine: attachable, and gone the
-// moment it died, so "what did the reviewer actually do" had no answer unless
-// you happened to be watching. It is a headless run now, and a run keeps a
-// transcript — the same `loop_job_transcript` a spec keeps, rendered through
-// the same `ChatView`. There is deliberately no second transcript mechanism.
-import React, { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { api, type LoopJobTranscriptEntry } from "@nookos/api";
-import { ChatView, Empty, Panel, Pill } from "@nookos/ui";
-import { transcriptMessages } from "./LoopPanel";
-import { foldToolActivity, jobStateMeta } from "./loop";
+// A repo's review runs (MAIN-455 AC-5) over the shared runs panel.
+import React from "react";
+import { api } from "@nookos/api";
+import { WorkspaceRuns, type RunRow } from "./WorkspaceRuns";
+export { pillTone } from "./WorkspaceRuns";
 
 type Run = {
   id: string;
@@ -19,13 +11,6 @@ type Run = {
   review_head_sha?: string | null;
   created_at: string;
 };
-
-/** The loop's state tones, in the design system's words. */
-export function pillTone(
-  tone: "info" | "warn" | "err" | "ok" | "muted",
-): "ok" | "warn" | "err" | "info" | "dim" {
-  return tone === "muted" ? "dim" : tone;
-}
 
 /** What a run is ABOUT, in the words the panel can show without a lookup. */
 export function runLabel(run: Run): string {
@@ -41,88 +26,33 @@ export function shortHead(sha?: string | null): string {
   return sha ? sha.slice(0, 7) : "";
 }
 
-// Both queries below repaint from the live `job_changed` event, which
-// `live.ts` turns into an invalidation of `["job"]` and `["workspace-reviews"]`
-// — the same mechanism the Loop panel rides, rather than a poll of its own.
 export function WorkspaceReviews({ workspaceId }: { workspaceId: string }) {
-  const [openId, setOpenId] = useState<string | null>(null);
-
-  const { data: runs } = useQuery({
-    queryKey: ["workspace-reviews", workspaceId],
-    queryFn: async () =>
-      ((
-        await api.GET("/api/v1/workspaces/{id}/reviews", {
-          params: { path: { id: workspaceId } },
-        })
-      ).data as Run[] | undefined) ?? [],
-  });
-
-  const open = openId ?? runs?.[0]?.id ?? null;
-  const { data: detail } = useQuery({
-    queryKey: ["job", open],
-    enabled: !!open,
-    queryFn: async () =>
-      (
-        await api.GET("/api/v1/jobs/{id}", { params: { path: { id: open as string } } })
-      ).data as { transcript?: LoopJobTranscriptEntry[] } | undefined,
-  });
-
-  if (!runs) return null;
-  if (runs.length === 0) {
-    return (
-      <Panel title="Reviews">
-        <Empty>
-          No review has run for this repo yet. The control plane raises one per
-          open pull request, and again when a pull request is pushed to.
-        </Empty>
-      </Panel>
-    );
-  }
-
   return (
-    <Panel title="Reviews">
-      <div className="reviews-split">
-        <ul className="reviews-runs">
-          {runs.map((r) => {
-            // `jobStateMeta` speaks the loop's tone vocabulary, which has a
-            // `muted` the Pill spells `dim`. Mapped here rather than widened in
-            // the shared component, whose set is the design system's.
-            const tone = pillTone(jobStateMeta(r.state).tone);
-            return (
-              <li key={r.id}>
-                <button
-                  className={`reviews-run${r.id === open ? " is-open" : ""}`}
-                  onClick={() => setOpenId(r.id)}
-                  data-testid="review-run"
-                >
-                  <span className="mono">{runLabel(r)}</span>
-                  <Pill tone={tone}>{r.state}</Pill>
-                  <span className="faint small mono">{shortHead(r.review_head_sha)}</span>
-                </button>
-              </li>
-            );
-          })}
-        </ul>
-        <div className="reviews-transcript" data-testid="review-transcript">
-          {detail?.transcript?.length ? (
-            <ChatView
-              // Folded like the Loop page folds it, so a ladder of `· Bash`
-              // lines reads as one activity entry there and here alike.
-              messages={transcriptMessages(foldToolActivity(detail.transcript))}
-              // Read-only on purpose: a review run is the control plane's work,
-              // not a conversation somebody steers. The composer is HIDDEN, not
-              // disabled — a greyed box promises a capability that is switched
-              // off, but there is nothing here to say anything TO, and an inert
-              // box under every finished review was clutter that read as
-              // broken.
-              onSend={() => {}}
-              hideComposer
-            />
-          ) : (
-            <Empty>This run has not said anything yet.</Empty>
-          )}
-        </div>
-      </div>
-    </Panel>
+    <WorkspaceRuns
+      title="Reviews"
+      queryKey={["workspace-reviews", workspaceId]}
+      empty={
+        "No review has run for this repo yet. The control plane raises one per " +
+        "open pull request, and again when a pull request is pushed to."
+      }
+      testid="review-run"
+      transcriptTestid="review-transcript"
+      fetchRows={async () => {
+        const rows =
+          ((
+            await api.GET("/api/v1/workspaces/{id}/reviews", {
+              params: { path: { id: workspaceId } },
+            })
+          ).data as Run[] | undefined) ?? [];
+        return rows.map(
+          (r): RunRow => ({
+            id: r.id,
+            state: r.state,
+            label: runLabel(r),
+            meta: shortHead(r.review_head_sha),
+          }),
+        );
+      }}
+    />
   );
 }

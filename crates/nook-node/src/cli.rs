@@ -3971,3 +3971,47 @@ pub async fn reviews_scale(workspace: &str, count: Option<&str>) -> Result<()> {
     }
     Ok(())
 }
+
+/// `nook builds scale <workspace> [n]` (MAIN-461 AC-1) — the CEILING on this
+/// repo's build runs, `reviews scale`'s twin, with the same three states: a
+/// read prints "unset (default 1)" rather than a bare "1" because those are
+/// the same effective number and different facts, `0` is the workspace-level
+/// kill-switch, and `unset` is how a terminal reaches the third state back.
+pub async fn builds_scale(workspace: &str, count: Option<&str>) -> Result<()> {
+    let client = Client::from_config()?;
+    let id = resolve_workspace(&client, workspace).await?;
+    let path = format!("/api/v1/workspaces/{id}/build-loop");
+
+    let current = match count {
+        None => client.get(&path).await?,
+        Some("unset") | Some("null") => {
+            client
+                .put(&path, serde_json::json!({ "max_replicas": null }))
+                .await?
+        }
+        Some(raw) => {
+            let n: u32 = raw.parse().with_context(|| {
+                format!("'{raw}' is not a non-negative whole number (or `unset`)")
+            })?;
+            client
+                .put(&path, serde_json::json!({ "max_replicas": n }))
+                .await?
+        }
+    };
+
+    match current["max_replicas"].as_i64() {
+        None => println!(
+            "build runs: {} — the default ceiling",
+            crate::style::ok_c("unset (default 1)")
+        ),
+        Some(0) => println!(
+            "build runs: {} — this repo's cards are not built",
+            crate::style::ok_c("0 (off)")
+        ),
+        Some(n) => println!(
+            "build runs: {} in flight at once",
+            crate::style::ok_c(&format!("max {n}"))
+        ),
+    }
+    Ok(())
+}

@@ -218,6 +218,10 @@ enum Command {
     /// level stays frozen.
     #[command(subcommand)]
     Reviews(ReviewsCommand),
+    /// Build runs (MAIN-461): the per-repo ceiling on the builder loop.
+    /// A new noun group, per docs/cli-style.md — the top level stays frozen.
+    #[command(subcommand)]
+    Builds(BuildsCommand),
     /// Epic-runner passes (MAIN-144): the loop's merge authority, one
     /// deliberate enqueue per pass.
     #[command(subcommand)]
@@ -677,6 +681,9 @@ async fn main() -> Result<()> {
         Command::Reviews(ReviewsCommand::Scale { workspace, count }) => {
             cli::reviews_scale(&workspace, count.as_deref()).await
         }
+        Command::Builds(BuildsCommand::Scale { workspace, count }) => {
+            cli::builds_scale(&workspace, count.as_deref()).await
+        }
         Command::Notify {
             title,
             body,
@@ -1118,6 +1125,21 @@ enum ReviewsCommand {
         /// The verdict body; `-` reads stdin. Omit only for `skipped`.
         #[arg(long)]
         body: Option<String>,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum BuildsCommand {
+    /// The ceiling on a workspace's build runs, or read the current value.
+    ///
+    /// `0` turns builds off for that repo — the workspace-level kill-switch —
+    /// and `unset` returns it to the default of one. A ceiling, not a count:
+    /// it caps how many build runs are in flight at once.
+    Scale {
+        /// The workspace, by id, slug or name.
+        workspace: String,
+        /// The ceiling, `0` to turn builds off, or `unset`. Omit to read.
+        count: Option<String>,
     },
 }
 

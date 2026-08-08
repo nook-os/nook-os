@@ -372,6 +372,56 @@ pub async fn set_review_loop(
     }))
 }
 
+/// `GET /api/v1/workspaces/{id}/build-loop` — the ceiling on build runs for
+/// this repo (MAIN-461 AC-1), `/review-loop`'s twin. Reports the RAW column
+/// for the same reason: `null` is "nobody decided", and resolving it to 1
+/// would erase the distinction the CLI prints as "unset (default 1)".
+#[utoipa::path(get, path = "/api/v1/workspaces/{id}/build-loop",
+    operation_id = "get_build_loop",
+    params(("id" = String, Path,)),
+    responses((status = 200, body = BuildLoopDeclaration), (status = 404)))]
+pub async fn get_build_loop(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<WorkspaceId>,
+) -> ApiResult<Json<BuildLoopDeclaration>> {
+    let ws = state
+        .workspaces
+        .get(auth.tenant_id, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok(Json(BuildLoopDeclaration {
+        max_replicas: ws.build_max_replicas,
+    }))
+}
+
+/// `PUT /api/v1/workspaces/{id}/build-loop` — set it, or clear it back to
+/// unset with `{"max_replicas": null}` (MAIN-461 AC-1).
+#[utoipa::path(put, path = "/api/v1/workspaces/{id}/build-loop",
+    operation_id = "set_build_loop",
+    params(("id" = String, Path,)),
+    request_body = SetBuildLoopRequest,
+    responses((status = 200, body = BuildLoopDeclaration), (status = 400), (status = 404)))]
+pub async fn set_build_loop(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<WorkspaceId>,
+    Json(req): Json<SetBuildLoopRequest>,
+) -> ApiResult<Json<BuildLoopDeclaration>> {
+    // A person declares desired state; a node credential is not a person — the
+    // same rule the review-loop PUT applies, for the same reason.
+    auth.require_user()?;
+    let max_replicas = parse_max_replicas(&req.max_replicas)?;
+    let ws = state
+        .workspaces
+        .set_build_max_replicas(auth.tenant_id, id, max_replicas)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok(Json(BuildLoopDeclaration {
+        max_replicas: ws.build_max_replicas,
+    }))
+}
+
 /// `null` clears; anything else must be a non-negative integer that fits the
 /// column (AC-2). Every rejection names the field, because the caller's next
 /// move is to fix that key and a message that does not say which one costs a

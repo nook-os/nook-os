@@ -139,6 +139,14 @@ pub trait WorkspaceRepository: Send + Sync {
         replicas: Option<i32>,
     ) -> ApiResult<Option<Workspace>>;
 
+    /// The build ceiling, `set_review_loop_max_replicas`'s twin (MAIN-461).
+    async fn set_build_max_replicas(
+        &self,
+        tenant: TenantId,
+        id: WorkspaceId,
+        replicas: Option<i32>,
+    ) -> ApiResult<Option<Workspace>>;
+
     /// Seal or clear a workspace's own forge token (MAIN-456). The SEALED
     /// bytes, never plaintext — the vault is the caller's, and this layer must
     /// not know how to read what it stores.
@@ -635,6 +643,26 @@ impl WorkspaceRepository for DbWorkspaceRepository {
             .query_opt(
                 &format!(
                     "UPDATE workspaces SET review_loop_max_replicas = $3, updated_at = {}
+                     WHERE tenant_id = $1 AND id = $2
+                     RETURNING *",
+                    type_mapping(self.db.engine()).now()
+                ),
+                params![tenant, id, replicas],
+            )
+            .await?)
+    }
+
+    async fn set_build_max_replicas(
+        &self,
+        tenant: TenantId,
+        id: WorkspaceId,
+        replicas: Option<i32>,
+    ) -> ApiResult<Option<Workspace>> {
+        Ok(self
+            .db
+            .query_opt(
+                &format!(
+                    "UPDATE workspaces SET build_max_replicas = $3, updated_at = {}
                      WHERE tenant_id = $1 AND id = $2
                      RETURNING *",
                     type_mapping(self.db.engine()).now()
@@ -1898,6 +1926,7 @@ impl FakeWorkspaceRepository {
             session_spec: None,
             git_credential_id: None,
             review_loop_max_replicas: None,
+            build_max_replicas: None,
         }
     }
 }
@@ -1991,6 +2020,22 @@ impl WorkspaceRepository for FakeWorkspaceRepository {
             .find(|w| w.id == id && w.tenant_id == tenant)
             .map(|w| {
                 w.review_loop_max_replicas = replicas;
+                w.clone()
+            }))
+    }
+
+    async fn set_build_max_replicas(
+        &self,
+        tenant: TenantId,
+        id: WorkspaceId,
+        replicas: Option<i32>,
+    ) -> ApiResult<Option<Workspace>> {
+        let mut s = self.inner.lock().unwrap();
+        Ok(s.workspaces
+            .iter_mut()
+            .find(|w| w.id == id && w.tenant_id == tenant)
+            .map(|w| {
+                w.build_max_replicas = replicas;
                 w.clone()
             }))
     }

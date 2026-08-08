@@ -950,6 +950,15 @@ pub struct ReviewLoopDeclaration {
     pub max_replicas: Option<i32>,
 }
 
+/// The ceiling on this repo's BUILD runs (MAIN-461) — `ReviewLoopDeclaration`'s
+/// twin, kept separate because the two are set independently and a shared type
+/// would let a rename on one silently rename the other's wire shape.
+/// `None` = nobody decided (effective 1), `0` = builds off for this repo.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BuildLoopDeclaration {
+    pub max_replicas: Option<i32>,
+}
+
 /// A review run's conclusion, sent by the run itself (MAIN-455).
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct ReviewVerdictRequest {
@@ -1028,6 +1037,27 @@ pub struct ReviewLoopStatus {
 pub struct SetReviewLoopRequest {
     #[schema(value_type = Option<i32>)]
     pub max_replicas: serde_json::Value,
+}
+
+/// `SetReviewLoopRequest`'s twin for builds (MAIN-461): the key is required,
+/// and `null` is the deliberate "clear back to unset".
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct SetBuildLoopRequest {
+    #[schema(value_type = Option<i32>)]
+    pub max_replicas: serde_json::Value,
+}
+
+/// One row of a workspace's Builds panel (MAIN-461 AC-2): the card the run
+/// owns, named by KEY — the join the panel would otherwise pay N queries for.
+/// A purpose-built row rather than `LoopJob`, which never carries the key.
+/// The run's outcome column joins this shape when MAIN-458 lands it.
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
+pub struct WorkspaceBuildRun {
+    pub id: Uuid,
+    pub state: String,
+    /// The card's human key (`MAIN-42`); `None` if the card was deleted.
+    pub task_key: Option<String>,
+    pub created_at: DateTime<Utc>,
 }
 
 /// Toggle a node's `shared` designation (MAIN-135). Owner-only at the route.
@@ -1181,6 +1211,10 @@ pub struct Workspace {
     /// shortfall rather than being silently capped.
     #[serde(default)]
     pub review_loop_max_replicas: Option<i32>,
+    /// The ceiling on this repo's build runs (MAIN-461) — same three states as
+    /// `review_loop_max_replicas`: unset = default 1, 0 = off, n = at most n.
+    #[serde(default)]
+    pub build_max_replicas: Option<i32>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

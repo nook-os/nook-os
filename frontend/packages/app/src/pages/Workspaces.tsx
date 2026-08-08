@@ -14,6 +14,7 @@ import { PORT_CAP_SENTENCE, PortSafetyNotice } from "../PortSafetyNotice";
 import { hasPortDeclaration } from "../portSafety";
 import { SessionPolicy } from "../SessionPolicy";
 import { WorkspaceReviews } from "../WorkspaceReviews";
+import { WorkspaceBuilds } from "../WorkspaceBuilds";
 import { WorkspaceLocations } from "../WorkspaceLocations";
 import { WorkspacePorts } from "../WorkspacePorts";
 import { SectionedPage, type PageSection } from "../SectionedPage";
@@ -715,6 +716,13 @@ export function WorkspaceDetail() {
       group: "Work",
       keywords: ["review", "loop", "pr", "pull request", "transcript", "verdict", "agent"],
       render: () => (id ? <WorkspaceReviews workspaceId={id} /> : null),
+    },
+    {
+      id: "builds",
+      title: "Builds",
+      group: "Work",
+      keywords: ["build", "loop", "card", "ticket", "transcript", "outcome", "agent"],
+      render: () => (id ? <WorkspaceBuilds workspaceId={id} /> : null),
     },
     {
       id: "policy",

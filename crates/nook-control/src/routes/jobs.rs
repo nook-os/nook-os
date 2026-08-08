@@ -142,6 +142,26 @@ pub async fn list_reviews_for_workspace(
     ))
 }
 
+/// `GET /api/v1/workspaces/{id}/builds` — the Builds panel's rows (MAIN-461
+/// AC-2): this repo's build runs, newest first, each naming its card by key.
+#[utoipa::path(get, path = "/api/v1/workspaces/{id}/builds",
+    operation_id = "list_builds_for_workspace",
+    params(("id" = String, Path,)),
+    responses((status = 200, body = [WorkspaceBuildRun]), (status = 404)))]
+pub async fn list_builds_for_workspace(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<WorkspaceId>,
+) -> ApiResult<Json<Vec<WorkspaceBuildRun>>> {
+    const PAGE: i64 = 50;
+    Ok(Json(
+        state
+            .jobs
+            .list_builds_for_workspace(auth.tenant_id, auth.user_id, id, PAGE)
+            .await?,
+    ))
+}
+
 #[utoipa::path(post, path = "/api/v1/jobs/{id}/cancel",
     operation_id = "job_cancel",
     params(("id" = String, Path,)),
