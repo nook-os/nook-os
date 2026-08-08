@@ -45,6 +45,11 @@ function toView(
     reactions: reactions.length > 0 ? reactions : undefined,
     edited: m.edited_at != null,
     deleted: m.deleted ?? false,
+    // Chat semantics, not document semantics: `**bold**`, `` `code` `` and
+    // links render, and a single newline stays the line break the person typed
+    // (Shift+Enter). Until now the body rendered as raw text, so markdown a
+    // person wrote showed up as its own punctuation.
+    markdown: "chat",
   };
 }
 
@@ -170,6 +175,9 @@ function pendingViews(
     createdAt: p.createdAt,
     pending: !p.failed,
     failed: p.failed,
+    // Same rendering as the confirmed echo it becomes — a message must not
+    // change shape the moment the server confirms it.
+    markdown: "chat" as const,
   }));
 }
 

@@ -18,7 +18,9 @@ import {
   isActiveJob,
   jobKey,
   jobStateMeta,
+  looksLikeMarkdown,
   loopAction,
+  stripAnsi,
   taskJobsKey,
 } from "./loop";
 import { ChatView, type ChatViewMessage } from "@nookos/ui";
@@ -39,8 +41,13 @@ export function transcriptMessages(
     // exactly as a run from one person does in team chat.
     authorId: l.source,
     authorName: l.source,
-    body: l.content,
+    // ANSI is stripped for the VIEW only; the stored line keeps every escape
+    // (MAIN-161 NG-2). The Loop page's own mapping already did both of these —
+    // this one had drifted behind it, which is how an agent's `**verdict**`
+    // rendered as literal asterisks in the Reviews panel.
+    body: stripAnsi(l.content),
     createdAt: l.at,
+    markdown: looksLikeMarkdown(l.content),
   }));
 }
 

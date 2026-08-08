@@ -109,20 +109,36 @@ describe("WorkspaceReviews", () => {
     expect(await screen.findByText(/Reviewed PR #341/)).toBeTruthy();
   });
 
-  it("does not offer to steer a review run", async () => {
+  it("has no composer at all — hidden, not disabled", async () => {
     // A spec run's composer is how a human shapes the draft. A review is the
-    // control plane's work, and a box that looked live would invite typing into
-    // something nothing reads.
+    // control plane's work: a greyed box would promise a capability that is
+    // switched off, so there must be NO box. `disabled` passing this test was
+    // the bug — it looked broken under every finished review.
     state.runs = [run()];
     state.transcript = [
       { id: "t1", source: "agent", content: "hello", at: "2026-08-08T10:01:00Z" },
     ];
     renderReviews();
     await screen.findByTestId("review-transcript");
-    const box = document.querySelector("textarea, input[type=text]") as
-      | HTMLTextAreaElement
-      | HTMLInputElement
-      | null;
-    expect(box === null || box.disabled).toBe(true);
+    expect(document.querySelector(".chat-composer")).toBeNull();
+    expect(document.querySelector("textarea")).toBeNull();
+  });
+
+  it("renders the agent's markdown as markdown, not punctuation", async () => {
+    // The e2e's own screenshot showed `**Pass ends with no action…**` as
+    // literal asterisks: this mapping had drifted behind the Loop page's.
+    state.runs = [run()];
+    state.transcript = [
+      {
+        id: "t1",
+        source: "agent",
+        content: "## Verdict\n\n**No action** — already reviewed.",
+        at: "2026-08-08T10:01:00Z",
+      },
+    ];
+    renderReviews();
+    const strong = await screen.findByText("No action");
+    expect(strong.tagName).toBe("STRONG");
+    expect(screen.getByText("Verdict").tagName).toBe("H2");
   });
 });

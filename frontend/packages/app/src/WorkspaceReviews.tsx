@@ -10,7 +10,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api, type LoopJobTranscriptEntry } from "@nookos/api";
 import { ChatView, Empty, Panel, Pill } from "@nookos/ui";
 import { transcriptMessages } from "./LoopPanel";
-import { jobStateMeta } from "./loop";
+import { foldToolActivity, jobStateMeta } from "./loop";
 
 type Run = {
   id: string;
@@ -106,15 +106,17 @@ export function WorkspaceReviews({ workspaceId }: { workspaceId: string }) {
         <div className="reviews-transcript" data-testid="review-transcript">
           {detail?.transcript?.length ? (
             <ChatView
-              messages={transcriptMessages(detail.transcript)}
+              // Folded like the Loop page folds it, so a ladder of `· Bash`
+              // lines reads as one activity entry there and here alike.
+              messages={transcriptMessages(foldToolActivity(detail.transcript))}
               // Read-only on purpose: a review run is the control plane's work,
-              // not a conversation somebody steers. A spec run's composer is
-              // how a human shapes the draft; there is no equivalent here, so
-              // the box is disabled rather than wired to a no-op that looks
-              // like it might do something.
+              // not a conversation somebody steers. The composer is HIDDEN, not
+              // disabled — a greyed box promises a capability that is switched
+              // off, but there is nothing here to say anything TO, and an inert
+              // box under every finished review was clutter that read as
+              // broken.
               onSend={() => {}}
-              disabled
-              placeholder="A review run is not steered from here."
+              hideComposer
             />
           ) : (
             <Empty>This run has not said anything yet.</Empty>

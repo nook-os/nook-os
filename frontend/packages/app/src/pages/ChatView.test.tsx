@@ -401,3 +401,69 @@ describe("ChatView shared-surface props (MAIN-237)", () => {
     expect(onSend).toHaveBeenCalledWith("hello");
   });
 });
+
+describe("ChatView markdown modes (MAIN-455 polish)", () => {
+  const at = "2026-08-08T10:00:00Z";
+  const msg = (over: Partial<ChatViewMessage>): ChatViewMessage => ({
+    id: "m1",
+    authorId: "u1",
+    authorName: "alice",
+    body: "",
+    createdAt: at,
+    ...over,
+  });
+
+  it("renders a chat message's markdown instead of its punctuation", () => {
+    render(
+      <ChatView
+        messages={[msg({ body: "look at **this** and `that`", markdown: "chat" })]}
+        onSend={vi.fn()}
+      />,
+    );
+    // The words render emphasised; the asterisks and backticks are consumed.
+    expect(screen.getByText("this").tagName).toBe("STRONG");
+    expect(screen.getByText("that").tagName).toBe("CODE");
+    expect(screen.queryByText(/\*\*/)).toBeNull();
+  });
+
+  it("keeps a chat message's single newline as a line break", () => {
+    const { container } = render(
+      <ChatView
+        messages={[msg({ body: "line one\nline two", markdown: "chat" })]}
+        onSend={vi.fn()}
+      />,
+    );
+    // Shift+Enter meant "go down a line" — chat mode must not fold the two
+    // lines into one paragraph the way document markdown would.
+    expect(container.querySelectorAll(".chat-body br")).toHaveLength(1);
+  });
+
+  it("keeps document mode's paragraph semantics for a drafted spec", () => {
+    const { container } = render(
+      <ChatView
+        messages={[msg({ body: "soft\nwrapped paragraph", markdown: true })]}
+        onSend={vi.fn()}
+      />,
+    );
+    expect(container.querySelectorAll(".chat-body br")).toHaveLength(0);
+  });
+
+  it("still renders an unflagged body as the literal text typed", () => {
+    render(
+      <ChatView messages={[msg({ body: "2 ** 8 == 256" })]} onSend={vi.fn()} />,
+    );
+    expect(screen.getByText("2 ** 8 == 256")).toBeTruthy();
+  });
+
+  it("dates a grouped row through its hover bar, not a second header", () => {
+    const two = [
+      msg({ id: "a", body: "first" }),
+      msg({ id: "b", body: "second", createdAt: "2026-08-08T10:01:00Z" }),
+    ];
+    const { container } = render(<ChatView messages={two} onSend={vi.fn()} />);
+    // One author header for the run; the grouped row's time sits in its bar.
+    expect(screen.getAllByText("alice")).toHaveLength(1);
+    const bars = container.querySelectorAll(".chat-msg-bar .chat-bar-time");
+    expect(bars).toHaveLength(1);
+  });
+});
