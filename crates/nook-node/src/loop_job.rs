@@ -307,7 +307,11 @@ pub fn deliver_message(job_id: &str, body: &str) -> Result<(), String> {
 ///
 /// The lookup is [`crate::config::fleet_gh_token`], the same one the session
 /// export uses, so this cannot come to disagree with what a session receives.
-fn gh_is_authenticated() -> Result<(), String> {
+///
+/// `pub(crate)` since MAIN-448: the managed review SESSION needs the identical
+/// preflight, and a second copy of "can this node reach GitHub" is two answers
+/// waiting to disagree about one machine.
+pub(crate) fn gh_is_authenticated() -> Result<(), String> {
     if crate::config::fleet_gh_token().is_some() {
         return Ok(());
     }

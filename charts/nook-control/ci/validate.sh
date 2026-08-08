@@ -236,6 +236,41 @@ for provider in database redis sqs; do
   fi
 done
 
+# ── The fleet GitHub token (MAIN-448) ────────────────────────────────────────
+# The control plane reads this to size a repo's review loops to its open PRs.
+# Two assertions, and the ABSENCE one is the load-bearing half: a deployment
+# with no token is a supported state — review loops run at their declared
+# ceiling, exactly as before the forge — so an unset `ghToken` must render no
+# env entry at all rather than a reference to a key nobody put in the Secret.
+need "no gh token env by default"  '^            - name: NOOK_GH_TOKEN$' 0
+
+echo "==> helm template (secretKeys.ghToken)"
+ghout="$(render "${min[@]}" --set secretKeys.ghToken=ghToken)"
+
+ghneed() {
+  local label="$1" pattern="$2" want="$3" got
+  got="$(grep -cE "$pattern" <<<"$ghout" || true)"
+  if [ "$got" -ne "$want" ]; then
+    echo "  FAIL: $label — expected $want, got $got"
+    fail=1
+  else
+    echo "  ok:   $label ($got)"
+  fi
+}
+
+ghneed "gh token env"              '^            - name: NOOK_GH_TOKEN$' 1
+ghneed "gh token by reference"     '^                  key: ghToken$' 1
+# `optional: true` for the reason the operator node's chart gives: a Secret
+# carrying everything BUT this key must still start the pod. Dropping the line
+# renders a control plane that CrashLoops on a Secret that was valid yesterday.
+ghneed "gh token key is optional"  '^                  optional: true$' 1
+if grep -qE 'NOOK_GH_TOKEN' <<<"$ghout" && grep -A2 'name: NOOK_GH_TOKEN' <<<"$ghout" | grep -q 'value:'; then
+  echo "  FAIL: NOOK_GH_TOKEN is rendered as a literal, not a reference"
+  fail=1
+else
+  echo "  ok:   NOOK_GH_TOKEN is a reference, never a literal"
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "chart validation FAILED"
   exit 1

@@ -799,11 +799,18 @@ pub async fn pass(state: &AppState, clones: &CloneThrottle) -> crate::error::Api
             if !loops_on {
                 continue;
             }
+            // How much review work this repo actually has (MAIN-448). Cached
+            // behind a TTL, and `None` whenever nothing could measure it — which
+            // the spec reads as "run the declared ceiling", never as zero.
+            let open_prs = state
+                .review_demand
+                .open_prs(ws.id, ws.git_remote_url.as_deref())
+                .await;
             if let Err(e) = reconcile_workspace(
                 state,
                 tenant,
                 ws.id,
-                &review_loop_spec(ws.review_loop_max_replicas),
+                &review_loop_spec(ws.review_loop_max_replicas, open_prs),
                 clones,
                 ManagedPurpose::ReviewLoop,
                 Slots::ClonesOnly,
@@ -829,40 +836,55 @@ pub async fn pass(state: &AppState, clones: &CloneThrottle) -> crate::error::Api
 /// repo still cannot ask for its reviewer on somebody's laptop.
 ///
 /// `max_replicas` is the workspace's column, and it is a CEILING rather than a
-/// count. The target shape is `desired = min(open_prs, max_replicas)` — a repo
-/// with two open PRs gets two reviewers, a quiet repo gets none. Nothing can
-/// measure open PRs yet (no forge), so today `desired = max_replicas` and the
-/// ceiling is the count. When the forge lands, only this function changes.
+/// count. `open_prs` is what the forge measured against it (MAIN-448), and the
+/// whole computation is one line: **`desired = min(open_prs, ceiling)`**. A repo
+/// with two open PRs gets two reviewers, a repo with twelve gets the ceiling,
+/// and a quiet repo gets none.
 ///
-/// Its three states are three different statements:
+/// The CEILING's three states are three different statements:
 ///
-/// - `None` — unset. `Replicas::Single`, the value every workspace had before
-///   this was settable, which is what makes the upgrade a no-op (AC-5).
-/// - `Some(0)` — off. `Count{0}` desires nothing, so the ordinary scale-down
-///   path stops a session this repo already has. Two things it is NOT: not
-///   "unmanaged" (skipping would leave the session running forever), and not
-///   the same as a repo idling at zero under a forge — that one scales back up
-///   when a PR appears, a zeroed one never does.
+/// - `None` — unset. A ceiling of one, the value every workspace had before it
+///   was settable.
+/// - `Some(0)` — off. This repo is never reviewed, whatever the forge says.
 /// - `Some(n)` — at most n reviewers, which MAIN-446 places for real: several
 ///   on one node if that is what the fleet has, each owning a shard of the
 ///   repo's open PRs, bounded by the node's own `max_loop_jobs`. A count past
 ///   what the fleet can host is still honest shortfall rather than a silent cap
 ///   — reporting the gap is the point.
 ///
-/// A negative value cannot arrive — the route rejects it (AC-2) — but the cast
-/// saturates at zero rather than wrapping, because a column is a wider contract
-/// than the one endpoint that writes it today.
-pub(crate) fn review_loop_spec(max_replicas: Option<i32>) -> SessionSpec {
+/// A negative value cannot arrive — the route rejects it (MAIN-445 AC-2) — but
+/// the cast saturates at zero rather than wrapping, because a column is a wider
+/// contract than the one endpoint that writes it today.
+///
+/// **Zero from a quiet repo and zero from `Some(0)` are the same NUMBER and not
+/// the same STATE, and the difference is the whole of AC-3.** Both stop the
+/// session this repo has, through the same scale-down path. What separates them
+/// is what happens next: a quiet repo's `open_prs` becomes 1 the moment somebody
+/// opens a PR and the reviewer returns, where a zeroed repo's `min` is zero for
+/// every count there is and it never comes back. Nothing here has to remember
+/// which case it is in — the arithmetic already distinguishes them, which is why
+/// it is arithmetic and not a flag.
+///
+/// **`open_prs` is `None` for "we do not know"**, and that is not zero either
+/// (AC-6). No remote, a local path, a self-hosted forge, a deployment with no
+/// token, an outage that has never once succeeded — all of them mean nothing
+/// measured the demand, and the honest answer is to run what the repo declared.
+/// No forge must never mean no reviewers.
+pub(crate) fn review_loop_spec(max_replicas: Option<i32>, open_prs: Option<u32>) -> SessionSpec {
+    let ceiling = match max_replicas {
+        None => 1,
+        Some(n) => n.max(0) as u32,
+    };
     SessionSpec {
         runtime: crate::services::jobs::LOOP_RUNTIME.into(),
         node_selector: [("role".to_string(), "loop".to_string())]
             .into_iter()
             .collect(),
         tolerations: vec![],
-        replicas: match max_replicas {
-            None => Replicas::Single,
-            Some(n) => Replicas::Count {
-                count: n.max(0) as u32,
+        replicas: Replicas::Count {
+            count: match open_prs {
+                Some(prs) => prs.min(ceiling),
+                None => ceiling,
             },
         },
     }
@@ -1951,7 +1973,7 @@ mod tests {
         let cos = [checkout(1, 1), checkout(2, 2)];
 
         let p = plan(
-            &review_loop_spec(None),
+            &review_loop_spec(None, None),
             &nodes,
             &cos,
             &[],
@@ -1969,7 +1991,7 @@ mod tests {
     fn no_loop_node_is_a_shortfall_not_a_substitute() {
         let nodes = [loop_capable(1, &[]), loop_capable(2, &[])];
         let p = plan(
-            &review_loop_spec(None),
+            &review_loop_spec(None, None),
             &nodes,
             &[checkout(1, 1)],
             &[],
@@ -1989,7 +2011,7 @@ mod tests {
             loop_capable(2, &[("role", "loop")]),
         ];
         let p = plan(
-            &review_loop_spec(None),
+            &review_loop_spec(None, None),
             &nodes,
             &[checkout(1, 1), checkout(2, 2)],
             &[],
@@ -2026,13 +2048,17 @@ mod tests {
     /// place nothing at all, which reads as "no loop node" forever.
     #[test]
     fn the_review_loop_spec_is_what_the_card_declares() {
-        let s = review_loop_spec(None);
+        let s = review_loop_spec(None, None);
         assert_eq!(s.runtime, "claude");
         assert_eq!(
             s.node_selector.get("role").map(String::as_str),
             Some("loop")
         );
-        assert_eq!(s.replicas, Replicas::Single);
+        // A `Count`, not `Replicas::Single`, since MAIN-448: the spec is now
+        // always the RESULT of `min(open_prs, ceiling)`, and `Single` cannot
+        // express the zero a quiet repo needs. Unset with no forge is one, which
+        // is the number `Single` meant.
+        assert_eq!(s.replicas, Replicas::Count { count: 1 });
     }
 
     /// MAIN-445 AC-5, the upgrade guarantee, stated where it can actually fail:
@@ -2067,7 +2093,7 @@ mod tests {
             Spread::Sharded,
         );
         let new = plan(
-            &review_loop_spec(None),
+            &review_loop_spec(None, None),
             &nodes,
             &cos,
             &[],
@@ -2094,7 +2120,7 @@ mod tests {
         }];
 
         let p = plan(
-            &review_loop_spec(Some(0)),
+            &review_loop_spec(Some(0), None),
             &[loop_box],
             &cos,
             &running,
@@ -2122,7 +2148,7 @@ mod tests {
         }];
 
         let p = plan(
-            &review_loop_spec(None),
+            &review_loop_spec(None, None),
             &[loop_box],
             &cos,
             &running,
@@ -2161,7 +2187,7 @@ mod tests {
     #[test]
     fn three_reviewers_fit_on_one_loop_node_with_the_capacity_for_them() {
         let p = plan(
-            &review_loop_spec(Some(3)),
+            &review_loop_spec(Some(3), None),
             &[loop_node(1, 3)],
             &[checkout(1, 1)],
             &[],
@@ -2184,7 +2210,7 @@ mod tests {
     #[test]
     fn the_ceiling_is_the_nodes_own_max_loop_jobs() {
         let quiesced = plan(
-            &review_loop_spec(Some(3)),
+            &review_loop_spec(Some(3), None),
             &[loop_node(1, 0)],
             &[checkout(1, 1)],
             &[],
@@ -2197,7 +2223,7 @@ mod tests {
         // Unreported reads as the shipped default, which is the same number a
         // node that never set `NOOK_MAX_LOOP_JOBS` runs loop jobs at.
         let unreported = plan(
-            &review_loop_spec(Some(9)),
+            &review_loop_spec(Some(9), None),
             &[loop_capable(1, &[("role", "loop")])],
             &[checkout(1, 1)],
             &[],
@@ -2225,7 +2251,7 @@ mod tests {
     #[test]
     fn a_count_past_capacity_divides_between_the_reviewers_that_landed() {
         let p = plan(
-            &review_loop_spec(Some(3)),
+            &review_loop_spec(Some(3), None),
             &[loop_node(1, 2)],
             &[checkout(1, 1)],
             &[],
@@ -2260,7 +2286,7 @@ mod tests {
     #[test]
     fn reviewers_spread_across_nodes_before_they_stack() {
         let p = plan(
-            &review_loop_spec(Some(3)),
+            &review_loop_spec(Some(3), None),
             &[loop_node(1, 2), loop_node(2, 2)],
             &[checkout(1, 1), checkout(2, 2)],
             &[],
@@ -2276,7 +2302,7 @@ mod tests {
     /// would break first.
     #[test]
     fn a_satisfied_sharded_declaration_is_a_no_op() {
-        let spec = review_loop_spec(Some(3));
+        let spec = review_loop_spec(Some(3), None);
         let nodes = [loop_node(1, 3)];
         let cos = [checkout(1, 1)];
         let live: Vec<Actual> = (0..3)
@@ -2300,7 +2326,7 @@ mod tests {
     /// renumbers every survivor the moment one is missing.
     #[test]
     fn restarting_one_reviewer_leaves_the_others_shards_alone() {
-        let spec = review_loop_spec(Some(3));
+        let spec = review_loop_spec(Some(3), None);
         let nodes = [loop_node(1, 3)];
         let cos = [checkout(1, 1)];
         // Shard 1 is gone; 0 and 2 are still up.
@@ -2339,7 +2365,7 @@ mod tests {
         ];
 
         let p = plan(
-            &review_loop_spec(Some(2)),
+            &review_loop_spec(Some(2), None),
             &nodes,
             &cos,
             &live,
@@ -2394,7 +2420,7 @@ mod tests {
         let nodes = [loop_node(1, 3)];
         let cos = [checkout(1, 1)];
         let capped = plan(
-            &review_loop_spec(Some(3)),
+            &review_loop_spec(Some(3), None),
             &nodes,
             &cos,
             &[],
@@ -2413,7 +2439,7 @@ mod tests {
         );
 
         let declared = plan(
-            &review_loop_spec(Some(3)),
+            &review_loop_spec(Some(3), None),
             &nodes,
             &cos,
             &[],
@@ -2428,7 +2454,7 @@ mod tests {
     /// when they need to know which shard is stuck.
     #[test]
     fn sharded_reviewers_are_named_apart() {
-        let spec = review_loop_spec(Some(3));
+        let spec = review_loop_spec(Some(3), None);
         assert_eq!(
             managed_name(
                 &spec,
@@ -2441,7 +2467,7 @@ mod tests {
         // rename the session every existing deployment is looking at.
         assert_eq!(
             managed_name(
-                &review_loop_spec(None),
+                &review_loop_spec(None, None),
                 ManagedPurpose::ReviewLoop,
                 ShardAssignment::SOLO
             ),
@@ -2463,6 +2489,163 @@ mod tests {
         assert!(
             skill.contains("number % NOOK_REVIEW_SHARDS == NOOK_REVIEW_SHARD"),
             "the skill must state the same modulo partition `owns` implements"
+        );
+    }
+    // ── MAIN-448: the count comes from the forge ─────────────────────────────
+
+    /// How many reviewers a ceiling and a forge count add up to. The whole of
+    /// AC-2 is this one function, so the table is the test.
+    fn desired(cap: Option<i32>, open_prs: Option<u32>) -> u32 {
+        match review_loop_spec(cap, open_prs).replicas {
+            Replicas::Count { count } => count,
+            other => panic!("the review loop always declares a Count, got {other:?}"),
+        }
+    }
+
+    /// AC-2, as the ticket's own examples.
+    #[test]
+    fn desired_is_the_smaller_of_the_open_prs_and_the_ceiling() {
+        assert_eq!(desired(Some(3), Some(12)), 3, "12 PRs, cap 3");
+        assert_eq!(desired(Some(3), Some(2)), 2, "2 PRs, cap 3");
+        assert_eq!(desired(Some(3), Some(3)), 3, "exactly at the cap");
+        assert_eq!(desired(None, Some(9)), 1, "unset is a ceiling of one");
+    }
+
+    /// AC-6. Four different reasons nothing measured the demand, one answer:
+    /// run what the repo declared. **No forge must never mean no reviewers**, so
+    /// this is the case that has to keep working when everything else does not.
+    #[test]
+    fn no_forge_runs_the_declared_ceiling_exactly_as_before() {
+        assert_eq!(desired(None, None), 1);
+        assert_eq!(desired(Some(3), None), 3);
+        assert_eq!(desired(Some(0), None), 0, "an off repo is still off");
+    }
+
+    /// AC-3, first direction: a repo with nothing open wants no reviewer.
+    #[test]
+    fn a_quiet_repo_desires_no_reviewer() {
+        assert_eq!(desired(None, Some(0)), 0);
+        assert_eq!(
+            desired(Some(5), Some(0)),
+            0,
+            "the ceiling cannot conjure work"
+        );
+    }
+
+    /// AC-3, the distinction the card calls the likeliest way to ship a fleet
+    /// that silently stops reviewing. Both states desire ZERO and are not the
+    /// same state — what separates them is what a PR does next.
+    #[test]
+    fn a_quiet_repo_comes_back_and_a_zeroed_one_never_does() {
+        // Quiet → busy: the count moves, so the desire moves with it.
+        assert_eq!(desired(None, Some(0)), 0);
+        assert_eq!(
+            desired(None, Some(1)),
+            1,
+            "a PR appeared: the reviewer returns"
+        );
+
+        // Off → still off, for every count there is. This is the assertion that
+        // fails if somebody "fixes" the zero case by treating 0 as unset.
+        for prs in [0, 1, 5, 50] {
+            assert_eq!(
+                desired(Some(0), Some(prs)),
+                0,
+                "an explicitly zeroed repo must not come back for {prs} PRs"
+            );
+        }
+    }
+
+    /// AC-3's stop half, at the layer that actually stops things: desiring zero
+    /// has to reach the running session through the ordinary scale-down path,
+    /// not through a special case.
+    #[test]
+    fn scaling_to_zero_stops_the_reviewer_and_a_pr_starts_it_again() {
+        let loop_box = loop_capable(1, &[("role", "loop")]);
+        let cos = [checkout(1, 1)];
+        let running = [Actual {
+            session_id: SessionId(Uuid::from_u128(900)),
+            checkout_id: cos[0].checkout_id,
+            node_id: loop_box.id,
+            shard: ShardAssignment::SOLO,
+        }];
+
+        let quiet = plan(
+            &review_loop_spec(None, Some(0)),
+            std::slice::from_ref(&loop_box),
+            &cos,
+            &running,
+            PortSafety::Declared,
+            Spread::Sharded,
+        );
+        assert_eq!(quiet.desired, 0);
+        assert_eq!(
+            stops(&quiet),
+            vec![running[0].session_id],
+            "no PRs: it stops"
+        );
+
+        // …and with the session now gone, one PR brings it back.
+        let busy = plan(
+            &review_loop_spec(None, Some(1)),
+            &[loop_box],
+            &cos,
+            &[],
+            PortSafety::Declared,
+            Spread::Sharded,
+        );
+        assert_eq!(busy.desired, 1);
+        assert_eq!(starts(&busy).len(), 1, "a PR appeared: it comes back");
+    }
+
+    /// AC-5. The forge changes the COUNT and nothing else — a repo still cannot
+    /// get its reviewer onto somebody's laptop, and a node still hosts no more
+    /// than its own `max_loop_jobs`.
+    #[test]
+    fn the_forge_changes_the_count_and_not_the_placement() {
+        let busy = review_loop_spec(Some(9), Some(9));
+        assert_eq!(busy.runtime, "claude");
+        assert_eq!(
+            busy.node_selector.get("role").map(String::as_str),
+            Some("loop"),
+            "still `role=loop`, whatever the forge says"
+        );
+
+        // Nine wanted, a node that runs two: two placed, seven reported.
+        let p = plan(
+            &busy,
+            &[loop_node(1, 2)],
+            &[checkout(1, 1)],
+            &[],
+            PortSafety::Declared,
+            Spread::Sharded,
+        );
+        assert_eq!(
+            placements(&p).len(),
+            2,
+            "bounded by max_loop_jobs (MAIN-446)"
+        );
+        assert_eq!(p.shortfall, 7);
+    }
+
+    /// A user's laptop is not a loop node, so a busy repo does not spill onto
+    /// one. Stated separately because "the count went up" is exactly when a
+    /// placement rule would be tempting to relax.
+    #[test]
+    fn a_busy_repo_still_does_not_reach_a_non_loop_node() {
+        let user_box = loop_capable(1, &[]);
+        let loop_box = loop_capable(2, &[("role", "loop")]);
+        let p = plan(
+            &review_loop_spec(Some(5), Some(5)),
+            &[user_box.clone(), loop_box],
+            &[checkout(1, 1), checkout(2, 2)],
+            &[],
+            PortSafety::Declared,
+            Spread::Sharded,
+        );
+        assert!(
+            !starts(&p).contains(&user_box.id),
+            "twelve PRs do not buy a reviewer on somebody's laptop"
         );
     }
 }

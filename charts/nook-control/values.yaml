@@ -181,6 +181,12 @@ secretKeys:
   secretsKey: ""
   # -- Secret key holding the OIDC client secret. Env: OIDC_CLIENT_SECRET. "" to omit.
   oidcClientSecret: ""
+  # -- Secret key holding the FLEET's GitHub token (MAIN-407), read by the
+  #    control plane to size review loops to a repo's open PRs (MAIN-448).
+  #    Env: NOOK_GH_TOKEN. "" to omit — review loops then run at their declared
+  #    ceiling, which is the pre-MAIN-448 behaviour and a supported state.
+  #    The same credential the operator node's chart mounts under this name.
+  ghToken: ""
   # -- Secret key holding the S3 access key id. Env: NOOK_S3_ACCESS_KEY_ID. "" to omit.
   s3AccessKeyId: ""
   # -- Secret key holding the S3 secret access key. Env: NOOK_S3_SECRET_ACCESS_KEY. "" to omit.

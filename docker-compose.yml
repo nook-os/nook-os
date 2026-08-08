@@ -128,6 +128,12 @@ services:
       #   cargo build --release -p nook-node \
       #     && cp target/release/nook dist/nook-linux-$(uname -m)
       NOOK_DIST_DIR: /app/dist
+      # The FLEET's GitHub token (MAIN-407), read here so the control plane can
+      # size each repo's review loops to its open PRs (MAIN-448). Never a
+      # literal — only the variable, so a real credential lives in .env. Empty
+      # is the honest default: review loops then run at their declared ceiling,
+      # exactly as they did before the forge landed.
+      NOOK_GH_TOKEN: ${NOOK_GH_TOKEN:-}
       # Artifact storage. Dev points at the local MinIO so the S3 path is the
       # one being exercised day to day — a backend only tested in production
       # is a backend nobody has tested.

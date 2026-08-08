@@ -355,10 +355,18 @@ pub async fn review_loop_status(
         .await?
         .ok_or(ApiError::NotFound)?;
 
-    let spec = recon::review_loop_spec(ws.review_loop_max_replicas);
+    // The forge's own count, from the cache the reconcile pass reads (MAIN-448)
+    // — not a second lookup. The comment below anticipated this card, and its
+    // point stands: reporting the ceiling while the loop converges on
+    // `min(open_prs, ceiling)` would be the drift it warns about.
+    let open_prs = state
+        .review_demand
+        .open_prs(id, ws.git_remote_url.as_deref())
+        .await;
+    let spec = recon::review_loop_spec(ws.review_loop_max_replicas, open_prs);
     // The same call `pass()` makes, with the same purpose and the same slots —
     // so this reports the plan the loop acts on rather than a second opinion
-    // that drifts when `review_loop_spec` changes (MAIN-448 will change it).
+    // that drifts when `review_loop_spec` changes.
     let (plan, actual) = recon::plan_now(
         &state,
         auth.tenant_id,
