@@ -22,15 +22,8 @@ say() { printf '\033[36m▸ %s\033[0m\n' "$1"; }
 
 ./scripts/dev-bootstrap.sh
 
-# A second stack on one machine needs its own compose project name, or the two
-# checkouts fight over the same container names and volumes. Derive it from the
-# directory so it is stable per worktree and needs no configuration.
-if [ -z "${COMPOSE_PROJECT_NAME:-}" ]; then
-  # `tr -c` would convert the trailing newline too, leaving a stray hyphen
-  # (MAIN-430 AC-5) — drop it before translating rather than after.
-  COMPOSE_PROJECT_NAME="nook-$(basename "$PWD" | tr -d '\n' | tr -c '[:alnum:]_-' '-' | tr '[:upper:]' '[:lower:]')"
-  export COMPOSE_PROJECT_NAME
-fi
+# shellcheck source=scripts/compose-project.sh
+. ./scripts/compose-project.sh
 say "Compose project: $COMPOSE_PROJECT_NAME"
 
 # Populate the cargo registry with ONE process before the three that share it

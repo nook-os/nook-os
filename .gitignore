@@ -32,6 +32,11 @@ frontend/apps/desktop/src-tauri/gen/
 # In-container cargo target mount points
 /target-docker
 /target-docker-node
+
+# Container build caches, bind-mounted so they survive `docker compose down -v`
+# and do not depend on the compose project name. Written only by containers —
+# never by the host — so there is no platform mixing to worry about.
+/.cache/
 # Dev agent TLS — BOTH halves, generated per checkout by
 # scripts/dev-bootstrap.sh. The certificate used to be tracked while its
 # key was ignored, which handed every fresh worktree a certificate it had

@@ -167,8 +167,8 @@ services:
       - "${NOOK_AGENT_PORT:-8081}:8081"
     volumes:
       - .:/app
-      - cargo-registry:/usr/local/cargo/registry
-      - cargo-target:/app/target-docker
+      - ./.cache/cargo-registry:/usr/local/cargo/registry
+      - ./.cache/cargo-target:/app/target-docker
     depends_on:
       postgres:
         condition: service_healthy
@@ -200,8 +200,8 @@ services:
       - "${NOOK_CHAT_PORT:-8082}:8082"
     volumes:
       - .:/app
-      - cargo-registry:/usr/local/cargo/registry
-      - cargo-target:/app/target-docker
+      - ./.cache/cargo-registry:/usr/local/cargo/registry
+      - ./.cache/cargo-target:/app/target-docker
     depends_on:
       postgres:
         condition: service_healthy
@@ -244,8 +244,8 @@ services:
       RUST_LOG: ${RUST_LOG:-nook_worker=info,info}
     volumes:
       - .:/app
-      - cargo-registry:/usr/local/cargo/registry
-      - cargo-target:/app/target-docker
+      - ./.cache/cargo-registry:/usr/local/cargo/registry
+      - ./.cache/cargo-target:/app/target-docker
     depends_on:
       postgres:
         condition: service_healthy
@@ -289,8 +289,8 @@ services:
       # --claude-login`, with no risk to a personal session.
       - ./.nook-secrets/claude:/nook-claude
       - .:/app
-      - cargo-registry:/usr/local/cargo/registry
-      - cargo-target-node:/app/target-docker-node
+      - ./.cache/cargo-registry:/usr/local/cargo/registry
+      - ./.cache/cargo-target-node:/app/target-docker-node
       - demo-workspaces:/workspace
       - node-config:/root/.config/nook
     depends_on:
@@ -401,7 +401,7 @@ services:
       - "${NOOK_WEB_PORT:-5173}:5173"
     volumes:
       - ./frontend:/app/frontend
-      - web-node-modules:/app/frontend/node_modules
+      - ./.cache/web-node-modules:/app/frontend/node_modules
     depends_on:
       control-plane:
         condition: service_healthy
@@ -415,12 +415,8 @@ networks:
 volumes:
   pgdata:
   miniodata:
-  cargo-registry:
-  cargo-target:
-  cargo-target-node:
   demo-workspaces:
   node-config:
   operator-config:
   operator-workspaces:
   operator-tmux:
-  web-node-modules:

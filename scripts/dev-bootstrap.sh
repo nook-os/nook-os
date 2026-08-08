@@ -73,4 +73,13 @@ else
   chmod 644 "$certs/agent.crt"
 fi
 
+# The container build caches (MAIN-425's third gitignored thing). Bind mounts,
+# not named volumes, for two reasons: `docker compose down -v` cannot take them
+# with it, and they no longer depend on the compose project name — one checkout
+# used to warm three separate caches because run.sh and dev-up.sh derived
+# different project names. Created here so Docker does not invent them.
+for d in cargo-registry cargo-target cargo-target-node web-node-modules; do
+  mkdir -p ".cache/$d"
+done
+
 say "Checkout ready — 'docker compose up -d' will start, or use ./scripts/dev-up.sh"
