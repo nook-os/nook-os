@@ -368,13 +368,26 @@ const UNMAPPED_KINDS: &[(&str, &str)] = &[
 
 /// Whether this kind may CREATE the clone cache, or only use one already there.
 ///
-/// A review job targets a WORKSPACE rather than a ticket, and runs on a shared
-/// operator whose whole point is that the repo is already cached (MAIN-406
-/// AC-1). Cloning on demand there would turn "review this repo" into an
-/// unbounded fetch of any repo a job names, on a machine several tenants share.
-/// So review uses what exists and says so when nothing does (AC-3).
-fn may_create_cache(kind: &str) -> bool {
-    kind != "review"
+/// **This was `kind != "review"` and is now true for every kind — a deliberate
+/// relaxation of a rule written against a threat that no longer exists.**
+///
+/// MAIN-406 refused a review job the right to clone because a review was
+/// enqueued from a board signal and could name any repo, on a machine several
+/// tenants share: "review this repo" would have become an unbounded fetch. That
+/// caller is gone. A review RUN is raised by the reconciler from a workspace's
+/// own `git_remote_url` (MAIN-455) — control-plane resolved, never supplied by
+/// whoever asked — so the repo a run can fetch is one the tenant already
+/// declared, exactly like the `spec` and `decompose` runs that have always
+/// cached freely.
+///
+/// Keeping the refusal made the feature unbuildable rather than safe: the
+/// checkout clone-on-demand lands is a WORKING TREE in the node's workspace
+/// root, and a job reads a bare mirror under `~/.nook/clone-cache`. They are
+/// different things in different places, so "the repo is already cached" was
+/// never true for a repo nothing had run a job on — every review failed with
+/// "no clone cache", forever, however many times it was retried.
+fn may_create_cache(_kind: &str) -> bool {
+    true
 }
 
 /// Run one loop job to completion. Blocking; call under `spawn_blocking`.
@@ -1076,17 +1089,20 @@ mod tests {
         }
     }
 
-    /// AC-1/AC-3: review uses an existing clone cache and never creates one.
+    /// MAIN-455: every kind may build its cache, review included.
     ///
-    /// The distinction is the whole point — a shared operator caches the repos
-    /// it hosts, and letting a review job clone on demand would turn "review
-    /// this repo" into an unbounded fetch of whatever a job names, on a machine
-    /// several tenants share.
+    /// The inverse of what this asserted. MAIN-406 barred review because a
+    /// board-signal sweep could name any repo on a shared machine; the
+    /// reconciler names only a workspace's own declared remote, so the repo a
+    /// run may fetch is one the tenant already registered. Barring it did not
+    /// make the operator safer — it made every review fail with "no clone
+    /// cache", because clone-on-demand lands a working tree and a job reads a
+    /// bare mirror.
     #[test]
-    fn only_review_is_barred_from_creating_the_clone_cache() {
-        assert!(!may_create_cache("review"));
-        assert!(may_create_cache("spec"));
-        assert!(may_create_cache("decompose"));
+    fn every_kind_may_build_its_clone_cache() {
+        for kind in ["review", "spec", "decompose"] {
+            assert!(may_create_cache(kind), "{kind} must be able to cache");
+        }
     }
 
     /// AC-4 / MAIN-143 AC-5: what counts as a credential.

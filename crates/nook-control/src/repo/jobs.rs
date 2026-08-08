@@ -58,6 +58,12 @@ pub struct NewLoopJob {
 #[derive(Debug, Clone, nook_db::FromDbRow)]
 pub struct ReviewRunHeads {
     pub review_pr_number: i64,
+    /// The head of the newest run that FAILED, and when it failed. A failure is
+    /// not a review — the head must not count as done, or one bad run silences
+    /// a PR until somebody pushes — but it must not be retried instantly
+    /// either, which is a run every poll interval forever.
+    pub failed_head: Option<String>,
+    pub failed_at: Option<chrono::DateTime<chrono::Utc>>,
     /// The head a run is in flight for, if one is. Its presence is what stops a
     /// second run being raised for the same PR.
     pub live_head: Option<String>,
@@ -313,6 +319,13 @@ impl LoopJobRepository for DbLoopJobRepository {
             review_head_sha: Option<String>,
         }
 
+        #[derive(nook_db::FromDbRow)]
+        struct FailedHead {
+            review_pr_number: i64,
+            review_head_sha: Option<String>,
+            updated_at: chrono::DateTime<chrono::Utc>,
+        }
+
         // At most one row per PR: the partial unique index from 0046 is what
         // makes that true, not an assumption here.
         let live: Vec<Head> = self
@@ -322,6 +335,23 @@ impl LoopJobRepository for DbLoopJobRepository {
                   WHERE tenant_id = $1 AND workspace_id = $2 AND kind = 'review'
                     AND review_pr_number IS NOT NULL
                     AND state IN ('queued', 'claimed', 'running', 'waiting_on_human')",
+                params![tenant, workspace.0],
+            )
+            .await?;
+
+        // The newest FAILED run per PR, so a failure can be backed off without
+        // being mistaken for a review.
+        let failed: Vec<FailedHead> = self
+            .db
+            .query_all(
+                "SELECT review_pr_number, review_head_sha, updated_at FROM loop_jobs j
+                  WHERE tenant_id = $1 AND workspace_id = $2 AND kind = 'review'
+                    AND review_pr_number IS NOT NULL AND state = 'failed'
+                    AND updated_at = (
+                        SELECT MAX(updated_at) FROM loop_jobs k
+                         WHERE k.workspace_id = j.workspace_id
+                           AND k.review_pr_number = j.review_pr_number
+                           AND k.kind = 'review' AND k.state = 'failed')",
                 params![tenant, workspace.0],
             )
             .await?;
@@ -353,6 +383,8 @@ impl LoopJobRepository for DbLoopJobRepository {
                     review_pr_number: h.review_pr_number,
                     live_head: None,
                     done_head: None,
+                    failed_head: None,
+                    failed_at: None,
                 })
                 .live_head = h.review_head_sha;
         }
@@ -363,8 +395,23 @@ impl LoopJobRepository for DbLoopJobRepository {
                     review_pr_number: h.review_pr_number,
                     live_head: None,
                     done_head: None,
+                    failed_head: None,
+                    failed_at: None,
                 })
                 .done_head = h.review_head_sha;
+        }
+        for h in failed {
+            let e = by_pr
+                .entry(h.review_pr_number)
+                .or_insert_with(|| ReviewRunHeads {
+                    review_pr_number: h.review_pr_number,
+                    live_head: None,
+                    done_head: None,
+                    failed_head: None,
+                    failed_at: None,
+                });
+            e.failed_head = h.review_head_sha;
+            e.failed_at = Some(h.updated_at);
         }
         Ok(by_pr.into_values().collect())
     }
@@ -803,12 +850,18 @@ impl LoopJobRepository for FakeLoopJobRepository {
                 review_pr_number: pr,
                 live_head: None,
                 done_head: None,
+                failed_head: None,
+                failed_at: None,
             });
             match j.state.as_str() {
                 "queued" | "claimed" | "running" | "waiting_on_human" => {
                     e.live_head = j.review_head_sha.clone()
                 }
                 "completed" => e.done_head = j.review_head_sha.clone(),
+                "failed" => {
+                    e.failed_head = j.review_head_sha.clone();
+                    e.failed_at = Some(j.updated_at);
+                }
                 _ => {}
             }
         }
