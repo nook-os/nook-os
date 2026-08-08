@@ -834,9 +834,13 @@ pub async fn pass(state: &AppState, clones: &CloneThrottle) -> crate::error::Api
             // The repo still has to BE on the nodes that review it. This
             // converges the checkouts (MAIN-317's clone-on-demand) and no
             // longer starts anything — see `reconcile_workspace`.
+            // The workspace's own forge identity, when it configured one
+            // (MAIN-456); the fleet variable is only the single-tenant
+            // fallback.
+            let gh_token = crate::services::workspace_gh_token(state, tenant, ws.id).await;
             let open_prs = state
                 .review_demand
-                .open_prs(ws.id, ws.git_remote_url.as_deref())
+                .open_prs(ws.id, ws.git_remote_url.as_deref(), gh_token.as_deref())
                 .await;
             if let Err(e) = reconcile_workspace(
                 state,
@@ -898,6 +902,7 @@ pub async fn pass(state: &AppState, clones: &CloneThrottle) -> crate::error::Api
             let ceiling = ws.review_loop_max_replicas.unwrap_or(1).max(0) as usize;
             let source = crate::services::work_source::ReviewWork {
                 demand: &state.review_demand,
+                token: gh_token,
             };
             match crate::services::run_reconcile::converge(
                 state,

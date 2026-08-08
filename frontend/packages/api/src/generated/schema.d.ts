@@ -3093,6 +3093,35 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{id}/gh-token": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/workspaces/{id}/gh-token` — does this workspace hold its own
+         *     forge token (MAIN-456)? Reports ONLY the fact; the token never leaves the
+         *     vault through any read path.
+         */
+        get: operations["get_workspace_gh_token"];
+        /**
+         * `PUT /api/v1/workspaces/{id}/gh-token` — set or clear the workspace's own
+         *     forge token (MAIN-456). Sealed with the same vault the git credentials use.
+         * @description Multi-tenant is the reason this exists: one fleet-wide token means every
+         *     tenant's verdicts post as one identity and the control plane holds a
+         *     credential with reach into every tenant's forge. The workspace token
+         *     OUTRANKS the fleet variable everywhere a forge is spoken to.
+         */
+        put: operations["set_workspace_gh_token"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{id}/git": {
         parameters: {
             query?: never;
@@ -6407,6 +6436,13 @@ export interface components {
         SetWorkspaceCredentialRequest: {
             credential_id?: null | components["schemas"]["GitCredentialId"];
         };
+        /**
+         * @description Set or clear a workspace's own forge token (MAIN-456). `token: null`
+         *     clears; the write path never echoes the value back.
+         */
+        SetWorkspaceGhTokenRequest: {
+            token?: string | null;
+        };
         /** @description Scope values: `tenant` | `user`. */
         Setting: {
             id: components["schemas"]["SettingId"];
@@ -7322,6 +7358,13 @@ export interface components {
         };
         WorkspaceDetail: components["schemas"]["Workspace"] & {
             locations: components["schemas"]["WorkspaceLocation"][];
+        };
+        /**
+         * @description Whether a workspace holds its own forge token — and never the token itself.
+         *     `set: false` means the fleet fallback (if any) applies.
+         */
+        WorkspaceGhTokenState: {
+            set: boolean;
         };
         /** Format: uuid */
         WorkspaceId: string;
@@ -12950,6 +12993,70 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Workspace"];
                 };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_workspace_gh_token: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceGhTokenState"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    set_workspace_gh_token: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetWorkspaceGhTokenRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceGhTokenState"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             404: {
                 headers: {

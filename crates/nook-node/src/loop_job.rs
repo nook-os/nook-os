@@ -43,6 +43,9 @@ pub struct LoopJob {
     /// The pull request a `review` run owns (MAIN-455): what the agent is told
     /// it is reviewing, and the session it resumes.
     pub review_pr_number: Option<u64>,
+    /// The workspace's own forge token (MAIN-456); outranks the node's fleet
+    /// env when set.
+    pub gh_token: Option<String>,
     pub target_task_key: String,
     pub repo_url: String,
     pub branch: String,
@@ -445,6 +448,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
         job_id,
         kind,
         review_pr_number,
+        gh_token,
         target_task_key,
         repo_url,
         branch,
@@ -596,6 +600,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
                 token: nook_token.as_deref(),
                 server: &cfg.server,
                 workspace_id: workspace_id.as_deref(),
+                gh_token: gh_token.as_deref(),
             },
         ),
         crate::job_adapter::Adapter::Tmux => drive_session(
@@ -673,6 +678,9 @@ struct AgentIdentity<'a> {
     server: &'a str,
     /// So `nook get workspace git-ssh` can name the repo it authenticates for.
     workspace_id: Option<&'a str>,
+    /// The workspace's own forge token (MAIN-456); outranks the node's fleet
+    /// env, so a tenant that configured its identity never speaks as the fleet.
+    gh_token: Option<&'a str>,
 }
 
 /// What a run is ABOUT: which skill, on which target, from which brief, and —
@@ -753,7 +761,11 @@ fn drive_streaming(
     // agent's mood. Absent, nothing is exported at all — an empty `GH_TOKEN`
     // out-prefers a logged-in account, same reasoning as `tmux::spawn`.
     let gh_env;
-    if let Some(t) = crate::config::fleet_gh_token() {
+    if let Some(t) = identity
+        .gh_token
+        .map(str::to_string)
+        .or_else(crate::config::fleet_gh_token)
+    {
         gh_env = t;
         env.push(("GH_TOKEN", &gh_env));
     }

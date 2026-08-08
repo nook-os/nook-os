@@ -597,6 +597,11 @@ pub enum ControlToNode {
         /// rebuilding both.
         #[serde(default)]
         review_pr_number: Option<u64>,
+        /// The workspace's own forge token (MAIN-456), exported to the run as
+        /// `GH_TOKEN`. `None` means the node's fleet env applies — the
+        /// single-tenant fallback.
+        #[serde(default)]
+        gh_token: Option<String>,
         /// The board key of the ticket the skill points at (e.g. `MAIN-42`).
         target_task_key: String,
         /// The clonable git remote, resolved by the control plane from the

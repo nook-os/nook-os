@@ -924,6 +924,20 @@ pub struct SetSessionSpecRequest {
     pub spec: Option<SessionSpec>,
 }
 
+/// Set or clear a workspace's own forge token (MAIN-456). `token: null`
+/// clears; the write path never echoes the value back.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct SetWorkspaceGhTokenRequest {
+    pub token: Option<String>,
+}
+
+/// Whether a workspace holds its own forge token — and never the token itself.
+/// `set: false` means the fleet fallback (if any) applies.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WorkspaceGhTokenState {
+    pub set: bool,
+}
+
 /// A workspace's review-loop declaration (MAIN-445), as the API reports it.
 ///
 /// `max_replicas: null` is UNSET — the build's default ceiling of one applies.
