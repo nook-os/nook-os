@@ -195,6 +195,47 @@ async fn decompose_requires_an_epic_target() {
     bed.teardown().await;
 }
 
+/// MAIN-144 AC-5: the epic-run route guard, exercised through `jobs::create`
+/// like decompose's above — a leaf task has no children to merge.
+#[tokio::test]
+async fn epic_run_requires_an_epic_target() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, tenant, user, b, c) = fixture(&bed).await;
+    let plain = task(&bed, tenant, b, c, "task", user, None).await;
+    let epic = task(&bed, tenant, b, c, "epic", user, None).await;
+
+    let err = jobs::create(
+        &state,
+        tenant,
+        user,
+        CreateLoopJobRequest {
+            kind: "epic-run".into(),
+            target_task_id: plain.to_string(),
+            seed: None,
+        },
+    )
+    .await
+    .expect_err("epic-run on a non-epic is refused");
+    assert!(matches!(err, nook_control::error::ApiError::BadRequest(_)));
+
+    jobs::create(
+        &state,
+        tenant,
+        user,
+        CreateLoopJobRequest {
+            kind: "epic-run".into(),
+            target_task_id: epic.to_string(),
+            seed: None,
+        },
+    )
+    .await
+    .expect("epic-run on an epic is allowed");
+
+    bed.teardown().await;
+}
+
 #[tokio::test]
 async fn lifecycle_allows_legal_transitions_and_refuses_illegal_ones() {
     let Some(mut bed) = TestBed::new().await else {

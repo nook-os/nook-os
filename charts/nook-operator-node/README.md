@@ -65,6 +65,14 @@ repositories the fleet reviews, granting only:
 | Contents        | Read-only      | Read the tree the PR changes                 |
 | Metadata        | Read-only      | Mandatory; GitHub grants it implicitly       |
 
+**Epic-run passes need one elevation** (MAIN-144): the epic-runner is the
+loop's merge authority, and merging a pull request requires **Contents: Read
+and write** on the repositories the runner manages. Grant it only if this
+fleet runs `epic-run` jobs; a review-only fleet keeps the read-only table
+above. A pass whose merge is refused for a missing permission stops and names
+that exact reason in the job transcript and the epic's comment — it never
+silently skips the PR.
+
 Nothing else. In particular **not** Administration, **not** Actions, **not**
 Workflows, and **not** a classic token's `repo` scope — `repo` carries push and
 settings access to every repository the issuing account can reach, which is

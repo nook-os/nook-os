@@ -142,6 +142,11 @@ pub trait LoopJobRepository: Send + Sync {
     /// verdict on a finished or foreign job is a caller bug, answered with 0.
     async fn set_review_verdict(&self, id: JobId, verdict: &str) -> ApiResult<u64>;
 
+    /// The live epic-run for this epic, if one is in flight (MAIN-144 AC-3) —
+    /// the dedupe that keeps "one deliberate enqueue per pass" true.
+    async fn active_epic_run_for(&self, tenant: TenantId, task: TaskId)
+        -> ApiResult<Option<JobId>>;
+
     async fn list_for_task(&self, tenant: TenantId, task: TaskId) -> ApiResult<Vec<LoopJob>>;
 
     async fn transition(&self, id: JobId, to: &str) -> ApiResult<LoopJob>;
@@ -407,6 +412,23 @@ impl LoopJobRepository for DbLoopJobRepository {
                   WHERE id = $1 AND kind = 'review'
                     AND state IN ('claimed', 'running', 'waiting_on_human')",
                 params![id.0, verdict],
+            )
+            .await?)
+    }
+
+    async fn active_epic_run_for(
+        &self,
+        tenant: TenantId,
+        task: TaskId,
+    ) -> ApiResult<Option<JobId>> {
+        Ok(self
+            .db
+            .query_scalar_opt(
+                "SELECT id FROM loop_jobs
+                  WHERE tenant_id = $1 AND target_task_id = $2 AND kind = 'epic-run'
+                    AND state IN ('queued', 'claimed', 'running', 'waiting_on_human')
+                  ORDER BY created_at LIMIT 1",
+                params![tenant, task],
             )
             .await?)
     }
@@ -809,6 +831,27 @@ impl LoopJobRepository for FakeLoopJobRepository {
         };
         j.review_verdict = Some(verdict.to_string());
         Ok(1)
+    }
+
+    async fn active_epic_run_for(
+        &self,
+        tenant: TenantId,
+        task: TaskId,
+    ) -> ApiResult<Option<JobId>> {
+        let s = self.inner.lock().unwrap();
+        Ok(s.jobs
+            .iter()
+            .filter(|j| {
+                j.tenant_id == tenant
+                    && j.target_task_id == Some(task)
+                    && j.kind == "epic-run"
+                    && matches!(
+                        j.state.as_str(),
+                        "queued" | "claimed" | "running" | "waiting_on_human"
+                    )
+            })
+            .min_by_key(|j| j.created_at)
+            .map(|j| j.id))
     }
 
     async fn list_reviews_for_workspace(

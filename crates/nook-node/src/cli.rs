@@ -4272,6 +4272,27 @@ pub async fn reviews_enqueue(workspace: &str, seed: Option<&str>) -> Result<()> 
     Ok(())
 }
 
+/// `nook epics run <KEY>` (MAIN-144) — enqueue ONE epic-runner pass on the
+/// fleet. Manual by design: invocation is authorization, there is no schedule
+/// and no auto-feed, and a second enqueue while one runs is refused with the
+/// running job's id rather than queued behind it.
+pub async fn epics_run(epic: &str, seed: Option<&str>) -> Result<()> {
+    let client = Client::from_config()?;
+    let mut body = serde_json::json!({ "kind": "epic-run", "target_task_id": epic });
+    if let Some(seed) = seed {
+        body["seed"] = serde_json::Value::String(seed.to_string());
+    }
+    let job = client.post("/api/v1/jobs", body).await?;
+    println!(
+        "epic-run {} — {} (target {})",
+        crate::style::ok_c(job["id"].as_str().unwrap_or("?")),
+        job["state"].as_str().unwrap_or("?"),
+        epic,
+    );
+    println!("  One pass: merges what the loops' evidence clears, then stops. Watch the job's transcript for the pass report.");
+    Ok(())
+}
+
 /// `nook reviews verdict <verdict> [--body …]` (MAIN-455) — a review run
 /// reports its conclusion. Job-scoped: reads `NOOK_JOB_ID` from the run's own
 /// environment, so an agent cannot verdict a job it is not.
