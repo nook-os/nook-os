@@ -396,6 +396,9 @@ fn skill_for(kind: &str) -> Option<&'static str> {
         "spec" => Some("nook-spec"),
         "decompose" => Some("nook-epic"),
         "review" => Some("nook-review"),
+        // The MERGE authority (MAIN-144): one manually-enqueued pass over one
+        // epic's children. Same headless run machinery as everything else.
+        "epic-run" => Some("nook-epic-runner"),
         _ => None,
     }
 }
@@ -412,10 +415,7 @@ fn skill_for(kind: &str) -> Option<&'static str> {
 // Scoped to the non-test build, where it genuinely is unused: in the test
 // build it IS read, and a blanket allow there would hide a real orphan.
 #[cfg_attr(not(test), allow(dead_code))]
-const UNMAPPED_KINDS: &[(&str, &str)] = &[
-    ("epic-run", "MAIN-144 owns the epic-run job kind"),
-    ("build", "MAIN-383 owns the build job kind"),
-];
+const UNMAPPED_KINDS: &[(&str, &str)] = &[("build", "MAIN-383 owns the build job kind")];
 
 /// Whether this kind may CREATE the clone cache, or only use one already there.
 ///
@@ -535,7 +535,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
     // the thing never to allow. Provisioning the token is split 3's (NG-2); this
     // card's duty is to fail cleanly when it is absent rather than report a pass
     // that examined nothing.
-    if kind == "review" {
+    if kind == "review" || kind == "epic-run" {
         if let Err(e) = gh_is_authenticated() {
             finished(
                 &out,

@@ -697,3 +697,57 @@ async fn a_reported_capacity_round_trips_and_absent_is_not_zero() {
         "absent is None, not Some(0) — one disables claiming, the other does not"
     );
 }
+
+// ── MAIN-144: the epic-run kind's dedupe ─────────────────────────────────────
+
+/// One pass per epic at a time, and the refusal names the job already running —
+/// the caller's next move is to watch that one, not to retry.
+#[tokio::test]
+async fn one_epic_run_per_epic_and_the_live_one_is_named() {
+    let repo = FakeLoopJobRepository::default();
+    let t = tenant();
+    let epic = TaskId::new();
+    let other_epic = TaskId::new();
+
+    assert_eq!(
+        repo.active_epic_run_for(t, epic).await.expect("query"),
+        None,
+        "no pass in flight yet"
+    );
+
+    let id = JobId::new();
+    repo.create(NewLoopJob {
+        id,
+        tenant: t,
+        kind: "epic-run".into(),
+        target_task_id: Some(epic),
+        workspace_id: None,
+        requested_by: UserId::new(),
+        seed: None,
+        predecessor_job_id: None,
+        review_pr_number: None,
+        review_head_sha: None,
+    })
+    .await
+    .expect("create");
+
+    assert_eq!(
+        repo.active_epic_run_for(t, epic).await.expect("query"),
+        Some(id),
+        "the live pass is returned BY ID, so a refusal can name it"
+    );
+    assert_eq!(
+        repo.active_epic_run_for(t, other_epic)
+            .await
+            .expect("query"),
+        None,
+        "another epic's queue is its own"
+    );
+
+    // A finished pass frees the epic: terminal states are not "in flight".
+    repo.transition(id, "completed").await.expect("finish");
+    assert_eq!(
+        repo.active_epic_run_for(t, epic).await.expect("query"),
+        None
+    );
+}

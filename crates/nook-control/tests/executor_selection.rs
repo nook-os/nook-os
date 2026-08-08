@@ -403,6 +403,44 @@ async fn a_shared_operator_declaring_build_is_still_refused_build_work() {
         .await
         .expect("candidates");
     assert_eq!(for_review, vec![op], "…while review is unaffected");
+    // MAIN-144 AC-5: epic-run rides the same declared-kinds gate. THIS node
+    // declares spec/review/build and not epic-run — so both the offer and the
+    // wall skip it, and the wall's refusal names the missing declaration (the
+    // declared-kinds rule, not the build rule).
+    let for_epic_run = state
+        .nodes
+        .eligible_loop_executors(tenant, person, "claude", "epic-run")
+        .await
+        .expect("candidates");
+    assert!(
+        for_epic_run.is_empty(),
+        "a node that does not declare epic-run is not offered it"
+    );
+    let undeclared = jobs::kind_wall_refusal(&state, op, "epic-run")
+        .await
+        .expect("wall")
+        .expect("a refusal");
+    assert!(
+        undeclared.contains("does not accept epic-run"),
+        "the refusal is the declared-kinds filter, by name: {undeclared}"
+    );
+    // …and on a shared operator that DOES declare epic-run, the wall passes
+    // it: the build rule is about build alone and has no opinion here.
+    let op_with_epic_run = node(
+        &bed,
+        tenant,
+        None,
+        "online",
+        caps_declaring(&["spec", "review", "epic-run"], true),
+    )
+    .await;
+    assert!(
+        jobs::kind_wall_refusal(&state, op_with_epic_run, "epic-run")
+            .await
+            .expect("wall")
+            .is_none(),
+        "epic-run is not build: the wall does not refuse it on an operator that declares it"
+    );
 
     // Claim: refused again, independently, with a message naming the rule.
     let refusal = jobs::kind_wall_refusal(&state, op, "build")

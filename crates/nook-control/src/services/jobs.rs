@@ -29,7 +29,7 @@ pub const WORK_TYPE: &str = "loop.job";
 /// `review` is deliberately absent: it targets a workspace, not a ticket, so it
 /// cannot be raised through a path whose whole input is a task id. It has its
 /// own entry point, [`enqueue_review`], which is also where the dedupe lives.
-const KINDS: [&str; 2] = ["spec", "decompose"];
+const KINDS: [&str; 3] = ["spec", "decompose", "epic-run"];
 
 /// The workspace-targeted job kind (MAIN-408). Matches the `loop_jobs_kind_check`
 /// constraint added by migration 0040.
@@ -137,8 +137,8 @@ pub async fn create(
 ) -> ApiResult<LoopJobDetail> {
     if !KINDS.contains(&req.kind.as_str()) {
         return Err(ApiError::BadRequest(format!(
-            "unknown job kind {:?} — expected spec or decompose. A review job \
-             targets a workspace, not a ticket: raise it with POST /api/v1/reviews.",
+            "unknown job kind {:?} — expected spec, decompose or epic-run. A review \
+             job targets a workspace, not a ticket: raise it with POST /api/v1/reviews.",
             req.kind
         )));
     }
@@ -159,6 +159,22 @@ pub async fn create(
         return Err(ApiError::BadRequest(
             "a decompose job's target must be an epic".into(),
         ));
+    }
+    if req.kind == "epic-run" {
+        if target.type_ != "epic" {
+            return Err(ApiError::BadRequest(
+                "an epic-run job's target must be an epic — it merges the epic's \
+                 children, and a leaf task has none"
+                    .into(),
+            ));
+        }
+        // One pass per epic at a time (MAIN-144 AC-3). Refused WITH the running
+        // job's id, so the caller can watch that one instead of retrying.
+        if let Some(existing) = state.jobs.active_epic_run_for(tenant, target_id).await? {
+            return Err(ApiError::Conflict(format!(
+                "an epic-run for this epic is already in flight: job {existing}"
+            )));
+        }
     }
 
     // The seed is the human's opening brief (MAIN-231). Blank is the same as

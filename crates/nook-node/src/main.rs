@@ -208,6 +208,10 @@ enum Command {
     /// level stays frozen.
     #[command(subcommand)]
     Reviews(ReviewsCommand),
+    /// Epic-runner passes (MAIN-144): the loop's merge authority, one
+    /// deliberate enqueue per pass.
+    #[command(subcommand)]
+    Epics(EpicsCommand),
     /// Tell the fleet something happened.
     ///
     /// Fans out to every connected UI and every configured channel (Slack,
@@ -662,6 +666,9 @@ async fn main() -> Result<()> {
         Command::Reviews(ReviewsCommand::Enqueue { workspace, seed }) => {
             cli::reviews_enqueue(&workspace, seed.as_deref()).await
         }
+        Command::Epics(EpicsCommand::Run { epic, seed }) => {
+            cli::epics_run(&epic, seed.as_deref()).await
+        }
         Command::Reviews(ReviewsCommand::Verdict { verdict, body }) => {
             cli::reviews_verdict(&verdict, body.as_deref()).await
         }
@@ -1059,6 +1066,19 @@ enum OperatorCommand {
         /// Remove the record entirely rather than revoking its certificate.
         #[arg(long)]
         remove: bool,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum EpicsCommand {
+    /// Run one epic-runner pass over a named epic, on the fleet. Manual only —
+    /// invocation is authorization; there is no schedule and no auto-feed.
+    Run {
+        /// The epic, by board key (e.g. MAIN-35).
+        epic: String,
+        /// An opening brief for the pass.
+        #[arg(long)]
+        seed: Option<String>,
     },
 }
 
