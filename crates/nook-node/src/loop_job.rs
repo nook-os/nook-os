@@ -46,6 +46,9 @@ pub struct LoopJob {
     /// The workspace's own forge token (MAIN-456); outranks the node's fleet
     /// env when set.
     pub gh_token: Option<String>,
+    /// The control plane's advertised API base URL (MAIN-465). The run's
+    /// `NOOK_SERVER` when present; absent, this node's own `cfg.server`.
+    pub server_url: Option<String>,
     pub target_task_key: String,
     pub repo_url: String,
     pub branch: String,
@@ -535,6 +538,18 @@ fn may_create_cache(_kind: &str) -> bool {
     true
 }
 
+/// Which server the RUN's `nook` CLI dials: the advertised API outranks the
+/// dialing address (MAIN-465). The job's token was minted by the control plane
+/// that raised the run, and it should be spent — and reported — against that
+/// plane's canonical URL, not the internal name this node happens to reach it
+/// by. A deployment that advertises nothing keeps today's behavior exactly.
+fn run_server<'a>(server_url: Option<&'a str>, cfg_server: &'a str) -> &'a str {
+    match server_url {
+        Some(u) if !u.trim().is_empty() => u,
+        _ => cfg_server,
+    }
+}
+
 /// Run one loop job to completion. Blocking; call under `spawn_blocking`.
 pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
     let LoopJob {
@@ -542,6 +557,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
         kind,
         review_pr_number,
         gh_token,
+        server_url,
         target_task_key,
         repo_url,
         branch,
@@ -697,7 +713,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
             },
             AgentIdentity {
                 token: nook_token.as_deref(),
-                server: &cfg.server,
+                server: run_server(server_url.as_deref(), &cfg.server),
                 workspace_id: workspace_id.as_deref(),
                 gh_token: gh_token.as_deref(),
             },
@@ -1237,6 +1253,27 @@ fn exit_is_ok(status: Option<i32>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// MAIN-465 AC-2: the delivered API URL wins; absent or blank falls back
+    /// to this node's own configured server, byte-identical to before.
+    #[test]
+    fn the_runs_server_is_the_advertised_api_or_the_nodes_own() {
+        assert_eq!(
+            run_server(
+                Some("https://api.example.test"),
+                "http://control-plane:8080"
+            ),
+            "https://api.example.test"
+        );
+        assert_eq!(
+            run_server(None, "http://control-plane:8080"),
+            "http://control-plane:8080"
+        );
+        assert_eq!(
+            run_server(Some("  "), "http://control-plane:8080"),
+            "http://control-plane:8080"
+        );
+    }
 
     /// AC-2: every advertised kind either maps to a skill or is a RECORDED gap.
     ///

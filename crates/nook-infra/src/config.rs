@@ -80,6 +80,15 @@ pub struct Config {
     /// that name usually resolves somewhere different on purpose.
     pub agent_public_url: Option<String>,
 
+    /// The HTTP API's canonical public URL (MAIN-465) — what a headless run's
+    /// `nook` CLI is told to dial and report. Deliberately its OWN setting:
+    /// `agent_public_url` above is the mTLS agent listener, which resolves
+    /// somewhere different on purpose, and `public_base_url` is the browser
+    /// URL, wrong from inside a container on a dev stack. `None` means the
+    /// deployment advertises nothing and runs fall back to the executor
+    /// node's own configured server address.
+    pub public_api_url: Option<String>,
+
     /// PEM certificate the agent listener serves, when the control plane
     /// terminates TLS itself. Its SHA-256 goes into join tokens so a machine
     /// can pin the server on first contact instead of trusting whatever the
@@ -292,6 +301,7 @@ impl Config {
             agent_tls_key: env_opt("NOOK_AGENT_TLS_KEY"),
             agent_bind: env_opt("NOOK_AGENT_BIND").unwrap_or_else(|| "0.0.0.0:8081".into()),
             agent_public_url: env_opt("NOOK_AGENT_PUBLIC_URL"),
+            public_api_url: env_opt("NOOK_PUBLIC_API_URL"),
             dist_dir: env_opt("NOOK_DIST_DIR")
                 .unwrap_or_else(|| "/usr/local/share/nook/dist".into()),
 
@@ -470,6 +480,7 @@ impl Config {
             releases_repo: "nook-os/nook-os".into(),
             agent_bind: "127.0.0.1:0".into(),
             agent_public_url: None,
+            public_api_url: None,
             agent_tls_cert: None,
             agent_tls_key: None,
             artifact_store: "disk".into(),
