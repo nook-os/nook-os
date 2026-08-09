@@ -17,6 +17,7 @@ import { WorkspaceReviews } from "../WorkspaceReviews";
 import { WorkspaceBuilds } from "../WorkspaceBuilds";
 import { WorkspaceLocations } from "../WorkspaceLocations";
 import { WorkspacePorts } from "../WorkspacePorts";
+import { WorkspaceScale } from "../WorkspaceScale";
 import { SectionedPage, type PageSection } from "../SectionedPage";
 import { askChoice, askConfirm, askForm, askText, notify } from "../dialogs";
 import { requireAppPassword, useAppPassword } from "../apppassword";
@@ -749,10 +750,21 @@ export function WorkspaceDetail() {
       // Beside the session policy on purpose: both are declarations about what
       // runs here, and this one decides what those sessions can bind.
       id: "ports",
-      title: "Ports",
+      title: "Ports & scale",
       group: "Work",
-      keywords: ["ports", "listener", "env", "PORT", "declaration", "lease"],
-      render: () => (id ? <WorkspacePorts workspaceId={id} declaredRaw={ws.port_requirements} /> : null),
+      keywords: [
+        "ports", "listener", "env", "PORT", "declaration", "lease",
+        "scale", "ceiling", "build", "review", "concurrency", "replicas", "max",
+      ],
+      render: () =>
+        id ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, minHeight: 0 }}>
+            <WorkspaceScale workspaceId={id} />
+            <div style={{ flex: 1, minHeight: 0, display: "grid" }}>
+              <WorkspacePorts workspaceId={id} declaredRaw={ws.port_requirements} />
+            </div>
+          </div>
+        ) : null,
     },
     {
       id: "notes",

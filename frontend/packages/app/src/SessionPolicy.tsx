@@ -387,7 +387,6 @@ export function SessionPolicy({ workspaceId }: { workspaceId: string }) {
           </div>
         </div>
       )}
-      <ReviewLoop workspaceId={workspaceId} />
     </Panel>
   );
 }
@@ -574,7 +573,7 @@ export function ReviewLoop({ workspaceId }: { workspaceId: string }) {
       )}
 
       {refusal && (
-        <div className="small" data-testid="review-loop-refusal" style={{ color: "var(--err)" }}>
+        <div className="small" data-testid="review-loop-refusal" style={{ color: "var(--nook-err)" }}>
           {refusal}
         </div>
       )}

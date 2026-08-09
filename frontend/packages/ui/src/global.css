@@ -2220,6 +2220,54 @@ table.nook-table tr.clickable { cursor: pointer; }
   border-bottom: 1px solid var(--nook-border);
 }
 
+/* ── Loop ceilings: build and review, side by side ──────────────────────── */
+
+/* Two ceilings in one row on any real window, stacking only when the panel is
+   genuinely narrow — they are read together ("how much of this repo runs at
+   once"), so splitting them across a fold is the thing to avoid. */
+.loop-scales {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1px;
+  background: var(--nook-border);
+  border-bottom: 1px solid var(--nook-border);
+}
+.loop-scale {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  background: var(--nook-bg);
+}
+.loop-scale-head { display: flex; align-items: center; gap: 8px; }
+.loop-scale-state { line-height: 1.5; }
+.loop-scale-edit,
+.loop-scale-actions { display: flex; align-items: center; gap: 6px; }
+.loop-scale-edit .input { width: 84px; }
+
+/* ── Workspace port declaration ─────────────────────────────────────────── */
+
+.ports-body { display: grid; gap: 10px; padding: 10px; }
+.ports-editor { display: grid; gap: 4px; }
+
+/* One track set shared by the header and every row, so the labels sit over the
+   fields they name instead of each row picking its own widths. */
+.ports-grid {
+  display: grid;
+  grid-template-columns: minmax(90px, 1fr) minmax(110px, 1.2fr) 72px 62px 28px;
+  gap: 6px;
+  align-items: center;
+}
+.ports-head { padding-bottom: 2px; }
+.ports-err { color: var(--nook-err); padding-left: 2px; }
+.ports-actions { display: flex; align-items: center; gap: 6px; padding-top: 2px; }
+.ports-note { padding-top: 2px; }
+
+.ports-list, .ports-leases { display: grid; gap: 3px; }
+.ports-listrow { display: flex; align-items: center; gap: 8px; }
+.ports-listrow > .mono:first-child { min-width: 96px; }
+.ports-lease-session { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* ── Declare / placement editors (MAIN-319) ─────────────────────────────── */
 
 .policy-summary { padding: 10px; line-height: 1.7; }
