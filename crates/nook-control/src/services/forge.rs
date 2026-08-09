@@ -54,6 +54,20 @@ pub struct PullRequest {
     pub labels: Vec<String>,
 }
 
+/// Where a pull request ended up, as the per-PR read reports it.
+///
+/// Three states, not two, because the board reconciler (MAIN-491) owes a
+/// different answer to each: merged completes the card, closed-unmerged raises
+/// a hand, and open is simply not finished. Read from the PR itself and never
+/// inferred from absence from the open-PR list — that list is filtered (drafts)
+/// and paginated, so "not in it" is not a statement about how a PR ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeState {
+    Open,
+    Merged,
+    ClosedUnmerged,
+}
+
 /// One pull request's merge-relevant detail, fetched one PR at a time — the
 /// list endpoint does not carry `mergeable`, so this is a second, per-PR read.
 ///
@@ -66,6 +80,17 @@ pub struct PrDetails {
     /// The PR description — it carries the `Closes KEY` line that joins the PR
     /// to its board card.
     pub body: String,
+    pub merge_state: MergeState,
+}
+
+/// One merged pull request, as the body join's search space (MAIN-491 AC-2):
+/// a card whose `pr_url` was never recorded is found by reading `Closes KEY`
+/// out of what actually merged recently.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergedPr {
+    pub number: u64,
+    pub body: String,
+    pub merged_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// What the reconciler needs to know about a repository's review queue.
@@ -98,6 +123,20 @@ pub trait Forge: Send + Sync {
     async fn pr_details(&self, repo: &Repo, number: u64) -> anyhow::Result<PrDetails> {
         let _ = (repo, number);
         anyhow::bail!("this forge cannot read pull request details")
+    }
+
+    /// The pull requests merged at or after `since`, for the body join.
+    ///
+    /// An error is an OUTAGE with the same force as `prs_needing_review`'s: an
+    /// empty list here reads as "nothing merged recently", which is precisely
+    /// the claim a forge that cannot answer must not make.
+    async fn merged_prs_since(
+        &self,
+        repo: &Repo,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> anyhow::Result<Vec<MergedPr>> {
+        let _ = (repo, since);
+        anyhow::bail!("this forge cannot read merged pull requests")
     }
 
     /// The bodies of a PR's issue comments, for once-per-head dedupe. An error
@@ -433,7 +472,30 @@ impl Forge for GithubForge {
                 .and_then(|b| b.as_str())
                 .unwrap_or_default()
                 .to_string(),
+            merge_state: merge_state(&json),
         })
+    }
+
+    async fn merged_prs_since(
+        &self,
+        repo: &Repo,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> anyhow::Result<Vec<MergedPr>> {
+        // Sorted by update time so the window's PRs are at the front — one page
+        // of a hundred is a week's merges for any repo this loop runs on, and
+        // the join it feeds is a backstop for cards whose `pr_url` path already
+        // covers the ordinary case.
+        let json = self
+            .get_json(format!(
+                "https://api.github.com/repos/{}/{}/pulls\
+                 ?state=closed&sort=updated&direction=desc&per_page={PAGE}",
+                repo.owner, repo.name
+            ))
+            .await?;
+        let prs = json
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("closed pull requests: expected an array"))?;
+        Ok(merged_since(prs, since))
     }
 
     async fn issue_comment_bodies(&self, repo: &Repo, number: u64) -> anyhow::Result<Vec<String>> {
@@ -514,6 +576,55 @@ fn needing_review(prs: &[serde_json::Value]) -> Vec<PullRequest> {
             })
         })
         .collect()
+}
+
+/// How a PR ended, from the PR document itself (MAIN-491 AC-9).
+///
+/// `merged` is the authority and it is checked FIRST: a merged PR is also
+/// `state: "closed"`, so reading the state field first would call every merge a
+/// closed-unmerged one. An absent `merged` on a closed PR is the honest
+/// reading of a shape we do not recognise — closed, and not provably merged —
+/// which routes it to a human rather than to Done.
+fn merge_state(pr: &serde_json::Value) -> MergeState {
+    if pr.get("merged").and_then(|m| m.as_bool()) == Some(true) {
+        return MergeState::Merged;
+    }
+    match pr.get("state").and_then(|s| s.as_str()) {
+        Some("closed") => MergeState::ClosedUnmerged,
+        _ => MergeState::Open,
+    }
+}
+
+/// The merged PRs in a closed-PR listing, newest merge first.
+///
+/// The list endpoint carries `merged_at` but not `merged`, and a non-null
+/// `merged_at` is exactly what "merged" means there — a closed-unmerged PR has
+/// `merged_at: null` and simply falls out.
+fn merged_since(prs: &[serde_json::Value], since: chrono::DateTime<chrono::Utc>) -> Vec<MergedPr> {
+    let mut merged: Vec<MergedPr> = prs
+        .iter()
+        .filter_map(|pr| {
+            let merged_at = pr
+                .get("merged_at")?
+                .as_str()?
+                .parse::<chrono::DateTime<chrono::Utc>>()
+                .ok()?;
+            if merged_at < since {
+                return None;
+            }
+            Some(MergedPr {
+                number: pr.get("number")?.as_u64()?,
+                body: pr
+                    .get("body")
+                    .and_then(|b| b.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                merged_at,
+            })
+        })
+        .collect();
+    merged.sort_by_key(|m| std::cmp::Reverse(m.merged_at));
+    merged
 }
 
 /// How long a count stands before it is asked for again.
@@ -842,6 +953,51 @@ mod tests {
             ]
         );
         assert!(needing_review(&[]).is_empty());
+    }
+
+    /// MAIN-491 AC-9. `merged` outranks `state`, because a merged PR is also a
+    /// closed one — reading `state` first would call every merge a rejection
+    /// and route finished work to a human instead of to Done.
+    #[test]
+    fn how_a_pr_ended_is_read_from_the_pr_and_merged_wins() {
+        let s = |v: serde_json::Value| merge_state(&v);
+        assert_eq!(
+            s(serde_json::json!({ "state": "closed", "merged": true })),
+            MergeState::Merged
+        );
+        assert_eq!(
+            s(serde_json::json!({ "state": "closed", "merged": false })),
+            MergeState::ClosedUnmerged
+        );
+        assert_eq!(
+            s(serde_json::json!({ "state": "open", "merged": false })),
+            MergeState::Open
+        );
+        // An unrecognised shape is not a merge. Closed-and-not-provably-merged
+        // raises a hand; anything else is simply unfinished.
+        assert_eq!(
+            s(serde_json::json!({ "state": "closed" })),
+            MergeState::ClosedUnmerged
+        );
+        assert_eq!(s(serde_json::json!({})), MergeState::Open);
+    }
+
+    /// The window is a filter over `merged_at`, and a closed-unmerged PR has
+    /// none — so it falls out rather than needing a second test.
+    #[test]
+    fn the_merged_listing_keeps_only_merges_inside_the_window() {
+        let since = "2026-08-02T00:00:00Z".parse().unwrap();
+        let prs = serde_json::json!([
+            { "number": 1, "merged_at": "2026-08-08T10:00:00Z", "body": "Closes MAIN-1" },
+            { "number": 2, "merged_at": null, "body": "rejected" },
+            { "number": 3, "merged_at": "2026-07-01T10:00:00Z", "body": "too old" },
+            // Newer than #1, so it sorts first — the caller reads newest-first.
+            { "number": 4, "merged_at": "2026-08-09T10:00:00Z" },
+        ]);
+        let got = merged_since(prs.as_array().unwrap(), since);
+        assert_eq!(got.iter().map(|m| m.number).collect::<Vec<_>>(), vec![4, 1]);
+        assert_eq!(got[1].body, "Closes MAIN-1");
+        assert_eq!(got[0].body, "", "an absent body reads as empty, not a drop");
     }
 
     #[tokio::test]

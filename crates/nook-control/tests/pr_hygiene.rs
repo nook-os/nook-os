@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use nook_control::repo::jobs::NewLoopJob;
-use nook_control::services::forge::{Forge, PrDetails, PullRequest, Repo};
+use nook_control::services::forge::{Forge, MergeState, PrDetails, PullRequest, Repo};
 use nook_control::services::pr_hygiene;
 use nook_db::{params, Db};
 use nook_testkit::TestBed;
@@ -226,6 +226,7 @@ async fn a_conflicted_pr_is_requeued_once_and_mirrored_to_its_card() {
         PrDetails {
             mergeable: Some(false),
             body: format!("What changed\n\nCloses {}\n\nRisk: Low", f.key),
+            merge_state: MergeState::Open,
         },
     );
     // The card still says loop-approved — the exact drift from PR #353's story.
@@ -330,6 +331,7 @@ async fn a_rebase_that_clears_the_conflict_lifts_the_state() {
         PrDetails {
             mergeable: Some(true),
             body: format!("Closes {}", f.key),
+            merge_state: MergeState::Open,
         },
     );
     // The builder's repair removed the label when it pushed the rebase.
@@ -374,6 +376,7 @@ async fn a_stripped_verdict_label_is_restored_from_the_recorded_verdict() {
         PrDetails {
             mergeable: Some(true),
             body: String::new(),
+            merge_state: MergeState::Open,
         },
     );
     let healed = pr_hygiene::heal(
@@ -414,6 +417,7 @@ async fn no_applicable_verdict_never_labels() {
             PrDetails {
                 mergeable: Some(true),
                 body: String::new(),
+                merge_state: MergeState::Open,
             },
         );
     }
@@ -454,6 +458,7 @@ async fn a_card_that_missed_its_mirror_catches_up_without_a_new_pr_comment() {
         PrDetails {
             mergeable: Some(false),
             body: format!("Closes {}", f.key),
+            merge_state: MergeState::Open,
         },
     );
     // The PR side was already announced on a previous pass; the card was not.

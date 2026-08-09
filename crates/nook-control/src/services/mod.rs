@@ -82,6 +82,7 @@ pub mod jobs;
 pub mod kanban;
 pub mod local_auth;
 pub mod loops;
+pub mod merge_reconcile;
 pub mod notebook_queries;
 pub mod notify;
 pub mod operator_queries;

@@ -613,7 +613,11 @@ pub async fn converge_builds(
 
 /// The `Closes KEY` line — the reviewer's only join from a PR to its contract,
 /// parsed by the same literal rule it teaches.
-fn closes_key(body: &str) -> Option<String> {
+///
+/// `pub(crate)` because the merge sweep (MAIN-491) joins by exactly this line:
+/// a second parser that disagreed about what counts as a key would move the
+/// wrong card, or none.
+pub(crate) fn closes_key(body: &str) -> Option<String> {
     body.lines().find_map(|l| {
         let token = l
             .trim()

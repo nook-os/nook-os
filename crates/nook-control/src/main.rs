@@ -177,6 +177,12 @@ async fn serve(db: nook_db::DbPool, cfg: Config) -> Result<()> {
     // leased cards, so a card a human put In Progress is never touched.
     nook_control::services::claim_reaper::start(state.clone());
 
+    // Move a card to Done once its pull request has merged (MAIN-491), so the
+    // board stops lying about shipped work between agent-skill runs. Gated on
+    // `loops.enabled`; read-only against the forge, and every board write is a
+    // guarded one, so every replica may run it.
+    nook_control::services::merge_reconcile::start(state.clone());
+
     // Reclaim checkouts that have stayed tombstoned past the retention window
     // (MAIN-220): reconcile now marks a vanished checkout missing instead of
     // deleting it, so this is the only background path that hard-deletes the row

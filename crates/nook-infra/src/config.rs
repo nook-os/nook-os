@@ -237,6 +237,14 @@ pub struct Config {
     /// How often the claim reaper scans. Default 30.
     pub claim_reap_scan_secs: u64,
 
+    // ── Merged-PR board reconciliation (MAIN-491) ───────────────────────
+    /// How often the merge sweep asks the forge how each in-flight card's pull
+    /// request ended. Slower than the claim reaper because the answer changes
+    /// only when somebody merges, and each pass costs real GitHub calls —
+    /// but fast enough that the board stops lying within minutes rather than
+    /// waiting for whenever an agent skill next runs. Default 120.
+    pub merge_reconcile_scan_secs: u64,
+
     // ── Workspace discovery ─────────────────────────────────────────────
     /// How many seconds a checkout may stay tombstoned (`node_workspaces
     /// .missing_at`) before the retention sweep hard-deletes it (MAIN-220). A
@@ -378,6 +386,9 @@ impl Config {
             claim_reap_scan_secs: env_opt("NOOK_CLAIM_REAP_SCAN_SECS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30),
+            merge_reconcile_scan_secs: env_opt("NOOK_MERGE_RECONCILE_SCAN_SECS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(120),
 
             workspace_missing_retention_secs: env_opt("NOOK_WORKSPACE_MISSING_RETENTION_SECS")
                 .and_then(|v| v.parse().ok())
@@ -520,6 +531,7 @@ impl Config {
             claim_session_grace_secs: 120,
             max_claim_secs: 14_400,
             claim_reap_scan_secs: 30,
+            merge_reconcile_scan_secs: 120,
             workspace_missing_retention_secs: 604_800,
         }
     }
