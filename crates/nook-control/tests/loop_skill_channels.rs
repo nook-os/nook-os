@@ -211,7 +211,29 @@ fn build_skill_is_directed_and_judgment_only() {
         );
     }
     assert!(
-        skill("nook-build").contains("version: 2.0.0"),
+        skill("nook-build").contains("version: 2.1.0"),
         "nook-build's version must be bumped with the directed-only rewrite"
     );
+}
+
+/// MAIN-475: builder passes are isolated in per-card worktrees, and the
+/// worktree OUTLIVES the pass — that is what lets a repair resume the tree
+/// the build pass left warm; the platform, never the skill, prunes it. Two
+/// builders sharing one checkout once moved its branch under each other
+/// mid-build; these lines are what prevent a recurrence.
+#[test]
+fn builder_pass_is_worktree_isolated() {
+    let body = flat("nook-build");
+    for line in [
+        "The checkout this run starts in is its own",
+        "never relocate to a checkout other sessions may hold",
+        "never switch a shared checkout's branch",
+        "**Worktrees persist; teardown is not the skill's job.**",
+        "Do not `git worktree remove` at the end of a pass.",
+    ] {
+        assert!(
+            body.contains(line),
+            "nook-build: worktree-isolation instruction changed or removed: {line:?}"
+        );
+    }
 }
