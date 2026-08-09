@@ -42,6 +42,7 @@ import {
 } from "../loop";
 import { answerInteraction } from "../Interactions";
 import { agentActivityLabel, transcriptMessages } from "../LoopPanel";
+import { fileSlug, TranscriptActions } from "../transcriptExport";
 
 /** The ticket this workspace is anchored to. Keys and uuids both resolve
  *  server-side (MAIN-209), so the route accepts whichever the caller had. */
@@ -416,6 +417,13 @@ export function LoopPage() {
           </span>
         )}
         <span className="lw-head-actions">
+          {latest && (
+            <TranscriptActions
+              // The FULL transcript (AC-3) — the page's fold is display-only.
+              lines={transcript}
+              filename={`${fileSlug(task?.key ?? routeParam ?? "task")}-${latest.id.slice(0, 8)}.md`}
+            />
+          )}
           {filed.map((key) => (
             <Link
               key={key}

@@ -11,6 +11,7 @@ import { api, type LoopJobTranscriptEntry } from "@nookos/api";
 import { ChatView, Empty, Panel, Pill } from "@nookos/ui";
 import { transcriptMessages } from "./LoopPanel";
 import { foldToolActivity, jobStateMeta } from "./loop";
+import { fileSlug, TranscriptActions } from "./transcriptExport";
 
 /** What every run row can say about itself, whatever kind produced it. */
 export type RunRow = {
@@ -39,6 +40,7 @@ export function WorkspaceRuns({
   empty,
   testid,
   transcriptTestid,
+  filePrefix,
 }: {
   title: string;
   queryKey: readonly unknown[];
@@ -46,6 +48,8 @@ export function WorkspaceRuns({
   empty: string;
   testid: string;
   transcriptTestid: string;
+  /** The workspace's name, for the export filename (MAIN-471 AC-2). */
+  filePrefix?: string;
 }) {
   const [openId, setOpenId] = useState<string | null>(null);
 
@@ -96,18 +100,33 @@ export function WorkspaceRuns({
         </ul>
         <div className="reviews-transcript" data-testid={transcriptTestid}>
           {detail?.transcript?.length ? (
-            <ChatView
-              // Folded like the Loop page folds it, so a ladder of `· Bash`
-              // lines reads as one activity entry there and here alike.
-              messages={transcriptMessages(foldToolActivity(detail.transcript))}
-              // Read-only on purpose: a managed run is the control plane's
-              // work, not a conversation somebody steers. The composer is
-              // HIDDEN, not disabled — there is nothing here to say anything
-              // TO, and an inert box under every finished run was clutter that
-              // read as broken.
-              onSend={() => {}}
-              hideComposer
-            />
+            <>
+              <div className="reviews-transcript-actions">
+                <TranscriptActions
+                  // The FULL transcript, not the folded view (AC-3): the fold
+                  // is how the panel reads, never what an incident paste
+                  // carries.
+                  lines={detail.transcript}
+                  filename={`${fileSlug(
+                    [filePrefix, runs.find((r) => r.id === open)?.label ?? "run"]
+                      .filter(Boolean)
+                      .join("-"),
+                  ).toLowerCase()}-${(open ?? "").slice(0, 8)}.md`}
+                />
+              </div>
+              <ChatView
+                // Folded like the Loop page folds it, so a ladder of `· Bash`
+                // lines reads as one activity entry there and here alike.
+                messages={transcriptMessages(foldToolActivity(detail.transcript))}
+                // Read-only on purpose: a managed run is the control plane's
+                // work, not a conversation somebody steers. The composer is
+                // HIDDEN, not disabled — there is nothing here to say anything
+                // TO, and an inert box under every finished run was clutter that
+                // read as broken.
+                onSend={() => {}}
+                hideComposer
+              />
+            </>
           ) : (
             <Empty>This run has not said anything yet.</Empty>
           )}

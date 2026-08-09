@@ -715,14 +715,14 @@ export function WorkspaceDetail() {
       title: "Reviews",
       group: "Work",
       keywords: ["review", "loop", "pr", "pull request", "transcript", "verdict", "agent"],
-      render: () => (id ? <WorkspaceReviews workspaceId={id} /> : null),
+      render: () => (id ? <WorkspaceReviews workspaceId={id} workspaceName={ws.name} /> : null),
     },
     {
       id: "builds",
       title: "Builds",
       group: "Work",
       keywords: ["build", "loop", "card", "ticket", "transcript", "outcome", "agent"],
-      render: () => (id ? <WorkspaceBuilds workspaceId={id} /> : null),
+      render: () => (id ? <WorkspaceBuilds workspaceId={id} workspaceName={ws.name} /> : null),
     },
     {
       id: "policy",

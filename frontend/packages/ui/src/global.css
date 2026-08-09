@@ -6623,6 +6623,14 @@ tr:hover .row-action,
   background: var(--nook-bg-raised);
   color: var(--nook-fg);
 }
+/* The copy/export row above a run transcript (MAIN-471). */
+.reviews-transcript-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+  margin-bottom: 4px;
+}
+
 .reviews-transcript {
   min-height: 0;
   overflow: hidden;

@@ -25,6 +25,7 @@ import {
 } from "./loop";
 import { ChatView, type ChatViewMessage } from "@nookos/ui";
 import { answerInteraction, useTaskInteractions } from "./Interactions";
+import { fileSlug, TranscriptActions } from "./transcriptExport";
 import { useLive } from "./live";
 
 /** The job transcript as chat messages (MAIN-237). One shared component now
@@ -142,10 +143,12 @@ function LoopJobView({
   taskId,
   taskType,
   jobId,
+  taskKey,
 }: {
   taskId: string;
   taskType: string | null | undefined;
   jobId: string;
+  taskKey?: string | null;
 }) {
   const qc = useQueryClient();
   const [showAgent, setShowAgent] = useState(false);
@@ -204,6 +207,10 @@ function LoopJobView({
           </span>
         )}
         <span className="loop-job-bar-actions">
+          <TranscriptActions
+            lines={transcript}
+            filename={`${fileSlug(taskKey ?? "task")}-${jobId.slice(0, 8)}.md`}
+          />
           {active && (
             <button
               className="btn small"
@@ -290,9 +297,12 @@ function LoopJobView({
 export function LoopPanel({
   taskId,
   taskType,
+  taskKey,
 }: {
   taskId: string;
   taskType: string | null | undefined;
+  /** The card's human key, for the export filename (MAIN-471 AC-2). */
+  taskKey?: string | null;
 }) {
   const { data: jobs, isLoading } = useQuery({
     queryKey: taskJobsKey(taskId),
@@ -321,7 +331,7 @@ export function LoopPanel({
       {isLoading ? (
         <div className="faint small">Loading loop…</div>
       ) : latest ? (
-        <LoopJobView taskId={taskId} taskType={taskType} jobId={latest.id} />
+        <LoopJobView taskId={taskId} taskType={taskType} jobId={latest.id} taskKey={taskKey} />
       ) : (
         <div className="faint small loop-empty">
           {taskType === "epic"
