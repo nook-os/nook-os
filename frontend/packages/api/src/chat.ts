@@ -20,6 +20,11 @@ type UpdateChatChannel = Schemas["UpdateChatChannel"];
 type UpdateChatMessage = Schemas["UpdateChatMessage"];
 export type DmSummary = Schemas["DmSummary"];
 export type PersonRef = Schemas["PersonRef"];
+type ChatServerFrame = Schemas["ChatServerMessage"];
+/** The payload of a `presence` frame (MAIN-115): one person, online or not. */
+export type ChatPresence = Extract<ChatServerFrame, { type: "presence" }>["data"];
+/** The payload of a `typing` frame (MAIN-115): who, where, and their name. */
+export type ChatTyping = Extract<ChatServerFrame, { type: "typing" }>["data"];
 
 /**
  * The one set of reactions the UI offers and the server accepts (MAIN-116
@@ -161,6 +166,21 @@ export function listDms(): Promise<DmSummary[]> {
  */
 export function markRead(channelId: string): Promise<void> {
   return chatWrite<void>("PUT", `/channels/${channelId}/read`);
+}
+
+/**
+ * Tell the channel the caller is typing (MAIN-115). Fire-and-forget on purpose:
+ * it deliberately does NOT go through `chatWrite`, because a failed ping is not
+ * "a thing you thought you did did not happen" — nothing the user asked for was
+ * lost, and surfacing it would nag them once every 3 seconds while they type.
+ * The server persists nothing; the indicator expires on the viewer's side.
+ */
+export function sendTyping(channelId: string): void {
+  void fetch(apiUrl(`${CHAT_PREFIX}/channels/${channelId}/typing`), {
+    method: "POST",
+    headers: { ...authHeaders() },
+    credentials: "same-origin",
+  }).catch(() => {});
 }
 
 /**
@@ -381,6 +401,13 @@ export function connectChatStream(
      *  (`reacted` is always false in the broadcast); the caller merges it,
      *  preserving its own `reacted`. Tagged by `channel_id` like `onMessage`. */
     onUpdate?: (message: ChatMessage) => void;
+    /** A person's chat presence changed (MAIN-115). Edges only — the server
+     *  keeps no roster and sends no snapshot, so the caller knows exactly the
+     *  people it has been told about and nothing more. */
+    onPresence?: (presence: ChatPresence) => void;
+    /** Someone is typing in a channel (MAIN-115). There is no stop frame: the
+     *  caller expires the indicator locally (`TYPING_TTL_MS`). */
+    onTyping?: (typing: ChatTyping) => void;
   },
 ): () => void {
   let closed = false;
@@ -402,6 +429,8 @@ export function connectChatStream(
         const frame = JSON.parse(e.data) as Schemas["ChatServerMessage"];
         if (frame.type === "message") onMessage(frame.data);
         else if (frame.type === "message_updated") handlers?.onUpdate?.(frame.data);
+        else if (frame.type === "presence") handlers?.onPresence?.(frame.data);
+        else if (frame.type === "typing") handlers?.onTyping?.(frame.data);
       } catch {
         // ignore malformed frames
       }

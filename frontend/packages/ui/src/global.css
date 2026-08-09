@@ -4777,6 +4777,16 @@ tr:hover .row-action,
   box-shadow: inset 2px 0 0 var(--nook-accent);
 }
 .chat-channel-hash { color: var(--nook-fg-faint); }
+/* Online dot (MAIN-163 AC-1). Only ever rendered for someone the server said is
+   online — there is no offline variant, because an absent frame means we were
+   not told, not that they are away. */
+.chat-presence-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--nook-ok);
+}
 /* Org-channel indicator (MAIN-112): a small pill next to the channel name. */
 .chat-channel-org {
   margin-left: auto;

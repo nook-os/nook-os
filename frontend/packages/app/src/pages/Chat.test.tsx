@@ -12,13 +12,20 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 // Capture the live-socket callbacks so the test can push messages through them.
 let liveCallback: ((m: unknown) => void) | null = null;
 let updateCallback: ((m: unknown) => void) | null = null;
+// Presence/typing frames (MAIN-163) arrive on the same stream.
+let presenceCallback: ((p: unknown) => void) | null = null;
+let typingCallback: ((t: unknown) => void) | null = null;
 const dispose = vi.fn();
 // The caller's chat role, mutable so the admin-gate tests can flip it (AC-5).
 const identity = vi.hoisted(() => ({ role: "member" as string | null }));
 // The channel list the mocked client returns, as a mutable server-of-record so
 // unread-badge tests (MAIN-117) can change it between refetches — a background
 // message raises a count, marking read zeroes it.
-const chatState = vi.hoisted(() => ({ channels: [] as any[], categories: [] as any[] }));
+const chatState = vi.hoisted(() => ({
+  channels: [] as any[],
+  categories: [] as any[],
+  dms: [] as any[],
+}));
 
 vi.mock("@nookos/api", () => ({
   // ChatView (in @nookos/ui) imports this from the same module; the whole-module
@@ -42,7 +49,8 @@ vi.mock("@nookos/api", () => ({
   createCategory: vi.fn(),
   renameCategory: vi.fn(),
   deleteCategory: vi.fn(),
-  listDms: vi.fn(async () => []),
+  listDms: vi.fn(async () => chatState.dms),
+  sendTyping: vi.fn(),
   // Marking a conversation read zeroes its unread on the server-of-record, so the
   // resync after it clears the badge (MAIN-117 AC-3).
   markRead: vi.fn(async (id: string) => {
@@ -79,9 +87,18 @@ vi.mock("@nookos/api", () => ({
     next_cursor: null,
   })),
   connectChatStream: vi.fn(
-    (onMessage: (m: unknown) => void, handlers?: { onUpdate?: (m: unknown) => void }) => {
+    (
+      onMessage: (m: unknown) => void,
+      handlers?: {
+        onUpdate?: (m: unknown) => void;
+        onPresence?: (p: unknown) => void;
+        onTyping?: (t: unknown) => void;
+      },
+    ) => {
       liveCallback = onMessage;
       updateCallback = handlers?.onUpdate ?? null;
+      presenceCallback = handlers?.onPresence ?? null;
+      typingCallback = handlers?.onTyping ?? null;
       return dispose;
     },
   ),
@@ -98,7 +115,8 @@ vi.mock("@nookos/api", () => ({
 }));
 
 import { ChatPage } from "./Chat";
-import { listChannels, markRead } from "@nookos/api";
+import { listChannels, markRead, sendTyping } from "@nookos/api";
+import { TYPING_PING_MS, TYPING_TTL_MS } from "./chatPresence";
 
 function renderPage() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -112,6 +130,8 @@ function renderPage() {
 beforeEach(() => {
   liveCallback = null;
   updateCallback = null;
+  presenceCallback = null;
+  typingCallback = null;
   identity.role = "member";
   dispose.mockClear();
   vi.mocked(markRead).mockClear();
@@ -131,6 +151,7 @@ beforeEach(() => {
     },
   ];
   chatState.categories = [];
+  chatState.dms = [];
   // jsdom reports focus inconsistently; force it so the open/focus mark-read
   // effect (AC-3) runs deterministically.
   vi.spyOn(document, "hasFocus").mockReturnValue(true);
@@ -188,6 +209,122 @@ describe("ChatPage channel categories (MAIN-179)", () => {
     // The header's drag-handle class is admin-only.
     const head = screen.getByText("Team").closest(".chat-cat-head");
     expect(head?.classList.contains("draggable")).toBe(false);
+  });
+});
+
+// MAIN-163: presence dots and the typing line, driven through the real page by
+// the frames the stream delivers. Fake timers because the whole contract is a
+// clock — a 4s local expiry and a 3s send throttle — and `shouldAdvanceTime`
+// keeps react-query's own awaits working while the test jumps that clock.
+describe("ChatPage presence and typing (MAIN-163)", () => {
+  beforeEach(() => vi.useFakeTimers({ shouldAdvanceTime: true }));
+  afterEach(() => vi.useRealTimers());
+
+  function withDm() {
+    chatState.dms = [
+      {
+        id: "d1",
+        created_at: "2026-07-25T09:00:00Z",
+        unread_count: 0,
+        participants: [
+          { person_id: "p-me", display_name: "Me" },
+          { person_id: "p-bob", display_name: "Bob" },
+        ],
+      },
+    ];
+  }
+
+  it("shows a DM's dot on an online frame and clears it on the offline one", async () => {
+    withDm();
+    renderPage();
+    await screen.findByText("Bob");
+    await waitFor(() => expect(presenceCallback).not.toBeNull());
+    // Nothing has been said about Bob yet: no dot. Absent is not offline.
+    expect(screen.queryByLabelText("Bob is online")).toBeNull();
+
+    act(() => presenceCallback!({ person: "p-bob", online: true }));
+    expect(await screen.findByLabelText("Bob is online")).toBeTruthy();
+
+    act(() => presenceCallback!({ person: "p-bob", online: false }));
+    await waitFor(() => expect(screen.queryByLabelText("Bob is online")).toBeNull());
+  });
+
+  it("never dots a DM from someone else's presence", async () => {
+    withDm();
+    renderPage();
+    await screen.findByText("Bob");
+    await waitFor(() => expect(presenceCallback).not.toBeNull());
+    act(() => presenceCallback!({ person: "p-carol", online: true }));
+    await waitFor(() => expect(screen.queryByLabelText("Bob is online")).toBeNull());
+  });
+
+  it("never dots a DM from the viewer's own presence", async () => {
+    withDm();
+    renderPage();
+    await screen.findByText("Bob");
+    await waitFor(() => expect(presenceCallback).not.toBeNull());
+    // The server announces the caller's own edges too — a DM row must not
+    // report itself online because we are.
+    act(() => presenceCallback!({ person: "p-me", online: true }));
+    await waitFor(() => expect(screen.queryByLabelText("Bob is online")).toBeNull());
+  });
+
+  it("shows the typing line and expires it locally after the TTL", async () => {
+    renderPage();
+    await screen.findByText("old message");
+    await waitFor(() => expect(typingCallback).not.toBeNull());
+
+    act(() => typingCallback!({ channel_id: "c1", person: "p-ada", display_name: "Ada" }));
+    expect(await screen.findByText("Ada is typing…")).toBeTruthy();
+
+    // There is no stop frame — the client is the only thing that ends it.
+    act(() => void vi.advanceTimersByTime(TYPING_TTL_MS + 1));
+    await waitFor(() => expect(screen.queryByText("Ada is typing…")).toBeNull());
+  });
+
+  it("combines two typists into one line", async () => {
+    renderPage();
+    await screen.findByText("old message");
+    await waitFor(() => expect(typingCallback).not.toBeNull());
+    act(() => {
+      typingCallback!({ channel_id: "c1", person: "p-ada", display_name: "Ada" });
+      typingCallback!({ channel_id: "c1", person: "p-bob", display_name: "Bob" });
+    });
+    expect(await screen.findByText("Ada and Bob are typing…")).toBeTruthy();
+  });
+
+  it("ignores typing in another channel, and its own echo", async () => {
+    renderPage();
+    await screen.findByText("old message");
+    await waitFor(() => expect(typingCallback).not.toBeNull());
+    act(() => {
+      typingCallback!({ channel_id: "c2", person: "p-ada", display_name: "Ada" });
+      // The server fans the frame back to the typist too; showing yourself
+      // typing is nonsense.
+      typingCallback!({ channel_id: "c1", person: "p-me", display_name: "Me" });
+    });
+    await waitFor(() => expect(screen.queryByText(/is typing…/)).toBeNull());
+  });
+
+  it("sends at most one typing ping per throttle window", async () => {
+    renderPage();
+    const input = (await screen.findByLabelText("Message")) as HTMLTextAreaElement;
+
+    fireEvent.change(input, { target: { value: "h" } });
+    fireEvent.change(input, { target: { value: "he" } });
+    fireEvent.change(input, { target: { value: "hel" } });
+    expect(vi.mocked(sendTyping).mock.calls).toEqual([["c1"]]);
+
+    act(() => void vi.advanceTimersByTime(TYPING_PING_MS));
+    fireEvent.change(input, { target: { value: "hell" } });
+    expect(vi.mocked(sendTyping).mock.calls).toEqual([["c1"], ["c1"]]);
+  });
+
+  it("does not ping for a box the user just emptied", async () => {
+    renderPage();
+    const input = (await screen.findByLabelText("Message")) as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "" } });
+    expect(vi.mocked(sendTyping)).not.toHaveBeenCalled();
   });
 });
 
