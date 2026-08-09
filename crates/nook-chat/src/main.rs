@@ -14,6 +14,7 @@ mod channels;
 mod config;
 mod dms;
 mod messages;
+mod presence;
 mod registry;
 mod repo;
 #[cfg(test)]
@@ -161,6 +162,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/channels/{id}/placement", patch(channels::place))
         // Advance the caller's read cursor for a channel (MAIN-117 AC-2).
         .route("/api/channels/{id}/read", put(channels::mark_read))
+        .route("/api/channels/{id}/typing", post(presence::typing))
         .route(
             "/api/channels/{id}/messages",
             get(messages::history).post(messages::post),

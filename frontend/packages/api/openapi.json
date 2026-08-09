@@ -9586,6 +9586,80 @@
                 ]
               }
             }
+          },
+          {
+            "type": "object",
+            "description": "A person's chat presence changed (MAIN-115). Ephemeral and\nconnection-derived — nothing is stored, and nothing is fetched back:\nonline means the person holds at least one authorized chat socket\nsomewhere. Person-scoped, not channel-scoped: delivered only to viewers\nwho share at least one tenant, org channel or DM with the person —\nnever a global roster.",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "A person's chat presence changed (MAIN-115). Ephemeral and\nconnection-derived — nothing is stored, and nothing is fetched back:\nonline means the person holds at least one authorized chat socket\nsomewhere. Person-scoped, not channel-scoped: delivered only to viewers\nwho share at least one tenant, org channel or DM with the person —\nnever a global roster.",
+                "required": [
+                  "person",
+                  "online"
+                ],
+                "properties": {
+                  "online": {
+                    "type": "boolean"
+                  },
+                  "person": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "presence"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Someone is typing in a channel (MAIN-115). Never persisted.\n\nThe client contract, both halves: send\n`POST /api/channels/{id}/typing` at most once per ~3 seconds while the\nuser is actively typing, and expire the indicator locally ~4 seconds\nafter the last frame — there is no stop signal, so a lost or never-sent\none cannot stick a \"typing…\" on screen.",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "Someone is typing in a channel (MAIN-115). Never persisted.\n\nThe client contract, both halves: send\n`POST /api/channels/{id}/typing` at most once per ~3 seconds while the\nuser is actively typing, and expire the indicator locally ~4 seconds\nafter the last frame — there is no stop signal, so a lost or never-sent\none cannot stick a \"typing…\" on screen.",
+                "required": [
+                  "channel_id",
+                  "person"
+                ],
+                "properties": {
+                  "channel_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "display_name": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "The typist's display name, resolved at send time so the client\nneeds no directory lookup; `None` when the user row carries none."
+                  },
+                  "person": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "typing"
+                ]
+              }
+            }
           }
         ],
         "description": "What the chat websocket pushes to a subscribed client (AC-3). Adjacently\ntagged for clean generated TypeScript, like the node protocol."

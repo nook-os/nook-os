@@ -9,6 +9,9 @@
 //! (`bus.rs`), which republishes each remote event through [`publish_local`];
 //! this is the local half, mirroring the control plane's registry/bus split.
 
+use std::collections::HashMap;
+use std::sync::Mutex;
+
 use nook_types::ChatServerMessage;
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -17,13 +20,20 @@ use uuid::Uuid;
 /// told to catch up rather than blocking the sender.
 const CHANNEL_CAP: usize = 256;
 
-/// The channel a server-message event belongs to. Both variants carry a
-/// [`ChatMessage`], so a new post and an update (edit/delete/reaction — MAIN-116)
-/// route the same way. `pub(crate)` so the per-user stream (MAIN-117) can
-/// re-authorize each delivered event by its channel.
-pub(crate) fn event_channel(event: &ChatServerMessage) -> Uuid {
+/// The channel a server-message event belongs to, or `None` for a
+/// person-scoped event that no channel gate can answer for (MAIN-115: owner
+/// ruling, option (a)). The match is EXHAUSTIVE on purpose — no default arm —
+/// so every future variant consciously picks channel- or person-scoped
+/// authorization rather than inheriting one silently.
+pub(crate) fn event_channel(event: &ChatServerMessage) -> Option<Uuid> {
     match event {
-        ChatServerMessage::Message(m) | ChatServerMessage::MessageUpdated(m) => m.channel_id,
+        ChatServerMessage::Message(m) | ChatServerMessage::MessageUpdated(m) => Some(m.channel_id),
+        // Typing belongs to its channel and inherits the existing per-event
+        // gate unchanged (AC-2/AC-4).
+        ChatServerMessage::Typing { channel_id, .. } => Some(*channel_id),
+        // Presence is a person↔person relation; the socket routes it through
+        // the person-scoped visibility check instead (AC-4).
+        ChatServerMessage::Presence { .. } => None,
     }
 }
 
@@ -37,6 +47,11 @@ pub struct Registry {
     /// subscribe set resolved at connect could not (AC-6 "a user added begins
     /// receiving it").
     firehose: broadcast::Sender<ChatServerMessage>,
+    /// How many live sockets each PERSON holds on this instance (MAIN-115
+    /// AC-1/AC-5). Ephemeral by construction — zero schema; the map dies with
+    /// the process, exactly as the connections it counts do. Presence edges
+    /// (0→1, 1→0) are what get broadcast, so two tabs stay one "online".
+    sockets: Mutex<HashMap<Uuid, usize>>,
 }
 
 impl Registry {
@@ -44,6 +59,35 @@ impl Registry {
         Self {
             instance: Uuid::now_v7(),
             firehose: broadcast::channel(CHANNEL_CAP).0,
+            sockets: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Count a socket for `person`. True when it is their FIRST on this
+    /// instance — the online edge worth announcing.
+    pub fn socket_opened(&self, person: Uuid) -> bool {
+        let mut sockets = self.sockets.lock().unwrap();
+        let n = sockets.entry(person).or_insert(0);
+        *n += 1;
+        *n == 1
+    }
+
+    /// Un-count a socket for `person`. True when it was their LAST — the
+    /// offline edge worth announcing.
+    pub fn socket_closed(&self, person: Uuid) -> bool {
+        let mut sockets = self.sockets.lock().unwrap();
+        match sockets.get_mut(&person) {
+            Some(n) if *n > 1 => {
+                *n -= 1;
+                false
+            }
+            Some(_) => {
+                sockets.remove(&person);
+                true
+            }
+            // A close with no open is a caller bug; never underflow into a
+            // phantom "offline" storm.
+            None => false,
         }
     }
 
@@ -113,14 +157,56 @@ mod tests {
         // Both events arrive on the single tap, each identifiable by channel so
         // the socket can authorize (and keep or drop) it.
         let first = rx.try_recv().expect("first event delivered");
-        assert_eq!(event_channel(&first), channel_a);
+        assert_eq!(event_channel(&first), Some(channel_a));
         let second = rx.try_recv().expect("second event delivered");
-        assert_eq!(event_channel(&second), channel_b);
+        assert_eq!(event_channel(&second), Some(channel_b));
         assert!(rx.try_recv().is_err(), "nothing else was delivered");
     }
 
     #[test]
     fn each_instance_has_a_distinct_id() {
         assert_ne!(Registry::new().instance(), Registry::new().instance());
+    }
+
+    /// AC-5's dedupe: only the FIRST socket announces online and only the LAST
+    /// announces offline — two tabs are one presence, and closing one of two
+    /// says nothing.
+    #[test]
+    fn presence_edges_fire_on_first_open_and_last_close_only() {
+        let reg = Registry::new();
+        let person = Uuid::now_v7();
+        assert!(reg.socket_opened(person), "first socket: the online edge");
+        assert!(!reg.socket_opened(person), "second tab: silent");
+        assert!(
+            !reg.socket_closed(person),
+            "one of two closed: still online"
+        );
+        assert!(reg.socket_closed(person), "last closed: the offline edge");
+        assert!(
+            !reg.socket_closed(person),
+            "a stray close never underflows into a phantom offline"
+        );
+    }
+
+    /// A person-scoped event has no channel, and the match is exhaustive — a
+    /// new variant must consciously pick a gate.
+    #[test]
+    fn presence_is_person_scoped_and_typing_is_channel_scoped() {
+        let channel = Uuid::now_v7();
+        assert_eq!(
+            event_channel(&ChatServerMessage::Typing {
+                channel_id: channel,
+                person: Uuid::now_v7(),
+                display_name: None,
+            }),
+            Some(channel)
+        );
+        assert_eq!(
+            event_channel(&ChatServerMessage::Presence {
+                person: Uuid::now_v7(),
+                online: true,
+            }),
+            None
+        );
     }
 }

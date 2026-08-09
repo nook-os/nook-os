@@ -4155,6 +4155,45 @@ export interface components {
             data: components["schemas"]["ChatMessage"];
             /** @enum {string} */
             type: "message_updated";
+        } | {
+            /**
+             * @description A person's chat presence changed (MAIN-115). Ephemeral and
+             *     connection-derived — nothing is stored, and nothing is fetched back:
+             *     online means the person holds at least one authorized chat socket
+             *     somewhere. Person-scoped, not channel-scoped: delivered only to viewers
+             *     who share at least one tenant, org channel or DM with the person —
+             *     never a global roster.
+             */
+            data: {
+                online: boolean;
+                /** Format: uuid */
+                person: string;
+            };
+            /** @enum {string} */
+            type: "presence";
+        } | {
+            /**
+             * @description Someone is typing in a channel (MAIN-115). Never persisted.
+             *
+             *     The client contract, both halves: send
+             *     `POST /api/channels/{id}/typing` at most once per ~3 seconds while the
+             *     user is actively typing, and expire the indicator locally ~4 seconds
+             *     after the last frame — there is no stop signal, so a lost or never-sent
+             *     one cannot stick a "typing…" on screen.
+             */
+            data: {
+                /** Format: uuid */
+                channel_id: string;
+                /**
+                 * @description The typist's display name, resolved at send time so the client
+                 *     needs no directory lookup; `None` when the user row carries none.
+                 */
+                display_name?: string | null;
+                /** Format: uuid */
+                person: string;
+            };
+            /** @enum {string} */
+            type: "typing";
         };
         /**
          * @description A message thread (MAIN-114): the parent message plus a keyset page of its

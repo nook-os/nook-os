@@ -39,6 +39,21 @@ struct Notice {
     updated: bool,
 }
 
+/// Everything a chat NOTIFY can carry. Rows travel as an id and are read back
+/// (a body can exceed NOTIFY's ~8 KB); presence/typing have NO row to refetch
+/// (MAIN-115 AC-1 — ephemeral, zero schema), so the whole tiny frame travels
+/// in the payload. Untagged: `Row` has `id`, `Ephemeral` has `event` — the
+/// shapes cannot be confused, and existing in-flight notices parse unchanged.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum Payload {
+    Row(Notice),
+    Ephemeral {
+        origin: Uuid,
+        event: nook_types::ChatServerMessage,
+    },
+}
+
 /// Announce a posted OR updated message so peer instances deliver it too. Best
 /// effort: a failed publish costs cross-instance liveness for one message, never
 /// correctness of what was stored.
@@ -65,6 +80,28 @@ pub async fn publish(pool: &DbPool, message_id: Uuid, origin: Uuid, updated: boo
         .await
     {
         tracing::warn!(error = %e, "chat NOTIFY failed; peers miss this message live");
+    }
+}
+
+/// Announce an EPHEMERAL event (presence, typing — MAIN-115) to peer
+/// instances: the whole frame travels, because there is no row to read back.
+/// Best effort, like `publish`: a lost frame costs one liveness blip, never
+/// correctness — presence self-heals on the next edge and typing expires
+/// client-side anyway.
+pub async fn publish_ephemeral(pool: &DbPool, origin: Uuid, event: &nook_types::ChatServerMessage) {
+    if pool.engine() != nook_db::Engine::Postgres {
+        return;
+    }
+    let payload = serde_json::to_string(&Payload::Ephemeral {
+        origin,
+        event: event.clone(),
+    })
+    .unwrap_or_default();
+    if let Err(e) = PgEventBus::new(pool.clone())
+        .publish(NOTIFY_CHANNEL, &payload)
+        .await
+    {
+        tracing::warn!(error = %e, "chat NOTIFY failed; peers miss this ephemeral event");
     }
 }
 
@@ -103,22 +140,36 @@ async fn run(
         .subscribe(NOTIFY_CHANNEL)
         .await?;
     while let Some(payload) = notices.next().await {
-        let Ok(notice) = serde_json::from_str::<Notice>(&payload) else {
+        let Ok(parsed) = serde_json::from_str::<Payload>(&payload) else {
             continue;
         };
-        // The origin instance already delivered this to its own subscribers.
-        if notice.origin == registry.instance() {
-            continue;
-        }
-        if let Some(msg) = crate::messages::fetch(messages, notice.id).await {
-            // Re-deliver under the right variant so a peer's edit/delete/reaction
-            // arrives as an update, not a duplicate new message (MAIN-116 AC-5).
-            let event = if notice.updated {
-                nook_types::ChatServerMessage::MessageUpdated(msg)
-            } else {
-                nook_types::ChatServerMessage::Message(msg)
-            };
-            registry.publish_local(event);
+        match parsed {
+            Payload::Row(notice) => {
+                // The origin instance already delivered this to its own
+                // subscribers.
+                if notice.origin == registry.instance() {
+                    continue;
+                }
+                if let Some(msg) = crate::messages::fetch(messages, notice.id).await {
+                    // Re-deliver under the right variant so a peer's
+                    // edit/delete/reaction arrives as an update, not a
+                    // duplicate new message (MAIN-116 AC-5).
+                    let event = if notice.updated {
+                        nook_types::ChatServerMessage::MessageUpdated(msg)
+                    } else {
+                        nook_types::ChatServerMessage::Message(msg)
+                    };
+                    registry.publish_local(event);
+                }
+            }
+            // An ephemeral frame carries itself — nothing to fetch; each
+            // peer's sockets re-authorize it per viewer exactly as a local one.
+            Payload::Ephemeral { origin, event } => {
+                if origin == registry.instance() {
+                    continue;
+                }
+                registry.publish_local(event);
+            }
         }
     }
     // The subscription stream ends only when the LISTEN connection failed
@@ -130,6 +181,90 @@ async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The two payload shapes cannot be confused (MAIN-115 AC-1): a row notice
+    /// keeps parsing as a row — old in-flight notices included — and an
+    /// ephemeral frame parses as itself, whole.
+    #[test]
+    fn payload_shapes_do_not_collide() {
+        let row =
+            serde_json::json!({"id": Uuid::now_v7(), "origin": Uuid::now_v7(), "updated": true});
+        assert!(matches!(
+            serde_json::from_value::<Payload>(row).unwrap(),
+            Payload::Row(_)
+        ));
+        let person = Uuid::now_v7();
+        let eph = serde_json::json!({
+            "origin": Uuid::now_v7(),
+            "event": {"type": "presence", "data": {"person": person, "online": true}}
+        });
+        match serde_json::from_value::<Payload>(eph).unwrap() {
+            Payload::Ephemeral { event, .. } => match event {
+                nook_types::ChatServerMessage::Presence { person: p, online } => {
+                    assert_eq!(p, person);
+                    assert!(online);
+                }
+                other => panic!("expected Presence, got {other:?}"),
+            },
+            Payload::Row(_) => panic!("an ephemeral frame parsed as a row"),
+        }
+    }
+
+    /// MAIN-115 AC-1: an ephemeral event rides the same bus, whole — there is
+    /// no row to read back. Filtered by our own origin for the same reason the
+    /// sibling tests filter by id: the NOTIFY channel is database-global.
+    #[tokio::test]
+    async fn an_ephemeral_event_rides_the_bus_whole() {
+        if crate::testdb::skip_unless_postgres("the chat ephemeral bus test") {
+            return;
+        }
+        let Some(st) = crate::testdb::chat_test("the chat ephemeral bus test").await else {
+            return;
+        };
+        let pool = st.db.clone();
+        let mut sub = PgEventBus::new(pool.clone())
+            .subscribe(NOTIFY_CHANNEL)
+            .await
+            .expect("subscribe");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let origin = Uuid::now_v7();
+        let person = Uuid::now_v7();
+        publish_ephemeral(
+            &pool,
+            origin,
+            &nook_types::ChatServerMessage::Presence {
+                person,
+                online: false,
+            },
+        )
+        .await;
+
+        let got = tokio::time::timeout(Duration::from_secs(3), async {
+            while let Some(payload) = sub.next().await {
+                if let Ok(Payload::Ephemeral { origin: o, event }) =
+                    serde_json::from_str::<Payload>(&payload)
+                {
+                    if o == origin {
+                        return event;
+                    }
+                }
+            }
+            panic!("the subscription ended before our frame arrived")
+        })
+        .await
+        .expect("our frame arrives before the timeout");
+
+        match got {
+            nook_types::ChatServerMessage::Presence { person: p, online } => {
+                assert_eq!(p, person);
+                assert!(!online);
+            }
+            other => panic!("expected the Presence frame back, got {other:?}"),
+        }
+
+        st.teardown().await;
+    }
 
     /// A message published through `publish` reaches a subscriber on the same
     /// channel via the event-bus seam, carrying the id/origin/updated we set —

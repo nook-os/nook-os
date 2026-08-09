@@ -198,6 +198,41 @@ impl ChannelRepository for FakeChannelRepository {
             .is_some_and(|c| c.participants.contains(&person)))
     }
 
+    async fn presence_peer(&self, viewer_user: Uuid, person: Uuid) -> RepoResult<bool> {
+        let st = self.inner.lock().unwrap();
+        let Some(my_person) = st.person_of(viewer_user) else {
+            return Ok(false);
+        };
+        let my_tenant = st.roles.get(&viewer_user).map(|(t, _)| *t);
+        let in_tenant = |t: &Uuid, p: Uuid| {
+            st.roles
+                .iter()
+                .any(|(u, (ut, _))| ut == t && st.persons.get(u) == Some(&p))
+        };
+        let same_tenant = my_tenant.is_some_and(|t| in_tenant(&t, person));
+        let my_org = my_tenant.and_then(|t| st.orgs.get(&t)).copied();
+        let org_share = my_org.is_some_and(|org| {
+            st.channels
+                .iter()
+                .any(|c| c.row.owner_type == "org" && c.owner_id == org)
+                && st.roles.iter().any(|(u, (t, _))| {
+                    st.orgs.get(t) == Some(&org) && st.persons.get(u) == Some(&person)
+                })
+        });
+        let dm_share = st
+            .channels
+            .iter()
+            .any(|c| c.participants.contains(&my_person) && c.participants.contains(&person));
+        Ok(same_tenant || org_share || dm_share)
+    }
+
+    async fn person_ref_of(&self, user: Uuid) -> RepoResult<Option<(Uuid, Option<String>)>> {
+        let st = self.inner.lock().unwrap();
+        // The channel fake registers no display names; `None` is the honest
+        // answer and the frame contract allows it.
+        Ok(st.person_of(user).map(|p| (p, None)))
+    }
+
     async fn create(&self, owner: OwnerScope, name: &str, slug: &str) -> RepoResult<ChannelRow> {
         let mut st = self.inner.lock().unwrap();
         // The real constraint is on (owner, slug), not the display name.
