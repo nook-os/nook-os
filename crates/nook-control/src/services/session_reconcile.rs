@@ -59,8 +59,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use nook_types::{
-    ManagedPurpose, NodeId, NodeWorkspaceId, Replicas, SessionId, SessionSpec, TenantId,
-    WorkspaceId,
+    ManagedPurpose, NodeBlocker, NodeId, NodeWorkspaceId, Replicas, SessionId, SessionSpec,
+    TenantId, WorkspaceId,
 };
 
 use crate::state::AppState;
@@ -239,33 +239,67 @@ impl Plan {
 /// Selector is subset-match: every declared `key=value` must be present with
 /// that value. An empty selector matches every node, which is what "I do not
 /// care where" should mean.
-fn eligible(spec: &SessionSpec, node: &NodeFacts) -> bool {
+/// Every ground on which this node is not eligible for this spec (MAIN-431).
+///
+/// Empty means eligible — that IS the definition, so there is one rule rather
+/// than a predicate and an explanation that can disagree.
+///
+/// No short-circuit: a node can be offline AND mismatch the selector AND hold
+/// an untolerated taint, and a person choosing a selector needs all three, not
+/// the first one found. Order is fixed (offline → runtime → selector → taint)
+/// so responses and tests are stable; selector keys are walked in `BTreeMap`
+/// order for the same reason.
+///
+/// The grounds and their meanings are exactly what `eligible()` decided before
+/// (MAIN-431 NG-1) — including the runtime fallback below. Only the return type
+/// changed, which is why `plan()` places the same nodes it always did.
+pub fn blockers(spec: &SessionSpec, node: &NodeFacts) -> Vec<NodeBlocker> {
+    let mut out = Vec::new();
     if !node.online {
-        return false;
+        out.push(NodeBlocker::Offline);
     }
-    // The runtime has to be installable here. A node that reported no runtimes is
-    // unknown, not incapable — don't exclude it on missing data (an older node
-    // still places under selector + taints). But once we DO know its runtimes, a
-    // spec asking for one it lacks is a refusal: the session would only fail at
-    // start on that machine.
+    // A node that reported no runtimes is unknown, not incapable — don't
+    // exclude it on missing data (an older node still places under selector +
+    // taints). But once we DO know its runtimes, a spec asking for one it lacks
+    // is a refusal: the session would only fail at start on that machine.
     if !node.runtimes.is_empty() && !node.runtimes.contains(&spec.runtime) {
-        return false;
+        out.push(NodeBlocker::RuntimeUnavailable {
+            wanted: spec.runtime.clone(),
+            available: node.runtimes.iter().cloned().collect(),
+        });
     }
-    if !spec
-        .node_selector
-        .iter()
-        .all(|(k, v)| node.labels.get(k) == Some(v))
-    {
-        return false;
+    for (k, v) in &spec.node_selector {
+        if node.labels.get(k) != Some(v) {
+            out.push(NodeBlocker::SelectorMismatch {
+                key: k.clone(),
+                wanted: v.clone(),
+                // `None` when the node has no such label at all, which is a
+                // different situation from holding a different value.
+                actual: node.labels.get(k).cloned(),
+            });
+        }
     }
     // Every taint must be tolerated — one untolerated taint is a refusal, no
     // matter how well the labels match. Key AND effect, because tolerating
     // `gpu:NoSchedule` says nothing about `gpu` under some future effect.
-    node.taints.iter().all(|t| {
-        spec.tolerations
+    for t in &node.taints {
+        let tolerated = spec
+            .tolerations
             .iter()
-            .any(|tol| tol.key == t.key && tol.effect == t.effect)
-    })
+            .any(|tol| tol.key == t.key && tol.effect == t.effect);
+        if !tolerated {
+            out.push(NodeBlocker::UntoleratedTaint {
+                key: t.key.clone(),
+                effect: t.effect.clone(),
+            });
+        }
+    }
+    out
+}
+
+/// Whether this node may run this spec — `blockers()` finding nothing.
+fn eligible(spec: &SessionSpec, node: &NodeFacts) -> bool {
+    blockers(spec, node).is_empty()
 }
 
 /// Desired, actual, and the difference — for ONE workspace.
@@ -1589,6 +1623,90 @@ mod tests {
             tolerations: vec![],
             replicas,
         }
+    }
+
+    /// AC-2: every ground is evaluated, and in a fixed order.
+    ///
+    /// The old `eligible()` returned on the first refusal, so a node that was
+    /// offline AND mismatched AND tainted reported one thing. A person choosing
+    /// a selector needs all of them — "no nodes matched" is nearly useless next
+    /// to the list of what to change.
+    #[test]
+    fn every_ground_is_reported_not_just_the_first() {
+        let mut n = node(1, &[("zone", "eu")], &[("gpu", "NoSchedule")]);
+        n.online = false;
+        n.runtimes = vec!["bash".into()];
+
+        let mut sp = spec(Replicas::Single);
+        sp.node_selector = [("zone".to_string(), "us".to_string())]
+            .into_iter()
+            .collect();
+
+        let got = blockers(&sp, &n);
+        assert_eq!(
+            got,
+            vec![
+                NodeBlocker::Offline,
+                NodeBlocker::RuntimeUnavailable {
+                    wanted: "claude".into(),
+                    available: vec!["bash".into()],
+                },
+                NodeBlocker::SelectorMismatch {
+                    key: "zone".into(),
+                    wanted: "us".into(),
+                    actual: Some("eu".into()),
+                },
+                NodeBlocker::UntoleratedTaint {
+                    key: "gpu".into(),
+                    effect: "NoSchedule".into(),
+                },
+            ],
+            "all four grounds, in the documented order"
+        );
+    }
+
+    /// AC-5: a missing label and a different label are different answers.
+    ///
+    /// `null` means the node has no such key; a value means it has one that
+    /// disagrees. Collapsing them would hide the commonest fix — the label is
+    /// simply not set yet.
+    #[test]
+    fn a_missing_label_is_null_not_an_empty_string() {
+        let n = node(1, &[], &[]);
+        let mut sp = spec(Replicas::Single);
+        sp.node_selector = [("zone".to_string(), "us".to_string())]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            blockers(&sp, &n),
+            vec![NodeBlocker::SelectorMismatch {
+                key: "zone".into(),
+                wanted: "us".into(),
+                actual: None,
+            }]
+        );
+    }
+
+    /// AC-3/NG-1: the runtime fallback is unchanged — a node that reported no
+    /// runtimes is unknown, not incapable, and still places.
+    #[test]
+    fn an_unknown_runtime_list_is_still_not_a_refusal() {
+        let n = node(1, &[], &[]); // `runtimes: vec![]`
+        assert!(blockers(&spec(Replicas::Single), &n).is_empty());
+        assert!(eligible(&spec(Replicas::Single), &n));
+    }
+
+    /// Eligibility IS the empty collection — one rule, so the predicate and the
+    /// explanation cannot disagree.
+    #[test]
+    fn eligible_is_exactly_no_blockers() {
+        let ok = node(1, &[], &[]);
+        let mut bad = node(2, &[], &[]);
+        bad.online = false;
+        let sp = spec(Replicas::Single);
+        assert_eq!(eligible(&sp, &ok), blockers(&sp, &ok).is_empty());
+        assert_eq!(eligible(&sp, &bad), blockers(&sp, &bad).is_empty());
+        assert!(!eligible(&sp, &bad));
     }
 
     fn starts(p: &Plan) -> Vec<NodeId> {

@@ -206,7 +206,7 @@ pub async fn reconcile_status(
             .map(|id| ReconcileBlocker {
                 node_id: *id,
                 node_name: named.get(id).cloned().unwrap_or_default(),
-                reason: "needs_clone".to_string(),
+                reason: nook_types::NodeBlocker::NeedsClone,
             })
             .collect(),
         eligible: (plan.desired.saturating_sub(plan.shortfall)) as u32,
@@ -249,6 +249,134 @@ fn validate_spec(spec: &SessionSpec) -> ApiResult<()> {
         }
     }
     Ok(())
+}
+
+/// `POST /api/v1/workspaces/{id}/reconcile-preview` — what would this spec do
+/// (MAIN-431)?
+///
+/// Runs the reconciler's OWN planner against a CANDIDATE spec and writes
+/// nothing: no session, no spec, no clone, no row of any kind. The same four
+/// reads `reconcile_status` makes, the same `plan()`, and per-node explanation
+/// through the same `blockers()` the planner itself decides with — a second
+/// eligibility implementation here is exactly the drift MAIN-319 closed.
+///
+/// Tenant-scoped like every other workspace read, and open to anyone who can
+/// see the workspace (the `GET /nodes/{id}/placement` precedent): a preview
+/// decides nothing, so there is nothing to gate on ownership.
+#[utoipa::path(post, path = "/api/v1/workspaces/{id}/reconcile-preview",
+    operation_id = "reconcile_preview",
+    params(("id" = String, Path,)),
+    request_body = ReconcilePreviewRequest,
+    responses((status = 200, body = ReconcilePreview), (status = 400), (status = 404)))]
+pub async fn reconcile_preview(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<WorkspaceId>,
+    Json(req): Json<ReconcilePreviewRequest>,
+) -> ApiResult<Json<ReconcilePreview>> {
+    use crate::services::session_reconcile as recon;
+
+    if state.workspaces.get(auth.tenant_id, id).await?.is_none() {
+        return Err(ApiError::NotFound);
+    }
+    // The same rejections the saved-spec path applies (MAIN-315 AC-3): a blank
+    // runtime, an empty selector key or value, a taint effect that is not
+    // NoSchedule. An unknown-but-nonempty runtime is deliberately NOT a 400 —
+    // no runtime catalog exists (that is a sibling card), and whether a runtime
+    // is launchable is a per-node fact, answered truthfully below as
+    // `runtime_unavailable` blockers on each node that reported its list.
+    validate_spec(&req.spec)?;
+
+    let nodes = recon::node_facts(&state, auth.tenant_id).await?;
+    let checkouts: Vec<recon::CheckoutSlot> = state
+        .workspaces
+        .present_checkouts(auth.tenant_id, id)
+        .await?
+        .into_iter()
+        .map(|c| recon::CheckoutSlot {
+            checkout_id: c.id,
+            node_id: c.node_id,
+            path: c.path,
+        })
+        .collect();
+    let actual: Vec<recon::Actual> = state
+        .sessions
+        .live_managed(auth.tenant_id, id, Some(ManagedPurpose::Access))
+        .await?
+        .into_iter()
+        .map(|s| recon::Actual {
+            session_id: s.id,
+            checkout_id: s.checkout_id,
+            node_id: s.node_id,
+            shard: nook_types::ShardAssignment {
+                index: s.managed_shard.max(0) as u32,
+                of: s.managed_shards.max(1) as u32,
+            },
+        })
+        .collect();
+    let ports = recon::port_safety(&state, auth.tenant_id, id).await?;
+    let plan = recon::plan(
+        &req.spec,
+        &nodes,
+        &checkouts,
+        &actual,
+        ports,
+        recon::Spread::PerCheckout,
+    );
+
+    let named: std::collections::HashMap<_, _> = state
+        .nodes
+        .list(auth.tenant_id, None, None)
+        .await?
+        .into_iter()
+        .map(|n| (n.id, n.name))
+        .collect();
+    let name_of = |id: &nook_types::NodeId| named.get(id).cloned().unwrap_or_default();
+
+    // Classify every node once, with the SAME rule the plan used. Eligible
+    // and holding a checkout is `matched`; eligible without one is exactly
+    // `plan.needs_clone` (asserted by construction: both sides are
+    // `blockers().is_empty()` plus checkout presence); everything else is
+    // ineligible, carrying all its grounds.
+    let mut matched = Vec::new();
+    let mut ineligible = Vec::new();
+    for node in &nodes {
+        let reasons = recon::blockers(&req.spec, node);
+        if reasons.is_empty() {
+            if checkouts.iter().any(|c| c.node_id == node.id) {
+                matched.push(nook_types::PreviewNode {
+                    node_id: node.id,
+                    node_name: name_of(&node.id),
+                });
+            }
+            // Eligible without a checkout: reported below from the plan's own
+            // list rather than re-derived here.
+        } else {
+            ineligible.push(nook_types::PreviewBlockedNode {
+                node_id: node.id,
+                node_name: name_of(&node.id),
+                reasons,
+            });
+        }
+    }
+
+    Ok(Json(ReconcilePreview {
+        matched,
+        needs_clone: plan
+            .needs_clone
+            .iter()
+            .map(|id| ReconcileBlocker {
+                node_id: *id,
+                node_name: name_of(id),
+                reason: nook_types::NodeBlocker::NeedsClone,
+            })
+            .collect(),
+        ineligible,
+        desired: plan.desired as u32,
+        placed: plan.placed as u32,
+        shortfall: plan.shortfall as u32,
+        capped: plan.capped,
+    }))
 }
 
 /// `GET /api/v1/workspaces/{id}/gh-token` — does this workspace hold its own
@@ -525,7 +653,7 @@ pub async fn review_loop_status(
             .map(|id| ReconcileBlocker {
                 node_id: *id,
                 node_name: named.get(id).cloned().unwrap_or_default(),
-                reason: "needs_clone".to_string(),
+                reason: nook_types::NodeBlocker::NeedsClone,
             })
             .collect(),
         eligible: (plan.desired.saturating_sub(plan.shortfall)) as u32,

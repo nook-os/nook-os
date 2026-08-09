@@ -7835,6 +7835,54 @@
         }
       }
     },
+    "/api/v1/workspaces/{id}/reconcile-preview": {
+      "post": {
+        "tags": [
+          "crate::routes::workspaces"
+        ],
+        "summary": "`POST /api/v1/workspaces/{id}/reconcile-preview` — what would this spec do\n(MAIN-431)?",
+        "description": "Runs the reconciler's OWN planner against a CANDIDATE spec and writes\nnothing: no session, no spec, no clone, no row of any kind. The same four\nreads `reconcile_status` makes, the same `plan()`, and per-node explanation\nthrough the same `blockers()` the planner itself decides with — a second\neligibility implementation here is exactly the drift MAIN-319 closed.\n\nTenant-scoped like every other workspace read, and open to anyone who can\nsee the workspace (the `GET /nodes/{id}/placement` precedent): a preview\ndecides nothing, so there is nothing to gate on ownership.",
+        "operationId": "reconcile_preview",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReconcilePreviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReconcilePreview"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/workspaces/{id}/reconcile-status": {
       "get": {
         "tags": [
@@ -12096,6 +12144,121 @@
           }
         }
       },
+      "NodeBlocker": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "The node is not connected. A session cannot start on it, and counting\nit toward `replicas` would report a desired state nothing can reach.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "offline"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The node reported its runtimes and this spec's is not among them —\nthe session would only fail at start there.\n\nA node that reported NO runtimes never produces this: empty means\nunknown (an older node), not incapable.",
+            "required": [
+              "wanted",
+              "available",
+              "kind"
+            ],
+            "properties": {
+              "available": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "What the node said it can launch."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "runtime_unavailable"
+                ]
+              },
+              "wanted": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A `node_selector` key the node does not match.",
+            "required": [
+              "key",
+              "wanted",
+              "kind"
+            ],
+            "properties": {
+              "actual": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The node's value, or `null` when it has no such label at all —\nwhich is a different situation from holding a different value."
+              },
+              "key": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "selector_mismatch"
+                ]
+              },
+              "wanted": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A taint the spec does not tolerate. Key AND effect: tolerating\n`gpu:NoSchedule` says nothing about `gpu` under another effect.",
+            "required": [
+              "key",
+              "effect",
+              "kind"
+            ],
+            "properties": {
+              "effect": {
+                "type": "string"
+              },
+              "key": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "untolerated_taint"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Eligible in every other way, but the workspace's checkout is not on it\nyet (MAIN-317 clones it). Deliberately in the same vocabulary while\nbeing reported through a SEPARATE field — a node that needs a clone is\nnot excluded, it is waiting.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "needs_clone"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Why one node is not running a session for a spec (MAIN-431).\n\nOne vocabulary for every ground, shared by the status endpoint and the\ndry-run preview so the two cannot describe the same refusal differently.\nIt replaces a bare `bool` on the eligibility side and a `reason: String`\non the reporting side — \"not eligible\" and the literal `\"needs_clone\"`\nwere the only two things either could say.\n\nInternally tagged, so a client reads `kind` and then the fields that\nground carries. Each variant holds what makes it ACTIONABLE: knowing a\nselector did not match is not useful without knowing which key, what was\nwanted, and what the node actually has."
+      },
       "NodeId": {
         "type": "string",
         "format": "uuid"
@@ -13663,6 +13826,46 @@
           }
         }
       },
+      "PreviewBlockedNode": {
+        "type": "object",
+        "description": "One node a preview excluded, with EVERY ground it failed on (MAIN-431\nAC-2) — a person choosing a selector needs \"offline, and also tainted\",\nnot whichever refusal happened to be checked first.",
+        "required": [
+          "node_id",
+          "node_name",
+          "reasons"
+        ],
+        "properties": {
+          "node_id": {
+            "$ref": "#/components/schemas/NodeId"
+          },
+          "node_name": {
+            "type": "string"
+          },
+          "reasons": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NodeBlocker"
+            },
+            "description": "In the fixed evaluation order: offline → runtime → selector → taint."
+          }
+        }
+      },
+      "PreviewNode": {
+        "type": "object",
+        "description": "One node a preview found usable, by id and by the name a person knows it as.",
+        "required": [
+          "node_id",
+          "node_name"
+        ],
+        "properties": {
+          "node_id": {
+            "$ref": "#/components/schemas/NodeId"
+          },
+          "node_name": {
+            "type": "string"
+          }
+        }
+      },
       "PurgeTestTenantsResponse": {
         "type": "object",
         "description": "Result of the dev-only `purge-test-tenants` sweep (MAIN-221 AC-3).",
@@ -13713,8 +13916,75 @@
             "type": "string"
           },
           "reason": {
-            "type": "string",
-            "description": "`needs_clone` — matches the selector and tolerates the taints, but the\nworkspace's checkout is not on it yet (MAIN-317 clones it)."
+            "$ref": "#/components/schemas/NodeBlocker",
+            "description": "Structural since MAIN-431 — this was a `String` whose only value was\never the literal `\"needs_clone\"`."
+          }
+        }
+      },
+      "ReconcilePreview": {
+        "type": "object",
+        "description": "What a candidate spec would do, computed by the reconciler's own planner\nand written nowhere (MAIN-431 AC-8).\n\n`needs_clone` is deliberately a separate field from `ineligible` (AC-9): a\nnode that matches but lacks the checkout is not excluded, it is waiting —\nsame vocabulary, different answer to \"should I fix my selector\".",
+        "required": [
+          "matched",
+          "needs_clone",
+          "ineligible",
+          "desired",
+          "placed",
+          "shortfall",
+          "capped"
+        ],
+        "properties": {
+          "capped": {
+            "type": "boolean",
+            "description": "The workspace declares no ports, so it is held to one session per node\n(MAIN-361) — a spec-level condition, never a per-node reason."
+          },
+          "desired": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "ineligible": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PreviewBlockedNode"
+            },
+            "description": "Nodes the spec cannot use, each with every applicable ground."
+          },
+          "matched": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PreviewNode"
+            },
+            "description": "Eligible nodes holding a checkout: where the plan can place today."
+          },
+          "needs_clone": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReconcileBlocker"
+            },
+            "description": "Eligible nodes the workspace's checkout has not reached yet."
+          },
+          "placed": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "shortfall": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "ReconcilePreviewRequest": {
+        "type": "object",
+        "description": "Preview what the reconciler would do with a CANDIDATE spec (MAIN-431).\nThe spec is required on purpose (NG-7): `reconcile-status` already answers\nfor the saved one.",
+        "required": [
+          "spec"
+        ],
+        "properties": {
+          "spec": {
+            "$ref": "#/components/schemas/SessionSpec"
           }
         }
       },

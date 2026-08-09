@@ -3321,6 +3321,35 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{id}/reconcile-preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/workspaces/{id}/reconcile-preview` — what would this spec do
+         *     (MAIN-431)?
+         * @description Runs the reconciler's OWN planner against a CANDIDATE spec and writes
+         *     nothing: no session, no spec, no clone, no row of any kind. The same four
+         *     reads `reconcile_status` makes, the same `plan()`, and per-node explanation
+         *     through the same `blockers()` the planner itself decides with — a second
+         *     eligibility implementation here is exactly the drift MAIN-319 closed.
+         *
+         *     Tenant-scoped like every other workspace read, and open to anyone who can
+         *     see the workspace (the `GET /nodes/{id}/placement` precedent): a preview
+         *     decides nothing, so there is nothing to gate on ownership.
+         */
+        post: operations["reconcile_preview"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{id}/reconcile-status": {
         parameters: {
             query?: never;
@@ -5271,6 +5300,48 @@ export interface components {
              */
             url: string;
         };
+        /**
+         * @description Why one node is not running a session for a spec (MAIN-431).
+         *
+         *     One vocabulary for every ground, shared by the status endpoint and the
+         *     dry-run preview so the two cannot describe the same refusal differently.
+         *     It replaces a bare `bool` on the eligibility side and a `reason: String`
+         *     on the reporting side — "not eligible" and the literal `"needs_clone"`
+         *     were the only two things either could say.
+         *
+         *     Internally tagged, so a client reads `kind` and then the fields that
+         *     ground carries. Each variant holds what makes it ACTIONABLE: knowing a
+         *     selector did not match is not useful without knowing which key, what was
+         *     wanted, and what the node actually has.
+         */
+        NodeBlocker: {
+            /** @enum {string} */
+            kind: "offline";
+        } | {
+            /** @description What the node said it can launch. */
+            available: string[];
+            /** @enum {string} */
+            kind: "runtime_unavailable";
+            wanted: string;
+        } | {
+            /**
+             * @description The node's value, or `null` when it has no such label at all —
+             *     which is a different situation from holding a different value.
+             */
+            actual?: string | null;
+            key: string;
+            /** @enum {string} */
+            kind: "selector_mismatch";
+            wanted: string;
+        } | {
+            effect: string;
+            key: string;
+            /** @enum {string} */
+            kind: "untolerated_taint";
+        } | {
+            /** @enum {string} */
+            kind: "needs_clone";
+        };
         /** Format: uuid */
         NodeId: string;
         /**
@@ -6014,6 +6085,22 @@ export interface components {
             /** Format: uuid */
             parent_message_id?: string | null;
         };
+        /**
+         * @description One node a preview excluded, with EVERY ground it failed on (MAIN-431
+         *     AC-2) — a person choosing a selector needs "offline, and also tainted",
+         *     not whichever refusal happened to be checked first.
+         */
+        PreviewBlockedNode: {
+            node_id: components["schemas"]["NodeId"];
+            node_name: string;
+            /** @description In the fixed evaluation order: offline → runtime → selector → taint. */
+            reasons: components["schemas"]["NodeBlocker"][];
+        };
+        /** @description One node a preview found usable, by id and by the name a person knows it as. */
+        PreviewNode: {
+            node_id: components["schemas"]["NodeId"];
+            node_name: string;
+        };
         /** @description Result of the dev-only `purge-test-tenants` sweep (MAIN-221 AC-3). */
         PurgeTestTenantsResponse: {
             /**
@@ -6039,10 +6126,45 @@ export interface components {
             node_id: components["schemas"]["NodeId"];
             node_name: string;
             /**
-             * @description `needs_clone` — matches the selector and tolerates the taints, but the
-             *     workspace's checkout is not on it yet (MAIN-317 clones it).
+             * @description Structural since MAIN-431 — this was a `String` whose only value was
+             *     ever the literal `"needs_clone"`.
              */
-            reason: string;
+            reason: components["schemas"]["NodeBlocker"];
+        };
+        /**
+         * @description What a candidate spec would do, computed by the reconciler's own planner
+         *     and written nowhere (MAIN-431 AC-8).
+         *
+         *     `needs_clone` is deliberately a separate field from `ineligible` (AC-9): a
+         *     node that matches but lacks the checkout is not excluded, it is waiting —
+         *     same vocabulary, different answer to "should I fix my selector".
+         */
+        ReconcilePreview: {
+            /**
+             * @description The workspace declares no ports, so it is held to one session per node
+             *     (MAIN-361) — a spec-level condition, never a per-node reason.
+             */
+            capped: boolean;
+            /** Format: int32 */
+            desired: number;
+            /** @description Nodes the spec cannot use, each with every applicable ground. */
+            ineligible: components["schemas"]["PreviewBlockedNode"][];
+            /** @description Eligible nodes holding a checkout: where the plan can place today. */
+            matched: components["schemas"]["PreviewNode"][];
+            /** @description Eligible nodes the workspace's checkout has not reached yet. */
+            needs_clone: components["schemas"]["ReconcileBlocker"][];
+            /** Format: int32 */
+            placed: number;
+            /** Format: int32 */
+            shortfall: number;
+        };
+        /**
+         * @description Preview what the reconciler would do with a CANDIDATE spec (MAIN-431).
+         *     The spec is required on purpose (NG-7): `reconcile-status` already answers
+         *     for the saved one.
+         */
+        ReconcilePreviewRequest: {
+            spec: components["schemas"]["SessionSpec"];
         };
         /**
          * @description Desired versus actual for one workspace (MAIN-319 AC-3).
@@ -13671,6 +13793,43 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PortRequirement"][];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    reconcile_preview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReconcilePreviewRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReconcilePreview"];
                 };
             };
             400: {
