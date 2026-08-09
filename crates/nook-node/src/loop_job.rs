@@ -329,6 +329,188 @@ fn fetch_refused_by(err: &str, worktree: &Path) -> bool {
         && err.contains(&format!("'{}'", worktree.to_string_lossy()))
 }
 
+/// Is this a BUILD run's worktree directory? Only those outlive their run
+/// (MAIN-480 AC-1); review keeps a stable PATH but is rebuilt every pass, and
+/// everything else is per-job.
+fn is_build_dirname(name: &str) -> bool {
+    name.starts_with("build-")
+}
+
+/// The branch an existing worktree has checked out, if any.
+///
+/// A build tree is normally ON one: the skill creates the card's branch and
+/// works there, so this is the state every pass after the first finds.
+fn attached_branch(worktree: &Path) -> Option<String> {
+    crate::gitops::run_git(&["symbolic-ref", "--short", "HEAD"], Some(worktree), None)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Detach an existing build worktree at its current commit, BEFORE the mirror
+/// is fetched (MAIN-480).
+///
+/// This is not tidiness, it is what keeps the tree alive. A linked worktree of
+/// a `--mirror` clone shares that repo's `refs/heads/*`, and git refuses —
+/// fatally — to fetch into a branch a worktree holds. `fetch_mirror`'s MAIN-466
+/// self-heal recognises OUR OWN path in that refusal and REMOVES the tree to
+/// unwedge itself, which was correct when a worktree lasted one run and is
+/// exactly wrong now that it must outlive the pass. Freeing the branch first
+/// means the refusal never happens.
+///
+/// Detaching keeps the working tree and the branch ref untouched: uncommitted
+/// work stays, unpushed commits stay reachable from the branch, and the skill
+/// re-attaches on its next step.
+fn detach_worktree(worktree: &Path) -> Option<String> {
+    let branch = attached_branch(worktree)?;
+    crate::gitops::run_git(&["checkout", "--detach"], Some(worktree), None).ok()?;
+    Some(branch)
+}
+
+/// The commit a pass should start from — "the pushed head" of the ticket's
+/// rule, resolved against the mirror AFTER it has been fetched.
+///
+/// The card's branch if origin still has it, else the default branch. Both
+/// cases are ordinary: a pass that pushed leaves its branch on origin, and a
+/// pass that never pushed has its local branch PRUNED out of the mirror by the
+/// fetch — which is precisely why the fallback is not an error.
+fn pushed_head(cache: &Path, card_branch: Option<&str>, default_branch: &str) -> String {
+    if let Some(b) = card_branch {
+        let r = format!("refs/heads/{b}");
+        if crate::gitops::run_git(&["rev-parse", "--verify", "--quiet", &r], Some(cache), None)
+            .is_ok_and(|o| !o.trim().is_empty())
+        {
+            return r;
+        }
+    }
+    format!("refs/heads/{default_branch}")
+}
+
+/// What an existing build worktree must have done to the tree before this pass
+/// may reset it (MAIN-480 AC-2).
+///
+/// The rule is one sentence: **reset only when there is nothing to lose.** A
+/// pass that finished cleanly ends pushed, so its tree holds nothing origin
+/// does not already have and starting from the pushed head costs nothing. A
+/// pass that DIED mid-flight leaves the only copy of that work here, and the
+/// hour it represents is not recoverable from anywhere else — so the tree is
+/// left exactly as found and the agent, which resumes a session that remembers
+/// what it was doing, continues.
+#[derive(Debug, PartialEq, Eq)]
+enum TreeState {
+    /// Nothing uncommitted and nothing the pushed head lacks: safe to reset.
+    Clean,
+    /// Uncommitted changes and/or commits origin does not have.
+    Interrupted { uncommitted: bool, unpushed: bool },
+}
+
+impl TreeState {
+    /// The transcript line for this state — the operator's only view of which
+    /// branch of the rule ran, so both cases say so out loud.
+    fn note(&self) -> String {
+        match self {
+            TreeState::Clean => {
+                "reusing this card's worktree — clean, reset to the pushed head".into()
+            }
+            TreeState::Interrupted {
+                uncommitted,
+                unpushed,
+            } => {
+                let what = match (uncommitted, unpushed) {
+                    (true, true) => "uncommitted changes and unpushed commits",
+                    (true, false) => "uncommitted changes",
+                    _ => "unpushed commits",
+                };
+                format!(
+                    "resuming interrupted work — this card's worktree holds {what}; \
+                     leaving the tree exactly as the previous run left it"
+                )
+            }
+        }
+    }
+}
+
+/// Classify an existing worktree against the head it would be reset to.
+///
+/// Called AFTER `detach_worktree` and the mirror fetch, which is what makes the
+/// unpushed half answerable at all: in a `--mirror` clone `refs/heads/*` is
+/// both the local branch and origin's copy of it, so the question can only be
+/// asked once the fetch has made that ref origin's truth — and only of a HEAD
+/// that no longer holds the branch. Asking it of an attached HEAD (against
+/// `--glob=refs/heads/*`, which excludes HEAD's own branch) silently answers
+/// "nothing unpushed" for every real build tree.
+fn classify_tree(worktree: &Path, pushed: &str) -> TreeState {
+    // `-uno`: modifications to TRACKED files only. Untracked files are NOT the
+    // interrupted signal — the rule sweeps them in the clean case, so counting
+    // them here would make that sweep unreachable AND wedge a tree forever the
+    // first time a pass left a stray file behind.
+    let uncommitted = crate::gitops::run_git(
+        &["status", "--porcelain", "--untracked-files=no"],
+        Some(worktree),
+        None,
+    )
+    .map(|o| !o.trim().is_empty())
+    .unwrap_or(false);
+    let unpushed = crate::gitops::run_git(
+        &["rev-list", "--count", "HEAD", &format!("^{pushed}")],
+        Some(worktree),
+        None,
+    )
+    .map(|o| o.trim() != "0" && !o.trim().is_empty())
+    .unwrap_or(false);
+    if uncommitted || unpushed {
+        TreeState::Interrupted {
+            uncommitted,
+            unpushed,
+        }
+    } else {
+        TreeState::Clean
+    }
+}
+
+/// Put a CLEAN existing worktree back on the head this pass should start from:
+/// DETACHED at `pushed`, with untracked-not-ignored leftovers swept.
+///
+/// `--detach` and not a bare reset: a plain `reset --hard` on an attached HEAD
+/// moves the card's own BRANCH to whatever it resets to — on a repair pass that
+/// would drag the branch off the PR's commit — and leaves the tree holding a
+/// ref, which re-arms the fetch wedge `detach_worktree` exists to avoid.
+///
+/// `clean -fd` and never `-fdx`: the ignored files are the warm layer — the
+/// `.env` a run needs and the vendor directories that make the build fast — and
+/// deleting them would make persistence pointless.
+fn reset_clean_worktree(worktree: &Path, pushed: &str) -> Result<Vec<String>, String> {
+    crate::gitops::run_git(&["checkout", "--detach", pushed], Some(worktree), None)?;
+    crate::gitops::run_git(&["reset", "--hard", pushed], Some(worktree), None)?;
+    // Named before they go. Untracked files are swept rather than treated as
+    // interrupted work (see `classify_tree`), which is the one edge where this
+    // rule can discard something a previous pass made — so it is never silent.
+    let doomed: Vec<String> = crate::gitops::run_git(&["clean", "-nd"], Some(worktree), None)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.strip_prefix("Would remove "))
+        .map(str::to_string)
+        .collect();
+    crate::gitops::run_git(&["clean", "-fd"], Some(worktree), None)?;
+    Ok(doomed)
+}
+
+/// The commit a fresh build worktree starts from: the mirror's own `HEAD`,
+/// which a `--mirror` clone symrefs to the repository's real default branch
+/// (MAIN-480 AC-3).
+///
+/// Asking the mirror is the whole point. `branch` arrives from the control
+/// plane's `resolve_repo`, which reads `node_workspaces.git_branch` — whatever
+/// branch the node's primary clone happened to have checked out when discovery
+/// last scanned it. A colleague's feature branch became the base for every
+/// build worktree that way; the repository's own answer cannot.
+fn default_branch_name(cache: &Path) -> Option<String> {
+    crate::gitops::run_git(&["symbolic-ref", "--short", "HEAD"], Some(cache), None)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// Add a per-job worktree off `cache`, into `<wt_base>/<job>` so concurrent jobs
 /// on the same workspace get distinct trees.
 ///
@@ -391,11 +573,41 @@ fn remove_job_worktree(cache: &Path, worktree: &Path) -> Result<(), String> {
     }
 }
 
+/// Every build worktree this node currently holds, as absolute paths — what
+/// `LoopWorktreesHeld` reports so the control plane can order the removal of
+/// the ones it no longer records (MAIN-480 AC-1).
+pub fn build_worktrees_held(cfg: &NodeConfig) -> Vec<String> {
+    held_build_worktrees_in(&cache_base(&cfg.server).join("worktrees"))
+}
+
+fn held_build_worktrees_in(wt_base: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(wt_base) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter(|e| e.file_name().to_str().is_some_and(is_build_dirname))
+        .map(|e| e.path().to_string_lossy().to_string())
+        .collect()
+}
+
 /// Best-effort cleanup of orphaned job worktrees on (re)connect (AC-4/AC-6):
 /// prune each known mirror's worktree admin, then delete any worktree dir whose
 /// job is no longer running. Never fatal.
+///
+/// **Build worktrees are exempt** (MAIN-480 AC-1). "No running job" is the
+/// normal state of a build tree between its passes, so the running-set test —
+/// correct for every other kind — would delete exactly the directories that are
+/// supposed to survive. Whether a build tree is still wanted is a control-plane
+/// fact (does a card still record it?), so the node reports what it holds via
+/// `build_worktrees_held` and removes one only when told to.
 pub fn reconcile(cfg: &NodeConfig) {
-    let base = cache_base(&cfg.server);
+    reconcile_in(&cache_base(&cfg.server));
+}
+
+fn reconcile_in(base: &Path) {
+    let base = base.to_path_buf();
     if let Ok(entries) = std::fs::read_dir(&base) {
         for entry in entries.flatten() {
             let p = entry.path();
@@ -412,7 +624,7 @@ pub fn reconcile(cfg: &NodeConfig) {
             let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
-            if p.is_dir() && !running.contains(name) {
+            if p.is_dir() && !running.contains(name) && !is_build_dirname(name) {
                 let _ = std::fs::remove_dir_all(&p);
             }
         }
@@ -660,6 +872,23 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
         &job_id,
         format!("preparing workspace from {repo_url} @ {branch}"),
     );
+
+    // BEFORE the mirror is fetched, free any branch this card's tree holds.
+    //
+    // A build worktree outlives its run ON the card's branch — that is what the
+    // skill leaves behind — and a linked worktree of a `--mirror` clone shares
+    // that repo's `refs/heads/*`, so the next `fetch --prune` is refused
+    // fatally. `fetch_mirror`'s MAIN-466 self-heal answers its own refusal by
+    // DELETING the tree, which was right when a tree lasted one run and would
+    // silently undo this whole ticket. Detaching first means the refusal never
+    // arises; the branch name is kept because it names the head this pass
+    // should start from.
+    let keeps_tree = is_build_dirname(&dirname);
+    let card_branch = if keeps_tree && own_worktree.exists() {
+        detach_worktree(&own_worktree)
+    } else {
+        None
+    };
     let cache = if may_create_cache(&kind) {
         match ensure_mirror_in(&base, &repo_url, ssh_key.as_deref(), &own_worktree) {
             Ok(c) => c,
@@ -692,23 +921,89 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
             }
         }
     };
-    // A crashed run can leave the stable path behind; the unique index says no
-    // LIVE run holds this PR, so clearing the leftover is safe and starting
-    // over is right — the agent's session survives in the config dir, not here.
-    if own_worktree.exists() {
+    // A BUILD worktree OUTLIVES its run (MAIN-480 AC-1), so an existing one is
+    // this card's own working state, not a crash leftover to clear. Every other
+    // kind keeps the old behaviour exactly: the path is stable but the tree is
+    // not, a leftover is cleared because the unique index says no live run
+    // holds it, and one that will NOT clear still fails the job loudly in
+    // `add_job_worktree_in` rather than being quietly reused.
+    let mut adopted = keeps_tree && own_worktree.exists();
+    if own_worktree.exists() && !adopted {
         let _ = remove_job_worktree(&cache, &own_worktree);
     }
-    // A STABLE worktree (review or build) outlives the run at its path, so an
-    // attached checkout would pin `branch` in the mirror and wedge every later
-    // fetch (MAIN-466) — detach both; the skill makes its own branch anyway.
-    let worktree = match add_job_worktree_in(&wt_base, &cache, &branch, &dirname, stable) {
-        Ok(w) => w,
-        Err(e) => {
-            finished(&out, &job_id, false, format!("worktree setup failed: {e}"));
-            unregister(&dirname);
-            return;
+    // The repository's OWN default branch, asked of the mirror — never the
+    // `branch` the control plane resolved from a primary clone's checked-out
+    // branch (AC-3).
+    let default_branch = default_branch_name(&cache).unwrap_or_else(|| branch.clone());
+    // "The pushed head": the card's branch as origin now has it, else the
+    // default branch. Resolved after the fetch, so it is origin's answer rather
+    // than this tree's.
+    let pushed = pushed_head(&cache, card_branch.as_deref(), &default_branch);
+    if adopted {
+        // The lifecycle rule, decided here and nowhere else (AC-2).
+        let state = classify_tree(&own_worktree, &pushed);
+        note(&out, &job_id, state.note());
+        match state {
+            TreeState::Clean => match reset_clean_worktree(&own_worktree, &pushed) {
+                Ok(swept) if !swept.is_empty() => note(
+                    &out,
+                    &job_id,
+                    format!(
+                        "swept {} untracked leftover(s): {}",
+                        swept.len(),
+                        swept.join(", ")
+                    ),
+                ),
+                Ok(_) => {}
+                Err(e) => {
+                    // A tree that will not reset is git-level broken, which is
+                    // the one case AC-1 allows recreation for. Say so — a
+                    // silent rebuild looks identical to the bug this fixes.
+                    note(
+                        &out,
+                        &job_id,
+                        format!("this card's worktree could not be reset ({e}) — recreating it"),
+                    );
+                    let _ = remove_job_worktree(&cache, &own_worktree);
+                    adopted = false;
+                }
+            },
+            // Divergence is NAMED, never resolved here (NG-6): the agent holds
+            // the context to rebase or discard it, this code does not.
+            TreeState::Interrupted { .. } => note(
+                &out,
+                &job_id,
+                format!(
+                    "origin's {pushed} may have moved since that work — reconcile it in the \
+                     tree; nothing here rebases on your behalf"
+                ),
+            ),
+        }
+    }
+    // A STABLE worktree (review or build) is created DETACHED, so an attached
+    // checkout cannot pin `branch` in the mirror and wedge every later fetch
+    // (MAIN-466) — the skill makes its own branch anyway.
+    let worktree = if adopted {
+        own_worktree.clone()
+    } else {
+        match add_job_worktree_in(&wt_base, &cache, &default_branch, &dirname, stable) {
+            Ok(w) => w,
+            Err(e) => {
+                finished(&out, &job_id, false, format!("worktree setup failed: {e}"));
+                unregister(&dirname);
+                return;
+            }
         }
     };
+    // Tell the control plane where this card works (AC-4). It records the path
+    // on the card, which is what pins later passes here, what `prune-worktree`
+    // addresses, and what stops `reconcile` treating the tree as an orphan.
+    if keeps_tree {
+        let _ = out.blocking_send(NodeToControl::LoopWorktreeReady {
+            job_id: job_id.clone(),
+            path: worktree.to_string_lossy().to_string(),
+        });
+    }
 
     // The fallback lives here, not in the map (see `skill_for`): `spec` is the
     // original kind and an unknown one is refused upstream by
@@ -804,8 +1099,16 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
         ),
     };
 
-    if let Err(e) = remove_job_worktree(&cache, &worktree) {
-        note(&out, &job_id, format!("worktree cleanup: {e}"));
+    // A BUILD worktree is NOT cleaned up here: it is this card's workplace
+    // until the work merges (MAIN-480 AC-1), and deleting it at the end of
+    // every pass is what made a repair start from scratch while its warm agent
+    // session pointed at a directory that no longer existed. Removal is the
+    // control plane's call now — `prune-worktree`, or the orphan sweep on
+    // reconnect. Every other kind is cleaned up exactly as before (NG-2).
+    if !keeps_tree {
+        if let Err(e) = remove_job_worktree(&cache, &worktree) {
+            note(&out, &job_id, format!("worktree cleanup: {e}"));
+        }
     }
     unregister(&dirname);
     finished(&out, &job_id, ok, message);
@@ -1413,6 +1716,245 @@ fn exit_is_ok(status: Option<i32>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── MAIN-480: the build worktree's lifecycle ────────────────────────────
+
+    /// Only build trees outlive their run; review keeps a stable PATH but is
+    /// rebuilt every pass, and per-job dirs are per-job (NG-2).
+    #[test]
+    fn only_build_worktrees_are_the_persistent_kind() {
+        assert!(is_build_dirname(&build_dirname("ws-1", "MAIN-42")));
+        assert!(!is_build_dirname(&review_dirname("ws-1", 7)));
+        assert!(!is_build_dirname(&job_dirname("0193-abc")));
+    }
+
+    /// The shape a real build pass leaves behind: a worktree of the mirror with
+    /// the card's BRANCH checked out, optionally pushed to origin. Every
+    /// lifecycle test runs against this, because the detached tree the node
+    /// creates only exists until the skill's first `checkout -b`.
+    fn build_tree_after_a_pass(tmp: &Path, key: &str, push: bool) -> (PathBuf, PathBuf, String) {
+        let remote = tmp.join("remote");
+        scratch_remote(&remote);
+        let wt_base = tmp.join("worktrees");
+        let dirname = build_dirname("ws-1", key);
+        let own = wt_base.join(&dirname);
+        let cache = ensure_mirror_in(&tmp.join("cache"), &remote.to_string_lossy(), None, &own)
+            .expect("mirror clone");
+        let wt = add_job_worktree_in(&wt_base, &cache, "main", &dirname, true).expect("worktree");
+        // What the skill does: its own branch, a commit, and a push if the pass
+        // got that far.
+        let branch = format!("{}-work", key.to_lowercase());
+        git_in(&wt, &["checkout", "-b", &branch]);
+        std::fs::write(wt.join("feature.rs"), "fn feature() {}\n").unwrap();
+        commit_all(&wt, "the pass's work");
+        if push {
+            // By URL, not by the `origin` remote: a linked worktree of a
+            // `--mirror` clone inherits `remote.origin.mirror`, which refuses a
+            // refspec. The destination is the same repository either way.
+            git_in(&wt, &["push", &remote.to_string_lossy(), &branch]);
+        }
+        (cache, wt, branch)
+    }
+
+    /// MAIN-480 AC-1, the defect this ticket exists to prevent: the tree must
+    /// survive the NEXT pass's mirror fetch.
+    ///
+    /// It did not. The skill leaves the tree on the card's branch, a worktree
+    /// of a `--mirror` clone shares `refs/heads/*`, and `fetch --prune` is then
+    /// refused — whereupon `fetch_mirror`'s self-heal recognised this run's own
+    /// path and DELETED the tree. Freeing the branch first is the fix.
+    #[test]
+    fn the_worktree_survives_the_next_passs_fetch() {
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let tmp =
+            std::env::temp_dir().join(format!("nook-480-fetch-{}", uuid::Uuid::now_v7().simple()));
+        let (cache, wt, branch) = build_tree_after_a_pass(&tmp, "MAIN-42", true);
+
+        // Exactly what `run` does at the start of the next pass.
+        assert_eq!(detach_worktree(&wt).as_deref(), Some(branch.as_str()));
+        fetch_mirror(&cache, None, &wt).expect("the fetch must not be refused");
+
+        assert!(
+            wt.exists(),
+            "the card's worktree must outlive the fetch — deleting it here is the bug"
+        );
+        assert!(wt.join("feature.rs").exists(), "with its contents intact");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// MAIN-480 AC-2, the clean half: a pass that pushed holds nothing origin
+    /// lacks, so it resets — DETACHED at the card's own pushed head, never at
+    /// the default branch, and never by moving the card's branch ref.
+    #[test]
+    fn a_pushed_tree_resets_detached_to_its_own_pushed_head() {
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let tmp =
+            std::env::temp_dir().join(format!("nook-480-clean-{}", uuid::Uuid::now_v7().simple()));
+        let (cache, wt, branch) = build_tree_after_a_pass(&tmp, "MAIN-43", true);
+        let pass_head = git_in(&wt, &["rev-parse", "HEAD"]);
+
+        // The warm layer, plus a stray the sweep must take.
+        std::fs::write(wt.join(".gitignore"), "warm/\n").unwrap();
+        commit_all(&wt, "ignore warm");
+        git_in(
+            &wt,
+            &["push", &tmp.join("remote").to_string_lossy(), &branch],
+        );
+        let pushed_tip = git_in(&wt, &["rev-parse", "HEAD"]);
+        std::fs::create_dir_all(wt.join("warm")).unwrap();
+        std::fs::write(wt.join("warm/target-cache"), "expensive\n").unwrap();
+        std::fs::write(wt.join("scratch.txt"), "stray\n").unwrap();
+
+        detach_worktree(&wt);
+        fetch_mirror(&cache, None, &wt).expect("fetch");
+        let pushed = pushed_head(&cache, Some(&branch), "main");
+        assert_eq!(
+            pushed,
+            format!("refs/heads/{branch}"),
+            "the card's own branch is the head to start from, not the default branch"
+        );
+        assert_eq!(classify_tree(&wt, &pushed), TreeState::Clean);
+
+        let swept = reset_clean_worktree(&wt, &pushed).expect("reset");
+        assert_eq!(swept, vec!["scratch.txt".to_string()]);
+        assert!(
+            wt.join("warm/target-cache").exists(),
+            "ignored files are the warm layer — `clean -fd` must never take them"
+        );
+        assert_eq!(
+            git_in(&wt, &["rev-parse", "HEAD"]),
+            pushed_tip,
+            "reset to the card's pushed head"
+        );
+        assert_ne!(pass_head, pushed_tip, "the fixture actually moved the head");
+        assert_eq!(
+            git_in(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "HEAD",
+            "and left DETACHED, or the next fetch is wedged again"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// MAIN-480 AC-2: a run that committed and died before pushing leaves the
+    /// only copy of that work here. With the branch attached — the real shape —
+    /// the old probe answered "nothing unpushed" and reset it away.
+    #[test]
+    fn an_unpushed_commit_on_the_cards_branch_is_interrupted() {
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let tmp =
+            std::env::temp_dir().join(format!("nook-480-unpush-{}", uuid::Uuid::now_v7().simple()));
+        let (cache, wt, branch) = build_tree_after_a_pass(&tmp, "MAIN-44", false);
+
+        detach_worktree(&wt);
+        fetch_mirror(&cache, None, &wt).expect("fetch");
+        // Never pushed, so the fetch's --prune took the local branch with it:
+        // the head to compare against falls back to the default branch, and the
+        // commit is visibly absent from origin.
+        let pushed = pushed_head(&cache, Some(&branch), "main");
+        assert_eq!(pushed, "refs/heads/main");
+        assert_eq!(
+            classify_tree(&wt, &pushed),
+            TreeState::Interrupted {
+                uncommitted: false,
+                unpushed: true
+            },
+            "a committed-but-unpushed pass is the case worth an hour of work"
+        );
+        assert!(wt.join("feature.rs").exists(), "and it is left untouched");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// MAIN-480 AC-2: uncommitted work on the card's branch is interrupted too.
+    #[test]
+    fn an_uncommitted_tree_is_interrupted_and_says_so() {
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let tmp =
+            std::env::temp_dir().join(format!("nook-480-dirty-{}", uuid::Uuid::now_v7().simple()));
+        let (cache, wt, branch) = build_tree_after_a_pass(&tmp, "MAIN-45", true);
+        std::fs::write(wt.join("feature.rs"), "fn feature() { /* half-done */ }\n").unwrap();
+
+        detach_worktree(&wt);
+        fetch_mirror(&cache, None, &wt).expect("fetch");
+        let state = classify_tree(&wt, &pushed_head(&cache, Some(&branch), "main"));
+        assert_eq!(
+            state,
+            TreeState::Interrupted {
+                uncommitted: true,
+                unpushed: false
+            }
+        );
+        assert!(state.note().contains("resuming interrupted work"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// MAIN-480 AC-3: the base comes from the MIRROR's own HEAD, so a primary
+    /// clone parked on a feature branch cannot become the base every build
+    /// starts from.
+    #[test]
+    fn the_base_is_the_repositorys_default_branch() {
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let tmp =
+            std::env::temp_dir().join(format!("nook-480-base-{}", uuid::Uuid::now_v7().simple()));
+        let remote = tmp.join("remote");
+        scratch_remote(&remote);
+        // The repository's default stays `main`. `someones-feature` exists and
+        // is what `resolve_repo` would have handed down, having read it off a
+        // primary clone that happened to be parked there — the exact shape that
+        // poisoned the base for every build worktree.
+        git_in(&remote, &["branch", "someones-feature"]);
+        let cache = ensure_mirror_in(
+            &tmp.join("cache"),
+            &remote.to_string_lossy(),
+            None,
+            &tmp.join("worktrees/none"),
+        )
+        .expect("mirror clone");
+        assert_eq!(default_branch_name(&cache).as_deref(), Some("main"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// MAIN-480 AC-1: reconcile is what deleted a build tree on every node
+    /// restart. It must now spare build trees — whose normal state between
+    /// passes is "no running job" — while still sweeping every other kind.
+    #[test]
+    fn reconcile_spares_build_worktrees_and_still_sweeps_the_rest() {
+        let tmp =
+            std::env::temp_dir().join(format!("nook-480-recon-{}", uuid::Uuid::now_v7().simple()));
+        let wt_base = tmp.join("worktrees");
+        let build = wt_base.join(build_dirname("ws-1", "MAIN-45"));
+        let review = wt_base.join(review_dirname("ws-1", 11));
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::create_dir_all(&review).unwrap();
+
+        reconcile_in(&tmp);
+
+        assert!(
+            build.exists(),
+            "a build tree between passes has no running job — that is not an orphan"
+        );
+        assert!(!review.exists(), "every other kind is swept as before");
+        assert_eq!(
+            held_build_worktrees_in(&wt_base),
+            vec![build.to_string_lossy().to_string()],
+            "what it keeps, it reports — the control plane decides if it is still wanted"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     /// MAIN-465 AC-2: the delivered API URL wins; absent or blank falls back
     /// to this node's own configured server, byte-identical to before.

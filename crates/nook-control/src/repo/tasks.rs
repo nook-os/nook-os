@@ -315,6 +315,21 @@ pub trait TaskRepository: Send + Sync {
     /// Forget the worktree — both the checkout id and the legacy string pair.
     async fn clear_worktree(&self, id: TaskId) -> ApiResult<TaskItem>;
 
+    /// Record where a loop BUILD run works (MAIN-480 AC-4). Narrower than
+    /// [`record_started_work`] on purpose: a build run stamps only the
+    /// worktree, never the branch, session or column — the skill owns the
+    /// branch and the converger owns the column.
+    async fn record_loop_worktree(
+        &self,
+        id: TaskId,
+        node: NodeId,
+        path: &str,
+    ) -> ApiResult<TaskItem>;
+
+    /// Every worktree path this node is recorded as holding — the set a
+    /// reconnecting node's report is checked against (MAIN-480 AC-1).
+    async fn worktree_paths_on_node(&self, node: NodeId) -> ApiResult<Vec<String>>;
+
     /// Move a card to `column`. Leaving a `started` column clears the claim
     /// lease (MAIN-229 AC-2) — the destination's type decides, in the same
     /// statement, so every mover (drag, `/move`, bulk) is covered by one rule.
@@ -1177,6 +1192,38 @@ impl TaskRepository for DbTaskRepository {
                 params![id],
             )
             .await?)
+    }
+
+    async fn record_loop_worktree(
+        &self,
+        id: TaskId,
+        node: NodeId,
+        path: &str,
+    ) -> ApiResult<TaskItem> {
+        Ok(self
+            .db
+            .query_one(
+                &format!(
+                    "UPDATE tasks SET worktree_path = $2, worktree_node_id = $3,
+                updated_at = {}
+         WHERE id = $1 RETURNING *",
+                    type_mapping(self.db.engine()).now()
+                ),
+                params![id, path, node],
+            )
+            .await?)
+    }
+
+    async fn worktree_paths_on_node(&self, node: NodeId) -> ApiResult<Vec<String>> {
+        let rows: Vec<(String,)> = self
+            .db
+            .query_all(
+                "SELECT worktree_path FROM tasks
+                  WHERE worktree_node_id = $1 AND worktree_path IS NOT NULL",
+                params![node],
+            )
+            .await?;
+        Ok(rows.into_iter().map(|(p,)| p).collect())
     }
 
     async fn set_column(&self, id: TaskId, column: ColumnId) -> ApiResult<TaskItem> {
@@ -2993,6 +3040,34 @@ impl TaskRepository for FakeTaskRepository {
         t.worktree_node_id = None;
         t.updated_at = chrono::Utc::now();
         Ok(t.clone())
+    }
+
+    async fn record_loop_worktree(
+        &self,
+        id: TaskId,
+        node: NodeId,
+        path: &str,
+    ) -> ApiResult<TaskItem> {
+        let mut st = self.inner.lock().unwrap();
+        let t = st
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == id)
+            .expect("task exists");
+        t.worktree_path = Some(path.to_string());
+        t.worktree_node_id = Some(node);
+        t.updated_at = chrono::Utc::now();
+        Ok(t.clone())
+    }
+
+    async fn worktree_paths_on_node(&self, node: NodeId) -> ApiResult<Vec<String>> {
+        let st = self.inner.lock().unwrap();
+        Ok(st
+            .tasks
+            .iter()
+            .filter(|t| t.worktree_node_id == Some(node))
+            .filter_map(|t| t.worktree_path.clone())
+            .collect())
     }
 
     async fn set_column(&self, id: TaskId, column: ColumnId) -> ApiResult<TaskItem> {

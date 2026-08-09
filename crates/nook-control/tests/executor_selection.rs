@@ -593,3 +593,199 @@ async fn a_build_job_waits_for_a_role_build_label_and_places_once_it_exists() {
 
     bed.teardown().await;
 }
+
+// ── MAIN-480: the worktree pin ───────────────────────────────────────────────
+
+/// A queued BUILD job — the only kind that carries state across passes and so
+/// the only kind the pin applies to.
+async fn queued_build_job(bed: &TestBed, tenant: TenantId, user: UserId, target: TaskId) -> JobId {
+    let id = JobId::new();
+    bed.db()
+        .exec(
+            "INSERT INTO loop_jobs (id, tenant_id, kind, target_task_id, requested_by, state)
+         VALUES ($1,$2,'build',$3,$4,'queued')",
+            params![id, tenant, target, user],
+        )
+        .await
+        .expect("build job");
+    id
+}
+
+/// Capabilities for a node that may take build work: the kind declared and the
+/// `role=build` label the build wall requires (MAIN-383).
+fn build_caps(operator: bool) -> serde_json::Value {
+    let mut c = json!({
+        "loop_kinds": ["spec", "decompose", "review", "epic-run", "build"],
+        "runtime_auth": [
+            { "id": "claude", "label": "Claude Code", "runtime": "claude", "state": "authorized" }
+        ]
+    });
+    if operator {
+        c["shared_operator"] = json!(true);
+    }
+    c
+}
+
+/// A node that may take build work: the kind declared (capabilities) AND the
+/// `role=build` label the build wall requires, which lives in its own column.
+async fn build_node(bed: &TestBed, tenant: TenantId, owner: Option<Uuid>, status: &str) -> NodeId {
+    let id = node(bed, tenant, owner, status, build_caps(false)).await;
+    bed.db()
+        .exec(
+            r#"UPDATE nodes SET labels = '{"role": "build"}' WHERE id = $1"#,
+            params![id],
+        )
+        .await
+        .expect("label");
+    id
+}
+
+async fn record_worktree(bed: &TestBed, task: TaskId, node: NodeId, path: &str) {
+    bed.db()
+        .exec(
+            "UPDATE tasks SET worktree_path = $2, worktree_node_id = $3 WHERE id = $1",
+            params![task, path, node],
+        )
+        .await
+        .expect("record worktree");
+}
+
+/// MAIN-480 AC-5: the card's recorded node is the ONLY candidate. The pin is
+/// not a preference — a pass elsewhere abandons the warm session and, after a
+/// crash, the only copy of the interrupted work.
+#[tokio::test]
+async fn a_recorded_worktree_pins_the_build_to_its_node() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("pin").await;
+    let (user, person) = bed.user(tenant, "owner").await;
+    let target = target_task(&bed, tenant, user).await;
+    let job = queued_build_job(&bed, tenant, user, target).await;
+    let state = bed.app_state().await;
+
+    let holder = build_node(&bed, tenant, Some(person), "online").await;
+    let _other = build_node(&bed, tenant, Some(person), "online").await;
+    record_worktree(&bed, target, holder, "/cache/worktrees/build-ws-MAIN-42").await;
+
+    let placed = jobs::select_executor(&state, tenant, job)
+        .await
+        .expect("select");
+    assert_eq!(placed.state, "claimed");
+    assert_eq!(
+        placed.executor_node_id,
+        Some(holder),
+        "the node holding this card's worktree is the only candidate"
+    );
+    bed.teardown().await;
+}
+
+/// MAIN-480 AC-5: pinned and dark means WAIT. Placing it elsewhere would be
+/// worse than waiting, so the job stays queued and the reason names the node
+/// and the way out.
+#[tokio::test]
+async fn a_pinned_build_waits_for_its_node_and_says_which() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("pindark").await;
+    let (user, person) = bed.user(tenant, "owner").await;
+    let target = target_task(&bed, tenant, user).await;
+    let job = queued_build_job(&bed, tenant, user, target).await;
+    let state = bed.app_state().await;
+
+    let dark = build_node(&bed, tenant, Some(person), "offline").await;
+    // A perfectly good alternative that must NOT be used.
+    let _alive = build_node(&bed, tenant, Some(person), "online").await;
+    record_worktree(&bed, target, dark, "/cache/worktrees/build-ws-MAIN-43").await;
+
+    let held = jobs::select_executor(&state, tenant, job)
+        .await
+        .expect("select");
+    assert_eq!(held.state, "queued", "it waits rather than starting over");
+    assert_eq!(held.executor_node_id, None);
+    let reason = held.queued_reason.unwrap_or_default();
+    assert!(
+        reason.contains("holds this card's worktree"),
+        "the reason must name why it is waiting: {reason}"
+    );
+    assert!(
+        reason.contains("Prune"),
+        "and the way out, so a dead node is not a dead end: {reason}"
+    );
+    bed.teardown().await;
+}
+
+/// MAIN-480 AC-5/AC-6: the pin is released by pruning the record — after which
+/// the loop places the work anywhere eligible, exactly as before.
+#[tokio::test]
+async fn clearing_the_record_releases_the_pin() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("unpin").await;
+    let (user, person) = bed.user(tenant, "owner").await;
+    let target = target_task(&bed, tenant, user).await;
+    let job = queued_build_job(&bed, tenant, user, target).await;
+    let state = bed.app_state().await;
+
+    let dark = build_node(&bed, tenant, Some(person), "offline").await;
+    let alive = build_node(&bed, tenant, Some(person), "online").await;
+    record_worktree(&bed, target, dark, "/cache/worktrees/build-ws-MAIN-44").await;
+    assert_eq!(
+        jobs::select_executor(&state, tenant, job)
+            .await
+            .expect("select")
+            .state,
+        "queued"
+    );
+
+    state.tasks.clear_worktree(target).await.expect("clear");
+
+    let placed = jobs::select_executor(&state, tenant, job)
+        .await
+        .expect("select again");
+    assert_eq!(placed.state, "claimed");
+    assert_eq!(placed.executor_node_id, Some(alive));
+    bed.teardown().await;
+}
+
+/// MAIN-480 NG-2: only build work is pinned. A review or spec run carries
+/// nothing across passes, and a `worktree_node_id` set by the human start-work
+/// path is none of their business.
+#[tokio::test]
+async fn a_spec_job_is_not_pinned_by_a_cards_worktree() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("nopin").await;
+    let (user, person) = bed.user(tenant, "owner").await;
+    let target = target_task(&bed, tenant, user).await;
+    let job = queued_job(&bed, tenant, user, target).await;
+    let state = bed.app_state().await;
+
+    let dark = node(
+        &bed,
+        tenant,
+        Some(person),
+        "offline",
+        caps("authorized", false),
+    )
+    .await;
+    let alive = node(
+        &bed,
+        tenant,
+        Some(person),
+        "online",
+        caps("authorized", false),
+    )
+    .await;
+    record_worktree(&bed, target, dark, "/checkouts/human-start-work").await;
+
+    let placed = jobs::select_executor(&state, tenant, job)
+        .await
+        .expect("select");
+    assert_eq!(placed.state, "claimed");
+    assert_eq!(placed.executor_node_id, Some(alive));
+    bed.teardown().await;
+}

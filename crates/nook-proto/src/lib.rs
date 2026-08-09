@@ -213,6 +213,24 @@ pub enum NodeToControl {
         ok: bool,
         message: String,
     },
+    /// Where a BUILD run's worktree is, reported once the node has created or
+    /// adopted it (MAIN-480 AC-4). The tree outlives the run, so the control
+    /// plane records it on the card: that record is what pins later passes to
+    /// this node, what `prune-worktree` addresses, and what tells the node's
+    /// `reconcile` the directory is still wanted.
+    LoopWorktreeReady {
+        job_id: String,
+        path: String,
+    },
+    /// Every build worktree this node holds, reported on (re)connect (MAIN-480
+    /// AC-1). The node can no longer decide alone which of these are orphans —
+    /// a tree BETWEEN passes has no running job, which is exactly the state
+    /// that used to be indistinguishable from a crash leftover — so it states
+    /// what it has and the control plane orders removal of what it no longer
+    /// records.
+    LoopWorktreesHeld {
+        paths: Vec<String>,
+    },
     Pong,
     /// The head of a tunnel response: status and headers, before any body.
     ///
