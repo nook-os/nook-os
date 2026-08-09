@@ -138,6 +138,46 @@ fn review_session_id(workspace_id: &str, pr: u64) -> String {
     .to_string()
 }
 
+/// The worktree directory a BUILD run works in: stable per (workspace, card),
+/// for the reason `review_dirname` is stable per PR (MAIN-460 AC-2) — Claude
+/// Code buckets its sessions by working directory, so a repair pass in a fresh
+/// per-job path could never resume building the thing. Safe to share across
+/// runs because 0050's unique index means no two live runs ever hold the card.
+fn build_dirname(workspace_id: &str, task_key: &str) -> String {
+    sanitize(&format!("build-{workspace_id}-{task_key}"))
+}
+
+/// The agent session a BUILD run pins on its first pass and resumes after:
+/// UUIDv5 over (workspace, card) — `review_session_id`'s twin (MAIN-460 AC-1).
+fn build_session_id(workspace_id: &str, task_key: &str) -> String {
+    uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_OID,
+        format!("nook-build:{workspace_id}:{task_key}").as_bytes(),
+    )
+    .to_string()
+}
+
+/// Which stable identity this run keeps, if any: `(dirname, session_id)`.
+///
+/// One decision for both facts, because they MUST agree — the session bucket
+/// is keyed on the working directory, so a stable session in a per-job dir
+/// (or the reverse) is a warm layer that never warms. `None` means per-job:
+/// spec and decompose runs neither resume nor leave a tree behind.
+fn warm_identity(
+    kind: &str,
+    review_pr: Option<u64>,
+    workspace_id: Option<&str>,
+    task_key: &str,
+) -> Option<(String, String)> {
+    match (review_pr, workspace_id) {
+        (Some(pr), Some(ws)) => Some((review_dirname(ws, pr), review_session_id(ws, pr))),
+        (None, Some(ws)) if kind == "build" && !task_key.is_empty() => {
+            Some((build_dirname(ws, task_key), build_session_id(ws, task_key)))
+        }
+        _ => None,
+    }
+}
+
 /// Does the agent already hold a session under this id?
 ///
 /// Answered from the filesystem — `<config>/projects/*/<id>.jsonl` — because it
@@ -160,6 +200,28 @@ fn agent_session_exists(session_id: &str) -> bool {
     projects
         .flatten()
         .any(|bucket| bucket.path().join(&file).is_file())
+}
+
+/// Move a session file that refused to resume out of the agent's way, so the
+/// derived id can be pinned fresh and the NEXT pass resumes a working session
+/// instead of paying the resume-fail-relaunch tax forever. Renamed, not
+/// deleted — the transcript may still be worth a human's read.
+fn quarantine_agent_session(session_id: &str) {
+    let config = std::env::var("CLAUDE_CONFIG_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".claude")
+        });
+    let file = format!("{session_id}.jsonl");
+    let Ok(projects) = std::fs::read_dir(config.join("projects")) else {
+        return;
+    };
+    for bucket in projects.flatten() {
+        let path = bucket.path().join(&file);
+        if path.is_file() {
+            let _ = std::fs::rename(&path, bucket.path().join(format!("{session_id}.corrupt")));
+        }
+    }
 }
 
 fn job_tmux_name(job_id: &str) -> String {
@@ -564,17 +626,20 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
         ssh_key,
         nook_token,
     } = job;
-    // A review run keeps ONE working directory per (workspace, PR) across
-    // runs — the agent-session bucket is keyed on it (see `review_dirname`).
-    // Everything else stays per-job.
-    let is_review = matches!(
-        (review_pr_number, workspace_id.as_deref()),
-        (Some(_), Some(_))
+    // A review run keeps ONE working directory per (workspace, PR), and a
+    // build run one per (workspace, card) — the agent-session bucket is keyed
+    // on it (see `warm_identity`). Everything else stays per-job.
+    let warm = warm_identity(
+        &kind,
+        review_pr_number,
+        workspace_id.as_deref(),
+        &target_task_key,
     );
-    let dirname = match (review_pr_number, workspace_id.as_deref()) {
-        (Some(pr), Some(ws)) => review_dirname(ws, pr),
-        _ => job_dirname(&job_id),
-    };
+    let stable = warm.is_some();
+    let dirname = warm
+        .as_ref()
+        .map(|(d, _)| d.clone())
+        .unwrap_or_else(|| job_dirname(&job_id));
     if let Ok(mut s) = running_jobs().lock() {
         s.insert(dirname.clone());
     }
@@ -628,7 +693,10 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
     if own_worktree.exists() {
         let _ = remove_job_worktree(&cache, &own_worktree);
     }
-    let worktree = match add_job_worktree_in(&wt_base, &cache, &branch, &dirname, is_review) {
+    // A STABLE worktree (review or build) outlives the run at its path, so an
+    // attached checkout would pin `branch` in the mirror and wedge every later
+    // fetch (MAIN-466) — detach both; the skill makes its own branch anyway.
+    let worktree = match add_job_worktree_in(&wt_base, &cache, &branch, &dirname, stable) {
         Ok(w) => w,
         Err(e) => {
             finished(&out, &job_id, false, format!("worktree setup failed: {e}"));
@@ -709,6 +777,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
                 seed: seed.as_deref(),
                 review_pr: review_pr_number,
                 build_task: (kind == "build").then_some(target_task_key.as_str()),
+                warm_session: warm.as_ref().map(|(_, sid)| sid.as_str()),
             },
             AgentIdentity {
                 token: nook_token.as_deref(),
@@ -813,6 +882,11 @@ struct RunBrief<'a> {
     /// The ticket a build run owns (MAIN-383 AC-5): same contract as
     /// `review_pr`, for the kind whose unit is a card rather than a PR.
     build_task: Option<&'a str>,
+    /// The warm session this run continues, from the ONE `warm_identity`
+    /// decision in `run()` — threaded rather than re-derived so the session
+    /// and the worktree cannot disagree by construction. `None` is a per-job
+    /// session.
+    warm_session: Option<&'a str>,
 }
 
 fn drive_streaming(
@@ -828,26 +902,22 @@ fn drive_streaming(
         seed,
         review_pr,
         build_task,
+        warm_session,
     } = brief;
-    use crate::job_adapter::{self, Event, StreamingSession, TurnState};
+    use crate::job_adapter;
 
-    // A review run continues ITS pull request's agent session, so a second look
-    // after a push keeps the tree and the earlier reasoning instead of
-    // rebuilding both to read one new commit (MAIN-455 AC-3). The session id is
-    // derived (workspace + PR), the first pass pins it, and every later pass
-    // resumes it — decided by whether the session file exists, never by hope.
-    // Still best effort across machines: the session lives on ONE node, so a
-    // run placed elsewhere pins its own and is a cold start, not a failure.
-    let args = match (review_pr, identity.workspace_id) {
-        (Some(pr), Some(ws)) => {
-            let sid = review_session_id(ws, pr);
-            if agent_session_exists(&sid) {
-                job_adapter::claude_resume_args(&sid)
-            } else {
-                job_adapter::claude_stream_args(&sid)
-            }
-        }
-        _ => job_adapter::claude_stream_args(job_id),
+    // A warm run continues ITS item's agent session — a review its PR's
+    // (MAIN-455 AC-3), a build its card's (MAIN-460 AC-1) — so a second look
+    // keeps the tree and the earlier reasoning instead of rebuilding both. The
+    // id comes from `run()`'s single `warm_identity` decision, the first pass
+    // pins it, and every later pass resumes it — decided by whether the
+    // session file exists, never by hope. Still best effort across machines:
+    // the session lives on ONE node, so a run placed elsewhere pins its own
+    // and is a cold start, not a failure.
+    let (args, resumed) = match warm_session {
+        Some(sid) if agent_session_exists(sid) => (job_adapter::claude_resume_args(sid), true),
+        Some(sid) => (job_adapter::claude_stream_args(sid), false),
+        None => (job_adapter::claude_stream_args(job_id), false),
     };
     let mut env: Vec<(&str, &str)> = vec![
         ("NOOK_JOB_ID", job_id),
@@ -908,18 +978,102 @@ fn drive_streaming(
     // inside the agent silently falls back to the node's own key.
     if let Some(w) = identity.workspace_id.filter(|w| !w.trim().is_empty()) {
         env.push(("NOOK_WORKSPACE_ID", w));
+        // …and the OTHER half of MAIN-367's mechanism, without which the
+        // variable above feeds a shim nothing invokes: git resolves its ssh
+        // through the shim, which pulls the workspace's pinned key — so a
+        // build's `git push` speaks as the workspace, not as the node
+        // (MAIN-460 AC-3). The shim falls through to plain ssh when nothing
+        // is pinned, so this changes nothing for public repos and local
+        // paths — the same reasoning as `tmux::spawn`'s export, and the two
+        // must stay together the way tmux.rs's guard test says.
+        env.push(("GIT_SSH_COMMAND", "nook get workspace git-ssh"));
     }
 
-    let mut session = match StreamingSession::spawn(RUNTIME, &args, worktree, &env) {
-        Ok(s) => s,
+    let mut end = match run_agent_once(out, job_id, worktree, &args, &env, skill, target, seed) {
+        Ok(e) => e,
         Err(e) => return (false, e),
     };
+    // A failed RESUME is a cold start, never a failed run (MAIN-460 AC-4). An
+    // agent that exits before its first result record has ALMOST always loaded
+    // nothing — a corrupt or foreign session file dies at launch — though a
+    // crash mid-turn lands here too; the second launch then meets the skill's
+    // own clean-tree preflight, which bounds the damage to one wasted pass.
+    // The bad file is QUARANTINED first so the retry can pin the derived id:
+    // left in place, every later pass for this item would pay the same
+    // resume-fail-relaunch tax forever, warming nothing.
+    if resumed && end.outcome.is_none() {
+        note(
+            out,
+            job_id,
+            "resuming the previous session failed — starting cold",
+        );
+        if let Some(sid) = warm_session {
+            quarantine_agent_session(sid);
+        }
+        let cold = job_adapter::claude_stream_args(warm_session.unwrap_or(job_id));
+        end = match run_agent_once(out, job_id, worktree, &cold, &env, skill, target, seed) {
+            Ok(e) => e,
+            Err(e) => return (false, e),
+        };
+    }
+
+    match end.outcome {
+        Some((ok, message)) => (ok, message),
+        // The stream ended without a result record: fall back to the exit code
+        // and the tail, the same crash-honesty rule the tmux path uses (AC-4 of
+        // MAIN-161) rather than reporting a success nobody observed.
+        None => {
+            let reason = match end.code {
+                Some(0) => "the agent exited without a result record".to_string(),
+                Some(c) => format!("the agent exited with status {c}"),
+                None => "the agent died without an exit status".to_string(),
+            };
+            (
+                false,
+                if end.tail.is_empty() {
+                    reason
+                } else {
+                    format!("{reason}\n{}", end.tail)
+                },
+            )
+        }
+    }
+}
+
+/// How one agent launch ended: the result record if one arrived, else the raw
+/// exit facts for the crash-honesty fallback.
+struct AgentEnd {
+    outcome: Option<(bool, String)>,
+    code: Option<i32>,
+    tail: String,
+}
+
+/// One launch of the agent: spawn, send the skill command, pump events, wait.
+/// `Err` is a launch that never got going (no process, no stdout, no first
+/// send); `Ok` with `outcome: None` is an agent that started and died without
+/// a result record — the shape a failed `--resume` produces, and the fact the
+/// cold-start retry keys on.
+// The launch's parameters, already grouped as `LoopJob` on the wire — the
+// same reason `drive_session` carries this allow.
+#[allow(clippy::too_many_arguments)]
+fn run_agent_once(
+    out: &Sender<NodeToControl>,
+    job_id: &str,
+    worktree: &Path,
+    args: &[String],
+    env: &[(&str, &str)],
+    skill: &str,
+    target: &str,
+    seed: Option<&str>,
+) -> Result<AgentEnd, String> {
+    use crate::job_adapter::{self, Event, StreamingSession, TurnState};
+    let mut session = StreamingSession::spawn(RUNTIME, args, worktree, env)?;
     register_stream(job_id, &session);
 
     let Some(stdout) = session.take_stdout() else {
         session.kill();
         unregister_stream(job_id);
-        return (false, "the agent produced no stdout".into());
+        return Err("the agent produced no stdout".into());
     };
 
     // The opening turn is the skill command — the same line the tmux path typed,
@@ -933,7 +1087,7 @@ fn drive_streaming(
     if let Err(e) = session.send(&opening) {
         session.kill();
         unregister_stream(job_id);
-        return (false, format!("could not send the skill command: {e}"));
+        return Err(format!("could not send the skill command: {e}"));
     }
 
     // Pump events on this thread; the child owns the pace.
@@ -1016,28 +1170,11 @@ fn drive_streaming(
     let code = session.wait();
     unregister_stream(job_id);
 
-    match outcome {
-        Some((ok, message)) => (ok, message),
-        // The stream ended without a result record: fall back to the exit code
-        // and the tail, the same crash-honesty rule the tmux path uses (AC-4 of
-        // MAIN-161) rather than reporting a success nobody observed.
-        None => {
-            let tail = session.tail_text();
-            let reason = match code {
-                Some(0) => "the agent exited without a result record".to_string(),
-                Some(c) => format!("the agent exited with status {c}"),
-                None => "the agent died without an exit status".to_string(),
-            };
-            (
-                false,
-                if tail.is_empty() {
-                    reason
-                } else {
-                    format!("{reason}\n{tail}")
-                },
-            )
-        }
-    }
+    Ok(AgentEnd {
+        outcome,
+        code,
+        tail: session.tail_text(),
+    })
 }
 
 /// Tell the control plane whether a turn is in flight (AC-2). A real signal
@@ -1354,6 +1491,60 @@ mod tests {
         );
         assert_eq!(review_dirname("ws-1", 348), review_dirname("ws-1", 348));
         assert_ne!(review_dirname("ws-1", 348), review_dirname("ws-1", 349));
+    }
+
+    /// MAIN-460 AC-1/AC-2: the same card always names the same session and the
+    /// same working directory — the warm layer's contract, `review`'s twin.
+    #[test]
+    fn a_cards_session_and_worktree_are_stable_across_runs() {
+        let a = build_session_id("ws-1", "MAIN-42");
+        assert_eq!(a, build_session_id("ws-1", "MAIN-42"));
+        assert_ne!(
+            a,
+            build_session_id("ws-1", "MAIN-43"),
+            "another card is another builder"
+        );
+        assert_ne!(
+            a,
+            build_session_id("ws-2", "MAIN-42"),
+            "another repo's MAIN-42 is unrelated"
+        );
+        assert_eq!(
+            build_dirname("ws-1", "MAIN-42"),
+            build_dirname("ws-1", "MAIN-42")
+        );
+        assert_ne!(
+            build_dirname("ws-1", "MAIN-42"),
+            build_dirname("ws-1", "MAIN-43")
+        );
+    }
+
+    /// One decision names both stable facts, and only for the kinds that have
+    /// them: review by PR, build by card, everything else per-job (`None`).
+    #[test]
+    fn warm_identity_matches_kind_and_inputs() {
+        // A review run warms its PR whatever the kind string says — the PR
+        // number IS the signal, exactly as the dirname selection always read.
+        let review = warm_identity("review", Some(7), Some("ws-1"), "");
+        assert_eq!(
+            review,
+            Some((review_dirname("ws-1", 7), review_session_id("ws-1", 7)))
+        );
+
+        let build = warm_identity("build", None, Some("ws-1"), "MAIN-42");
+        assert_eq!(
+            build,
+            Some((
+                build_dirname("ws-1", "MAIN-42"),
+                build_session_id("ws-1", "MAIN-42")
+            ))
+        );
+
+        // Cold kinds and incomplete identities stay per-job.
+        assert_eq!(warm_identity("spec", None, Some("ws-1"), "MAIN-42"), None);
+        assert_eq!(warm_identity("decompose", None, Some("ws-1"), "E-1"), None);
+        assert_eq!(warm_identity("build", None, Some("ws-1"), ""), None);
+        assert_eq!(warm_identity("build", None, None, "MAIN-42"), None);
     }
 
     /// MAIN-455: every kind may build its cache, review included — the inverse
