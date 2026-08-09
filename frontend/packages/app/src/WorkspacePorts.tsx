@@ -14,6 +14,10 @@
 // is here is the workspace's own declaration, plus the leases its OWN sessions
 // hold — the same numbers viewed from the other end, which is what makes "I
 // declared API_PORT" and "this session got 4207" checkable in one place.
+//
+// The rationale that used to sit on every row now hangs off `title` instead.
+// It is the same text; a control surface somebody opens daily should not make
+// them re-read the design notes to find the field they came for.
 import React, { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, X } from "lucide-react";
@@ -26,6 +30,15 @@ type Requirement = Schemas["PortRequirement"];
  *  default declaration does: most sessions are a shell or an agent, and a node
  *  out of ports should not stop somebody opening a terminal. */
 const BLANK: Requirement = { name: "", env: "", protocol: "tcp", required: false };
+
+/** Why `optional` is the setting whose consequence is invisible: the session
+ *  starts either way and the variable is simply missing, so an app that falls
+ *  back to a default falls back to the literal every other session uses too. */
+const REQUIRED_HELP =
+  "required: the session does not start unless this port is leased.\n" +
+  "optional: the session still starts and the variable is unset — the app must " +
+  "fail fast rather than use a default, because that default is the literal " +
+  "every other session would fall back to as well.";
 
 /** The two collisions the API and the merged migration already depend on, found
  *  BEFORE the save so the message lands on the offending field (AC-3).
@@ -166,7 +179,7 @@ export function WorkspacePorts({
       actions={
         editing ? (
           <>
-            <button className="btn small" disabled={busy || invalid} onClick={save}>
+            <button className="btn primary small" disabled={busy || invalid} onClick={save}>
               save
             </button>
             <button className="btn small" disabled={busy} onClick={() => setEditing(false)}>
@@ -183,37 +196,43 @@ export function WorkspacePorts({
         )
       }
     >
-      <div style={{ padding: 10, display: "grid", gap: 10 }}>
-        <div className="faint small">
-          A session here gets one leased port per listener, delivered as the
-          variable named. An app binds <span className="mono">$THAT</span>, never
-          a literal — which is what lets two worktrees run side by side.
+      <div className="ports-body">
+        <div
+          className="faint small"
+          title="An app binds the variable, never a literal — which is what lets two worktrees of one repo run side by side instead of fighting over 3000."
+        >
+          One leased port per listener, delivered as the variable named.
         </div>
 
         {editing ? (
-          <div style={{ display: "grid", gap: 6 }}>
+          <div className="ports-editor">
+            <div className="ports-grid ports-head faint small">
+              <span>name</span>
+              <span>variable</span>
+              <span>proto</span>
+              <span title={REQUIRED_HELP}>required</span>
+              <span />
+            </div>
+
             {rows.map((r, i) => (
-              <div key={i} style={{ display: "grid", gap: 4 }}>
-                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <React.Fragment key={i}>
+                <div className="ports-grid ports-row">
                   <input
-                    className="input"
-                    style={{ width: 120 }}
-                    placeholder="name"
+                    className="input small"
+                    placeholder="web"
                     aria-label={`listener ${i + 1} name`}
                     value={r.name}
                     onChange={(e) => set(i, { name: e.target.value })}
                   />
                   <input
-                    className="input"
-                    style={{ width: 150 }}
-                    placeholder="ENV_VAR"
+                    className="input small mono"
+                    placeholder="PORT"
                     aria-label={`listener ${i + 1} variable`}
                     value={r.env}
                     onChange={(e) => set(i, { env: e.target.value })}
                   />
                   <select
-                    className="input"
-                    style={{ width: 76 }}
+                    className="input small"
                     aria-label={`listener ${i + 1} protocol`}
                     value={r.protocol ?? "tcp"}
                     onChange={(e) => set(i, { protocol: e.target.value })}
@@ -221,64 +240,31 @@ export function WorkspacePorts({
                     <option value="tcp">tcp</option>
                     <option value="udp">udp</option>
                   </select>
-                  <label
-                    className="faint small"
-                    style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
-                    title={
-                      r.required
-                        ? "required: if this port cannot be leased the session does not start"
-                        : "optional: the session still starts if this port cannot be leased, and its variable is unset — the app must not fall back to a default, because that default is the literal every other session falls back to too"
-                    }
-                  >
-                    <input
-                      type="checkbox"
-                      aria-label={`listener ${i + 1} required`}
-                      checked={!!r.required}
-                      onChange={(e) => set(i, { required: e.target.checked })}
-                    />
-                    required
-                  </label>
+                  <input
+                    type="checkbox"
+                    aria-label={`listener ${i + 1} required`}
+                    title={REQUIRED_HELP}
+                    checked={!!r.required}
+                    onChange={(e) => set(i, { required: e.target.checked })}
+                  />
                   <button
-                    className="btn small"
+                    className="btn small icon"
                     aria-label={`remove listener ${i + 1}`}
                     onClick={() => setRows((rs) => rs.filter((_, n) => n !== i))}
                   >
                     <X size={11} />
                   </button>
                 </div>
-                {/* AC-5: what the setting COSTS, on the row. A person choosing
-                    between the two should not have to read the allocator, and
-                    `optional` is the one whose consequence is invisible — the
-                    session starts either way and the variable is simply
-                    missing. */}
-                <div className="faint small" style={{ paddingLeft: 2 }}>
-                  {r.required
-                    ? "the session will not start unless this port is leased"
-                    : "starts without it — the variable is unset, so the app must fail fast rather than use a default"}
-                </div>
                 {(errors[i]?.name || errors[i]?.env) && (
-                  <div className="small" style={{ color: "var(--nook-err)" }}>
+                  <div className="ports-err small">
                     {errors[i]?.name && <span>name: {errors[i]?.name}. </span>}
                     {errors[i]?.env && <span>variable: {errors[i]?.env}.</span>}
                   </div>
                 )}
-              </div>
+              </React.Fragment>
             ))}
-            {/* MAIN-360 AC-4, as far as it can honestly go today. The warning
-                is UNCONDITIONAL because nothing records where a stored
-                declaration came from: `.nook.toml` (MAIN-359) writes the same
-                field the API writes, with no provenance beside it. Warning
-                always is the safe direction — it can be ignored by a repo that
-                commits no file, whereas staying silent would let somebody save
-                an edit that a scan quietly reverts. Making it conditional needs
-                a `source` on the declaration; noted on the card rather than
-                invented here. */}
-            <div className="faint small">
-              If this repo commits a <span className="mono">.nook.toml</span>,
-              the next scan re-syncs from that file and replaces what you save
-              here — edit the file instead.
-            </div>
-            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+
+            <div className="ports-actions">
               <button className="btn small" onClick={() => setRows((rs) => [...rs, { ...BLANK }])}>
                 <Plus size={11} /> listener
               </button>
@@ -288,6 +274,20 @@ export function WorkspacePorts({
               {rows.length === 0 && (
                 <span className="faint small">saving none declares that this repo binds nothing</span>
               )}
+            </div>
+
+            {/* MAIN-360 AC-4, as far as it can honestly go today. The warning
+                is UNCONDITIONAL because nothing records where a stored
+                declaration came from: `.nook.toml` (MAIN-359) writes the same
+                field the API writes, with no provenance beside it. Warning
+                always is the safe direction — it can be ignored by a repo that
+                commits no file, whereas staying silent would let somebody save
+                an edit that a scan quietly reverts. Making it conditional needs
+                a `source` on the declaration; noted on the card rather than
+                invented here. */}
+            <div className="ports-note faint small">
+              If this repo commits a <span className="mono">.nook.toml</span>, the next scan
+              replaces what you save here — edit the file instead.
             </div>
           </div>
         ) : declared === undefined ? (
@@ -303,22 +303,19 @@ export function WorkspacePorts({
           // panel would read as a loading state (AC-1).
           <Empty>Declares no ports — sessions here start with no port variables.</Empty>
         ) : (
-          <div style={{ display: "grid", gap: 4 }}>
+          <div className="ports-list">
             {declared.map((r) => (
-              <div
-                key={r.name}
-                style={{ display: "flex", gap: 8, alignItems: "center", padding: "1px 0" }}
-              >
-                <span className="mono" style={{ minWidth: 110 }}>
-                  {r.name}
-                </span>
+              <div key={r.name} className="ports-listrow">
+                <span className="mono">{r.name}</span>
                 <span className="mono faint">{r.env}</span>
                 <Pill>{r.protocol ?? "tcp"}</Pill>
                 {r.required ? (
-                  <Pill tone="warn">required</Pill>
+                  <Pill tone="warn" title={REQUIRED_HELP}>
+                    required
+                  </Pill>
                 ) : (
-                  <span className="faint small" title="the session starts without it and the variable is unset">
-                    optional — unset if unleased
+                  <span className="faint small" title={REQUIRED_HELP}>
+                    optional
                   </span>
                 )}
               </div>
@@ -327,24 +324,17 @@ export function WorkspacePorts({
         )}
 
         {/* AC-6: the declaration above, and what it actually turned into. */}
-        <div>
-          <div className="faint small" style={{ marginBottom: 4 }}>
-            live leases · {leases.length}
-          </div>
+        <div className="ports-leases">
+          <div className="faint small">live leases · {leases.length}</div>
           {leases.length === 0 ? (
             <span className="faint small">none held right now</span>
           ) : (
             leases.map((l) => (
-              <div
-                key={`${l.session}:${l.port}`}
-                style={{ display: "flex", gap: 8, alignItems: "center", padding: "1px 0" }}
-              >
+              <div key={`${l.session}:${l.port}`} className="ports-listrow">
                 <span className="mono">{l.port}</span>
                 <Pill>{l.name}</Pill>
                 <span className="mono faint small">{l.env}</span>
-                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>
-                  {l.session}
-                </span>
+                <span className="ports-lease-session">{l.session}</span>
               </div>
             ))
           )}
