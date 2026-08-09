@@ -134,6 +134,7 @@ run_lint() {
     scripts/check-sqlite-ci.sh scripts/check-sqlite-ci.test.sh \
     scripts/squash-migrations.sh \
     scripts/dev-bootstrap.sh scripts/dev-up.sh scripts/compose-project.sh \
+    scripts/dev-prewarm.sh scripts/dev-wait-healthy.sh \
     || die "shellcheck"
   pass_if_ran "shell scripts clean"
 
