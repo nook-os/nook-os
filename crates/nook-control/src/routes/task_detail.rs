@@ -43,6 +43,36 @@ pub async fn comments_of(state: &AppState, task: TaskId) -> ApiResult<Vec<TaskCo
     state.tasks.comments_of(task).await
 }
 
+#[utoipa::path(get, path = "/api/v1/tasks/{id}/revisions",
+    operation_id = "list_description_revisions", params(("id" = String, Path,)),
+    responses((status = 200, body = [TaskDescriptionRevision]), (status = 404)))]
+pub async fn list_revisions(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(ident): Path<String>,
+) -> ApiResult<Json<Vec<TaskDescriptionRevision>>> {
+    let task = tasks::resolve_id(state.tasks.as_ref(), auth.tenant_id, &ident).await?;
+    // The stored bodies ARE the card's descriptions, so this route must refuse
+    // exactly where the detail read does (MAIN-76): a private card a viewer
+    // cannot see must 404 here too, or its whole description history leaks
+    // through the sibling route.
+    let row = state
+        .tasks
+        .get_row(auth.tenant_id, task)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    if !tasks::visible_to(&row, auth.user_id) {
+        return Err(ApiError::NotFound);
+    }
+    // Newest first: the reader is undoing the most recent clobber (MAIN-470).
+    Ok(Json(
+        state
+            .tasks
+            .description_revisions_of(auth.tenant_id, task)
+            .await?,
+    ))
+}
+
 #[utoipa::path(post, path = "/api/v1/tasks/{id}/comments",
     operation_id = "create_comment", params(("id" = String, Path,)),
     request_body = CreateCommentRequest,

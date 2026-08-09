@@ -5858,6 +5858,42 @@
         }
       }
     },
+    "/api/v1/tasks/{id}/revisions": {
+      "get": {
+        "tags": [
+          "crate::routes::task_detail"
+        ],
+        "operationId": "list_description_revisions",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TaskDescriptionRevision"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/tasks/{id}/start-work": {
       "post": {
         "tags": [
@@ -14562,6 +14598,45 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "TaskDescriptionRevision": {
+        "type": "object",
+        "description": "A description body the moment before a replace overwrote it (MAIN-470).\n\nThe task PATCH is a whole-body replace with no history, so one bad payload\ndestroys a contract with no undo — the row exists so it doesn't. Newest\nfirst from the API: the reader is undoing the most recent clobber.",
+        "required": [
+          "id",
+          "tenant_id",
+          "task_id",
+          "body",
+          "created_at"
+        ],
+        "properties": {
+          "author_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Who performed the replace; `None` for a node/system credential."
+          },
+          "body": {
+            "type": "string",
+            "description": "The body that was replaced — the thing to restore."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "task_id": {
+            "$ref": "#/components/schemas/TaskId"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
           }
         }
       },

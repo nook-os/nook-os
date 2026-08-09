@@ -140,6 +140,10 @@ enum Command {
         key: String,
         #[arg(long)]
         json: bool,
+        /// List the description bodies past replaces overwrote (newest first)
+        /// — the undo for a clobbered description.
+        #[arg(long)]
+        revisions: bool,
     },
     /// Comment on a task.
     Comment {
@@ -152,8 +156,14 @@ enum Command {
     /// it never silently loses your change. Read the body first with `nook task`.
     SetDescription {
         key: String,
-        /// The new description (markdown).
+        /// The new description (markdown). A lone `-` reads it from stdin,
+        /// for multi-line bodies.
         description: Vec<String>,
+        /// Replace a long description with a tiny body anyway — without this,
+        /// shrinking a >200-char description below 20 chars is refused as
+        /// probable payload loss.
+        #[arg(long)]
+        force: bool,
     },
     /// Add or remove a label.
     Label {
@@ -587,11 +597,17 @@ async fn main() -> Result<()> {
             kind,
             dependent,
         } => cli::relate(&blocker, &kind, &dependent).await,
-        Command::Task { key, json } => cli::task(&key, json).await,
+        Command::Task {
+            key,
+            json,
+            revisions,
+        } => cli::task(&key, json, revisions).await,
         Command::Comment { key, body } => cli::comment(&key, &body.join(" ")).await,
-        Command::SetDescription { key, description } => {
-            cli::set_description(&key, &description.join(" ")).await
-        }
+        Command::SetDescription {
+            key,
+            description,
+            force,
+        } => cli::set_description(&key, &description, force).await,
         Command::Label { key, name, remove } => cli::label(&key, &name, remove).await,
         Command::Workspace(WorkspaceCommand::Current { json }) => {
             cli::workspace_current(json).await

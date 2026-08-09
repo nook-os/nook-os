@@ -545,6 +545,23 @@ pub trait TaskRepository: Send + Sync {
 
     async fn create_comment(&self, new: NewComment) -> ApiResult<TaskComment>;
 
+    /// Keep the body a description replace is about to destroy (MAIN-470
+    /// AC-3) — the undo a whole-body PATCH otherwise lacks.
+    async fn add_description_revision(
+        &self,
+        tenant: TenantId,
+        task: TaskId,
+        body: &str,
+        author: Option<Uuid>,
+    ) -> ApiResult<()>;
+
+    /// Newest first: the reader is undoing the most recent clobber.
+    async fn description_revisions_of(
+        &self,
+        tenant: TenantId,
+        task: TaskId,
+    ) -> ApiResult<Vec<TaskDescriptionRevision>>;
+
     /// `(visibility, number, board key)` — what decides whether a notification
     /// may carry an excerpt, and how to name the card if not.
     async fn task_visibility_naming(
@@ -2039,6 +2056,40 @@ impl TaskRepository for DbTaskRepository {
             .await?)
     }
 
+    async fn add_description_revision(
+        &self,
+        tenant: TenantId,
+        task: TaskId,
+        body: &str,
+        author: Option<Uuid>,
+    ) -> ApiResult<()> {
+        self.db
+            .exec(
+                "INSERT INTO task_description_revisions (id, tenant_id, task_id, body, author_id)
+         VALUES ($1, $2, $3, $4, $5)",
+                params![Uuid::now_v7(), tenant, task, body, author],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn description_revisions_of(
+        &self,
+        tenant: TenantId,
+        task: TaskId,
+    ) -> ApiResult<Vec<TaskDescriptionRevision>> {
+        Ok(self
+            .db
+            .query_all(
+                "SELECT id, tenant_id, task_id, body, author_id, created_at
+         FROM task_description_revisions
+         WHERE tenant_id = $1 AND task_id = $2
+         ORDER BY created_at DESC, id DESC",
+                params![tenant, task],
+            )
+            .await?)
+    }
+
     async fn task_visibility_naming(
         &self,
         task: TaskId,
@@ -2340,6 +2391,7 @@ struct FakeState {
     /// `(task, label_name)`
     task_labels: Vec<(Uuid, String)>,
     comments: Vec<TaskComment>,
+    desc_revisions: Vec<TaskDescriptionRevision>,
     labels: Vec<Label>,
     relations: Vec<TaskRelation>,
     /// `(checkout, tenant, workspace, node, path, kind, present, remote)`
@@ -3575,6 +3627,47 @@ impl TaskRepository for FakeTaskRepository {
         };
         self.inner.lock().unwrap().comments.push(c.clone());
         Ok(c)
+    }
+
+    async fn add_description_revision(
+        &self,
+        tenant: TenantId,
+        task: TaskId,
+        body: &str,
+        author: Option<Uuid>,
+    ) -> ApiResult<()> {
+        self.inner
+            .lock()
+            .unwrap()
+            .desc_revisions
+            .push(TaskDescriptionRevision {
+                id: Uuid::now_v7(),
+                tenant_id: tenant,
+                task_id: task,
+                body: body.to_string(),
+                author_id: author,
+                created_at: chrono::Utc::now(),
+            });
+        Ok(())
+    }
+
+    async fn description_revisions_of(
+        &self,
+        tenant: TenantId,
+        task: TaskId,
+    ) -> ApiResult<Vec<TaskDescriptionRevision>> {
+        let mut rows: Vec<_> = self
+            .inner
+            .lock()
+            .unwrap()
+            .desc_revisions
+            .iter()
+            .filter(|r| r.tenant_id == tenant && r.task_id == task)
+            .cloned()
+            .collect();
+        // Newest first, id as the tiebreak — the real query's ordering.
+        rows.sort_by_key(|r| std::cmp::Reverse((r.created_at, r.id)));
+        Ok(rows)
     }
 
     async fn task_visibility_naming(

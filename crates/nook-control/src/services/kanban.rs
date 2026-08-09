@@ -280,6 +280,23 @@ impl KanbanProvider for LocalBoardProvider {
             }
         }
 
+        // A description replace is the one edit here with no undo — the PATCH
+        // overwrites the whole body. Read what it is about to destroy so the
+        // successful write below can keep it as a revision (MAIN-470 AC-3).
+        // NOT atomic with the update: under a concurrent unguarded edit this
+        // can capture a body other than the one the update actually replaces.
+        // Guarded callers (the CLI always sends `expected_updated_at`) cannot
+        // hit the window — a moved body fails their precondition instead.
+        let prior_description = if req.description.is_some() {
+            self.repo
+                .get_row(tenant, task)
+                .await?
+                .and_then(|t| t.description)
+        } else {
+            None
+        };
+        let author = viewer;
+
         // Parent tri-state (AC-2/AC-3): absent = leave, null = detach, a ref =
         // validate + set. `self_is_epic` is the EFFECTIVE type after this patch.
         let effective_is_epic = req.type_.as_deref().unwrap_or(&cur_type) == "epic";
@@ -346,6 +363,26 @@ impl KanbanProvider for LocalBoardProvider {
             .await?;
 
         if let Some(t) = updated {
+            // Only a replace that actually changed the body earns a revision:
+            // a no-op rewrite destroyed nothing, and recording it would bury
+            // the real clobber under noise.
+            if let Some(prior) = prior_description {
+                if req.description.as_deref() != Some(prior.as_str()) {
+                    // Non-fatal: the replace above already landed, so an error
+                    // here would report failure for an edit that happened —
+                    // while still losing the revision. Log loudly instead.
+                    if let Err(e) = self
+                        .repo
+                        .add_description_revision(tenant, task, &prior, author.map(|u| u.0))
+                        .await
+                    {
+                        tracing::error!(
+                            task = %t.id.0,
+                            "description revision not recorded — the prior body is lost: {e:?}"
+                        );
+                    }
+                }
+            }
             return Ok(t);
         }
 
