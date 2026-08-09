@@ -1,7 +1,7 @@
 ---
 name: nook-build
 description: "Build the one NookOS card a run is directed at, end to end: read the contract, implement it in a branch, verify, open a PR, and report the outcome. Judgment only — the control plane picks, claims, moves cards and records. Designed for directed build runs; never merges."
-version: 2.0.0
+version: 2.1.0
 author: NookOS
 license: MIT
 platforms: [linux, macos]
@@ -97,7 +97,16 @@ conflict hygiene pass routing a rebase here).
   **lowercased**, plus a short slug: `MAIN-42` → `main-42-short-slug`.
 - The checkout this run starts in is its own — the node prepared a dedicated
   worktree for this card before the run began. Work here; never relocate to a
-  checkout other sessions may hold.
+  checkout other sessions may hold, and never switch a shared checkout's
+  branch: on 2026-08-08 two builders sharing one checkout moved its branch
+  under each other mid-build — phantom file losses, tests running against the
+  wrong branch's code, an `--amend` seconds from landing on the other
+  builder's commit (MAIN-475). The per-card worktree is the isolation.
+- **Worktrees persist; teardown is not the skill's job.** The card's worktree
+  outlives the run on purpose — that is what lets a repair resume the tree
+  the build pass left warm — and the platform's reconcile/orphan cleanup
+  prunes it once the work is done. Do not `git worktree remove` at the end
+  of a pass.
 - Implement the acceptance criteria using the repository's existing style,
   architecture, and naming.
 - Add or update tests when the change affects logic, data flow, permissions,
