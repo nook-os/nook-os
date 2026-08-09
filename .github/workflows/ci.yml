@@ -100,7 +100,10 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         if: matrix.engine == 'postgres'
-        run: cargo clippy --workspace --all-targets
+        # `-D warnings`, matching `./test.sh`'s gate exactly. Without it a
+        # warning merged clean and then broke every local run until someone
+        # hunted it down — which is how main came to be red on three of them.
+        run: cargo clippy --workspace --all-targets -- -D warnings
       # The source guards, and their self-tests. Pure shell + awk over the tree:
       # no Docker, well under a second, and nothing else was running them —
       # `check-sqlx-signatures.sh` had been RED on main unnoticed because it
