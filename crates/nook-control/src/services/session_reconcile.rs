@@ -265,7 +265,7 @@ pub fn blockers(spec: &SessionSpec, node: &NodeFacts) -> Vec<NodeBlocker> {
     if !node.runtimes.is_empty() && !node.runtimes.contains(&spec.runtime) {
         out.push(NodeBlocker::RuntimeUnavailable {
             wanted: spec.runtime.clone(),
-            available: node.runtimes.iter().cloned().collect(),
+            available: node.runtimes.to_vec(),
         });
     }
     for (k, v) in &spec.node_selector {

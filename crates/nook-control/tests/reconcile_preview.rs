@@ -84,7 +84,7 @@ async fn blocked_nodes_carry_every_ground_and_nothing_is_written() {
 
     // `good`: online, labelled to match, holding the checkout.
     online(&state, tenant, good);
-    nook_control::routes::nodes::set_placement(
+    let placed = nook_control::routes::nodes::set_placement(
         axum::extract::State(state.clone()),
         ctx(user, tenant),
         axum::extract::Path(good),
@@ -95,6 +95,9 @@ async fn blocked_nodes_carry_every_ground_and_nothing_is_written() {
     )
     .await
     .expect("label good");
+    // The label this whole case turns on: if it did not land, the preview
+    // below would be asserting against a node that never matched the selector.
+    assert_eq!(placed.labels.get("role").map(String::as_str), Some("eu"));
     state
         .workspaces
         .associate_clone(tenant, good, ws, "/w/repo", "repo.git", "repo")
@@ -102,7 +105,7 @@ async fn blocked_nodes_carry_every_ground_and_nothing_is_written() {
         .expect("checkout");
 
     // `bad`: offline (never registered), missing the selector label, tainted.
-    nook_control::routes::nodes::set_placement(
+    let tainted = nook_control::routes::nodes::set_placement(
         axum::extract::State(state.clone()),
         ctx(user, tenant),
         axum::extract::Path(bad),
@@ -116,6 +119,16 @@ async fn blocked_nodes_carry_every_ground_and_nothing_is_written() {
     )
     .await
     .expect("taint bad");
+    // Same reason: an unapplied taint would make `bad` blocked for the wrong
+    // reason, and the preview's blocker list would still look right.
+    assert_eq!(
+        tainted
+            .taints
+            .iter()
+            .map(|t| t.key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["gpu"]
+    );
 
     let sessions_before: i64 = bed
         .db()
