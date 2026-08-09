@@ -580,6 +580,107 @@ pub async fn converge_builds(
     })
 }
 
+/// The `Closes KEY` line — the reviewer's only join from a PR to its contract,
+/// parsed by the same literal rule it teaches.
+fn closes_key(body: &str) -> Option<String> {
+    body.lines().find_map(|l| {
+        let token = l
+            .trim()
+            .strip_prefix("Closes ")?
+            .split_whitespace()
+            .next()?;
+        let (prefix, num) = token.rsplit_once('-')?;
+        (!prefix.is_empty() && !num.is_empty() && num.chars().all(|c| c.is_ascii_digit()))
+            .then(|| token.to_string())
+    })
+}
+
+/// AC-3's join check (MAIN-459): a `pr_opened` outcome must name a PR of THIS
+/// workspace's repository whose body closes THIS run's card.
+///
+/// Validated as far as the deployment can see. The URL shape and repository
+/// are always checkable for a GitHub workspace and refuse loudly on mismatch.
+/// The body's `Closes` line needs a readable forge: no credential, or a forge
+/// that fails to answer, SKIPS that half with a warning rather than refusing —
+/// availability must not gate recording, or an outage strands every finished
+/// run un-recordable. A workspace whose remote is not GitHub validates nothing.
+async fn validate_pr_join(
+    state: &AppState,
+    tenant: TenantId,
+    task: TaskId,
+    workspace: nook_types::WorkspaceId,
+    url: &str,
+) -> ApiResult<()> {
+    let Some(ws) = state.workspaces.get(tenant, workspace).await? else {
+        return Ok(());
+    };
+    let Some(repo) = ws
+        .git_remote_url
+        .as_deref()
+        .and_then(crate::services::forge::github_repo)
+    else {
+        return Ok(());
+    };
+    // `github_repo` lowercases (it rides `normalize_remote`), while `gh pr
+    // create` prints GitHub's canonical casing — so the host/owner/name half
+    // is compared case-insensitively, or a repo named `Acme/API` would refuse
+    // every correct outcome. The path literal and the number are exact.
+    let expected = format!("https://github.com/{}/{}/pull/", repo.owner, repo.name);
+    let head = url.get(..expected.len()).unwrap_or_default();
+    let number: u64 = (head.to_lowercase() == expected)
+        .then(|| url[expected.len()..].trim_end_matches('/').parse().ok())
+        .flatten()
+        .ok_or_else(|| {
+            ApiError::BadRequest(format!(
+                "the url is not a pull request of this workspace's repository \
+                 (expected {expected}<number>)"
+            ))
+        })?;
+
+    // The workspace's own identity first (MAIN-456); otherwise the
+    // deployment's forge — the SAME instance the review demand holds, which is
+    // also what lets a test point this check at a fake. Neither present:
+    // nothing can read the body, so the Closes half is skipped.
+    let own;
+    let forge: &dyn crate::services::forge::Forge =
+        match crate::services::workspace_gh_token(state, tenant, workspace).await {
+            Some(t) => {
+                own = crate::services::forge::GithubForge::from_token(&t);
+                &own
+            }
+            None => match state.review_demand.forge() {
+                Some(f) => f,
+                None => return Ok(()),
+            },
+        };
+    let body = match forge.pr_details(&repo, number).await {
+        Ok(d) => d.body,
+        Err(e) => {
+            tracing::warn!(
+                %workspace, pr = number, error = %e,
+                "could not read the PR body — recording the outcome without the Closes check"
+            );
+            return Ok(());
+        }
+    };
+    let Some(key) = closes_key(&body) else {
+        return Err(ApiError::BadRequest(
+            "the PR body has no `Closes <KEY>` line — the reviewer cannot join it to its \
+             contract; add one and report the outcome again"
+                .into(),
+        ));
+    };
+    match crate::services::tasks::resolve_id(state.tasks.as_ref(), tenant, &key).await {
+        Ok(resolved) if resolved == task => Ok(()),
+        Ok(_) => Err(ApiError::BadRequest(format!(
+            "the PR closes {key}, which is not this run's card"
+        ))),
+        Err(_) => Err(ApiError::BadRequest(format!(
+            "the PR closes {key}, which resolves to no card on this board"
+        ))),
+    }
+}
+
 /// Record what a build run concluded, and mirror it to the board (MAIN-458
 /// AC-2/AC-3). The card's move is code's job now; the agent only concludes.
 pub async fn record_build_outcome(
@@ -593,7 +694,7 @@ pub async fn record_build_outcome(
         .get(tenant, job_id)
         .await?
         .ok_or(ApiError::NotFound)?;
-    let (Some(task), Some(_ws)) = (job.target_task_id, job.workspace_id) else {
+    let (Some(task), Some(ws)) = (job.target_task_id, job.workspace_id) else {
         return Err(ApiError::BadRequest(
             "only a directed build run records an outcome".into(),
         ));
@@ -618,9 +719,14 @@ pub async fn record_build_outcome(
         .map(str::trim)
         .filter(|q| !q.is_empty());
     let concluded = match req.outcome.as_str() {
-        "pr_opened" => Concluded::PrOpened(
-            url.ok_or_else(|| ApiError::BadRequest("pr_opened needs a url".into()))?,
-        ),
+        "pr_opened" => {
+            let url = url.ok_or_else(|| ApiError::BadRequest("pr_opened needs a url".into()))?;
+            // AC-3 (MAIN-459): validate the join BEFORE recording, so a PR
+            // that names another repository or another card changes nothing
+            // anywhere — the run sees the refusal and can fix its PR.
+            validate_pr_join(state, tenant, task, ws, url).await?;
+            Concluded::PrOpened(url)
+        }
         "blocked" => Concluded::Blocked(
             question.ok_or_else(|| ApiError::BadRequest("blocked needs a question".into()))?,
         ),
@@ -1743,5 +1849,26 @@ pub async fn revoke_job_token(state: &AppState, tenant: TenantId, id: JobId) {
         .await
     {
         tracing::warn!(job = %id.0, error = %e, "could not revoke the job token; it expires on its own");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::closes_key;
+
+    /// The literal contract, and only it: a line starting `Closes `, a token
+    /// shaped like a key. Lookalikes must not join a PR to a card it does not
+    /// close.
+    #[test]
+    fn the_closes_line_finds_its_key_and_ignores_lookalikes() {
+        assert_eq!(
+            closes_key("What changed\n\nCloses MAIN-459\n\nRisk: Low"),
+            Some("MAIN-459".into())
+        );
+        assert_eq!(closes_key("Closes WEB-UI-7 tail"), Some("WEB-UI-7".into()));
+        assert_eq!(closes_key("It closes MAIN-459"), None, "mid-sentence");
+        assert_eq!(closes_key("Closes the gap"), None, "no key shape");
+        assert_eq!(closes_key("Closes MAIN-"), None, "no number");
+        assert_eq!(closes_key(""), None);
     }
 }

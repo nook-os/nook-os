@@ -160,3 +160,58 @@ fn terminal_mode_instructions_are_unchanged() {
         );
     }
 }
+
+/// MAIN-459: nook-build 2.0 is directed-only and judgment-only. The directive
+/// and the structured ending must be taught; the pick/claim/board mechanics
+/// left with MAIN-458's control-plane machinery and are BANNED from
+/// reappearing — a skill that picks its own card is inventing work, and one
+/// that moves its own card can half-update the board.
+#[test]
+fn build_skill_is_directed_and_judgment_only() {
+    let body = flat("nook-build");
+    for taught in [
+        // The directive, and the no-directive rule.
+        "NOOK_BUILD_TASK",
+        "end the pass and say so",
+        // The structured ending, all three shapes.
+        "nook builds outcome pr --url",
+        "nook builds outcome blocked --question -",
+        "nook builds outcome nothing",
+        // Blocked keeps BOTH shapes: the live pause and the async handback.
+        "nook interactions ask --wait",
+        // The repair flow's JUDGMENT survived the rewrite: a card with a
+        // recorded PR is repaired against the verdict, on the same PR. The
+        // trigger is the `pr:` line the human rendering prints, and BOTH
+        // comment markers are named — a conflict-only repair has no verdict
+        // comment to find.
+        "when the card already records a PR",
+        "shows a **`pr:` line**",
+        "Loop review of COMMIT_SHA",
+        "Loop conflict check of <head>",
+        "Fix **only** its \"Must fix before merge\" items.",
+        "nook builds outcome pr --url <the existing PR's URL>",
+        // NG-2: the hard rules survive the rewrite verbatim.
+        "Never merge and never enable auto-merge.",
+        "Never apply `agent-ready` to anything.",
+    ] {
+        assert!(body.contains(taught), "nook-build must teach: {taught:?}");
+    }
+    // The mechanics that left the skill. Each string is distinctive of the
+    // 1.x flow: the pick query, the claim verb, and the hand-driven column
+    // move payload.
+    for banned in [
+        "nook tasks --label agent-ready",
+        "nook claim",
+        "--column-type started",
+        "\"column\":",
+    ] {
+        assert!(
+            !body.contains(banned),
+            "nook-build 2.0 must not carry the retired mechanic: {banned:?}"
+        );
+    }
+    assert!(
+        skill("nook-build").contains("version: 2.0.0"),
+        "nook-build's version must be bumped with the directed-only rewrite"
+    );
+}

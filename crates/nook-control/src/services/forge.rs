@@ -593,6 +593,13 @@ impl ReviewDemand {
         }
     }
 
+    /// The deployment forge itself, for callers that need a per-PR read with
+    /// the same credential and the same test seam (MAIN-459: the outcome
+    /// call's `Closes` check). `None` is the no-forge deployment.
+    pub fn forge(&self) -> Option<&dyn Forge> {
+        self.forge.as_deref()
+    }
+
     /// Forget one workspace's cached answer, so the next ask hits the forge.
     ///
     /// The manual path calls this: a person clicking "review now" right after
