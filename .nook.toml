@@ -167,3 +167,30 @@ name = "mailpit"
 env = "NOOK_MAILPIT_PORT"
 protocol = "tcp"
 required = true
+
+# What a fresh build worktree gets seeded with (MAIN-481).
+#
+# The DEFAULT is every ignored file, which is right for the small ones this
+# repo actually needs in a worktree — `.env`, and `deploy/dev-certs/`, without
+# which the stack boots and dies. It is very wrong for the build caches: on a
+# working checkout `target/` is ~9 GB and `.cache/` ~88 GB, and a seed would
+# copy them synchronously before the pass could start. `.cache/` is also
+# written by containers as root, so a host-side copy of it fails as well as
+# being enormous.
+#
+# `.nook-secrets/` is excluded on principle rather than for size: it holds the
+# fleet's Claude session, the node already mounts it where the agent looks, and
+# a credential should not be duplicated into every card's worktree.
+[worktree]
+exclude = [
+  "/target",
+  "/target-docker",
+  "/target-docker-node",
+  "/.cache/",
+  "node_modules/",
+  "dist/",
+  ".pnpm-store/",
+  ".nook-secrets/",
+  "frontend/apps/desktop/src-tauri/target",
+  "frontend/apps/desktop/src-tauri/binaries/",
+]
