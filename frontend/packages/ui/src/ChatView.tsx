@@ -128,6 +128,12 @@ export interface ChatViewProps {
    *  into view like a message would; a fixed banner would sit still while the
    *  conversation moved. */
   typing?: string | null;
+  /** The viewer is actively composing — fired on every keystroke that leaves
+   *  text in the box (MAIN-163 AC-2). The caller owns the throttle and the
+   *  network: this component only reports the activity, which is what keeps it
+   *  backend-agnostic. Clearing the box fires nothing; there is no stop signal
+   *  to send. */
+  onTypingActivity?: () => void;
   /** Rendered between the log and the composer — where a caller puts controls
    *  that belong to the reply rather than to the conversation (the loop's
    *  interaction choice buttons). Team chat passes nothing and is unchanged. */
@@ -398,6 +404,7 @@ export function ChatView({
   onDeleteMessage,
   canDeleteAny = false,
   typing,
+  onTypingActivity,
   beforeComposer,
   hideComposer = false,
 }: ChatViewProps) {
@@ -661,6 +668,7 @@ export function ChatView({
           onChange={(e) => {
             setDraft(e.target.value);
             autoGrow();
+            if (e.target.value.trim().length > 0) onTypingActivity?.();
           }}
           onKeyDown={onKeyDown}
         />

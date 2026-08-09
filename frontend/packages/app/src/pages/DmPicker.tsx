@@ -6,11 +6,16 @@ import { useQuery } from "@tanstack/react-query";
 import { Check, X } from "lucide-react";
 import { listPeople, openDm, type DmSummary, type PersonRef } from "@nookos/api";
 import { notify } from "../dialogs";
+import { PresenceDot } from "./PresenceDot";
 
 export function DmPicker({
+  online,
   onClose,
   onOpened,
 }: {
+  /** People a `presence` frame has reported online (MAIN-163 AC-1). The page
+   *  owns the set; this list is the other place the app names people. */
+  online: ReadonlySet<string>;
   onClose: () => void;
   onOpened: (dm: DmSummary) => void;
 }) {
@@ -84,6 +89,10 @@ export function DmPicker({
                   className={`chan-manage-row${selected.has(p.person_id) ? " active" : ""}`}
                   onClick={() => toggle(p.person_id)}
                 >
+                  <PresenceDot
+                    online={online.has(p.person_id)}
+                    label={`${p.display_name} is online`}
+                  />
                   <span className="chan-manage-name">{p.display_name}</span>
                   {selected.has(p.person_id) && <Check size={12} />}
                 </button>

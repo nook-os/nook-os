@@ -24,6 +24,7 @@ import {
   me as chatMe,
   openDm,
   postMessage,
+  sendTyping,
   toggleReaction,
   updateChannel,
   type ChatChannel,
@@ -37,11 +38,23 @@ import {
   buildChatMessages,
   type PendingMessage,
 } from "./chatMessages";
+import {
+  NO_TYPISTS,
+  nextTypingExpiry,
+  notePresence,
+  noteTyping,
+  pruneTyping,
+  typingLabel,
+  typistNames,
+  TYPING_PING_MS,
+  type TypingState,
+} from "./chatPresence";
 import { askConfirm, askText, notify } from "../dialogs";
 import { type ContextMenuItem } from "../contextMenu";
 import { ChannelManager } from "./ChannelManager";
 import { ChannelSidebar } from "./ChannelSidebar";
 import { DmPicker } from "./DmPicker";
+import { PresenceDot } from "./PresenceDot";
 import { ThreadPanel } from "./ThreadPanel";
 
 /** A DM has no name of its own — label it by its OTHER participants (MAIN-113
@@ -201,6 +214,16 @@ export function ChatPage() {
   const [newReplyIds, setNewReplyIds] = useState<ReadonlySet<string>>(new Set());
   const tempCounter = useRef(0);
 
+  // Presence and typing (MAIN-163) are app-wide, not per-conversation: both ride
+  // the one stream, so they survive a channel switch and a person's dot does not
+  // blink when you look somewhere else. Everything in here arrived as a frame —
+  // nothing is inferred from a member list or a message's author (AC-3).
+  const [online, setOnline] = useState<ReadonlySet<string>>(() => new Set());
+  const [typists, setTypists] = useState<TypingState>(NO_TYPISTS);
+  // When we last told the server we are typing, so the ~3s throttle holds across
+  // renders (AC-2). Zero means "ping the next keystroke".
+  const lastTypingPing = useRef(0);
+
   // The current history, reachable from stable callbacks (the socket handler and
   // the fold helpers below capture it) without re-subscribing on every page.
   const historyRef = useRef<ChatMessage[]>(history);
@@ -288,6 +311,9 @@ export function ChatPage() {
     setPending([]);
     setNewReplyIds(new Set());
     setThreadParentId(null);
+    // A fresh conversation gets a ping on its first keystroke rather than
+    // inheriting the window the last one was part-way through.
+    lastTypingPing.current = 0;
   }, [selectedId]);
 
   // The active conversation, reachable from the always-on stream handler without
@@ -326,6 +352,12 @@ export function ChatPage() {
           // conversation's history (which carries authoritative reply counts, so
           // drop the optimistic new-reply bumps too).
           setNewReplyIds(new Set());
+          // A typing frame from before the gap is seconds old and can no longer
+          // be refreshed by the sender's next ping — forget it rather than let
+          // it run out its clock. Presence is kept: it is the last thing the
+          // server actually said, there is no snapshot to replace it with, and
+          // dropping every dot would claim a roomful of people went offline.
+          setTypists(NO_TYPISTS);
           bumpBadges();
           if (selectedIdRef.current) {
             void qc.invalidateQueries({ queryKey: ["chat", "messages", selectedIdRef.current] });
@@ -338,10 +370,40 @@ export function ChatPage() {
           if (msg.channel_id === selectedIdRef.current) applyBroadcast(msg);
           else bumpBadges();
         },
+        // Presence and typing (MAIN-163). Both are folded in for EVERY channel
+        // the stream carries, not just the open one, so a dot is right the
+        // moment you switch to the conversation it belongs to.
+        onPresence: (p) => setOnline((prev) => notePresence(prev, p)),
+        onTyping: (t) => setTypists((prev) => noteTyping(prev, t, Date.now())),
       },
     );
     return dispose;
   }, [qc, applyBroadcast]);
+
+  // Expire typists locally (AC-2). There is no stop frame, so the client is the
+  // only thing that ends an indicator: wake exactly when the soonest one lapses
+  // rather than polling, and `pruneTyping` returns the same state when nothing
+  // did, so this cannot loop on itself.
+  useEffect(() => {
+    const due = nextTypingExpiry(typists);
+    if (due === null) return;
+    const timer = setTimeout(
+      () => setTypists((prev) => pruneTyping(prev, Date.now())),
+      Math.max(0, due - Date.now()),
+    );
+    return () => clearTimeout(timer);
+  }, [typists]);
+
+  // Tell the channel we are typing, at most once per ~3s (AC-2). Fire-and-forget
+  // in the client: a dropped ping costs one indicator refresh, nothing more.
+  const onTypingActivity = useCallback(() => {
+    const id = selectedIdRef.current;
+    if (!id) return;
+    const now = Date.now();
+    if (now - lastTypingPing.current < TYPING_PING_MS) return;
+    lastTypingPing.current = now;
+    sendTyping(id);
+  }, []);
 
   // Advance the caller's read cursor for a conversation, then refresh the lists
   // so its badge clears at once (MAIN-117 AC-3). Failures are swallowed — a
@@ -445,6 +507,29 @@ export function ChatPage() {
     [threadParentId, history, live],
   );
 
+  // The composer's typing line. Recomputed whenever a frame lands or one lapses
+  // — the expiry timer above is what makes those the only moments it can change.
+  const typingLine = useMemo(
+    () => typingLabel(typistNames(typists, selectedId, Date.now(), chatIdentity?.person_id)),
+    [typists, selectedId, chatIdentity?.person_id],
+  );
+
+  /** Is anyone on the other side of this DM online (AC-1)? One dot per row, not
+   *  one per participant: the row is the conversation, and a group DM listing
+   *  three dots says less than it costs.
+   *
+   *  Gated on the identity having loaded, because the server announces the
+   *  caller's OWN presence too — without knowing which person we are, our own
+   *  frame would dot every DM we are in. */
+  const dmHasOnline = useCallback(
+    (dm: DmSummary) =>
+      !!chatIdentity &&
+      dm.participants.some(
+        (p) => p.person_id !== chatIdentity.person_id && online.has(p.person_id),
+      ),
+    [online, chatIdentity],
+  );
+
   const activeChannel = channels.find((c) => c.id === selectedId);
   const activeDm = dms.find((d) => d.id === selectedId);
   const activeTitle = activeChannel
@@ -503,6 +588,10 @@ export function ChatPage() {
               onClick={() => setSelectedId(d.id)}
             >
               <span className="chat-channel-hash">@</span>
+              <PresenceDot
+                online={dmHasOnline(d)}
+                label={`${dmName(d, chatIdentity?.person_id)} is online`}
+              />
               {dmName(d, chatIdentity?.person_id)}
               {(d.unread_count ?? 0) > 0 && (
                 <span className="chat-unread" aria-label={`${d.unread_count} unread`}>
@@ -545,6 +634,8 @@ export function ChatPage() {
             onEditMessage={onEditMessage}
             onDeleteMessage={onDeleteMessage}
             canDeleteAny={canManage}
+            typing={typingLine}
+            onTypingActivity={onTypingActivity}
           />
           {threadParent && selectedId && (
             <ThreadPanel
@@ -563,7 +654,13 @@ export function ChatPage() {
         </div>
       </section>
       {managing && canManage && <ChannelManager onClose={() => setManaging(false)} />}
-      {pickingDm && <DmPicker onClose={() => setPickingDm(false)} onOpened={onDmOpened} />}
+      {pickingDm && (
+        <DmPicker
+          online={online}
+          onClose={() => setPickingDm(false)}
+          onOpened={onDmOpened}
+        />
+      )}
     </div>
   );
 }
