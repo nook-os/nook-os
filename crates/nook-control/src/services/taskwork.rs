@@ -491,6 +491,44 @@ pub async fn move_task(
     Ok(updated)
 }
 
+/// Complete a card the way a human drag to Done completes it, but only while it
+/// is still in flight (MAIN-491 AC-3/AC-8). `None` means it was not — another
+/// replica or a person got there first — and nothing was written.
+///
+/// The same two steps as [`move_task`]: the write, then `fire_automation`, so
+/// `triggers::on_column_change` sees a merge-reconciled card exactly as it sees
+/// a dragged one. What differs is the write itself, which has to be ONE guarded
+/// statement rather than a load and an unconditional `set_column`: the sweep
+/// runs on every replica, and "did my update match?" is the only fact that can
+/// decide which of them announces the move.
+///
+/// The destination is resolved by column TYPE, never by the name "Done" — a
+/// board that renamed the column still completes correctly, and a board with no
+/// `completed` column completes nothing rather than guessing at a position.
+pub async fn complete_in_flight_card(
+    state: &AppState,
+    tenant: TenantId,
+    task_id: TaskId,
+) -> ApiResult<Option<TaskItem>> {
+    let before = load_task(state, tenant, task_id).await?;
+    let Some(done) = state
+        .tasks
+        .column_of_type(before.board_id, "completed")
+        .await?
+    else {
+        return Ok(None);
+    };
+    let Some(after) = state
+        .tasks
+        .complete_if_in_flight(tenant, task_id, done)
+        .await?
+    else {
+        return Ok(None);
+    };
+    fire_automation(state, tenant, &before, &after).await;
+    Ok(Some(after))
+}
+
 /// Best-effort compare/MR URL from the worktree's git remote.
 async fn derive_pr_url(state: &AppState, task: &TaskItem, branch: &str) -> Option<String> {
     let raw: String = state

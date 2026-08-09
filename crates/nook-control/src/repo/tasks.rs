@@ -269,6 +269,20 @@ pub trait TaskRepository: Send + Sync {
         workspace: WorkspaceId,
     ) -> ApiResult<Vec<(TaskId, i64, String)>>;
 
+    /// The same cards, narrowed to those still IN FLIGHT — in a column whose
+    /// type is neither `completed` nor `canceled` — as `(id, pr_url)`.
+    ///
+    /// The narrowing is MAIN-491's NG-5 expressed as a query rather than as a
+    /// filter every caller has to remember: a card that already reached Done is
+    /// outside the merge sweep's candidate set, so no forge call is even spent
+    /// asking about it. That also bounds the per-pass cost to open work rather
+    /// than to every card the workspace has ever shipped.
+    async fn in_flight_tasks_with_pr(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Vec<(TaskId, String)>>;
+
     // ---- task writes -------------------------------------------------------
 
     /// Allocate the board number, insert the task, and attach its labels — in
@@ -311,6 +325,34 @@ pub trait TaskRepository: Send + Sync {
     async fn record_started_work(&self, id: TaskId, work: StartedWork) -> ApiResult<TaskItem>;
 
     async fn set_pr_url(&self, id: TaskId, url: &str, column: ColumnId) -> ApiResult<TaskItem>;
+
+    /// Record `url` on a card that has NO recorded PR and is still in flight,
+    /// reporting whether THIS call wrote it (MAIN-491 AC-2's self-heal).
+    ///
+    /// Guarded rather than unconditional on both counts. `pr_url IS NULL` keeps
+    /// the two joins in the order the contract states — a recorded PR is the
+    /// card's own answer and a body scan never overrides it — and makes the
+    /// write the exactly-once fence across replicas. The in-flight test is
+    /// NG-5: a card that already reached Done is not touched, not even to
+    /// stamp a URL on it.
+    async fn backfill_pr_url(&self, tenant: TenantId, id: TaskId, url: &str) -> ApiResult<bool>;
+
+    /// Move a card to `column` — clearing its claim lease — only while it is
+    /// still in a non-completed column. `None` means it was not, so nothing was
+    /// written (MAIN-491 AC-3/AC-8).
+    ///
+    /// The guard is what makes the sweep safe on every replica AND idempotent
+    /// across passes: the first update matches and every later one does not, so
+    /// "did I move it?" and "may I comment?" are the same question with one
+    /// answer. Clearing the lease in the same statement follows `set_column`'s
+    /// rule — a completed card holds no worker — spelled out here because this
+    /// destination is never a `started` column.
+    async fn complete_if_in_flight(
+        &self,
+        tenant: TenantId,
+        id: TaskId,
+        column: ColumnId,
+    ) -> ApiResult<Option<TaskItem>>;
 
     /// Forget the worktree — both the checkout id and the legacy string pair.
     async fn clear_worktree(&self, id: TaskId) -> ApiResult<TaskItem>;
@@ -950,6 +992,28 @@ impl TaskRepository for DbTaskRepository {
             .collect())
     }
 
+    async fn in_flight_tasks_with_pr(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Vec<(TaskId, String)>> {
+        let rows: Vec<(Uuid, String)> = self
+            .db
+            .query_all(
+                "SELECT t.id, t.pr_url FROM tasks t
+                   JOIN board_columns c ON c.id = t.column_id
+                  WHERE t.tenant_id = $1 AND t.workspace_id = $2
+                    AND t.pr_url IS NOT NULL AND t.archived_at IS NULL
+                    AND c.type NOT IN ('completed', 'canceled')",
+                params![tenant, workspace.0],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, url)| (TaskId(id), url))
+            .collect())
+    }
+
     async fn create_task(&self, new: NewTask) -> ApiResult<TaskItem> {
         // One transaction, and the board row locked while the number is taken.
         // Without the lock two concurrent creates read the same `next_number`
@@ -1175,6 +1239,47 @@ impl TaskRepository for DbTaskRepository {
                     type_mapping(self.db.engine()).now()
                 ),
                 params![id, url, column],
+            )
+            .await?)
+    }
+
+    async fn backfill_pr_url(&self, tenant: TenantId, id: TaskId, url: &str) -> ApiResult<bool> {
+        let written = self
+            .db
+            .exec(
+                &format!(
+                    "UPDATE tasks SET pr_url = $3, updated_at = {now}
+              WHERE id = $1 AND tenant_id = $2 AND pr_url IS NULL AND archived_at IS NULL
+                AND EXISTS (SELECT 1 FROM board_columns c
+                             WHERE c.id = tasks.column_id
+                               AND c.type NOT IN ('completed', 'canceled'))",
+                    now = type_mapping(self.db.engine()).now()
+                ),
+                params![id, tenant, url],
+            )
+            .await?;
+        Ok(written > 0)
+    }
+
+    async fn complete_if_in_flight(
+        &self,
+        tenant: TenantId,
+        id: TaskId,
+        column: ColumnId,
+    ) -> ApiResult<Option<TaskItem>> {
+        Ok(self
+            .db
+            .query_opt(
+                &format!(
+                    "UPDATE tasks SET column_id = $3, claim_expires_at = NULL, updated_at = {now}
+              WHERE id = $1 AND tenant_id = $2 AND archived_at IS NULL
+                AND EXISTS (SELECT 1 FROM board_columns c
+                             WHERE c.id = tasks.column_id
+                               AND c.type NOT IN ('completed', 'canceled'))
+              RETURNING *",
+                    now = type_mapping(self.db.engine()).now()
+                ),
+                params![id, tenant, column],
             )
             .await?)
     }
@@ -2480,6 +2585,16 @@ struct FakeState {
     checkouts: Vec<Checkout>,
 }
 
+/// The fake's reading of the guard both merge-sweep writes carry: the card sits
+/// in a column whose type is neither `completed` nor `canceled`. A card whose
+/// column is not in the fake's board at all is NOT in flight — the same answer
+/// the real `EXISTS` gives when the join finds nothing.
+fn in_flight(st: &FakeState, task: &TaskItem) -> bool {
+    st.columns
+        .iter()
+        .any(|c| c.id == task.column_id && !matches!(c.r#type.as_str(), "completed" | "canceled"))
+}
+
 struct Checkout {
     id: NodeWorkspaceId,
     tenant: TenantId,
@@ -2835,6 +2950,25 @@ impl TaskRepository for FakeTaskRepository {
             .collect())
     }
 
+    async fn in_flight_tasks_with_pr(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Vec<(TaskId, String)>> {
+        let st = self.inner.lock().unwrap();
+        Ok(st
+            .tasks
+            .iter()
+            .filter(|t| {
+                t.tenant_id == tenant
+                    && t.workspace_id == Some(workspace)
+                    && t.archived_at.is_none()
+                    && in_flight(&st, t)
+            })
+            .filter_map(|t| Some((t.id, t.pr_url.clone()?)))
+            .collect())
+    }
+
     async fn create_task(&self, new: NewTask) -> ApiResult<TaskItem> {
         let mut st = self.inner.lock().unwrap();
         // The counter the real `FOR UPDATE` protects. Held under the same lock
@@ -3026,6 +3160,58 @@ impl TaskRepository for FakeTaskRepository {
         t.claim_expires_at = None;
         t.updated_at = chrono::Utc::now();
         Ok(t.clone())
+    }
+
+    async fn backfill_pr_url(&self, tenant: TenantId, id: TaskId, url: &str) -> ApiResult<bool> {
+        let mut st = self.inner.lock().unwrap();
+        let Some(t) = st
+            .tasks
+            .iter()
+            .find(|t| t.id == id && t.tenant_id == tenant && t.archived_at.is_none())
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        if t.pr_url.is_some() || !in_flight(&st, &t) {
+            return Ok(false);
+        }
+        let t = st
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == id)
+            .expect("just found");
+        t.pr_url = Some(url.into());
+        t.updated_at = chrono::Utc::now();
+        Ok(true)
+    }
+
+    async fn complete_if_in_flight(
+        &self,
+        tenant: TenantId,
+        id: TaskId,
+        column: ColumnId,
+    ) -> ApiResult<Option<TaskItem>> {
+        let mut st = self.inner.lock().unwrap();
+        let Some(t) = st
+            .tasks
+            .iter()
+            .find(|t| t.id == id && t.tenant_id == tenant && t.archived_at.is_none())
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        if !in_flight(&st, &t) {
+            return Ok(None);
+        }
+        let t = st
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == id)
+            .expect("just found");
+        t.column_id = column;
+        t.claim_expires_at = None;
+        t.updated_at = chrono::Utc::now();
+        Ok(Some(t.clone()))
     }
 
     async fn clear_worktree(&self, id: TaskId) -> ApiResult<TaskItem> {
