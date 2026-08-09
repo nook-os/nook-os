@@ -1,7 +1,7 @@
 ---
 name: nook-review
 description: "Review open PRs against their linked NookOS board issue and required GitHub checks, then post a three-group verdict with loop labels. Use when asked to run the loop's reviewer or review its PR queue. Designed for /loop; never merges or pushes code."
-version: 1.4.0
+version: 1.5.0
 author: NookOS
 license: MIT
 platforms: [linux, macos]
@@ -55,6 +55,12 @@ to conclude: record it and end the pass:
 ```bash
 nook reviews verdict skipped --body "already reviewed at $HEAD" 
 ```
+
+**Unless `NOOK_REVIEW_FORCED` is set (MAIN-473).** A human forced this run
+precisely because the head is unchanged and the existing verdict's evidence
+went stale — a CI rerun turned green, a judgment was overtaken. Skip only the
+draft check and review the current head in full; your verdict supersedes the
+recorded one. Never set this yourself: it arrives only from a forced enqueue.
 
 Never touch another PR because yours needed nothing.
 

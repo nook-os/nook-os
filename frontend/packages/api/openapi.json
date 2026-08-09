@@ -4415,6 +4415,37 @@
         }
       }
     },
+    "/api/v1/reviews": {
+      "post": {
+        "tags": [
+          "crate::routes::jobs"
+        ],
+        "summary": "\"Review this workspace now\" (MAIN-455) — the manual counterpart to the\nreconciler, and the SAME convergence: one directed run per pull request\nthat is owed one, same dedupe, same ceiling. `pr` narrows it to one PR;\n`force` (MAIN-473) additionally overrules exactly ONE rule — the\nverdicted-head rest — while the live-run dedupe and the workspace ceiling\n(including `0 = off`) still stand and refuse by name. The response is what\nactually happened — the runs raised, plus how many PRs were already\ncovered or held back — because \"a job\" stopped being the honest unit when\na workspace can owe several.",
+        "operationId": "review_enqueue",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateReviewJobRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewRaiseResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/runtime-auth": {
       "post": {
         "tags": [
@@ -10103,6 +10134,38 @@
           }
         }
       },
+      "CreateReviewJobRequest": {
+        "type": "object",
+        "description": "Raise a `review` job against a WORKSPACE (MAIN-408) — the manual half of\nAC-2, beside the board-signal sweep of AC-1.\n\nSeparate from [`CreateLoopJobRequest`] because the two address different\nthings: that one names a ticket, this one names a repository. Folding them\ninto one request with two optional targets would make \"exactly one of these\"\na runtime check in the service layer, which is precisely what migration\n0040 moved into a database constraint.",
+        "required": [
+          "workspace_id"
+        ],
+        "properties": {
+          "force": {
+            "type": "boolean",
+            "description": "Re-review even when the PR's head equals the last verdicted head\n(MAIN-473): a human's lever for evidence that changed under a verdict —\na CI rerun turning green, a stale judgment — without an empty amend.\nManual-only; the reconciler's own wakeup rule is untouched."
+          },
+          "pr": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Converge only this pull request. Required for `force`."
+          },
+          "seed": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The opening brief, exactly as on a spec job. Optional."
+          },
+          "workspace_id": {
+            "type": "string",
+            "description": "The workspace to review, as a UUID or its name — resolved server-side."
+          }
+        }
+      },
       "CreateSessionRequest": {
         "type": "object",
         "required": [
@@ -11594,6 +11657,10 @@
           },
           "requested_by": {
             "$ref": "#/components/schemas/UserId"
+          },
+          "review_forced": {
+            "type": "boolean",
+            "description": "A human forced this review run at an already-verdicted head\n(MAIN-473): the reviewer's already-reviewed skip-check stands aside for\nexactly this run. Always false for routine runs."
           },
           "review_head_sha": {
             "type": [

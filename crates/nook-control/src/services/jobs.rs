@@ -213,6 +213,7 @@ pub async fn create(
             requested_by,
             seed: seed.clone(),
             predecessor_job_id: None,
+            review_forced: false,
             review_pr_number: None,
             review_head_sha: None,
             build_fingerprint: None,
@@ -277,6 +278,9 @@ pub async fn raise_run(
     kind: &str,
     item: &crate::services::work_source::WorkItem,
     note: Option<&str>,
+    // A human forced this run at an already-verdicted head (MAIN-473).
+    // Review items only; a build item ignores it.
+    forced: bool,
 ) -> ApiResult<Option<LoopJob>> {
     let job = match state
         .jobs
@@ -297,6 +301,7 @@ pub async fn raise_run(
                 .target_task_id
                 .is_some()
                 .then(|| item.fingerprint.clone()),
+            review_forced: forced && item.target_task_id.is_none(),
         })
         .await
     {
@@ -511,6 +516,7 @@ pub async fn converge_builds(
             BUILD_KIND,
             item,
             None,
+            false,
         )
         .await;
         match raised {
@@ -850,13 +856,29 @@ pub async fn record_build_outcome(
 /// same `owed()` rule, the same dedupe index, and the same ceiling. A repo
 /// with no forge raises nothing, and the counts say so rather than a job that
 /// would have found nothing to scan.
+///
+/// `force` (MAIN-473) overrules exactly one of those rules — the
+/// verdicted-head rest, for one named PR — and nothing else: the live-run
+/// dedupe and the workspace ceiling (including `0 = off`) refuse a forced
+/// enqueue the same as any other.
 pub async fn enqueue_review(
     state: &AppState,
     tenant: TenantId,
     requested_by: UserId,
     workspace: WorkspaceId,
     seed: Option<String>,
+    pr: Option<i64>,
+    force: bool,
 ) -> ApiResult<crate::services::run_reconcile::Converged> {
+    use crate::services::work_source::WorkSource;
+
+    if force && pr.is_none() {
+        return Err(ApiError::BadRequest(
+            "force needs a PR number — a blanket re-review of every verdicted head is \
+             never what anyone means"
+                .into(),
+        ));
+    }
     let ws = state
         .workspaces
         .get(tenant, workspace)
@@ -870,17 +892,132 @@ pub async fn enqueue_review(
         demand: &state.review_demand,
         token: crate::services::workspace_gh_token(state, tenant, workspace).await,
     };
-    crate::services::run_reconcile::converge(
+
+    let Some(pr) = pr else {
+        return crate::services::run_reconcile::converge(
+            state,
+            &source,
+            tenant,
+            requested_by,
+            workspace,
+            ws.git_remote_url.as_deref(),
+            ceiling,
+            seed.as_deref(),
+        )
+        .await;
+    };
+
+    // Directed at ONE pull request. The item comes from the same source the
+    // reconciler reads — its current head is the fingerprint a run needs. An
+    // unreadable forge is an OUTAGE the server is already retrying, never a
+    // client error: 503, matching how `converge` holds on the same `None`.
+    let Some(items) = source.items(workspace, ws.git_remote_url.as_deref()).await else {
+        return Err(ApiError::ServiceUnavailable(
+            "the forge cannot be read right now, so the PR's current head is unknown — \
+             try again shortly"
+                .into(),
+        ));
+    };
+    let Some(item) = items.iter().find(|i| i.key == pr) else {
+        return Err(ApiError::BadRequest(format!(
+            "PR #{pr} is not an open pull request needing review in this workspace"
+        )));
+    };
+
+    let heads = state.jobs.review_run_heads(tenant, workspace).await?;
+    if !force {
+        // The reconciler's own rule decides, unchanged — a verdicted head
+        // rests, a hold holds, a live run blocks, the ceiling caps — and it
+        // declines the same quiet way the blanket path does, so the presence
+        // of `--pr` alone never changes how a condition is reported.
+        let (owed, withheld, live) = crate::services::run_reconcile::owed(
+            std::slice::from_ref(item),
+            &heads,
+            ceiling,
+            chrono::Utc::now(),
+        );
+        if owed.is_empty() {
+            return Ok(crate::services::run_reconcile::Converged {
+                jobs: Vec::new(),
+                raised: 0,
+                withheld,
+                live,
+            });
+        }
+    } else {
+        // Force overrules exactly ONE rule: the verdicted-head rest. Every
+        // other control stands, refused most-specific first.
+        //
+        // One live run per PR (AC-3) — named by id, so the refusal points at
+        // the thing to wait on; checked before the ceiling because "your PR's
+        // own run is live" is the actionable answer when both are true.
+        if heads
+            .iter()
+            .any(|h| h.item_key == pr && h.live_head.is_some())
+        {
+            let live_id = live_review_run_id(state, tenant, workspace, pr).await?;
+            return Err(ApiError::Conflict(format!(
+                "a review run is already live for PR #{pr}{} — wait for it or cancel it",
+                live_id.map(|id| format!(" (job {id})")).unwrap_or_default()
+            )));
+        }
+        // Then the workspace ceiling (`0 = off` is the workspace-level kill
+        // switch, and a forced run past it would execute review work the owner
+        // turned off): count live runs the way `owed()` does and refuse past
+        // the cap rather than silently exceeding it.
+        let live = heads.iter().filter(|h| h.live_head.is_some()).count();
+        if ceiling == 0 {
+            return Err(ApiError::Conflict(
+                "reviews are off for this workspace (ceiling 0) — raise the ceiling to force one"
+                    .into(),
+            ));
+        }
+        if live >= ceiling {
+            return Err(ApiError::Conflict(format!(
+                "the review ceiling ({ceiling}) is full — {live} run(s) live; wait for one to \
+                 finish or raise the ceiling"
+            )));
+        }
+    }
+    // Raised through the same path as every other run; the partial unique
+    // index still arbitrates a race, so two forces cannot double-raise.
+    let job = raise_run(
         state,
-        &source,
         tenant,
         requested_by,
         workspace,
-        ws.git_remote_url.as_deref(),
-        ceiling,
+        source.kind(),
+        item,
         seed.as_deref(),
+        force,
     )
-    .await
+    .await?;
+    match job {
+        Some(job) => Ok(crate::services::run_reconcile::Converged {
+            raised: 1,
+            jobs: vec![job],
+            withheld: 0,
+            live: 0,
+        }),
+        None => {
+            let live_id = live_review_run_id(state, tenant, workspace, pr).await?;
+            Err(ApiError::Conflict(format!(
+                "a review run is already live for PR #{pr}{} — wait for it or cancel it",
+                live_id.map(|id| format!(" (job {id})")).unwrap_or_default()
+            )))
+        }
+    }
+}
+
+/// The id of the live review run for one PR, for the refusal that names it —
+/// a targeted lookup, so the id is present however old the run is.
+async fn live_review_run_id(
+    state: &AppState,
+    tenant: TenantId,
+    workspace: WorkspaceId,
+    pr: i64,
+) -> ApiResult<Option<JobId>> {
+    state.jobs.live_review_run_for(tenant, workspace, pr).await
 }
 
 /// Read a job with its transcript (AC-3). 404 if it is not this tenant's, or if
@@ -1029,6 +1166,7 @@ pub async fn rerun(
             review_pr_number: None,
             review_head_sha: None,
             build_fingerprint: None,
+            review_forced: false,
         })
         .await?;
 
@@ -1568,6 +1706,7 @@ pub async fn dispatch_to_node(state: &AppState, tenant: TenantId, job: &LoopJob)
             // Which PR this run owns, so the agent is told rather than having to
             // find its share, and so it can resume that PR's session.
             review_pr_number: job.review_pr_number.map(|n| n.max(0) as u64),
+            review_forced: job.review_forced,
             target_task_key,
             repo_url,
             branch,

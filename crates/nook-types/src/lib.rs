@@ -3135,6 +3135,11 @@ pub struct LoopJob {
     /// its head.
     #[serde(default)]
     pub review_verdict: Option<String>,
+    /// A human forced this review run at an already-verdicted head
+    /// (MAIN-473): the reviewer's already-reviewed skip-check stands aside for
+    /// exactly this run. Always false for routine runs.
+    #[serde(default)]
+    pub review_forced: bool,
     /// What a `build` run CONCLUDED (MAIN-458): `pr_opened` | `blocked` |
     /// `nothing_to_do`. `None` means the run concluded nothing, however it
     /// exited — and such a run does not consume its card.
@@ -3201,6 +3206,15 @@ pub struct CreateReviewJobRequest {
     /// The opening brief, exactly as on a spec job. Optional.
     #[serde(default)]
     pub seed: Option<String>,
+    /// Converge only this pull request. Required for `force`.
+    #[serde(default)]
+    pub pr: Option<i64>,
+    /// Re-review even when the PR's head equals the last verdicted head
+    /// (MAIN-473): a human's lever for evidence that changed under a verdict —
+    /// a CI rerun turning green, a stale judgment — without an empty amend.
+    /// Manual-only; the reconciler's own wakeup rule is untouched.
+    #[serde(default)]
+    pub force: bool,
 }
 
 /// Send an unsolicited steering message to a live job (MAIN-231) — the input

@@ -43,6 +43,10 @@ pub struct LoopJob {
     /// The pull request a `review` run owns (MAIN-455): what the agent is told
     /// it is reviewing, and the session it resumes.
     pub review_pr_number: Option<u64>,
+    /// A human forced this review at an already-verdicted head (MAIN-473);
+    /// exported as `NOOK_REVIEW_FORCED` so the skill's skip-check stands
+    /// aside for exactly this run.
+    pub review_forced: bool,
     /// The workspace's own forge token (MAIN-456); outranks the node's fleet
     /// env when set.
     pub gh_token: Option<String>,
@@ -616,6 +620,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
         job_id,
         kind,
         review_pr_number,
+        review_forced,
         gh_token,
         server_url,
         target_task_key,
@@ -776,6 +781,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
                 target: &target_task_key,
                 seed: seed.as_deref(),
                 review_pr: review_pr_number,
+                review_forced,
                 build_task: (kind == "build").then_some(target_task_key.as_str()),
                 warm_session: warm.as_ref().map(|(_, sid)| sid.as_str()),
             },
@@ -879,6 +885,8 @@ struct RunBrief<'a> {
     /// The pull request a review run owns (MAIN-455): what the agent is told it
     /// is reviewing, and the session it resumes.
     review_pr: Option<u64>,
+    /// A human forced this review at an already-verdicted head (MAIN-473).
+    review_forced: bool,
     /// The ticket a build run owns (MAIN-383 AC-5): same contract as
     /// `review_pr`, for the kind whose unit is a card rather than a PR.
     build_task: Option<&'a str>,
@@ -901,6 +909,7 @@ fn drive_streaming(
         target,
         seed,
         review_pr,
+        review_forced,
         build_task,
         warm_session,
     } = brief;
@@ -939,6 +948,11 @@ fn drive_streaming(
     if let Some(pr) = review_pr {
         pr_env = pr.to_string();
         env.push(("NOOK_REVIEW_PR", &pr_env));
+    }
+    // A human forced this run at an already-verdicted head (MAIN-473): the
+    // skill's already-reviewed skip-check stands aside for exactly this run.
+    if review_forced {
+        env.push(("NOOK_REVIEW_FORCED", "1"));
     }
     // The one ticket this run owns — `NOOK_REVIEW_PR`'s twin for builds
     // (MAIN-383 AC-5): the skill reads which card it was enqueued for instead

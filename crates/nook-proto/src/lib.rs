@@ -597,6 +597,12 @@ pub enum ControlToNode {
         /// rebuilding both.
         #[serde(default)]
         review_pr_number: Option<u64>,
+        /// A human forced this review at an already-verdicted head
+        /// (MAIN-473): exported to the run as `NOOK_REVIEW_FORCED`, so the
+        /// reviewer's already-reviewed skip-check stands aside for exactly
+        /// this run. `#[serde(default)]` keeps older peers readable.
+        #[serde(default)]
+        review_forced: bool,
         /// The workspace's own forge token (MAIN-456), exported to the run as
         /// `GH_TOKEN`. `None` means the node's fleet env applies — the
         /// single-tenant fallback.
