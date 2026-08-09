@@ -33,6 +33,13 @@ cargo build -p nook-node
 # shows up as a feature mysteriously not working in dev while the tests pass.
 NOOK="${CARGO_TARGET_DIR:-/app/target}/debug/nook"
 
+# `nook` on PATH, for the AGENT rather than for this script (MAIN-486). A build
+# pass shells out to `nook` — claim, comment, move — and the binary lives in a
+# container-local target dir no PATH would find. A symlink rather than a copy so
+# cargo-watch's rebuilds are picked up without re-running this, and re-made on
+# every start so `docker compose up -d node` cannot lose it.
+ln -sfn "$NOOK" /usr/local/bin/nook
+
 if [ ! -f "$HOME/.config/nook/node.toml" ]; then
   "$NOOK" join \
     --server "${NOOK_SERVER:?}" \

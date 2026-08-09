@@ -95,6 +95,7 @@ services:
     build:
       context: .
       dockerfile: deploy/docker/dev-rust.Dockerfile
+      target: dev-rust
     command: cargo watch --poll -w crates -w Cargo.toml -w Cargo.lock -x 'run -p nook-control'
     working_dir: /app
     env_file: .env
@@ -196,6 +197,7 @@ services:
     build:
       context: .
       dockerfile: deploy/docker/dev-rust.Dockerfile
+      target: dev-rust
     command: cargo watch --poll -w crates -w Cargo.toml -w Cargo.lock -x 'run -p nook-chat'
     working_dir: /app
     environment:
@@ -228,6 +230,7 @@ services:
     build:
       context: .
       dockerfile: deploy/docker/dev-rust.Dockerfile
+      target: dev-rust
     command: cargo watch --poll -w crates -w Cargo.toml -w Cargo.lock -x 'run -p nook-worker'
     working_dir: /app
     env_file: .env
@@ -262,6 +265,7 @@ services:
     build:
       context: .
       dockerfile: deploy/docker/dev-rust.Dockerfile
+      target: dev-node
     entrypoint: ["bash", "deploy/docker/node-dev-entrypoint.sh"]
     # tini as PID 1 reaps reparented zombies. tmux's `new-session -d` double-forks
     # a server daemon that reparents to PID 1; the node is a plain binary and never
@@ -274,6 +278,15 @@ services:
       NOOK_SERVER: http://control-plane:8080
       NOOK_DEV_JOIN_TOKEN: ${NOOK_DEV_JOIN_TOKEN:-}
       NOOK_NODE_NAME: dev-node
+      # The dev BUILD node (MAIN-486). The build wall keeps the shared operator
+      # out of build work by design (MAIN-142), so dogfooding a build loop needs
+      # a second node that takes it — this one. The operator's kinds are
+      # deliberately unchanged.
+      NOOK_LOOP_KINDS: build
+      # The fleet's GitHub credential (MAIN-407), reaching this node exactly the
+      # way it reaches the operator: the variable only, never a literal, so the
+      # secret lives in .env and nothing committed carries it.
+      NOOK_GH_TOKEN: ${NOOK_GH_TOKEN:-}
       # Ports this node leases to sessions (MAIN-301) — a different band from
       # the operator's, so the two dev nodes never advertise the same numbers.
       NOOK_PORT_RANGE: 4200-4299
