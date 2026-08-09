@@ -61,6 +61,63 @@ pub async fn enqueue_review(
     }))
 }
 
+/// `POST /api/v1/builds` — build one card NOW (MAIN-458 AC-4): the same
+/// convergence the reconciler runs, filtered to the named card — the manual
+/// path cannot bypass the dedupe, the claim, or the ceiling.
+#[utoipa::path(post, path = "/api/v1/builds",
+    operation_id = "build_enqueue",
+    request_body = EnqueueBuildRequest,
+    responses((status = 200, body = ReviewRaiseResult), (status = 400), (status = 404)))]
+pub async fn enqueue_build(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Json(req): Json<EnqueueBuildRequest>,
+) -> ApiResult<Json<ReviewRaiseResult>> {
+    auth.require_user()?;
+    let task =
+        crate::services::tasks::resolve_id(state.tasks.as_ref(), auth.tenant_id, &req.task).await?;
+    let row = state
+        .tasks
+        .get_row(auth.tenant_id, task)
+        .await?
+        .ok_or(crate::error::ApiError::NotFound)?;
+    if !crate::services::tasks::visible_to(&row, auth.user_id) {
+        return Err(crate::error::ApiError::NotFound);
+    }
+    let workspace = row.workspace_id.ok_or_else(|| {
+        crate::error::ApiError::BadRequest(
+            "this card has no workspace — a build needs a repo to run in".into(),
+        )
+    })?;
+    let c =
+        jobs::converge_builds(&state, auth.tenant_id, auth.user_id, workspace, Some(task)).await?;
+    Ok(Json(ReviewRaiseResult {
+        raised: c.jobs,
+        live: c.live as u32,
+        withheld: c.withheld as u32,
+    }))
+}
+
+/// `POST /api/v1/jobs/{id}/outcome` — a build run reports its conclusion
+/// (MAIN-458 AC-2/AC-3): the CP records it and mirrors it to the board, so
+/// the agent's last act is one call instead of board mechanics it could
+/// misperform.
+#[utoipa::path(post, path = "/api/v1/jobs/{id}/outcome",
+    operation_id = "job_outcome",
+    params(("id" = String, Path,)),
+    request_body = BuildOutcomeRequest,
+    responses((status = 200, body = LoopJob), (status = 400), (status = 409)))]
+pub async fn outcome(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<JobId>,
+    Json(req): Json<BuildOutcomeRequest>,
+) -> ApiResult<Json<LoopJob>> {
+    Ok(Json(
+        jobs::record_build_outcome(&state, auth.tenant_id, id, &req).await?,
+    ))
+}
+
 /// `POST /api/v1/jobs/{id}/verdict` — a review run reports its conclusion
 /// (MAIN-455). The run's own minted token authorises it, the same identity its
 /// other writes travel as; the control plane posts the comment and labels, so

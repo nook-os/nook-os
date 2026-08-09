@@ -218,7 +218,8 @@ enum Command {
     /// level stays frozen.
     #[command(subcommand)]
     Reviews(ReviewsCommand),
-    /// Build runs (MAIN-461): the per-repo ceiling on the builder loop.
+    /// Build runs: the per-repo ceiling (MAIN-461) and the board's
+    /// convergence on demand for one card (MAIN-458).
     /// A new noun group, per docs/cli-style.md — the top level stays frozen.
     #[command(subcommand)]
     Builds(BuildsCommand),
@@ -684,6 +685,7 @@ async fn main() -> Result<()> {
         Command::Builds(BuildsCommand::Scale { workspace, count }) => {
             cli::builds_scale(&workspace, count.as_deref()).await
         }
+        Command::Builds(BuildsCommand::Enqueue { task }) => cli::builds_enqueue(&task).await,
         Command::Notify {
             title,
             body,
@@ -1140,6 +1142,12 @@ enum BuildsCommand {
         workspace: String,
         /// The ceiling, `0` to turn builds off, or `unset`. Omit to read.
         count: Option<String>,
+    },
+    /// Build this card now: the reconciler's own convergence on demand,
+    /// filtered to one card — same claim, same dedupe, same ceiling.
+    Enqueue {
+        /// The card, by key (MAIN-42) or id.
+        task: String,
     },
 }
 

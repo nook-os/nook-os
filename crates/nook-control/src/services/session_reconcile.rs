@@ -929,6 +929,28 @@ pub async fn pass(state: &AppState, clones: &CloneThrottle) -> crate::error::Api
                     tracing::warn!(workspace = %ws.id, error = %e, "review run reconcile failed")
                 }
             }
+
+            // The build loop's POLL trigger (MAIN-458). Gated on the tenant's
+            // `loops.enabled` alone — owner ruling 2026-08-08, option (a):
+            // every workspace in a loops-on tenant converges its agent-ready
+            // cards; MAIN-385's per-workspace switch refines this later.
+            if loops_on {
+                match crate::services::jobs::converge_builds(state, tenant, owner, ws.id, None)
+                    .await
+                {
+                    Ok(c) if c.raised > 0 || c.withheld > 0 => tracing::info!(
+                        workspace = %ws.id,
+                        raised = c.raised,
+                        live = c.live,
+                        withheld = c.withheld,
+                        "raised build runs"
+                    ),
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(workspace = %ws.id, error = %e, "build run reconcile failed")
+                    }
+                }
+            }
         }
     }
     Ok(())

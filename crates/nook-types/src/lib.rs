@@ -959,6 +959,30 @@ pub struct BuildLoopDeclaration {
     pub max_replicas: Option<i32>,
 }
 
+/// A build run's conclusion, sent by the run itself (MAIN-458). The control
+/// plane records it and mirrors it to the board; opening a PR without
+/// reporting it is the silent lie the outcome call ends.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct BuildOutcomeRequest {
+    /// `pr_opened` | `blocked` | `nothing_to_do`.
+    pub outcome: String,
+    /// The PR, required for `pr_opened`.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// The specific question a human can answer asynchronously, required for
+    /// `blocked`.
+    #[serde(default)]
+    pub question: Option<String>,
+}
+
+/// `POST /api/v1/builds` — build one card NOW (MAIN-458 AC-4): the same
+/// convergence the reconciler runs, filtered to the named task.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct EnqueueBuildRequest {
+    /// The card, by key or id.
+    pub task: String,
+}
+
 /// A review run's conclusion, sent by the run itself (MAIN-455).
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct ReviewVerdictRequest {
@@ -3111,6 +3135,15 @@ pub struct LoopJob {
     /// its head.
     #[serde(default)]
     pub review_verdict: Option<String>,
+    /// What a `build` run CONCLUDED (MAIN-458): `pr_opened` | `blocked` |
+    /// `nothing_to_do`. `None` means the run concluded nothing, however it
+    /// exited — and such a run does not consume its card.
+    #[serde(default)]
+    pub build_outcome: Option<String>,
+    /// What the card looked like when the run was raised — `review_head_sha`'s
+    /// twin for the kind whose unit is a card.
+    #[serde(default)]
+    pub build_fingerprint: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

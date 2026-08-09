@@ -46,6 +46,9 @@ pub struct Repo {
 pub struct PullRequest {
     pub number: u64,
     pub head_sha: String,
+    /// The PR's label names — how a repair item is recognized (MAIN-458):
+    /// `loop-changes-requested` at a head no repair run has answered.
+    pub labels: Vec<String>,
 }
 
 /// What the reconciler needs to know about a repository's review queue.
@@ -297,6 +300,15 @@ fn needing_review(prs: &[serde_json::Value]) -> Vec<PullRequest> {
                 // last run, so it is dropped rather than guessed at: an item we
                 // cannot tell has changed would re-run on every pass forever.
                 head_sha: pr.get("head")?.get("sha")?.as_str()?.to_string(),
+                labels: pr
+                    .get("labels")
+                    .and_then(|l| l.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|l| l.get("name")?.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             })
         })
         .collect()
@@ -544,6 +556,7 @@ mod tests {
                     .map(|i| PullRequest {
                         number: i as u64 + 1,
                         head_sha: format!("sha{i}"),
+                        labels: vec![],
                     })
                     .collect()
             })
@@ -607,11 +620,13 @@ mod tests {
             vec![
                 PullRequest {
                     number: 1,
-                    head_sha: "aaa".into()
+                    head_sha: "aaa".into(),
+                    labels: vec![],
                 },
                 PullRequest {
                     number: 3,
-                    head_sha: "ccc".into()
+                    head_sha: "ccc".into(),
+                    labels: vec![],
                 },
             ]
         );

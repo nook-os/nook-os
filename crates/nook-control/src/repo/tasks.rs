@@ -261,6 +261,14 @@ pub trait TaskRepository: Send + Sync {
     /// The highest `position` in a column, for appending.
     async fn max_position_in_column(&self, column: ColumnId) -> ApiResult<Option<i32>>;
 
+    /// This workspace's cards that carry a recorded PR — `(id, number, pr_url)`
+    /// — the candidate set for REPAIR items (MAIN-458 AC-1b).
+    async fn tasks_with_pr(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Vec<(TaskId, i64, String)>>;
+
     // ---- task writes -------------------------------------------------------
 
     /// Allocate the board number, insert the task, and attach its labels — in
@@ -902,6 +910,29 @@ impl TaskRepository for DbTaskRepository {
                 params![column],
             )
             .await?)
+    }
+
+    async fn tasks_with_pr(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Vec<(TaskId, i64, String)>> {
+        // `number` is INT4 on Postgres: decode the column's own width and
+        // widen in Rust, or the whole read dies with a ColumnDecode there
+        // (SQLite is untyped enough not to notice).
+        let rows: Vec<(Uuid, i32, String)> = self
+            .db
+            .query_all(
+                "SELECT id, number, pr_url FROM tasks
+                  WHERE tenant_id = $1 AND workspace_id = $2
+                    AND pr_url IS NOT NULL AND archived_at IS NULL",
+                params![tenant, workspace.0],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, n, url)| (TaskId(id), i64::from(n), url))
+            .collect())
     }
 
     async fn create_task(&self, new: NewTask) -> ApiResult<TaskItem> {
@@ -2732,6 +2763,25 @@ impl TaskRepository for FakeTaskRepository {
             .filter(|t| t.column_id == column)
             .map(|t| t.position)
             .max())
+    }
+
+    async fn tasks_with_pr(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Vec<(TaskId, i64, String)>> {
+        let st = self.inner.lock().unwrap();
+        Ok(st
+            .tasks
+            .iter()
+            .filter(|t| {
+                t.tenant_id == tenant
+                    && t.workspace_id == Some(workspace)
+                    && t.pr_url.is_some()
+                    && t.archived_at.is_none()
+            })
+            .filter_map(|t| Some((t.id, i64::from(t.number?), t.pr_url.clone()?)))
+            .collect())
     }
 
     async fn create_task(&self, new: NewTask) -> ApiResult<TaskItem> {

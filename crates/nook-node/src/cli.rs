@@ -3813,6 +3813,29 @@ mod tests {
     }
 }
 
+/// `nook builds enqueue <KEY>` (MAIN-458 AC-4) — build one card now, through
+/// the same convergence the reconciler runs: the CP claims the card, raises a
+/// directed run, and dedupes against anything already live for it.
+pub async fn builds_enqueue(task: &str) -> Result<()> {
+    let client = Client::from_config()?;
+    let r = client
+        .post("/api/v1/builds", serde_json::json!({ "task": task }))
+        .await?;
+    let raised = r["raised"].as_array().map(|a| a.len()).unwrap_or(0);
+    let live = r["live"].as_i64().unwrap_or(0);
+    if raised > 0 {
+        println!("{} raised a build run for {task}", crate::style::ok_c("✓"));
+    } else if live > 0 {
+        println!("already building — a live run holds this card");
+    } else {
+        println!(
+            "nothing raised — the card is not currently owed a run \
+             (not agent-ready, blocked, assigned, or already built at this content)"
+        );
+    }
+    Ok(())
+}
+
 /// `nook reviews enqueue <workspace>` (MAIN-408 AC-2) — raise a review now.
 ///
 /// Deduped server-side against the sweep by the shared rule, so running this
