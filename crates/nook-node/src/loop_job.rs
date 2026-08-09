@@ -329,6 +329,273 @@ fn fetch_refused_by(err: &str, worktree: &Path) -> bool {
         && err.contains(&format!("'{}'", worktree.to_string_lossy()))
 }
 
+/// The `[worktree]` section of a repo's own `.nook.toml` (MAIN-481 AC-2).
+///
+/// Read from the NEW worktree rather than the source checkout: it is the tree's
+/// own tracked file, so a branch that changes the rule takes effect on the pass
+/// that checks it out, not one pass late.
+///
+/// `#[serde(default)]` and no `deny_unknown_fields`, matching
+/// `services/repo_settings.rs`'s contract exactly: the next setting is a new
+/// section, and an older node reading a newer file keeps working.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(default)]
+struct WorktreeSeed {
+    /// Opt a repo out entirely. Default on: a build worktree with no `.env` is
+    /// the failure this exists to prevent.
+    copy_ignored: bool,
+    /// Gitignore-style patterns carved OUT of the copy — the vendor directory
+    /// too big to be worth it, the log nobody wants.
+    exclude: Vec<String>,
+}
+
+impl Default for WorktreeSeed {
+    fn default() -> Self {
+        Self {
+            copy_ignored: true,
+            exclude: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct RepoSettingsFile {
+    #[serde(default)]
+    worktree: WorktreeSeed,
+}
+
+/// Parse a repo's `.nook.toml`. A missing, unreadable or malformed file is the
+/// DEFAULT, never an error: seeding is an optimisation, and a typo in a settings
+/// file must not fail a build run.
+fn seed_settings(worktree: &Path) -> WorktreeSeed {
+    let Ok(text) = std::fs::read_to_string(worktree.join(".nook.toml")) else {
+        return WorktreeSeed::default();
+    };
+    toml::from_str::<RepoSettingsFile>(&text)
+        .map(|f| f.worktree)
+        .unwrap_or_default()
+}
+
+/// The workspace's PRIMARY checkout on this node — the one holding the `.env`
+/// and the warm vendor directories a fresh worktree lacks.
+///
+/// Matched by remote, because that is the identity `discovery` itself gives a
+/// workspace. Linked worktrees are skipped: they are as bare as the tree being
+/// seeded, so copying from one would be copying nothing.
+fn primary_checkout_for(cfg: &NodeConfig, repo_url: &str) -> Option<PathBuf> {
+    primary_checkout_in(&cfg.workspace_roots, repo_url)
+}
+
+fn primary_checkout_in(roots: &[String], repo_url: &str) -> Option<PathBuf> {
+    let want = same_repo_key(repo_url);
+    crate::discovery::scan(roots)
+        .into_iter()
+        .filter(|w| !w.worktree)
+        .find(|w| {
+            w.git_remote_url
+                .as_deref()
+                .is_some_and(|u| same_repo_key(u) == want)
+        })
+        .map(|w| PathBuf::from(w.path))
+}
+
+/// Two remote URLs naming one repository, compared loosely enough to survive
+/// the shapes the same repo is written in (`.git` suffix, trailing slash,
+/// case). Deliberately not the control plane's `normalize_remote`: nothing
+/// links these two binaries, and a seed that occasionally declines to find a
+/// checkout costs a cold build, where a wrong match would copy a stranger's
+/// `.env` into this repo's tree.
+fn same_repo_key(url: &str) -> String {
+    url.trim()
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .to_lowercase()
+}
+
+/// Every ignored entry in `source`, as git itself enumerates them.
+///
+/// `--directory` collapses a wholly-ignored directory to one entry, so
+/// `node_modules/` is a single line rather than fifty thousand.
+fn ignored_entries(source: &Path) -> Result<Vec<String>, String> {
+    Ok(crate::gitops::run_git(
+        &[
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+        ],
+        Some(source),
+        None,
+    )?
+    .lines()
+    .map(str::trim)
+    .filter(|l| !l.is_empty())
+    .map(str::to_string)
+    .collect())
+}
+
+/// Which of `entries` the repo's `exclude` patterns match.
+///
+/// Asked of GIT, in a throwaway repository holding ONLY those patterns, so the
+/// answer is real gitignore semantics — `**`, negation, anchoring, directory
+/// suffixes — rather than a glob matcher that agrees with git on the easy cases
+/// and diverges on the ones a user reaches for patterns to express.
+///
+/// `core.excludesFile=/dev/null` is load-bearing: without it `check-ignore`
+/// also honours the NODE's global ignore file, so a `.env` line in one
+/// operator's `~/.config/git/ignore` would silently carve `.env` out of every
+/// repo's seed — the exact file this exists to carry — and make node-level git
+/// config a second home for a setting NG-1 puts only in `.nook.toml`.
+///
+/// An error is an ERROR, never an empty set. Failing open would copy the very
+/// entries the repo asked to drop while the transcript still read "seeded N";
+/// the caller says so out loud and seeds nothing instead.
+fn excluded_by(patterns: &[String], entries: &[String]) -> Result<HashSet<String>, String> {
+    let mut out = HashSet::new();
+    if patterns.is_empty() || entries.is_empty() {
+        return Ok(out);
+    }
+    let tmp = std::env::temp_dir().join(format!("nook-seed-{}", uuid::Uuid::now_v7().simple()));
+    let cleanup = || {
+        let _ = std::fs::remove_dir_all(&tmp);
+    };
+    std::fs::create_dir_all(&tmp).map_err(|e| format!("exclude scratch repo: {e}"))?;
+    let init = crate::gitops::run_git(&["init", "-q"], Some(&tmp), None)
+        .map_err(|e| format!("exclude scratch repo: {e}"))
+        .and_then(|_| {
+            std::fs::write(tmp.join(".git/info/exclude"), patterns.join("\n") + "\n")
+                .map_err(|e| format!("exclude patterns: {e}"))
+        });
+    if let Err(e) = init {
+        cleanup();
+        return Err(e);
+    }
+    // Batched, because one argv holding every ignored entry of a large checkout
+    // can pass ARG_MAX — and a failure there would look exactly like "nothing
+    // matched" if this returned a bare set.
+    for chunk in entries.chunks(500) {
+        let mut args: Vec<&str> = vec![
+            "-c",
+            "core.excludesFile=/dev/null",
+            "check-ignore",
+            "--no-index",
+        ];
+        args.extend(chunk.iter().map(String::as_str));
+        match crate::gitops::run_git(&args, Some(&tmp), None) {
+            Ok(matched) => out.extend(
+                matched
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_string),
+            ),
+            // `check-ignore` exits 1 with nothing on stderr when NOTHING in the
+            // batch matched. That is an answer, not a failure.
+            Err(e) if e.trim().is_empty() => {}
+            Err(e) => {
+                cleanup();
+                return Err(format!("deciding excludes: {e}"));
+            }
+        }
+    }
+    cleanup();
+    Ok(out)
+}
+
+/// Copy a file, directory or symlink, never overwriting what is already there
+/// and never FOLLOWING a link.
+///
+/// `symlink_metadata` and not `metadata`: a followed link reports the type of
+/// its target, so a symlink to a directory would be walked as one. Ignored
+/// directories are exactly where symlink farms live — `node_modules`, `.venv`,
+/// pnpm layouts — and a mutual pair there recursed until the OS refused the
+/// path length, after materialising thousands of real directories on the node.
+/// A dangling link was the mirror bug: `exists()` said no, `copy` failed
+/// `ENOENT`, and the whole seed died on it.
+fn copy_into(src: &Path, dest: &Path) -> std::io::Result<()> {
+    let meta = std::fs::symlink_metadata(src)?;
+    // `symlink_metadata` again rather than `exists()`, which follows and so
+    // reports a dangling link as absent — then refuses to overwrite it anyway.
+    if std::fs::symlink_metadata(dest).is_ok() {
+        return Ok(());
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if meta.file_type().is_symlink() {
+        let target = std::fs::read_link(src)?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, dest)?;
+        // The node ships for linux and macos; anywhere else a link is skipped
+        // rather than guessed at, which costs a cold build and nothing worse.
+        #[cfg(not(unix))]
+        let _ = target;
+        return Ok(());
+    }
+    if meta.is_dir() {
+        std::fs::create_dir_all(dest)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            copy_into(&entry.path(), &dest.join(entry.file_name()))?;
+        }
+        return Ok(());
+    }
+    std::fs::copy(src, dest)?;
+    Ok(())
+}
+
+/// Seed a FRESH build worktree with the ignored files of the workspace's
+/// primary checkout (MAIN-481).
+///
+/// The copied set is exactly what git IGNORES — `.env`, vendor and build
+/// directories. Untracked-but-not-ignored files are deliberately not copied:
+/// MAIN-480's clean-case sweep deletes that class on the next pass, so seeding
+/// it would hand the tree something designed to be thrown away, while ignored
+/// files are the one class both tickets always preserve.
+///
+/// Returns how many entries were copied, or the reason nothing was.
+fn seed_worktree(source: &Path, dest: &Path, settings: &WorktreeSeed) -> Result<usize, String> {
+    if !settings.copy_ignored {
+        return Ok(0);
+    }
+    let entries = ignored_entries(source)?;
+    let skip = excluded_by(&settings.exclude, &entries)?;
+    let mut copied = 0;
+    let mut failed = Vec::new();
+    for entry in entries {
+        let rel = entry.trim_end_matches('/');
+        if rel.is_empty() || skip.contains(&entry) || skip.contains(rel) {
+            continue;
+        }
+        let from = source.join(rel);
+        let to = dest.join(rel);
+        if std::fs::symlink_metadata(&from).is_err() || std::fs::symlink_metadata(&to).is_ok() {
+            continue;
+        }
+        match copy_into(&from, &to) {
+            Ok(()) => copied += 1,
+            Err(e) => {
+                // The tree is never re-seeded (AC-4/NG-5), so a half-copied
+                // `node_modules` would outlive the card and be worse than the
+                // cold build this falls back to. Take the partial away and
+                // carry on with the entries that can still land.
+                let _ = std::fs::remove_dir_all(&to);
+                let _ = std::fs::remove_file(&to);
+                failed.push(format!("{rel} ({e})"));
+            }
+        }
+    }
+    if !failed.is_empty() {
+        return Err(format!(
+            "copied {copied}; could not copy {}: {}",
+            failed.len(),
+            failed.join(", ")
+        ));
+    }
+    Ok(copied)
+}
+
 /// Is this a BUILD run's worktree directory? Only those outlive their run
 /// (MAIN-480 AC-1); review keeps a stable PATH but is rebuilt every pass, and
 /// everything else is per-job.
@@ -995,6 +1262,51 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
             }
         }
     };
+    // A FRESH build tree has only tracked files — no `.env`, no vendor
+    // directories — so a first pass either dies on missing local config or pays
+    // a cold build. Seed it from the workspace's primary checkout on this node
+    // (MAIN-481). Creation only: MAIN-480's persistence keeps it warm after,
+    // and re-copying would fight the tree the agent has been working in.
+    //
+    // Never fatal. A missing checkout or a failed copy costs a cold build; it
+    // must not cost the run, so both are said out loud and the pass continues.
+    if keeps_tree && !adopted {
+        let settings = seed_settings(&worktree);
+        // Checked BEFORE the scan: `primary_checkout_for` walks every workspace
+        // root and shells out to git per candidate, which is pure waste for a
+        // repo that has opted out.
+        if !settings.copy_ignored {
+            note(
+                &out,
+                &job_id,
+                "this repo sets `[worktree] copy_ignored = false` — seeding nothing",
+            );
+        } else {
+            match primary_checkout_for(&cfg, &repo_url) {
+                Some(source) => match seed_worktree(&source, &worktree, &settings) {
+                    Ok(0) => note(
+                        &out,
+                        &job_id,
+                        format!("nothing to seed from {}", source.display()),
+                    ),
+                    Ok(n) => note(
+                        &out,
+                        &job_id,
+                        format!("seeded {n} ignored entr(ies) from {}", source.display()),
+                    ),
+                    Err(e) => note(&out, &job_id, format!("seeding this worktree failed: {e}")),
+                },
+                None => note(
+                    &out,
+                    &job_id,
+                    format!(
+                        "no primary checkout of {repo_url} under this node's workspace roots — \
+                     nothing to seed, so this build starts cold (no .env, no vendor dirs)"
+                    ),
+                ),
+            }
+        }
+    }
     // Tell the control plane where this card works (AC-4). It records the path
     // on the card, which is what pins later passes here, what `prune-worktree`
     // addresses, and what stops `reconcile` treating the tree as an orphan.
@@ -1716,6 +2028,356 @@ fn exit_is_ok(status: Option<i32>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── MAIN-481: seeding a fresh build worktree ───────────────────────────
+
+    /// A checkout holding one of each class the seed must tell apart.
+    fn checkout_with_every_class(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        git_in(dir, &["init", "-b", "main"]);
+        std::fs::write(dir.join(".gitignore"), ".env\n*.log\nvendor/\n").unwrap();
+        std::fs::write(dir.join("README.md"), "# demo\n").unwrap();
+        commit_all(dir, "init");
+        // Ignored: the warm layer the seed exists to carry.
+        std::fs::write(dir.join(".env"), "SECRET=1\n").unwrap();
+        std::fs::write(dir.join("build.log"), "noise\n").unwrap();
+        std::fs::create_dir_all(dir.join("vendor/pkg")).unwrap();
+        std::fs::write(dir.join("vendor/pkg/lib.rs"), "// expensive\n").unwrap();
+        // Untracked but NOT ignored: a human's stray file, never copied.
+        std::fs::write(dir.join("notes.txt"), "my notes\n").unwrap();
+    }
+
+    /// MAIN-481 AC-1: ignored files come across — including a whole directory —
+    /// and untracked-not-ignored files do not, because MAIN-480's sweep deletes
+    /// that class anyway.
+    #[test]
+    fn the_seed_copies_ignored_files_and_leaves_stray_ones_behind() {
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let tmp =
+            std::env::temp_dir().join(format!("nook-481-copy-{}", uuid::Uuid::now_v7().simple()));
+        let source = tmp.join("primary");
+        let dest = tmp.join("worktree");
+        checkout_with_every_class(&source);
+        std::fs::create_dir_all(&dest).unwrap();
+
+        let copied = seed_worktree(&source, &dest, &WorktreeSeed::default()).expect("seed");
+
+        assert!(dest.join(".env").exists(), "the config a run needs");
+        assert!(
+            dest.join("vendor/pkg/lib.rs").exists(),
+            "a wholly ignored directory comes as one entry, contents and all"
+        );
+        assert!(dest.join("build.log").exists());
+        assert!(
+            !dest.join("notes.txt").exists(),
+            "untracked-not-ignored is the class the next pass sweeps — never seed it"
+        );
+        assert!(
+            !dest.join("README.md").exists(),
+            "tracked files arrive from git, not from the copy"
+        );
+        assert_eq!(copied, 3);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// MAIN-481 AC-2: `exclude` carves patterns out, with real gitignore
+    /// semantics — the answer comes from git, not a hand-rolled glob.
+    #[test]
+    fn exclude_patterns_carve_entries_out_of_the_copy() {
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let tmp =
+            std::env::temp_dir().join(format!("nook-481-excl-{}", uuid::Uuid::now_v7().simple()));
+        let source = tmp.join("primary");
+        let dest = tmp.join("worktree");
+        checkout_with_every_class(&source);
+        std::fs::create_dir_all(&dest).unwrap();
+
+        let settings = WorktreeSeed {
+            copy_ignored: true,
+            exclude: vec!["*.log".into(), "vendor/".into()],
+        };
+        seed_worktree(&source, &dest, &settings).expect("seed");
+
+        assert!(dest.join(".env").exists(), "not excluded, still copied");
+        assert!(!dest.join("build.log").exists(), "excluded by `*.log`");
+        assert!(!dest.join("vendor").exists(), "excluded by `vendor/`");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// MAIN-481 AC-2: a repo can opt out entirely.
+    #[test]
+    fn copy_ignored_false_seeds_nothing() {
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let tmp =
+            std::env::temp_dir().join(format!("nook-481-optout-{}", uuid::Uuid::now_v7().simple()));
+        let source = tmp.join("primary");
+        let dest = tmp.join("worktree");
+        checkout_with_every_class(&source);
+        std::fs::create_dir_all(&dest).unwrap();
+
+        let settings = WorktreeSeed {
+            copy_ignored: false,
+            exclude: vec![],
+        };
+        assert_eq!(seed_worktree(&source, &dest, &settings).expect("seed"), 0);
+        assert!(!dest.join(".env").exists());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// MAIN-481 AC-1: what the tree already has wins. The worktree is the live
+    /// working state; the seed is a convenience and must never overwrite it.
+    #[test]
+    fn the_seed_never_overwrites_what_the_worktree_already_has() {
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let tmp =
+            std::env::temp_dir().join(format!("nook-481-keep-{}", uuid::Uuid::now_v7().simple()));
+        let source = tmp.join("primary");
+        let dest = tmp.join("worktree");
+        checkout_with_every_class(&source);
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join(".env"), "MINE=1\n").unwrap();
+
+        seed_worktree(&source, &dest, &WorktreeSeed::default()).expect("seed");
+
+        assert_eq!(
+            std::fs::read_to_string(dest.join(".env")).unwrap(),
+            "MINE=1\n",
+            "the worktree's own file survives the seed"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// MAIN-481 AC-2: the settings are the repo's own, and anything unreadable
+    /// or unknown falls back to the default rather than failing a build.
+    #[test]
+    fn the_worktree_section_is_read_and_unknown_keys_are_tolerated() {
+        let tmp =
+            std::env::temp_dir().join(format!("nook-481-cfg-{}", uuid::Uuid::now_v7().simple()));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        assert_eq!(
+            seed_settings(&tmp),
+            WorktreeSeed::default(),
+            "no file at all is the default, not a refusal"
+        );
+
+        std::fs::write(
+            tmp.join(".nook.toml"),
+            "[ports]\nname = \"web\"\n\n[worktree]\ncopy_ignored = false\nexclude = [\"a\"]\nfuture_key = 3\n",
+        )
+        .unwrap();
+        assert_eq!(
+            seed_settings(&tmp),
+            WorktreeSeed {
+                copy_ignored: false,
+                exclude: vec!["a".into()]
+            },
+            "an unknown key and an unrelated section are both tolerated"
+        );
+
+        std::fs::write(tmp.join(".nook.toml"), "this is not toml {{{").unwrap();
+        assert_eq!(
+            seed_settings(&tmp),
+            WorktreeSeed::default(),
+            "a broken settings file costs the seed, never the run"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// One repository written two ways is still one repository — the shapes a
+    /// remote is stored in must not decide whether a tree gets seeded.
+    #[test]
+    fn two_remote_url_shapes_of_one_repo_match() {
+        assert_eq!(
+            same_repo_key("https://github.com/o/r.git"),
+            same_repo_key("https://github.com/o/r/")
+        );
+        assert_ne!(
+            same_repo_key("https://github.com/o/r"),
+            same_repo_key("https://github.com/o/other")
+        );
+    }
+
+    /// MAIN-481 AC-1: a symlink is RECREATED, never followed.
+    ///
+    /// The bug this pins filled a node's disk: a mutual pair inside an ignored
+    /// directory (`node_modules` is where these live) was walked as real
+    /// directories until the OS refused the path length. Its mirror, a dangling
+    /// link, aborted the entire seed on `ENOENT`.
+    #[test]
+    fn symlinks_are_recreated_rather_than_walked() {
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let tmp =
+            std::env::temp_dir().join(format!("nook-481-link-{}", uuid::Uuid::now_v7().simple()));
+        let source = tmp.join("primary");
+        let dest = tmp.join("worktree");
+        checkout_with_every_class(&source);
+        std::fs::create_dir_all(source.join("vendor/a")).unwrap();
+        std::fs::create_dir_all(source.join("vendor/b")).unwrap();
+        #[cfg(unix)]
+        {
+            // The cycle, and a link pointing at nothing.
+            std::os::unix::fs::symlink("../b", source.join("vendor/a/blink")).unwrap();
+            std::os::unix::fs::symlink("../a", source.join("vendor/b/alink")).unwrap();
+            std::os::unix::fs::symlink("gone", source.join("vendor/dangling")).unwrap();
+        }
+        std::fs::create_dir_all(&dest).unwrap();
+
+        let copied = seed_worktree(&source, &dest, &WorktreeSeed::default())
+            .expect("a symlink farm must not fail the seed");
+        assert!(copied > 0);
+
+        #[cfg(unix)]
+        {
+            let link = std::fs::symlink_metadata(dest.join("vendor/a/blink")).expect("blink");
+            assert!(link.file_type().is_symlink(), "recreated as a link");
+            assert!(
+                std::fs::symlink_metadata(dest.join("vendor/dangling")).is_ok(),
+                "a dangling link is copied as a link, not an error"
+            );
+            // A correctly recreated pair still RESOLVES through — that is what
+            // links do — so the thing to pin is that nothing was materialised:
+            // the buggy walk turned each of these into real nested directories
+            // and made thousands of them.
+            let a: Vec<_> = std::fs::read_dir(dest.join("vendor/a"))
+                .unwrap()
+                .flatten()
+                .collect();
+            assert_eq!(a.len(), 1, "one entry, the link itself");
+            assert!(
+                std::fs::symlink_metadata(a[0].path())
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "and it is a link, not a walked copy of the cycle"
+            );
+        }
+        assert!(dest.join(".env").exists(), "and the rest still lands");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// MAIN-481 AC-2: the exclude answer comes from the REPO's patterns alone.
+    /// A `.env` line in an operator's global gitignore must not carve `.env`
+    /// out of every repo's seed — that is the file this feature exists to
+    /// carry, and node git config is not a second home for the setting (NG-1).
+    #[test]
+    fn a_global_gitignore_cannot_carve_entries_out_of_the_seed() {
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let tmp =
+            std::env::temp_dir().join(format!("nook-481-glob-{}", uuid::Uuid::now_v7().simple()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let global = tmp.join("global-ignore");
+        std::fs::write(&global, ".env\n").unwrap();
+
+        // `excluded_by` neutralises core.excludesFile, so this global rule is
+        // invisible to it even while git is told to read the file.
+        let prev = std::env::var("GIT_CONFIG_GLOBAL").ok();
+        // SAFETY: single-threaded test process; restored below.
+        unsafe { std::env::set_var("GIT_CONFIG_GLOBAL", tmp.join("gitconfig")) };
+        std::fs::write(
+            tmp.join("gitconfig"),
+            format!("[core]\n\texcludesFile = {}\n", global.display()),
+        )
+        .unwrap();
+
+        let entries = vec![".env".to_string(), "build.log".to_string()];
+        let skip = excluded_by(&["*.log".to_string()], &entries).expect("excludes");
+
+        match prev {
+            Some(v) => unsafe { std::env::set_var("GIT_CONFIG_GLOBAL", v) },
+            None => unsafe { std::env::remove_var("GIT_CONFIG_GLOBAL") },
+        }
+
+        assert!(skip.contains("build.log"), "the repo's own pattern applies");
+        assert!(
+            !skip.contains(".env"),
+            "a node's global ignore must not decide what a repo seeds"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// MAIN-481 AC-3/AC-5: no primary checkout under the node's roots is the
+    /// logged-skip case, and it must actually be reachable — nothing else
+    /// pinned that `primary_checkout_in` can return `None`.
+    #[test]
+    fn a_missing_primary_checkout_is_none_and_a_linked_worktree_is_never_the_source() {
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let tmp =
+            std::env::temp_dir().join(format!("nook-481-src-{}", uuid::Uuid::now_v7().simple()));
+        let root = tmp.join("roots");
+        std::fs::create_dir_all(&root).unwrap();
+        let roots = vec![root.to_string_lossy().to_string()];
+        let remote = "https://github.com/o/r.git";
+
+        assert_eq!(
+            primary_checkout_in(&roots, remote),
+            None,
+            "an empty root is the AC-3 skip, not a panic"
+        );
+
+        // A repo of the RIGHT remote, but reached as a linked worktree: as bare
+        // as the tree being seeded, so choosing it would seed nothing.
+        let primary = tmp.join("elsewhere");
+        std::fs::create_dir_all(&primary).unwrap();
+        git_in(&primary, &["init", "-b", "main"]);
+        git_in(&primary, &["remote", "add", "origin", remote]);
+        std::fs::write(primary.join("README.md"), "# demo\n").unwrap();
+        commit_all(&primary, "init");
+        git_in(
+            &primary,
+            &[
+                "worktree",
+                "add",
+                &root.join("linked").to_string_lossy(),
+                "-b",
+                "side",
+            ],
+        );
+        assert_eq!(
+            primary_checkout_in(&roots, remote),
+            None,
+            "a linked worktree is never the seed source"
+        );
+
+        // The same repo as a real checkout under the root IS found.
+        git_in(
+            &tmp,
+            &[
+                "clone",
+                "-q",
+                &primary.to_string_lossy(),
+                &root.join("real").to_string_lossy(),
+            ],
+        );
+        git_in(&root.join("real"), &["remote", "set-url", "origin", remote]);
+        assert_eq!(
+            primary_checkout_in(&roots, remote),
+            Some(root.join("real")),
+            "a primary checkout of the right remote is the source"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     // ── MAIN-480: the build worktree's lifecycle ────────────────────────────
 
