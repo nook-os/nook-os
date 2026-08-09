@@ -1500,6 +1500,41 @@ pub async fn select_executor(
         .eligible_loop_executors(tenant, person, LOOP_RUNTIME, &job.kind)
         .await?;
 
+    // The worktree PIN (MAIN-480 AC-5). A build card's worktree outlives its
+    // run and holds the state later passes depend on — a warm agent session
+    // that remembers that directory, and, after a crash, the only copy of the
+    // interrupted work. Running the next pass anywhere else abandons both, so
+    // the recorded node is not a preference: it is the only candidate, and a
+    // job waits rather than starting somewhere it would have to begin again.
+    //
+    // Waiting is bounded by a human, not by a timer: `prune-worktree` clears
+    // the record (even against an unreachable node) and the job is placeable
+    // again the moment it does.
+    let pinned = pinned_node(state, tenant, &job).await?;
+    let candidates: Vec<NodeId> = match pinned {
+        Some(pin) => candidates.into_iter().filter(|n| *n == pin).collect(),
+        None => candidates,
+    };
+    if let Some(pin) = pinned {
+        if candidates.is_empty() {
+            let name = state
+                .nodes
+                .get(tenant, pin)
+                .await?
+                .map(|n| n.name)
+                .unwrap_or_else(|| pin.0.to_string());
+            return set_queued_reason(
+                state,
+                job_id,
+                &format!(
+                    "waiting for node {name}, which holds this card's worktree — it is offline \
+                     or not eligible right now. Prune the worktree from the card to release it."
+                ),
+            )
+            .await;
+        }
+    }
+
     // A kind with a placement selector runs on labeled nodes and nowhere else.
     // Review keeps the declaration's own rule (MAIN-455 AC-4) and build filters
     // to `role=build` the same way (MAIN-383 AC-3) — each selector has ONE
@@ -1586,6 +1621,35 @@ pub async fn select_executor(
         // Lost the race — another consumer claimed it. Return the current row.
         None => load(state, tenant, job_id).await,
     }
+}
+
+/// The node a job is pinned to, if its card already has a worktree somewhere
+/// (MAIN-480 AC-5).
+///
+/// Only BUILD work is pinned. A review or spec run carries no state across
+/// passes, and pinning one would strand it on a machine for no gain; a card's
+/// `worktree_node_id` may also have been set by the human `start-work` path,
+/// which those kinds have no business honouring.
+async fn pinned_node(
+    state: &AppState,
+    tenant: TenantId,
+    job: &LoopJob,
+) -> ApiResult<Option<NodeId>> {
+    if job.kind != BUILD_KIND {
+        return Ok(None);
+    }
+    let Some(task) = job.target_task_id else {
+        return Ok(None);
+    };
+    let Some(card) = state.tasks.get_row(tenant, task).await? else {
+        return Ok(None);
+    };
+    Ok(
+        match (card.worktree_path.as_deref(), card.worktree_node_id) {
+            (Some(_), Some(node)) => Some(node),
+            _ => None,
+        },
+    )
 }
 
 /// Capacity assumed for a node that reports none — an agent old enough to
@@ -2027,6 +2091,67 @@ pub async fn finish_from_node(
         return Ok(());
     }
     finish(state, tenant, id, ok, message).await
+}
+
+/// Record where a build run's worktree lives (MAIN-480 AC-4).
+///
+/// Node-scoped like every other node report: a node may only speak for a job it
+/// actually executes, so it cannot point another executor's card at a directory
+/// on this machine.
+///
+/// The record is the load-bearing part of the ticket, not bookkeeping. It is
+/// what pins later passes to this node (`select_executor`), what
+/// `prune-worktree` addresses, and what tells the node's reconnect sweep the
+/// directory is still wanted.
+pub async fn record_worktree_from_node(
+    state: &AppState,
+    tenant: TenantId,
+    node: NodeId,
+    id: JobId,
+    path: &str,
+) -> ApiResult<()> {
+    if !is_executor(state, tenant, id, node).await? {
+        tracing::warn!(job = %id.0, node = %node.0, "node reported a worktree for a job it does not execute — dropped");
+        return Ok(());
+    }
+    let job = load(state, tenant, id).await?;
+    let Some(task) = job.target_task_id else {
+        return Ok(());
+    };
+    state.tasks.record_loop_worktree(task, node, path).await?;
+    state
+        .registry
+        .publish(tenant, nook_proto::UiEvent::TaskChanged { task_id: task });
+    Ok(())
+}
+
+/// Answer a reconnecting node's inventory of build worktrees (MAIN-480 AC-1):
+/// anything it holds that no card records HERE is an orphan, and the node is
+/// told to remove it.
+///
+/// Deliberately one-directional. A path this side records but the node does not
+/// hold is NOT repaired from here — the tree may be on a machine that is simply
+/// slow to report, and re-creating it is the next run's job anyway. Only the
+/// direction that leaks disk is acted on.
+pub async fn sweep_worktrees_on_node(
+    state: &AppState,
+    tenant: TenantId,
+    node: NodeId,
+    held: &[String],
+) -> ApiResult<usize> {
+    let recorded = state.tasks.worktree_paths_on_node(node).await?;
+    let orphans: Vec<&String> = held.iter().filter(|p| !recorded.contains(p)).collect();
+    for path in &orphans {
+        tracing::info!(node = %node.0, path = %path, "removing a build worktree no card records");
+        let _ = state.registry.request_op(node, |request_id| {
+            nook_proto::ControlToNode::RemoveWorktree {
+                request_id,
+                worktree_path: (*path).clone(),
+            }
+        });
+    }
+    let _ = tenant;
+    Ok(orphans.len())
 }
 
 /// The name a job's token carries, so it is identifiable in Settings → Access

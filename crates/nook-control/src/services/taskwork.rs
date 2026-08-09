@@ -365,34 +365,65 @@ pub async fn prune_worktree(
         return Err(ApiError::BadRequest("task has no worktree to prune".into()));
     };
 
-    let rx = state
-        .registry
-        .request_op(node_id, |request_id| ControlToNode::RemoveWorktree {
-            request_id,
-            worktree_path: path.clone(),
-        })
-        .ok_or_else(|| ApiError::BadRequest("node is offline".into()))?;
-    let op = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
-        .await
-        .map_err(|_| ApiError::BadRequest("node did not answer in time".into()))?
-        .map_err(|_| ApiError::BadRequest("node disconnected".into()))?;
-    if !op.ok {
-        return Err(ApiError::BadRequest(format!(
-            "prune failed: {}",
-            op.message
-        )));
-    }
+    // An unreachable node must not strand the card (MAIN-480 AC-6). The record
+    // is what PINS a build card's later passes to this node, so refusing to
+    // clear it while the machine is down would leave the work unplaceable with
+    // no way out. The directory is not lost: the node reports what it holds on
+    // its next connect and is told to remove anything no card records.
+    let removal = remove_worktree_on_node(state, node_id, &path).await;
+    let unreachable = match removal {
+        Ok(()) => None,
+        Err(e) => {
+            tracing::warn!(
+                task = %task_id.0, node = %node_id.0, path = %path, error = %e,
+                "pruning the worktree on the node failed — clearing the record anyway; \
+                 the node removes the directory when it next reports what it holds"
+            );
+            Some(e)
+        }
+    };
 
     let updated = state.tasks.clear_worktree(task_id).await?;
 
     events::record(
         state,
         tenant,
-        EventDraft::new("task.worktree_pruned")
-            .payload(serde_json::json!({ "task_id": task_id, "path": path })),
+        EventDraft::new("task.worktree_pruned").payload(serde_json::json!({
+            "task_id": task_id,
+            "path": path,
+            "node_unreachable": unreachable.is_some(),
+        })),
     )
     .await;
     Ok(updated)
+}
+
+/// Ask the node to remove a worktree, waiting for its answer.
+///
+/// Every failure is one value — offline, silent, disconnected, or a refusal
+/// from git itself — because the caller treats them identically: the record is
+/// cleared regardless and the reason is logged.
+async fn remove_worktree_on_node(
+    state: &AppState,
+    node_id: NodeId,
+    path: &str,
+) -> Result<(), String> {
+    let rx = state
+        .registry
+        .request_op(node_id, |request_id| ControlToNode::RemoveWorktree {
+            request_id,
+            worktree_path: path.to_string(),
+        })
+        .ok_or_else(|| "node is offline".to_string())?;
+    let op = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
+        .await
+        .map_err(|_| "node did not answer in time".to_string())?
+        .map_err(|_| "node disconnected".to_string())?;
+    if op.ok {
+        Ok(())
+    } else {
+        Err(format!("prune failed: {}", op.message))
+    }
 }
 
 /// Push a claim's backstop out to `max_claim_secs` from now (MAIN-229 AC-5).

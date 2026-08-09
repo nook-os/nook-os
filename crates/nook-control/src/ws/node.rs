@@ -938,6 +938,27 @@ async fn handle_message(
                 .await;
             }
         }
+        // Where a build run's worktree is (MAIN-480 AC-4) — the record that
+        // pins later passes here and makes the tree prunable from the board.
+        NodeToControl::LoopWorktreeReady { job_id, path } => {
+            if let Ok(id) = job_id.parse::<uuid::Uuid>() {
+                let _ = crate::services::jobs::record_worktree_from_node(
+                    state,
+                    tenant,
+                    node_id,
+                    nook_types::JobId(id),
+                    &path,
+                )
+                .await;
+            }
+        }
+        // A reconnecting node's inventory of build worktrees (MAIN-480 AC-1):
+        // it keeps every one this side still records and is told to remove the
+        // rest — including any pruned while it was unreachable.
+        NodeToControl::LoopWorktreesHeld { paths } => {
+            let _ = crate::services::jobs::sweep_worktrees_on_node(state, tenant, node_id, &paths)
+                .await;
+        }
         NodeToControl::Pong => {}
     }
     Ok(())

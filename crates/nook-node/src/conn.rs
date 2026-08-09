@@ -298,9 +298,19 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
 
     // Best-effort: on every (re)connect, prune loop-job worktrees orphaned by a
     // crash or a node restart (MAIN-161 AC-4). Blocking git, non-fatal.
+    //
+    // Build worktrees are exempt from that sweep and REPORTED instead: whether
+    // one is still wanted is a card fact this process cannot see, so the
+    // control plane answers with a `RemoveWorktree` for each it no longer
+    // records (MAIN-480 AC-1).
     {
         let cfg = cfg.clone();
-        tokio::task::spawn_blocking(move || crate::loop_job::reconcile(&cfg));
+        let tx = ctl_tx.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::loop_job::reconcile(&cfg);
+            let paths = crate::loop_job::build_worktrees_held(&cfg);
+            let _ = tx.blocking_send(NodeToControl::LoopWorktreesHeld { paths });
+        });
     }
 
     // Heartbeat carries a live resource sample so triage/humans can see which
