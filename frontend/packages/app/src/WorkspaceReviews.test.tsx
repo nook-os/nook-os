@@ -6,7 +6,7 @@
 // say" had no answer at all.
 import React from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 const state = vi.hoisted(() => ({
@@ -140,5 +140,27 @@ describe("WorkspaceReviews", () => {
     const strong = await screen.findByText("No action");
     expect(strong.tagName).toBe("STRONG");
     expect(screen.getByText("Verdict").tagName).toBe("H2");
+  });
+});
+
+describe("transcript export (MAIN-471)", () => {
+  it("copies the FULL transcript even when the view folds agent activity", async () => {
+    state.runs = [run()];
+    state.transcript = [
+      { id: "l1", job_id: "job-1", source: "system", content: "started", at: "2026-08-08T10:00:00Z" },
+      // A tool-activity ladder line the VIEW folds away.
+      { id: "l2", job_id: "job-1", source: "agent", content: "· Bash cargo test", at: "2026-08-08T10:00:01Z" },
+      { id: "l3", job_id: "job-1", source: "system", content: "verdict: approved", at: "2026-08-08T10:00:02Z" },
+    ];
+    const writeText = vi.fn(async (_text: string) => {});
+    Object.assign(navigator, { clipboard: { writeText } });
+
+    renderReviews();
+    fireEvent.click(await screen.findByTestId("transcript-copy"));
+    await new Promise((r) => setTimeout(r, 0));
+    const copied = writeText.mock.calls[0][0] as string;
+    expect(copied).toContain("· Bash cargo test");
+    expect(copied).toContain("## agent");
+    expect(copied).toContain("verdict: approved");
   });
 });

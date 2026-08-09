@@ -16,7 +16,13 @@ type Run = {
   build_outcome?: string | null;
 };
 
-export function WorkspaceBuilds({ workspaceId }: { workspaceId: string }) {
+export function WorkspaceBuilds({
+  workspaceId,
+  workspaceName,
+}: {
+  workspaceId: string;
+  workspaceName?: string;
+}) {
   return (
     <WorkspaceRuns
       title="Builds"
@@ -27,6 +33,7 @@ export function WorkspaceBuilds({ workspaceId }: { workspaceId: string }) {
       }
       testid="build-run"
       transcriptTestid="build-transcript"
+      filePrefix={workspaceName}
       fetchRows={async () => {
         const rows =
           ((

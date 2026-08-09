@@ -26,7 +26,13 @@ export function shortHead(sha?: string | null): string {
   return sha ? sha.slice(0, 7) : "";
 }
 
-export function WorkspaceReviews({ workspaceId }: { workspaceId: string }) {
+export function WorkspaceReviews({
+  workspaceId,
+  workspaceName,
+}: {
+  workspaceId: string;
+  workspaceName?: string;
+}) {
   return (
     <WorkspaceRuns
       title="Reviews"
@@ -37,6 +43,7 @@ export function WorkspaceReviews({ workspaceId }: { workspaceId: string }) {
       }
       testid="review-run"
       transcriptTestid="review-transcript"
+      filePrefix={workspaceName}
       fetchRows={async () => {
         const rows =
           ((
