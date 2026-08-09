@@ -200,6 +200,10 @@ export function startLive(queryClient: QueryClient) {
       // list is keyed by workspace, and invalidating the prefix repaints it
       // without this needing to know which repo the run belonged to.
       queryClient.invalidateQueries({ queryKey: ["workspace-reviews"] });
+      // Builds ride the same nudge (MAIN-461 AC-3): a build HAS a task id, so
+      // the ticketed branch above already repaints its card — this repaints
+      // the workspace's Builds panel rows.
+      queryClient.invalidateQueries({ queryKey: ["workspace-builds"] });
     } else if (event.type === "job_turn") {
       // A loop job's agent started or stopped a turn (MAIN-240 AC-2). Unlike
       // every neighbour in this switch, this does NOT invalidate a query: a turn

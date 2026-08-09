@@ -138,6 +138,19 @@ pub trait LoopJobRepository: Send + Sync {
         limit: i64,
     ) -> ApiResult<Vec<LoopJob>>;
 
+    /// The Builds panel's rows (MAIN-461 AC-2): each build run with its card
+    /// named by KEY — joined here because `LoopJob` never carries the key and
+    /// the panel must not pay one lookup per row. The key is VIEWER-GATED
+    /// (MAIN-265/MAIN-86): a private card a viewer cannot see lists its run
+    /// keyless, exactly as a private epic's key is withheld from its children.
+    async fn list_builds_for_workspace(
+        &self,
+        tenant: TenantId,
+        viewer: nook_types::UserId,
+        workspace: WorkspaceId,
+        limit: i64,
+    ) -> ApiResult<Vec<nook_types::WorkspaceBuildRun>>;
+
     /// Record what a review run concluded. Guarded on a live review run — a
     /// verdict on a finished or foreign job is a caller bug, answered with 0.
     async fn set_review_verdict(&self, id: JobId, verdict: &str) -> ApiResult<u64>;
@@ -451,6 +464,42 @@ impl LoopJobRepository for DbLoopJobRepository {
                   WHERE tenant_id = $1 AND workspace_id = $2 AND kind = 'review'
                   ORDER BY created_at DESC LIMIT $3",
                 params![tenant, workspace.0, limit],
+            )
+            .await?)
+    }
+
+    async fn list_builds_for_workspace(
+        &self,
+        tenant: TenantId,
+        viewer: nook_types::UserId,
+        workspace: WorkspaceId,
+        limit: i64,
+    ) -> ApiResult<Vec<nook_types::WorkspaceBuildRun>> {
+        // `||` and CAST are the concat/coercion BOTH engines run — this file is
+        // held to SQL both engines run, like every query here. LEFT JOIN so a
+        // run whose card was deleted still lists (key NULL), rather than
+        // silently vanishing from the history it is part of. The CASE gates
+        // the KEY on the shared visibility rule (MAIN-265): the run row is the
+        // workspace's history, but a private card's identity is the owner's —
+        // a non-owner sees the run keyless, the way MAIN-86 withholds a
+        // private epic's key from its children.
+        Ok(self
+            .db
+            .query_all(
+                &format!(
+                    "SELECT j.id, j.state,
+                        CASE WHEN {vis}
+                             THEN (b.key || '-' || CAST(t.number AS text))
+                        END AS task_key,
+                        j.created_at
+                   FROM loop_jobs j
+                   LEFT JOIN tasks t ON t.id = j.target_task_id
+                   LEFT JOIN boards b ON b.id = t.board_id
+                  WHERE j.tenant_id = $1 AND j.workspace_id = $2 AND j.kind = 'build'
+                  ORDER BY j.created_at DESC LIMIT $3",
+                    vis = crate::services::tasks::visible_sql("t", "$4"),
+                ),
+                params![tenant, workspace.0, limit, viewer],
             )
             .await?)
     }
@@ -888,6 +937,34 @@ impl LoopJobRepository for FakeLoopJobRepository {
             .cloned()
             .collect();
         mine.sort_by_key(|j| std::cmp::Reverse(j.created_at));
+        mine.truncate(limit.max(0) as usize);
+        Ok(mine)
+    }
+
+    async fn list_builds_for_workspace(
+        &self,
+        tenant: TenantId,
+        _viewer: nook_types::UserId,
+        workspace: WorkspaceId,
+        limit: i64,
+    ) -> ApiResult<Vec<nook_types::WorkspaceBuildRun>> {
+        let s = self.inner.lock().unwrap();
+        let mut mine: Vec<nook_types::WorkspaceBuildRun> = s
+            .jobs
+            .iter()
+            .filter(|j| {
+                j.tenant_id == tenant && j.workspace_id == Some(workspace) && j.kind == "build"
+            })
+            .map(|j| nook_types::WorkspaceBuildRun {
+                id: j.id.0,
+                state: j.state.clone(),
+                // The fake holds no boards to join; the key is the panel's
+                // concern, and `None` is a legal row (a deleted card's run).
+                task_key: None,
+                created_at: j.created_at,
+            })
+            .collect();
+        mine.sort_by_key(|r| std::cmp::Reverse(r.created_at));
         mine.truncate(limit.max(0) as usize);
         Ok(mine)
     }

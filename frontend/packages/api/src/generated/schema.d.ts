@@ -3029,6 +3029,52 @@ export interface paths {
         patch: operations["rename_workspace"];
         trace?: never;
     };
+    "/api/v1/workspaces/{id}/build-loop": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/workspaces/{id}/build-loop` — the ceiling on build runs for
+         *     this repo (MAIN-461 AC-1), `/review-loop`'s twin. Reports the RAW column
+         *     for the same reason: `null` is "nobody decided", and resolving it to 1
+         *     would erase the distinction the CLI prints as "unset (default 1)".
+         */
+        get: operations["get_build_loop"];
+        /**
+         * `PUT /api/v1/workspaces/{id}/build-loop` — set it, or clear it back to
+         *     unset with `{"max_replicas": null}` (MAIN-461 AC-1).
+         */
+        put: operations["set_build_loop"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{id}/builds": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/workspaces/{id}/builds` — the Builds panel's rows (MAIN-461
+         *     AC-2): this repo's build runs, newest first, each naming its card by key.
+         */
+        get: operations["list_builds_for_workspace"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{id}/clone": {
         parameters: {
             query?: never;
@@ -3737,6 +3783,16 @@ export interface components {
         };
         /** Format: uuid */
         BoardId: string;
+        /**
+         * @description The ceiling on this repo's BUILD runs (MAIN-461) — `ReviewLoopDeclaration`'s
+         *     twin, kept separate because the two are set independently and a shared type
+         *     would let a rename on one silently rename the other's wire shape.
+         *     `None` = nobody decided (effective 1), `0` = builds off for this repo.
+         */
+        BuildLoopDeclaration: {
+            /** Format: int32 */
+            max_replicas?: number | null;
+        };
         /**
          * @description The outcome for one task in a bulk batch: `ok`, or `skipped` with a reason
          *     (an epic that can't take the action, or an id the caller cannot see).
@@ -6288,6 +6344,14 @@ export interface components {
             panes?: number;
         };
         /**
+         * @description `SetReviewLoopRequest`'s twin for builds (MAIN-461): the key is required,
+         *     and `null` is the deliberate "clear back to unset".
+         */
+        SetBuildLoopRequest: {
+            /** Format: int32 */
+            max_replicas?: number | null;
+        };
+        /**
          * @description Point feedback at a repo and a branch. Separate from submitting, so the
          *     target can be changed at any time rather than only on the first send.
          */
@@ -7276,6 +7340,12 @@ export interface components {
             name: string;
         };
         Workspace: {
+            /**
+             * Format: int32
+             * @description The ceiling on this repo's build runs (MAIN-461) — same three states as
+             *     `review_loop_max_replicas`: unset = default 1, 0 = off, n = at most n.
+             */
+            build_max_replicas?: number | null;
             /** Format: date-time */
             created_at: string;
             description?: string | null;
@@ -7328,6 +7398,21 @@ export interface components {
             tenant_id: components["schemas"]["TenantId"];
             /** Format: date-time */
             updated_at: string;
+        };
+        /**
+         * @description One row of a workspace's Builds panel (MAIN-461 AC-2): the card the run
+         *     owns, named by KEY — the join the panel would otherwise pay N queries for.
+         *     A purpose-built row rather than `LoopJob`, which never carries the key.
+         *     The run's outcome column joins this shape when MAIN-458 lands it.
+         */
+        WorkspaceBuildRun: {
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            id: string;
+            state: string;
+            /** @description The card's human key (`MAIN-42`); `None` if the card was deleted. */
+            task_key?: string | null;
         };
         /**
          * @description Clone a workspace's *stored* remote onto a node (MAIN-223 AC-2). Unlike
@@ -12890,6 +12975,97 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_build_loop: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BuildLoopDeclaration"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    set_build_loop: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetBuildLoopRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BuildLoopDeclaration"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_builds_for_workspace: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceBuildRun"][];
+                };
             };
             404: {
                 headers: {
