@@ -184,12 +184,12 @@ the verdict labels (`loop-approved` / `loop-changes-requested` /
 through `gh` yourself. If the call fails, the verdict did NOT land: say so and end the pass
 as a failure, never post the comment by hand as a fallback.
 
-Then mirror the verdict onto the board card, which is what lets NookOS answer
-"does this PR need repair?" without holding GitHub credentials. The card key is
-the `Closes <KEY>` line in the PR body:
+The control plane also mirrors the verdict COMMENT onto the board card itself
+(MAIN-477) — collapsed, so a redelivered conclusion never stacks duplicates —
+through the `Closes <KEY>` join in the PR body. Do not `nook comment` the
+verdict line yourself. What remains yours is the card's LABEL state:
 
 ```bash
-nook comment <KEY> 'Loop review of COMMIT_SHA — <verdict line>: <pr url>'
 nook label <KEY> <the verdict label>          # and --remove the one it replaces
 ```
 
