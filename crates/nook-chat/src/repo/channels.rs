@@ -123,6 +123,17 @@ pub trait ChannelRepository: Send + Sync {
     /// membership check.
     async fn person_is_participant(&self, channel: Uuid, user: Uuid) -> RepoResult<bool>;
 
+    /// May the viewer see `person`'s presence (MAIN-115 AC-4)? True when they
+    /// share a tenant, share an org that has at least one org channel, or
+    /// share a DM — never a global roster. Person↔person, which is why the
+    /// channel gate cannot answer it.
+    async fn presence_peer(&self, viewer_user: Uuid, person: Uuid) -> RepoResult<bool>;
+
+    /// The person and display name behind a user, for frames that carry the
+    /// name so clients need no directory lookup. `None` when the user row is
+    /// gone (a revoked caller mid-session).
+    async fn person_ref_of(&self, user: Uuid) -> RepoResult<Option<(Uuid, Option<String>)>>;
+
     // ── channels ────────────────────────────────────────────────────────────
 
     async fn create(&self, owner: OwnerScope, name: &str, slug: &str) -> RepoResult<ChannelRow>;
@@ -242,6 +253,57 @@ impl ChannelRepository for DbChannelRepository {
             )
             .await
             .map_err(Into::into)
+    }
+
+    async fn presence_peer(&self, viewer_user: Uuid, person: Uuid) -> RepoResult<bool> {
+        // Three shares, one round trip. Engine-neutral: EXISTS/OR only.
+        // Self is covered by the first arm (me joins me).
+        Ok(self
+            .db
+            .query_scalar::<bool>(
+                "SELECT (
+                     EXISTS (
+                         SELECT 1 FROM users me
+                         JOIN users them ON them.tenant_id = me.tenant_id
+                         WHERE me.id = $1 AND them.person_id = $2
+                     )
+                     OR EXISTS (
+                         SELECT 1 FROM users me
+                         JOIN tenants mt ON mt.id = me.tenant_id
+                         JOIN chat_channels c
+                           ON c.owner_type = 'org' AND c.owner_id = mt.org_id
+                         JOIN tenants ot ON ot.org_id = mt.org_id
+                         JOIN users them
+                           ON them.tenant_id = ot.id AND them.person_id = $2
+                         WHERE me.id = $1
+                     )
+                     OR EXISTS (
+                         SELECT 1 FROM users me
+                         JOIN chat_channel_participants a ON a.person_id = me.person_id
+                         JOIN chat_channel_participants b
+                           ON b.channel_id = a.channel_id AND b.person_id = $2
+                         WHERE me.id = $1
+                     )
+                 )",
+                nook_db::params![viewer_user, person],
+            )
+            .await?)
+    }
+
+    async fn person_ref_of(&self, user: Uuid) -> RepoResult<Option<(Uuid, Option<String>)>> {
+        #[derive(nook_db::FromDbRow)]
+        struct Row {
+            person_id: Uuid,
+            display_name: Option<String>,
+        }
+        Ok(self
+            .db
+            .query_opt::<Row>(
+                "SELECT person_id, display_name FROM users WHERE id = $1",
+                nook_db::params![user],
+            )
+            .await?
+            .map(|r| (r.person_id, r.display_name)))
     }
 
     async fn tenant_role(&self, user: Uuid, tenant: Uuid) -> RepoResult<Option<String>> {
