@@ -53,7 +53,7 @@ pub const FAILURE_BACKOFF: chrono::Duration = chrono::Duration::minutes(5);
 /// the hold immediately, so a real fix never waits on the timer.
 pub fn owed<'a>(
     items: &'a [WorkItem],
-    heads: &[crate::repo::jobs::ReviewRunHeads],
+    heads: &[crate::repo::jobs::RunHeads],
     ceiling: usize,
     now: chrono::DateTime<chrono::Utc>,
 ) -> (Vec<&'a WorkItem>, usize, usize) {
@@ -61,7 +61,7 @@ pub fn owed<'a>(
     let mut owed: Vec<&WorkItem> = items
         .iter()
         .filter(|item| {
-            let head = heads.iter().find(|h| h.review_pr_number == item.key);
+            let head = heads.iter().find(|h| h.item_key == item.key);
             match head {
                 // Already being run: never two runs for one item, whatever the
                 // fingerprint says. The new head is picked up when this finishes.
@@ -151,19 +151,21 @@ pub async fn converge(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repo::jobs::ReviewRunHeads;
+    use crate::repo::jobs::RunHeads;
 
     fn item(key: i64, fingerprint: &str) -> WorkItem {
         WorkItem {
             key,
             fingerprint: fingerprint.to_string(),
             label: format!("PR #{key}"),
+            target_task_id: None,
+            claim_first: false,
         }
     }
 
-    fn heads(key: i64) -> ReviewRunHeads {
-        ReviewRunHeads {
-            review_pr_number: key,
+    fn heads(key: i64) -> RunHeads {
+        RunHeads {
+            item_key: key,
             live_head: None,
             done_head: None,
             attempted_head: None,
@@ -188,7 +190,7 @@ mod tests {
     #[test]
     fn a_head_that_has_not_moved_is_owed_nothing() {
         let items = [item(341, "aaa")];
-        let done = ReviewRunHeads {
+        let done = RunHeads {
             done_head: Some("aaa".into()),
             ..heads(341)
         };
@@ -198,7 +200,7 @@ mod tests {
     #[test]
     fn a_push_earns_a_fresh_run() {
         let items = [item(341, "bbb")];
-        let done = ReviewRunHeads {
+        let done = RunHeads {
             done_head: Some("aaa".into()),
             ..heads(341)
         };
@@ -210,7 +212,7 @@ mod tests {
     #[test]
     fn a_live_run_blocks_a_second_one_even_after_a_push() {
         let items = [item(341, "bbb")];
-        let live = ReviewRunHeads {
+        let live = RunHeads {
             live_head: Some("aaa".into()),
             ..heads(341)
         };
@@ -222,7 +224,7 @@ mod tests {
     #[test]
     fn a_recent_failure_at_this_head_is_held_rather_than_retried() {
         let items = [item(341, "aaa")];
-        let failed = ReviewRunHeads {
+        let failed = RunHeads {
             attempted_head: Some("aaa".into()),
             attempted_at: Some(now() - chrono::Duration::seconds(30)),
             ..heads(341)
@@ -233,7 +235,7 @@ mod tests {
     #[test]
     fn the_hold_expires_so_a_transient_fault_heals_itself() {
         let items = [item(341, "aaa")];
-        let failed = ReviewRunHeads {
+        let failed = RunHeads {
             attempted_head: Some("aaa".into()),
             attempted_at: Some(now() - FAILURE_BACKOFF - chrono::Duration::seconds(1)),
             ..heads(341)
@@ -246,7 +248,7 @@ mod tests {
     #[test]
     fn a_push_clears_a_failure_hold_immediately() {
         let items = [item(341, "bbb")];
-        let failed = ReviewRunHeads {
+        let failed = RunHeads {
             attempted_head: Some("aaa".into()),
             attempted_at: Some(now()),
             ..heads(341)
@@ -263,7 +265,7 @@ mod tests {
     #[test]
     fn a_verdictless_completion_is_held_then_owed_like_a_failure() {
         let items = [item(341, "aaa")];
-        let hold = ReviewRunHeads {
+        let hold = RunHeads {
             attempted_head: Some("aaa".into()),
             attempted_at: Some(now() - chrono::Duration::seconds(30)),
             ..heads(341)
@@ -272,7 +274,7 @@ mod tests {
             owed(&items, &[hold], 2, now()).0.is_empty(),
             "held inside the window"
         );
-        let expired = ReviewRunHeads {
+        let expired = RunHeads {
             attempted_head: Some("aaa".into()),
             attempted_at: Some(now() - FAILURE_BACKOFF - chrono::Duration::seconds(1)),
             ..heads(341)
@@ -289,7 +291,7 @@ mod tests {
     #[test]
     fn a_failure_does_not_count_as_having_reviewed_the_head() {
         let items = [item(341, "aaa")];
-        let failed = ReviewRunHeads {
+        let failed = RunHeads {
             attempted_head: Some("aaa".into()),
             attempted_at: Some(now() - FAILURE_BACKOFF * 2),
             ..heads(341)
@@ -315,7 +317,7 @@ mod tests {
     #[test]
     fn a_live_run_uses_up_a_slot_in_the_ceiling() {
         let items = [item(1, "a"), item(2, "b")];
-        let live = ReviewRunHeads {
+        let live = RunHeads {
             live_head: Some("a".into()),
             ..heads(1)
         };

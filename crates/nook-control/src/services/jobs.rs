@@ -215,6 +215,7 @@ pub async fn create(
             predecessor_job_id: None,
             review_pr_number: None,
             review_head_sha: None,
+            build_fingerprint: None,
         })
         .await?;
 
@@ -283,13 +284,19 @@ pub async fn raise_run(
             id: JobId::new(),
             tenant,
             kind: kind.to_string(),
-            target_task_id: None,
+            // A build item targets its card (0050's dedupe index arbitrates);
+            // a review item is about the workspace alone.
+            target_task_id: item.target_task_id,
             workspace_id: Some(workspace),
             requested_by,
             seed: Some(item.label.clone()),
             predecessor_job_id: None,
-            review_pr_number: Some(item.key),
-            review_head_sha: Some(item.fingerprint.clone()),
+            review_pr_number: (item.target_task_id.is_none()).then_some(item.key),
+            review_head_sha: (item.target_task_id.is_none()).then(|| item.fingerprint.clone()),
+            build_fingerprint: item
+                .target_task_id
+                .is_some()
+                .then(|| item.fingerprint.clone()),
         })
         .await
     {
@@ -417,6 +424,314 @@ pub async fn record_verdict(
     )
     .await
     .ok();
+    state.jobs.reload(job_id).await
+}
+
+/// Converge BUILD runs for one workspace (MAIN-458): one live run per owed
+/// card, raised only when the card's fingerprint is not what the last
+/// OUTCOMED run recorded — `owed()`'s rule, unchanged, over a second source.
+///
+/// `only_task` is the manual trigger's focus: the same convergence, filtered
+/// to one card, so "build this NOW" cannot bypass the dedupe or the claim.
+///
+/// AC-3's board mechanics happen HERE, not in the skill: a fresh pick is
+/// CLAIMED (atomically — a lost claim skips the item, the same 409 a second
+/// builder would have eaten) before its run is raised, which also moves the
+/// card to In Progress.
+pub async fn converge_builds(
+    state: &AppState,
+    tenant: TenantId,
+    requested_by: UserId,
+    workspace: WorkspaceId,
+    only_task: Option<TaskId>,
+) -> ApiResult<crate::services::run_reconcile::Converged> {
+    let ws = state
+        .workspaces
+        .get(tenant, workspace)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let token = crate::services::workspace_gh_token(state, tenant, workspace).await;
+    // The workspace's declared ceiling (MAIN-461, landed): unset means the
+    // default of one, 0 is the workspace-level kill-switch.
+    let ceiling = ws.build_max_replicas.unwrap_or(1).max(0) as usize;
+    let rejected_heads: std::collections::HashMap<i64, String> = state
+        .jobs
+        .rejected_review_heads(tenant, workspace)
+        .await?
+        .into_iter()
+        .collect();
+    let source = crate::services::work_source::BuildWork {
+        tasks: state.tasks.as_ref(),
+        tenant,
+        viewer: requested_by,
+        demand: &state.review_demand,
+        token,
+        rejected_heads,
+    };
+    use crate::services::work_source::WorkSource;
+    let Some(mut items) = source.items(workspace, ws.git_remote_url.as_deref()).await else {
+        // UNKNOWN, never "no work" — hold rather than conclude on a guess.
+        return Ok(Default::default());
+    };
+    if let Some(t) = only_task {
+        items.retain(|i| i.target_task_id == Some(t));
+    }
+    let heads = state.jobs.build_run_heads(tenant, workspace).await?;
+    let (owed, withheld, live) =
+        crate::services::run_reconcile::owed(&items, &heads, ceiling, chrono::Utc::now());
+
+    let mut jobs = Vec::new();
+    for item in owed {
+        let mut claimed: Option<TaskId> = None;
+        if item.claim_first {
+            let Some(task) = item.target_task_id else {
+                continue;
+            };
+            // The claim is the atomic lock the skill used to take itself; a
+            // loss is normal — another replica (or a human) got there first.
+            if crate::routes::task_query::claim_inner(
+                state,
+                tenant,
+                requested_by,
+                &task.0.to_string(),
+                Some("started".into()),
+            )
+            .await
+            .is_err()
+            {
+                continue;
+            }
+            claimed = Some(task);
+        }
+        let raised = raise_run(
+            state,
+            tenant,
+            requested_by,
+            workspace,
+            BUILD_KIND,
+            item,
+            None,
+        )
+        .await;
+        match raised {
+            Ok(Some(job)) => jobs.push(job),
+            other => {
+                if let Err(e) = &other {
+                    tracing::warn!(%workspace, item = %item.label, error = %e, "could not raise build run");
+                }
+                // COMPENSATE the claim: a card claimed for a run that never
+                // materialized (a lost index race, a failed insert) would
+                // otherwise sit assigned forever — out of every future pick
+                // with nothing working it — and, released but left in the
+                // started column, would read as unheld work in progress.
+                if let Some(task) = claimed {
+                    if let Err(e) = state.tasks.release_assignment(task, tenant).await {
+                        tracing::warn!(%workspace, error = %e, "could not release a compensated claim");
+                    }
+                    let back = async {
+                        let row = state
+                            .tasks
+                            .get_row(tenant, task)
+                            .await?
+                            .ok_or(crate::error::ApiError::NotFound)?;
+                        let todo = crate::services::tasks::column_of_type(
+                            state.tasks.as_ref(),
+                            row.board_id,
+                            "unstarted",
+                        )
+                        .await?;
+                        state
+                            .tasks
+                            .update_fields(
+                                tenant,
+                                task,
+                                crate::repo::tasks::TaskEdit {
+                                    title: None,
+                                    description: None,
+                                    column_id: Some(todo.0),
+                                    position: None,
+                                    assignee_user_id: None,
+                                    priority: None,
+                                    set_workspace: false,
+                                    workspace_id: None,
+                                    expected_updated_at: None,
+                                    type_: None,
+                                    visibility: None,
+                                    set_parent: false,
+                                    parent_task_id: None,
+                                },
+                            )
+                            .await?;
+                        Ok::<(), crate::error::ApiError>(())
+                    }
+                    .await;
+                    if let Err(e) = back {
+                        tracing::warn!(%workspace, error = ?e, "could not move a compensated card back");
+                    }
+                }
+            }
+        }
+    }
+    Ok(crate::services::run_reconcile::Converged {
+        raised: jobs.len(),
+        jobs,
+        withheld,
+        live,
+    })
+}
+
+/// Record what a build run concluded, and mirror it to the board (MAIN-458
+/// AC-2/AC-3). The card's move is code's job now; the agent only concludes.
+pub async fn record_build_outcome(
+    state: &AppState,
+    tenant: TenantId,
+    job_id: JobId,
+    req: &nook_types::BuildOutcomeRequest,
+) -> ApiResult<LoopJob> {
+    let job = state
+        .jobs
+        .get(tenant, job_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let (Some(task), Some(_ws)) = (job.target_task_id, job.workspace_id) else {
+        return Err(ApiError::BadRequest(
+            "only a directed build run records an outcome".into(),
+        ));
+    };
+    if job.kind != BUILD_KIND {
+        return Err(ApiError::BadRequest(
+            "only a build run records a build outcome".into(),
+        ));
+    }
+    // Validate the SHAPE before recording anything, so a malformed call
+    // changes nothing anywhere — and carry the validated values as a type,
+    // so the arms below cannot drift apart from this check.
+    enum Concluded<'a> {
+        PrOpened(&'a str),
+        Blocked(&'a str),
+        Nothing,
+    }
+    let url = req.url.as_deref().map(str::trim).filter(|u| !u.is_empty());
+    let question = req
+        .question
+        .as_deref()
+        .map(str::trim)
+        .filter(|q| !q.is_empty());
+    let concluded = match req.outcome.as_str() {
+        "pr_opened" => Concluded::PrOpened(
+            url.ok_or_else(|| ApiError::BadRequest("pr_opened needs a url".into()))?,
+        ),
+        "blocked" => Concluded::Blocked(
+            question.ok_or_else(|| ApiError::BadRequest("blocked needs a question".into()))?,
+        ),
+        "nothing_to_do" => Concluded::Nothing,
+        other => {
+            return Err(ApiError::BadRequest(format!(
+                "outcome must be one of pr_opened|blocked|nothing_to_do, got {other:?}"
+            )));
+        }
+    };
+
+    // Record FIRST, exactly once: the guarded UPDATE (live run, no outcome
+    // yet) is the idempotence gate, so a retried delivery — an agent timing
+    // out on a call that landed — cannot post a second comment, re-label, or
+    // re-release. The board writes below happen only on the one recording.
+    if state.jobs.set_build_outcome(job_id, &req.outcome).await? == 0 {
+        return Err(ApiError::Conflict(
+            "this run is not live, or its outcome is already recorded".into(),
+        ));
+    }
+
+    // A REPAIR run's card was never claimed by the loop and may be held by a
+    // human — the release below is only ever undoing the loop's own claim.
+    let is_repair = job
+        .build_fingerprint
+        .as_deref()
+        .is_some_and(|f| f.starts_with("repair:"));
+
+    // The outcome above is recorded whatever happens next; a board write
+    // that fails after it must therefore be LOUD — the run has consumed the
+    // card, and a silent half-mirror would self-perpetuate (the repair
+    // source reads `pr_url` off the card). The transcript carries the manual
+    // fix an operator needs.
+    let board = async {
+        match concluded {
+            Concluded::PrOpened(url) => {
+                // The reviewer's ONLY join from a PR to its contract is the
+                // card — record the PR on it and park it where a human
+                // reviews (AC-3).
+                let row = state
+                    .tasks
+                    .get_row(tenant, task)
+                    .await?
+                    .ok_or(ApiError::NotFound)?;
+                let review_col = crate::services::tasks::column_of_type(
+                    state.tasks.as_ref(),
+                    row.board_id,
+                    "review",
+                )
+                .await?;
+                state.tasks.set_pr_url(task, url, review_col).await?;
+            }
+            Concluded::Blocked(question) => {
+                // Question first, then the label, then the release — the
+                // order a human reads: the card explains itself before it
+                // reappears.
+                state
+                    .tasks
+                    .create_comment(crate::repo::tasks::NewComment {
+                        tenant,
+                        task,
+                        author_type: "system".into(),
+                        author_id: None,
+                        author_name: "nook-build loop".into(),
+                        body_md: question.to_string(),
+                    })
+                    .await?;
+                state.tasks.attach_label(tenant, task, "blocked").await?;
+                if !is_repair {
+                    state.tasks.release_assignment(task, tenant).await?;
+                }
+            }
+            Concluded::Nothing => {
+                if !is_repair {
+                    state.tasks.release_assignment(task, tenant).await?;
+                }
+            }
+        }
+        Ok::<(), crate::error::ApiError>(())
+    }
+    .await;
+    if let Err(e) = board {
+        tracing::error!(
+            job = %job_id, task = %task.0, error = ?e,
+            "build outcome recorded but the board write failed — fix the card by hand"
+        );
+        append_transcript(
+            state,
+            job_id,
+            "system",
+            &format!(
+                "outcome {} recorded, but mirroring it to the board FAILED ({e:?}) — \
+                 the card needs a hand: check its PR link, column and labels",
+                req.outcome
+            ),
+        )
+        .await
+        .ok();
+    }
+
+    append_transcript(
+        state,
+        job_id,
+        "system",
+        &format!("outcome: {}", req.outcome),
+    )
+    .await
+    .ok();
+    state
+        .registry
+        .publish(tenant, nook_proto::UiEvent::TaskChanged { task_id: task });
     state.jobs.reload(job_id).await
 }
 
@@ -607,6 +922,7 @@ pub async fn rerun(
             predecessor_job_id: Some(prev.id),
             review_pr_number: None,
             review_head_sha: None,
+            build_fingerprint: None,
         })
         .await?;
 

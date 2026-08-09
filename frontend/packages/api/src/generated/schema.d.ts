@@ -346,6 +346,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/builds": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/builds` — build one card NOW (MAIN-458 AC-4): the same
+         *     convergence the reconciler runs, filtered to the named card — the manual
+         *     path cannot bypass the dedupe, the claim, or the ceiling.
+         */
+        post: operations["build_enqueue"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/columns/{id}": {
         parameters: {
             query?: never;
@@ -730,6 +751,28 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["job_message"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/jobs/{id}/outcome": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/jobs/{id}/outcome` — a build run reports its conclusion
+         *     (MAIN-458 AC-2/AC-3): the CP records it and mirrors it to the board, so
+         *     the agent's last act is one call instead of board mechanics it could
+         *     misperform.
+         */
+        post: operations["job_outcome"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3794,6 +3837,22 @@ export interface components {
             max_replicas?: number | null;
         };
         /**
+         * @description A build run's conclusion, sent by the run itself (MAIN-458). The control
+         *     plane records it and mirrors it to the board; opening a PR without
+         *     reporting it is the silent lie the outcome call ends.
+         */
+        BuildOutcomeRequest: {
+            /** @description `pr_opened` | `blocked` | `nothing_to_do`. */
+            outcome: string;
+            /**
+             * @description The specific question a human can answer asynchronously, required for
+             *     `blocked`.
+             */
+            question?: string | null;
+            /** @description The PR, required for `pr_opened`. */
+            url?: string | null;
+        };
+        /**
          * @description The outcome for one task in a bulk batch: `ok`, or `skipped` with a reason
          *     (an epic that can't take the action, or an id the caller cannot see).
          */
@@ -4525,6 +4584,14 @@ export interface components {
             verified: boolean;
         };
         /**
+         * @description `POST /api/v1/builds` — build one card NOW (MAIN-458 AC-4): the same
+         *     convergence the reconciler runs, filtered to the named task.
+         */
+        EnqueueBuildRequest: {
+            /** @description The card, by key or id. */
+            task: string;
+        };
+        /**
          * @description First contact: trade a join token for a certificate.
          *
          *     The node generates its keypair locally and sends only a CSR — the private
@@ -4858,6 +4925,17 @@ export interface components {
          *     are legal — the wire type just carries the current value.
          */
         LoopJob: {
+            /**
+             * @description What the card looked like when the run was raised — `review_head_sha`'s
+             *     twin for the kind whose unit is a card.
+             */
+            build_fingerprint?: string | null;
+            /**
+             * @description What a `build` run CONCLUDED (MAIN-458): `pr_opened` | `blocked` |
+             *     `nothing_to_do`. `None` means the run concluded nothing, however it
+             *     exited — and such a run does not consume its card.
+             */
+            build_outcome?: string | null;
             /** Format: date-time */
             created_at: string;
             executor_node_id?: null | components["schemas"]["NodeId"];
@@ -8004,6 +8082,41 @@ export interface operations {
             };
         };
     };
+    build_enqueue: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EnqueueBuildRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReviewRaiseResult"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     delete_column: {
         parameters: {
             query?: never;
@@ -8680,6 +8793,43 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["LoopJobTranscriptEntry"];
                 };
+            };
+        };
+    };
+    job_outcome: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BuildOutcomeRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LoopJob"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

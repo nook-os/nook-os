@@ -625,6 +625,43 @@
         }
       }
     },
+    "/api/v1/builds": {
+      "post": {
+        "tags": [
+          "crate::routes::jobs"
+        ],
+        "summary": "`POST /api/v1/builds` — build one card NOW (MAIN-458 AC-4): the same\nconvergence the reconciler runs, filtered to the named card — the manual\npath cannot bypass the dedupe, the claim, or the ceiling.",
+        "operationId": "build_enqueue",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnqueueBuildRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewRaiseResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/columns/{id}": {
       "delete": {
         "tags": [
@@ -1506,6 +1543,53 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/outcome": {
+      "post": {
+        "tags": [
+          "crate::routes::jobs"
+        ],
+        "summary": "`POST /api/v1/jobs/{id}/outcome` — a build run reports its conclusion\n(MAIN-458 AC-2/AC-3): the CP records it and mirrors it to the board, so\nthe agent's last act is one call instead of board mechanics it could\nmisperform.",
+        "operationId": "job_outcome",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BuildOutcomeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoopJob"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          },
+          "409": {
+            "description": ""
           }
         }
       }
@@ -8901,6 +8985,33 @@
           }
         }
       },
+      "BuildOutcomeRequest": {
+        "type": "object",
+        "description": "A build run's conclusion, sent by the run itself (MAIN-458). The control\nplane records it and mirrors it to the board; opening a PR without\nreporting it is the silent lie the outcome call ends.",
+        "required": [
+          "outcome"
+        ],
+        "properties": {
+          "outcome": {
+            "type": "string",
+            "description": "`pr_opened` | `blocked` | `nothing_to_do`."
+          },
+          "question": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The specific question a human can answer asynchronously, required for\n`blocked`."
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The PR, required for `pr_opened`."
+          }
+        }
+      },
       "BulkTaskItemResult": {
         "type": "object",
         "description": "The outcome for one task in a bulk batch: `ok`, or `skipped` with a reason\n(an epic that can't take the action, or an id the caller cannot see).",
@@ -10500,6 +10611,19 @@
           }
         }
       },
+      "EnqueueBuildRequest": {
+        "type": "object",
+        "description": "`POST /api/v1/builds` — build one card NOW (MAIN-458 AC-4): the same\nconvergence the reconciler runs, filtered to the named task.",
+        "required": [
+          "task"
+        ],
+        "properties": {
+          "task": {
+            "type": "string",
+            "description": "The card, by key or id."
+          }
+        }
+      },
       "EnrollRequest": {
         "type": "object",
         "description": "First contact: trade a join token for a certificate.\n\nThe node generates its keypair locally and sends only a CSR — the private\nkey never leaves the machine, so the control plane cannot leak what it was\nnever given.",
@@ -11414,6 +11538,20 @@
           "updated_at"
         ],
         "properties": {
+          "build_fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What the card looked like when the run was raised — `review_head_sha`'s\ntwin for the kind whose unit is a card."
+          },
+          "build_outcome": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What a `build` run CONCLUDED (MAIN-458): `pr_opened` | `blocked` |\n`nothing_to_do`. `None` means the run concluded nothing, however it\nexited — and such a run does not consume its card."
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"

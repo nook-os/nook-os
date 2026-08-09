@@ -150,6 +150,7 @@ async fn the_builds_listing_names_the_card_by_key() {
             predecessor_job_id: None,
             review_pr_number: None,
             review_head_sha: None,
+            build_fingerprint: None,
         })
         .await
         .expect("build run");
@@ -170,6 +171,7 @@ async fn the_builds_listing_names_the_card_by_key() {
             predecessor_job_id: None,
             review_pr_number: Some(7),
             review_head_sha: Some("aaa".into()),
+            build_fingerprint: None,
         })
         .await
         .expect("review run");
@@ -206,6 +208,7 @@ async fn the_builds_listing_names_the_card_by_key() {
             predecessor_job_id: None,
             review_pr_number: None,
             review_head_sha: None,
+            build_fingerprint: None,
         })
         .await
         .expect("other-ws build");
@@ -293,6 +296,7 @@ async fn a_private_cards_key_is_withheld_from_a_non_owner() {
             predecessor_job_id: None,
             review_pr_number: None,
             review_head_sha: None,
+            build_fingerprint: None,
         })
         .await
         .expect("build run");

@@ -52,12 +52,15 @@ pub struct NewLoopJob {
     /// The work item, for a `review` run: which PR, at which head.
     pub review_pr_number: Option<i64>,
     pub review_head_sha: Option<String>,
+    /// The work item, for a `build` run: what the card looked like when the
+    /// run was raised (MAIN-458) — `review_head_sha`'s twin.
+    pub build_fingerprint: Option<String>,
 }
 
 /// What the wakeup rule knows about one pull request's runs.
 #[derive(Debug, Clone, nook_db::FromDbRow)]
-pub struct ReviewRunHeads {
-    pub review_pr_number: i64,
+pub struct RunHeads {
+    pub item_key: i64,
     /// The head of the newest run that CONCLUDED NOTHING, and when. Two states
     /// land here: `failed`, and `completed` with no recorded verdict — an agent
     /// that ends a pass early (checks pending, environment broken) exits zero
@@ -126,7 +129,31 @@ pub trait LoopJobRepository: Send + Sync {
         &self,
         tenant: TenantId,
         workspace: WorkspaceId,
-    ) -> ApiResult<Vec<ReviewRunHeads>>;
+    ) -> ApiResult<Vec<RunHeads>>;
+
+    /// The newest REJECTING head per PR: what the latest
+    /// `changes_requested` review run reviewed. This — never the PR's current
+    /// head, which the repair's own push moves — is what a repair item is
+    /// fingerprinted on (MAIN-458): "a new REJECTED head re-raises".
+    async fn rejected_review_heads(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Vec<(i64, String)>>;
+
+    /// `review_run_heads`'s twin for BUILD runs (MAIN-458), keyed by the
+    /// card's board number — the same key `BuildWork` items carry — with
+    /// `build_fingerprint`/`build_outcome` in the roles head-sha/verdict play
+    /// for reviews.
+    async fn build_run_heads(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Vec<RunHeads>>;
+
+    /// Record what a build run concluded. Guarded on a live build run — an
+    /// outcome on a finished or foreign job is a caller bug, answered with 0.
+    async fn set_build_outcome(&self, id: JobId, outcome: &str) -> ApiResult<u64>;
 
     /// A workspace's review runs, newest first — what the workspace's review
     /// surface reads. Bounded, because a busy repo accumulates one per push per
@@ -284,8 +311,8 @@ impl LoopJobRepository for DbLoopJobRepository {
             .query_one(
                 "INSERT INTO loop_jobs
                     (id, tenant_id, kind, target_task_id, workspace_id, requested_by,
-                     state, predecessor_job_id, seed, review_pr_number, review_head_sha)
-                 VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7, $8, $9, $10)
+                     state, predecessor_job_id, seed, review_pr_number, review_head_sha, build_fingerprint)
+                 VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7, $8, $9, $10, $11)
                  RETURNING *",
                 params![
                     new.id,
@@ -297,7 +324,8 @@ impl LoopJobRepository for DbLoopJobRepository {
                     new.predecessor_job_id.map(|p| p.0),
                     new.seed,
                     new.review_pr_number,
-                    new.review_head_sha
+                    new.review_head_sha,
+                    new.build_fingerprint
                 ],
             )
             .await?)
@@ -307,7 +335,7 @@ impl LoopJobRepository for DbLoopJobRepository {
         &self,
         tenant: TenantId,
         workspace: WorkspaceId,
-    ) -> ApiResult<Vec<ReviewRunHeads>> {
+    ) -> ApiResult<Vec<RunHeads>> {
         // Two plain queries merged here rather than one clever one. A single
         // statement wanting "the newest row per group" reaches for `DISTINCT ON`
         // or `array_agg(... ORDER BY ...)`, both Postgres-only, and this file is
@@ -380,13 +408,12 @@ impl LoopJobRepository for DbLoopJobRepository {
             )
             .await?;
 
-        let mut by_pr: std::collections::HashMap<i64, ReviewRunHeads> =
-            std::collections::HashMap::new();
+        let mut by_pr: std::collections::HashMap<i64, RunHeads> = std::collections::HashMap::new();
         for h in live {
             by_pr
                 .entry(h.review_pr_number)
-                .or_insert_with(|| ReviewRunHeads {
-                    review_pr_number: h.review_pr_number,
+                .or_insert_with(|| RunHeads {
+                    item_key: h.review_pr_number,
                     live_head: None,
                     done_head: None,
                     attempted_head: None,
@@ -397,8 +424,8 @@ impl LoopJobRepository for DbLoopJobRepository {
         for h in done {
             by_pr
                 .entry(h.review_pr_number)
-                .or_insert_with(|| ReviewRunHeads {
-                    review_pr_number: h.review_pr_number,
+                .or_insert_with(|| RunHeads {
+                    item_key: h.review_pr_number,
                     live_head: None,
                     done_head: None,
                     attempted_head: None,
@@ -407,15 +434,13 @@ impl LoopJobRepository for DbLoopJobRepository {
                 .done_head = h.review_head_sha;
         }
         for h in attempted {
-            let e = by_pr
-                .entry(h.review_pr_number)
-                .or_insert_with(|| ReviewRunHeads {
-                    review_pr_number: h.review_pr_number,
-                    live_head: None,
-                    done_head: None,
-                    attempted_head: None,
-                    attempted_at: None,
-                });
+            let e = by_pr.entry(h.review_pr_number).or_insert_with(|| RunHeads {
+                item_key: h.review_pr_number,
+                live_head: None,
+                done_head: None,
+                attempted_head: None,
+                attempted_at: None,
+            });
             e.attempted_head = h.review_head_sha;
             e.attempted_at = Some(h.updated_at);
         }
@@ -426,12 +451,183 @@ impl LoopJobRepository for DbLoopJobRepository {
         Ok(self
             .db
             .exec(
-                "UPDATE loop_jobs SET review_verdict = $2, updated_at = now()
+                &format!(
+                    "UPDATE loop_jobs SET review_verdict = $2, updated_at = {}
                   WHERE id = $1 AND kind = 'review'
                     AND state IN ('claimed', 'running', 'waiting_on_human')",
+                    type_mapping(self.db.engine()).now()
+                ),
                 params![id.0, verdict],
             )
             .await?)
+    }
+
+    async fn rejected_review_heads(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Vec<(i64, String)>> {
+        #[derive(nook_db::FromDbRow)]
+        struct Row {
+            review_pr_number: i64,
+            review_head_sha: String,
+        }
+        let rows: Vec<Row> = self
+            .db
+            .query_all(
+                "SELECT j.review_pr_number, j.review_head_sha FROM loop_jobs j
+                  WHERE j.tenant_id = $1 AND j.workspace_id = $2 AND j.kind = 'review'
+                    AND j.review_verdict = 'changes_requested'
+                    AND j.review_pr_number IS NOT NULL AND j.review_head_sha IS NOT NULL
+                    AND j.id = (
+                        SELECT k.id FROM loop_jobs k
+                         WHERE k.workspace_id = j.workspace_id
+                           AND k.review_pr_number = j.review_pr_number
+                           AND k.kind = 'review'
+                           AND k.review_verdict = 'changes_requested'
+                         ORDER BY k.created_at DESC, k.id DESC LIMIT 1)",
+                params![tenant, workspace.0],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.review_pr_number, r.review_head_sha))
+            .collect())
+    }
+
+    async fn set_build_outcome(&self, id: JobId, outcome: &str) -> ApiResult<u64> {
+        // `type_mapping(...).now()`, not a literal `now()`: this runs on the
+        // SQLite leg from day one, unlike `set_review_verdict` above, whose
+        // hardcoded `now()` predates the leg covering this path.
+        Ok(self
+            .db
+            .exec(
+                &format!(
+                    "UPDATE loop_jobs SET build_outcome = $2, updated_at = {}
+                  WHERE id = $1 AND kind = 'build' AND build_outcome IS NULL
+                    AND state IN ('claimed', 'running', 'waiting_on_human')",
+                    type_mapping(self.db.engine()).now()
+                ),
+                params![id.0, outcome],
+            )
+            .await?)
+    }
+
+    async fn build_run_heads(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Vec<RunHeads>> {
+        // `tasks.number` is INT4 on Postgres; decoding it straight into i64
+        // dies with a ColumnDecode on the production engine (SQLite is
+        // untyped enough not to notice). Decode the column's own width and
+        // widen in Rust.
+        #[derive(nook_db::FromDbRow)]
+        struct Head {
+            item_key: i32,
+            fingerprint: Option<String>,
+        }
+        #[derive(nook_db::FromDbRow)]
+        struct AttemptedHead {
+            item_key: i32,
+            fingerprint: Option<String>,
+            updated_at: chrono::DateTime<chrono::Utc>,
+        }
+        // Fresh and repair are separate fingerprint SPACES with separate
+        // bookkeeping: keyed apart (repair = the NEGATED card number, matching
+        // `BuildWork`'s items), so a repair outcome can never overwrite the
+        // record that the card's CONTENT was already built — the overwrite
+        // that dragged an In-Review card back into a fresh build.
+        let keyed = |raw: i32, fp: &Option<String>| -> i64 {
+            let n = i64::from(raw);
+            if fp.as_deref().is_some_and(|f| f.starts_with("repair:")) {
+                -n
+            } else {
+                n
+            }
+        };
+
+        // Keyed by the card's board number via the join — the number is what
+        // `BuildWork` items carry, and 0050's per-card unique index is what
+        // makes "at most one live row per key" true.
+        let live: Vec<Head> = self
+            .db
+            .query_all(
+                "SELECT t.number AS item_key, j.build_fingerprint AS fingerprint
+                   FROM loop_jobs j JOIN tasks t ON t.id = j.target_task_id
+                  WHERE j.tenant_id = $1 AND j.workspace_id = $2 AND j.kind = 'build'
+                    AND j.state IN ('queued', 'claimed', 'running', 'waiting_on_human')",
+                params![tenant, workspace.0],
+            )
+            .await?;
+
+        let attempted: Vec<AttemptedHead> = self
+            .db
+            .query_all(
+                "SELECT t.number AS item_key, j.build_fingerprint AS fingerprint, j.updated_at
+                   FROM loop_jobs j JOIN tasks t ON t.id = j.target_task_id
+                  WHERE j.tenant_id = $1 AND j.workspace_id = $2 AND j.kind = 'build'
+                    AND (j.state = 'failed' OR (j.state = 'completed' AND j.build_outcome IS NULL))
+                    AND j.updated_at = (
+                        SELECT MAX(k.updated_at) FROM loop_jobs k
+                         WHERE k.workspace_id = j.workspace_id
+                           AND k.target_task_id = j.target_task_id
+                           AND k.kind = 'build'
+                           AND ((k.build_fingerprint LIKE 'repair:%')
+                                = (j.build_fingerprint LIKE 'repair:%'))
+                           AND (k.state = 'failed'
+                                OR (k.state = 'completed' AND k.build_outcome IS NULL)))",
+                params![tenant, workspace.0],
+            )
+            .await?;
+
+        let done: Vec<Head> = self
+            .db
+            .query_all(
+                "SELECT t.number AS item_key, j.build_fingerprint AS fingerprint
+                   FROM loop_jobs j JOIN tasks t ON t.id = j.target_task_id
+                  WHERE j.tenant_id = $1 AND j.workspace_id = $2 AND j.kind = 'build'
+                    AND j.state = 'completed' AND j.build_outcome IS NOT NULL
+                    AND j.created_at = (
+                        SELECT MAX(k.created_at) FROM loop_jobs k
+                         WHERE k.workspace_id = j.workspace_id
+                           AND k.target_task_id = j.target_task_id
+                           AND k.kind = 'build' AND k.state = 'completed'
+                           AND ((k.build_fingerprint LIKE 'repair:%')
+                                = (j.build_fingerprint LIKE 'repair:%'))
+                           AND k.build_outcome IS NOT NULL)",
+                params![tenant, workspace.0],
+            )
+            .await?;
+
+        let mut by_key: std::collections::HashMap<i64, RunHeads> = std::collections::HashMap::new();
+        let entry = |m: &mut std::collections::HashMap<i64, RunHeads>, k: i64| {
+            m.entry(k).or_insert_with(|| RunHeads {
+                item_key: k,
+                live_head: None,
+                done_head: None,
+                attempted_head: None,
+                attempted_at: None,
+            });
+        };
+        for h in live {
+            let k = keyed(h.item_key, &h.fingerprint);
+            entry(&mut by_key, k);
+            by_key.get_mut(&k).unwrap().live_head = h.fingerprint;
+        }
+        for h in done {
+            let k = keyed(h.item_key, &h.fingerprint);
+            entry(&mut by_key, k);
+            by_key.get_mut(&k).unwrap().done_head = h.fingerprint;
+        }
+        for h in attempted {
+            let k = keyed(h.item_key, &h.fingerprint);
+            entry(&mut by_key, k);
+            let e = by_key.get_mut(&k).unwrap();
+            e.attempted_head = h.fingerprint;
+            e.attempted_at = Some(h.updated_at);
+        }
+        Ok(by_key.into_values().collect())
     }
 
     async fn active_epic_run_for(
@@ -900,6 +1096,87 @@ impl LoopJobRepository for FakeLoopJobRepository {
         Ok(1)
     }
 
+    async fn set_build_outcome(&self, id: JobId, outcome: &str) -> ApiResult<u64> {
+        let mut s = self.inner.lock().unwrap();
+        let Some(j) = s.jobs.iter_mut().find(|j| {
+            j.id == id
+                && j.kind == "build"
+                && j.build_outcome.is_none()
+                && matches!(j.state.as_str(), "claimed" | "running" | "waiting_on_human")
+        }) else {
+            return Ok(0);
+        };
+        j.build_outcome = Some(outcome.to_string());
+        Ok(1)
+    }
+
+    async fn rejected_review_heads(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Vec<(i64, String)>> {
+        let s = self.inner.lock().unwrap();
+        let mut newest: std::collections::HashMap<i64, (chrono::DateTime<chrono::Utc>, String)> =
+            std::collections::HashMap::new();
+        for j in s.jobs.iter().filter(|j| {
+            j.tenant_id == tenant
+                && j.workspace_id == Some(workspace)
+                && j.kind == "review"
+                && j.review_verdict.as_deref() == Some("changes_requested")
+        }) {
+            if let (Some(pr), Some(head)) = (j.review_pr_number, j.review_head_sha.as_ref()) {
+                let e = newest.entry(pr).or_insert((j.created_at, head.clone()));
+                if j.created_at > e.0 {
+                    *e = (j.created_at, head.clone());
+                }
+            }
+        }
+        Ok(newest.into_iter().map(|(pr, (_, h))| (pr, h)).collect())
+    }
+
+    async fn build_run_heads(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Vec<RunHeads>> {
+        // The fake has no tasks table to join a board number from; the tests
+        // that need keyed heads drive the real repo. What the fake preserves
+        // is the SHAPE the reconciler reads: one entry per targeted card,
+        // keyed by a stable stand-in derived from the task id.
+        let s = self.inner.lock().unwrap();
+        let mut by_key: std::collections::HashMap<i64, RunHeads> = std::collections::HashMap::new();
+        let key_of = |t: &TaskId| -> i64 { t.0.as_u64_pair().0 as i64 };
+        for j in s.jobs.iter().filter(|j| {
+            j.tenant_id == tenant && j.workspace_id == Some(workspace) && j.kind == "build"
+        }) {
+            let Some(task) = j.target_task_id.as_ref() else {
+                continue;
+            };
+            let k = key_of(task);
+            let e = by_key.entry(k).or_insert_with(|| RunHeads {
+                item_key: k,
+                live_head: None,
+                done_head: None,
+                attempted_head: None,
+                attempted_at: None,
+            });
+            match j.state.as_str() {
+                "queued" | "claimed" | "running" | "waiting_on_human" => {
+                    e.live_head = j.build_fingerprint.clone()
+                }
+                "completed" if j.build_outcome.is_some() => {
+                    e.done_head = j.build_fingerprint.clone()
+                }
+                "failed" | "completed" => {
+                    e.attempted_head = j.build_fingerprint.clone();
+                    e.attempted_at = Some(j.updated_at);
+                }
+                _ => {}
+            }
+        }
+        Ok(by_key.into_values().collect())
+    }
+
     async fn active_epic_run_for(
         &self,
         tenant: TenantId,
@@ -973,10 +1250,9 @@ impl LoopJobRepository for FakeLoopJobRepository {
         &self,
         tenant: TenantId,
         workspace: WorkspaceId,
-    ) -> ApiResult<Vec<ReviewRunHeads>> {
+    ) -> ApiResult<Vec<RunHeads>> {
         let s = self.inner.lock().unwrap();
-        let mut by_pr: std::collections::HashMap<i64, ReviewRunHeads> =
-            std::collections::HashMap::new();
+        let mut by_pr: std::collections::HashMap<i64, RunHeads> = std::collections::HashMap::new();
         let mut mine: Vec<&LoopJob> = s
             .jobs
             .iter()
@@ -992,8 +1268,8 @@ impl LoopJobRepository for FakeLoopJobRepository {
         mine.sort_by_key(|j| j.created_at);
         for j in mine {
             let pr = j.review_pr_number.unwrap();
-            let e = by_pr.entry(pr).or_insert_with(|| ReviewRunHeads {
-                review_pr_number: pr,
+            let e = by_pr.entry(pr).or_insert_with(|| RunHeads {
+                item_key: pr,
                 live_head: None,
                 done_head: None,
                 attempted_head: None,
@@ -1043,6 +1319,8 @@ impl LoopJobRepository for FakeLoopJobRepository {
             review_pr_number: None,
             review_head_sha: None,
             review_verdict: None,
+            build_outcome: None,
+            build_fingerprint: None,
         };
         self.inner.lock().unwrap().jobs.push(job.clone());
         Ok(job)
