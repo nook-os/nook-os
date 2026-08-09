@@ -1431,11 +1431,15 @@ impl TaskRepository for DbTaskRepository {
     }
 
     async fn detach_label(&self, tenant: TenantId, task_id: TaskId, name: &str) -> ApiResult<()> {
+        // A subquery, not `DELETE … USING`: USING is Postgres-only and this
+        // file is held to SQL both engines run — the old form errored on
+        // SQLite, which surfaced when MAIN-476's card mirror started detaching
+        // labels from inside the control plane.
         self.db
             .exec(
-                "DELETE FROM task_labels tl USING labels l
-             WHERE tl.label_id = l.id AND tl.task_id = $1
-               AND l.tenant_id = $2 AND l.name = $3",
+                "DELETE FROM task_labels
+                  WHERE task_id = $1
+                    AND label_id IN (SELECT id FROM labels WHERE tenant_id = $2 AND name = $3)",
                 params![task_id, tenant, name],
             )
             .await?;

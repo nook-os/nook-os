@@ -88,6 +88,7 @@ pub mod operator_queries;
 pub mod overview_queries;
 pub mod policy;
 pub mod port_leases;
+pub mod pr_hygiene;
 pub mod queue;
 pub mod repo_settings;
 pub mod run_reconcile;

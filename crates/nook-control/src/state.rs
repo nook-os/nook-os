@@ -107,6 +107,9 @@ pub struct AppState {
     /// caches would mean two answers to "how many reviewers does this repo
     /// want", and the UI would be reporting the one nobody converges toward.
     pub review_demand: Arc<crate::services::forge::ReviewDemand>,
+    /// Throttles the PR hygiene pass (MAIN-476) to the forge cache's rhythm —
+    /// its per-PR detail reads must not run at the reconciler's poll cadence.
+    pub pr_hygiene: Arc<crate::services::pr_hygiene::Hygiene>,
     /// Per-tenant budget for `POST /notify`, which node tokens may call.
     pub notify_limit: Arc<crate::services::notify::RateLimiter>,
     /// Per-IP budget for the UNAUTHENTICATED invite preview. Keyed by a uuid
@@ -196,6 +199,9 @@ impl AppState {
             oidc,
             mcp_auth_cache: Arc::new(dashmap::DashMap::new()),
             review_demand: Arc::new(crate::services::forge::ReviewDemand::from_env()),
+            pr_hygiene: Arc::new(crate::services::pr_hygiene::Hygiene::new(
+                std::time::Duration::from_secs(60),
+            )),
             notify_limit: Arc::new(Default::default()),
             preview_limit: Arc::new(Default::default()),
             cookie_key,

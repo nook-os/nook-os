@@ -902,7 +902,9 @@ pub async fn pass(state: &AppState, clones: &CloneThrottle) -> crate::error::Api
             let ceiling = ws.review_loop_max_replicas.unwrap_or(1).max(0) as usize;
             let source = crate::services::work_source::ReviewWork {
                 demand: &state.review_demand,
-                token: gh_token,
+                // Cloned: the hygiene pass below authenticates with the same
+                // credential.
+                token: gh_token.clone(),
             };
             match crate::services::run_reconcile::converge(
                 state,
@@ -948,6 +950,46 @@ pub async fn pass(state: &AppState, clones: &CloneThrottle) -> crate::error::Api
                     Ok(_) => {}
                     Err(e) => {
                         tracing::warn!(workspace = %ws.id, error = %e, "build run reconcile failed")
+                    }
+                }
+            }
+
+            // A PR the loop cannot see is a PR that sits (MAIN-476): a
+            // CONFLICTING PR re-enters the repair queue, and a verdict label
+            // stripped outside the loop is restored from the recorded verdict.
+            // Throttled to the forge cache's rhythm, and skipped for a
+            // workspace with no GitHub repo or no write-capable credential —
+            // both mean nothing here could act anyway.
+            if state.pr_hygiene.due(ws.id) {
+                let repo = ws
+                    .git_remote_url
+                    .as_deref()
+                    .and_then(crate::services::forge::github_repo);
+                let write_forge = match gh_token.as_deref() {
+                    Some(t) => Some(crate::services::forge::GithubForge::from_token(t)),
+                    None => crate::services::forge::GithubForge::from_env(),
+                };
+                if let (Some(repo), Some(forge)) = (repo, write_forge) {
+                    let prs = state
+                        .review_demand
+                        .prs(ws.id, ws.git_remote_url.as_deref(), gh_token.as_deref())
+                        .await
+                        .unwrap_or_default();
+                    match crate::services::pr_hygiene::heal(
+                        state, &forge, &repo, tenant, owner, ws.id, &prs,
+                    )
+                    .await
+                    {
+                        Ok(h) if h.restored > 0 || h.marked > 0 => tracing::info!(
+                            workspace = %ws.id,
+                            restored = h.restored,
+                            marked = h.marked,
+                            "pr hygiene healed stuck pull requests"
+                        ),
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!(workspace = %ws.id, error = %e, "pr hygiene pass failed")
+                        }
                     }
                 }
             }

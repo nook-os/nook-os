@@ -79,6 +79,16 @@ pub struct RunHeads {
     pub done_head: Option<String>,
 }
 
+/// The newest recorded verdict for one PR: which head it judged, and what it
+/// said. What label restoration (MAIN-476 AC-3) reads — only verdicts this
+/// deployment itself recorded, which is the "one writer wins" rule.
+#[derive(Debug, Clone, nook_db::FromDbRow)]
+pub struct RecordedVerdict {
+    pub review_pr_number: i64,
+    pub review_head_sha: String,
+    pub review_verdict: String,
+}
+
 /// A job the reaper found stranded on a node that stopped reporting, with the
 /// moment that node was last seen — the transcript line quotes it.
 #[derive(Debug, Clone)]
@@ -154,6 +164,14 @@ pub trait LoopJobRepository: Send + Sync {
     /// Record what a build run concluded. Guarded on a live build run — an
     /// outcome on a finished or foreign job is a caller bug, answered with 0.
     async fn set_build_outcome(&self, id: JobId, outcome: &str) -> ApiResult<u64>;
+
+    /// Per PR: the newest completed run that recorded a REAL verdict —
+    /// `skipped` deferred to someone else's review, so it restores nothing.
+    async fn recorded_review_verdicts(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Vec<RecordedVerdict>>;
 
     /// A workspace's review runs, newest first — what the workspace's review
     /// surface reads. Bounded, because a busy repo accumulates one per push per
@@ -445,6 +463,36 @@ impl LoopJobRepository for DbLoopJobRepository {
             e.attempted_at = Some(h.updated_at);
         }
         Ok(by_pr.into_values().collect())
+    }
+
+    async fn recorded_review_verdicts(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Vec<RecordedVerdict>> {
+        // Newest per PR by `ORDER BY … LIMIT 1` rather than `MAX(created_at)`:
+        // created_at has second resolution, so two runs in one second would
+        // both match a MAX and the same PR would come back twice. The id is a
+        // UUIDv7, time-ordered, which is what makes it an honest tiebreak.
+        Ok(self
+            .db
+            .query_all(
+                "SELECT review_pr_number, review_head_sha, review_verdict FROM loop_jobs j
+                  WHERE tenant_id = $1 AND workspace_id = $2 AND kind = 'review'
+                    AND review_pr_number IS NOT NULL AND review_head_sha IS NOT NULL
+                    AND state = 'completed'
+                    AND review_verdict IS NOT NULL AND review_verdict <> 'skipped'
+                    AND j.id = (
+                        SELECT k.id FROM loop_jobs k
+                         WHERE k.tenant_id = j.tenant_id
+                           AND k.workspace_id = j.workspace_id
+                           AND k.review_pr_number = j.review_pr_number
+                           AND k.kind = 'review' AND k.state = 'completed'
+                           AND k.review_verdict IS NOT NULL AND k.review_verdict <> 'skipped'
+                         ORDER BY k.created_at DESC, k.id DESC LIMIT 1)",
+                params![tenant, workspace.0],
+            )
+            .await?)
     }
 
     async fn set_review_verdict(&self, id: JobId, verdict: &str) -> ApiResult<u64> {
@@ -1298,6 +1346,38 @@ impl LoopJobRepository for FakeLoopJobRepository {
             }
         }
         Ok(by_pr.into_values().collect())
+    }
+
+    async fn recorded_review_verdicts(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Vec<RecordedVerdict>> {
+        let s = self.inner.lock().unwrap();
+        let mut newest: std::collections::HashMap<i64, &LoopJob> = std::collections::HashMap::new();
+        for j in s.jobs.iter().filter(|j| {
+            j.tenant_id == tenant
+                && j.workspace_id == Some(workspace)
+                && j.kind == "review"
+                && j.state == "completed"
+                && j.review_pr_number.is_some()
+                && j.review_head_sha.is_some()
+                && j.review_verdict.as_deref().is_some_and(|v| v != "skipped")
+        }) {
+            let e = newest.entry(j.review_pr_number.unwrap()).or_insert(j);
+            // The SQL's tiebreak: created_at, then the time-ordered id.
+            if (j.created_at, j.id.0) > ((*e).created_at, (*e).id.0) {
+                *e = j;
+            }
+        }
+        Ok(newest
+            .into_values()
+            .map(|j| RecordedVerdict {
+                review_pr_number: j.review_pr_number.unwrap(),
+                review_head_sha: j.review_head_sha.clone().unwrap(),
+                review_verdict: j.review_verdict.clone().unwrap(),
+            })
+            .collect())
     }
 
     async fn create(&self, new: NewLoopJob) -> ApiResult<LoopJob> {
