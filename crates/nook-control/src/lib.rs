@@ -13,6 +13,7 @@ pub mod seed;
 pub mod services;
 pub mod session_status;
 pub mod state;
+pub mod tunnels;
 pub mod ws;
 
 // Config parsing and the cache / storage / mail / queue providers now live in

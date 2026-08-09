@@ -245,6 +245,18 @@ pub struct Config {
     /// waiting for whenever an agent skill next runs. Default 120.
     pub merge_reconcile_scan_secs: u64,
 
+    // ── Tunnels (MAIN-9) ────────────────────────────────────────────────
+    /// The wildcard zone tunnels are served under, e.g. `nook.hein.network`.
+    /// A request whose `Host` is a subdomain of this is a tunnel and is answered
+    /// by the tunnel surface instead of the API (MAIN-403 AC-1).
+    ///
+    /// `None` — the shipped default — turns the whole surface off: host dispatch
+    /// never runs and no host is treated as a tunnel. Deliberately not guessed
+    /// from `public_base_url`, because serving `*.<domain>` needs a wildcard DNS
+    /// record and a certificate for it, and inferring the name would produce a
+    /// tunnel that resolves nowhere.
+    pub tunnel_domain: Option<String>,
+
     // ── Workspace discovery ─────────────────────────────────────────────
     /// How many seconds a checkout may stay tombstoned (`node_workspaces
     /// .missing_at`) before the retention sweep hard-deletes it (MAIN-220). A
@@ -390,6 +402,13 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(120),
 
+            // Normalised once, here: a leading dot and a trailing dot are both
+            // ways people write a zone, and host matching compares lowercase
+            // ASCII. Doing it at the edge means every reader compares like with
+            // like instead of re-normalising and drifting.
+            tunnel_domain: env_opt("TUNNEL_DOMAIN")
+                .map(|d| d.trim().trim_matches('.').to_ascii_lowercase()),
+
             workspace_missing_retention_secs: env_opt("NOOK_WORKSPACE_MISSING_RETENTION_SECS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(604_800),
@@ -527,6 +546,9 @@ impl Config {
             mail_max_per_month: Some(100),
             mail_max_per_day: None,
             trusted_proxies: Vec::new(),
+            // Off, like a fresh deployment: a test that wants the tunnel surface
+            // sets the domain itself, so nothing gets host dispatch by accident.
+            tunnel_domain: None,
             job_reap_grace_secs: 180,
             claim_session_grace_secs: 120,
             max_claim_secs: 14_400,

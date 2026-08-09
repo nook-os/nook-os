@@ -33,6 +33,7 @@ pub mod tenant_ca;
 pub mod tenants;
 pub mod themes;
 pub mod tokens;
+pub mod tunnels;
 pub mod vault;
 pub mod verify_email;
 pub mod workspaces;
@@ -491,7 +492,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/vault/passkeys/{id}", delete_route(vault::delete_passkey))
         .route("/vault/passkeys/{id}/used", post(vault::touch_passkey))
         .route("/settings", get(settings::list))
-        .route("/settings/{key}", put(settings::put));
+        .route("/settings/{key}", put(settings::put))
+        // The apex half of the tunnel grant flow (MAIN-403). Unauthenticated by
+        // construction — it is where a signed-out person arrives — and it reads
+        // the session cookie itself rather than taking `AuthCtx`.
+        .route("/tunnels/authorize", get(tunnels::authorize));
 
     // MCP: streamable-HTTP service guarded by the static MCP token (dev) or an
     // OIDC access token from the configured issuer.
@@ -549,6 +554,16 @@ pub fn build_router(state: AppState) -> Router {
             utoipa_swagger_ui::SwaggerUi::new("/docs").url("/docs/openapi.json", ApiDoc::openapi()),
         );
     }
+
+    // AHEAD OF EVERY ROUTE ABOVE, which is the whole point (MAIN-403 AC-1). A
+    // layer runs before matching, so a request whose `Host` is a tunnel's is
+    // answered by the tunnel surface and can never be served by the API — not
+    // even when its path happens to name one. With no `TUNNEL_DOMAIN` set it
+    // passes everything straight through.
+    let router = router.layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        tunnels::host_dispatch,
+    ));
 
     with_middleware(router).with_state(state)
 }
