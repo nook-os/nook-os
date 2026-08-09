@@ -13,14 +13,25 @@
 # running container. `--build` on every run re-sent the whole build context to
 # re-derive an image that had not changed.
 #
-# THE ONE EXCEPTION IS THE OPERATOR NODE, and it is the reason `--build` still
-# exists: `operator-node.Dockerfile` COPYs `crates/` and bakes a release binary,
-# with no mount and no cargo-watch. It therefore keeps running whatever `nook`
-# it was built with until somebody rebuilds it — and a stale one skews against
-# the control plane's protocol and hangs loop jobs at "waiting for the agent",
-# which looks like a hung job rather than an old image. After changing anything
-# under `crates/`, run `./run.sh --build` (or `docker compose build
-# operator-node`) before trusting a loop run.
+# TWO IMAGES ARE EXCEPTIONS, because they bake something.
+#
+# THE OPERATOR NODE is the reason `--build` still exists:
+# `operator-node.Dockerfile` COPYs `crates/` and bakes a release binary, with no
+# mount and no cargo-watch. It therefore keeps running whatever `nook` it was
+# built with until somebody rebuilds it — and a stale one skews against the
+# control plane's protocol and hangs loop jobs at "waiting for the agent", which
+# looks like a hung job rather than an old image. After changing anything under
+# `crates/`, run `./run.sh --build` (or `docker compose build operator-node`)
+# before trusting a loop run.
+#
+# THE DEV NODE bakes an agent TOOLCHAIN (MAIN-486): `dev-rust.Dockerfile`'s
+# `dev-node` stage carries `gh` and a pinned `claude`. That one is handled for
+# you — this script checks the existing image for those binaries and rebuilds it
+# when they are missing — because the failure it prevents is silent and remote
+# from its cause: compose only builds an image that is ABSENT, never one whose
+# Dockerfile changed, so a machine that already had a `node` image would keep a
+# toolchain-less one and the symptom would surface much later as a build pass
+# dying on `gh: not found`.
 #
 # A clean run lands in a state the loop can actually be tested in (MAIN-341):
 # a real bare git repo on the operator node, a seeded workspace pointing at it,
@@ -310,6 +321,60 @@ refresh_dev_cli_context() {
   fi
 }
 
+# ── The dev build node's placement label (MAIN-486) ──────────────────────────
+#
+# Build work is placed only on a node labelled `role=build` (MAIN-383), and a
+# label is a person's statement about a machine — nothing in the join path can
+# set it, by design. So `run.sh` applies it to `dev-node` the way a human would:
+# through the API, as the seeded dev identity that owns the node.
+#
+# The node joins moments after the control plane answers, so this retries
+# briefly rather than racing it. If it still cannot find the node it prints the
+# exact command instead of failing the boot — the label is the last step, and a
+# stack that is otherwise up should not be torn down over it.
+label_dev_build_node() {
+  local jar id attempt
+  jar="$(mktemp)"
+  if ! curl -fsS -c "$jar" -X POST "$CONTROL_URL"/api/v1/auth/dev-login \
+      -H 'Content-Type: application/json' \
+      -d "{\"email\":\"$DEV_EMAIL\"}" >/dev/null 2>&1; then
+    rm -f "$jar"
+    warn "dev-login unavailable — dev-node is unlabelled and build jobs will stay queued."
+    return 0
+  fi
+  id=""
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    # `id` is the first field serde writes for a node and `name` the third,
+    # with only a scalar between — so one match pairs the two without a JSON
+    # parser this script does not otherwise need.
+    id="$(curl -fsS -b "$jar" "$CONTROL_URL"/api/v1/nodes 2>/dev/null \
+      | grep -o '"id":"[^"]*","tenant_id":"[^"]*","name":"dev-node"' \
+      | sed -n 's/^"id":"\([^"]*\)".*/\1/p' | head -1)"
+    [ -n "$id" ] && break
+    [ "$attempt" -lt 10 ] && sleep 2
+  done
+  if [ -z "$id" ]; then
+    rm -f "$jar"
+    warn "dev-node has not joined yet, so it is unlabelled and takes no build work."
+    echo "  Re-run ./run.sh once it appears, set the label on the Nodes page, or:" >&2
+    echo "    jar=\$(mktemp)" >&2
+    echo "    curl -sS -c \"\$jar\" -X POST $CONTROL_URL/api/v1/auth/dev-login \\" >&2
+    echo "      -H 'Content-Type: application/json' -d '{\"email\":\"$DEV_EMAIL\"}'" >&2
+    echo "    curl -sS -b \"\$jar\" -X PUT $CONTROL_URL/api/v1/nodes/<node-id>/placement \\" >&2
+    echo "      -H 'Content-Type: application/json' \\" >&2
+    echo "      -d '{\"labels\":{\"role\":\"build\"},\"taints\":[]}'" >&2
+    return 0
+  fi
+  if curl -fsS -b "$jar" -X PUT "$CONTROL_URL/api/v1/nodes/$id/placement" \
+      -H 'Content-Type: application/json' \
+      -d '{"labels":{"role":"build"},"taints":[]}' >/dev/null 2>&1; then
+    say "dev-node labelled role=build — it takes the loop's build work."
+  else
+    warn "Could not label dev-node role=build — build jobs will stay queued."
+  fi
+  rm -f "$jar"
+}
+
 # shellcheck source=scripts/compose-project.sh
 . ./scripts/compose-project.sh
 
@@ -357,9 +422,26 @@ if [ -z "$dev_join_token" ]; then
   echo "  run without it: docker compose up -d --scale operator-node=0" >&2
 fi
 
+# A `node` image from before the `dev-node` stage has no `gh` and no `claude`,
+# and compose will not rebuild it: it builds what is missing, not what changed.
+# Probing the image itself — rather than trusting a version marker — is what
+# makes this correct for a checkout that has never had the stage and for one
+# whose image predates a later addition to it.
+rebuild_node_image_if_toolchainless() {
+  local img="${COMPOSE_PROJECT_NAME}-node"
+  docker image inspect "$img" >/dev/null 2>&1 || return 0   # absent: `up` builds it
+  if docker run --rm --entrypoint sh "$img" -lc \
+      'command -v gh >/dev/null && command -v claude >/dev/null' >/dev/null 2>&1; then
+    return 0
+  fi
+  say "The dev node image predates its agent toolchain — rebuilding it..."
+  docker compose build node || warn "Could not rebuild the node image; build passes will fail on \`gh: not found\`."
+}
+
 if [ -n "$BUILD" ]; then
   say "Rebuilding images and starting the stack..."
 else
+  rebuild_node_image_if_toolchainless
   say "Starting the stack (reusing existing images — ./run.sh --build to rebuild)..."
   # Only worth saying when there IS an operator-node image that could be stale;
   # on a first run compose builds it here anyway and the warning would be a lie.
@@ -384,6 +466,7 @@ claude_login_gate
 # CLI token minted through the dev-login hatch.
 provision_dogfood_repo
 refresh_dev_cli_context
+label_dev_build_node
 
 say "NookOS is up."
 echo
