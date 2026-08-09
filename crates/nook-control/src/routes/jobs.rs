@@ -29,10 +29,13 @@ pub async fn create(
 
 /// "Review this workspace now" (MAIN-455) — the manual counterpart to the
 /// reconciler, and the SAME convergence: one directed run per pull request
-/// that is owed one, same dedupe, same ceiling. The response is what actually
-/// happened — the runs raised, plus how many PRs were already covered or held
-/// back — because "a job" stopped being the honest unit when a workspace can
-/// owe several.
+/// that is owed one, same dedupe, same ceiling. `pr` narrows it to one PR;
+/// `force` (MAIN-473) additionally overrules exactly ONE rule — the
+/// verdicted-head rest — while the live-run dedupe and the workspace ceiling
+/// (including `0 = off`) still stand and refuse by name. The response is what
+/// actually happened — the runs raised, plus how many PRs were already
+/// covered or held back — because "a job" stopped being the honest unit when
+/// a workspace can owe several.
 #[utoipa::path(post, path = "/api/v1/reviews",
     operation_id = "review_enqueue",
     request_body = CreateReviewJobRequest,
@@ -53,7 +56,16 @@ pub async fn enqueue_review(
     .await
     .map_err(|e| crate::error::ApiError::BadRequest(e.to_string()))?;
 
-    let c = jobs::enqueue_review(&state, auth.tenant_id, auth.user_id, workspace, req.seed).await?;
+    let c = jobs::enqueue_review(
+        &state,
+        auth.tenant_id,
+        auth.user_id,
+        workspace,
+        req.seed,
+        req.pr,
+        req.force,
+    )
+    .await?;
     Ok(Json(ReviewRaiseResult {
         raised: c.jobs,
         live: c.live as u32,

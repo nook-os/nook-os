@@ -1978,6 +1978,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/reviews": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * "Review this workspace now" (MAIN-455) — the manual counterpart to the
+         *     reconciler, and the SAME convergence: one directed run per pull request
+         *     that is owed one, same dedupe, same ceiling. `pr` narrows it to one PR;
+         *     `force` (MAIN-473) additionally overrules exactly ONE rule — the
+         *     verdicted-head rest — while the live-run dedupe and the workspace ceiling
+         *     (including `0 = off`) still stand and refuse by name. The response is what
+         *     actually happened — the runs raised, plus how many PRs were already
+         *     covered or held back — because "a job" stopped being the honest unit when
+         *     a workspace can owe several.
+         */
+        post: operations["review_enqueue"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/runtime-auth": {
         parameters: {
             query?: never;
@@ -4388,6 +4415,34 @@ export interface components {
             kind: string;
             to_task: components["schemas"]["TaskId"];
         };
+        /**
+         * @description Raise a `review` job against a WORKSPACE (MAIN-408) — the manual half of
+         *     AC-2, beside the board-signal sweep of AC-1.
+         *
+         *     Separate from [`CreateLoopJobRequest`] because the two address different
+         *     things: that one names a ticket, this one names a repository. Folding them
+         *     into one request with two optional targets would make "exactly one of these"
+         *     a runtime check in the service layer, which is precisely what migration
+         *     0040 moved into a database constraint.
+         */
+        CreateReviewJobRequest: {
+            /**
+             * @description Re-review even when the PR's head equals the last verdicted head
+             *     (MAIN-473): a human's lever for evidence that changed under a verdict —
+             *     a CI rerun turning green, a stale judgment — without an empty amend.
+             *     Manual-only; the reconciler's own wakeup rule is untouched.
+             */
+            force?: boolean;
+            /**
+             * Format: int64
+             * @description Converge only this pull request. Required for `force`.
+             */
+            pr?: number | null;
+            /** @description The opening brief, exactly as on a spec job. Optional. */
+            seed?: string | null;
+            /** @description The workspace to review, as a UUID or its name — resolved server-side. */
+            workspace_id: string;
+        };
         CreateSessionRequest: {
             name?: string | null;
             node_id: components["schemas"]["NodeId"];
@@ -4991,6 +5046,12 @@ export interface components {
              */
             queued_reason?: string | null;
             requested_by: components["schemas"]["UserId"];
+            /**
+             * @description A human forced this review run at an already-verdicted head
+             *     (MAIN-473): the reviewer's already-reviewed skip-check stands aside for
+             *     exactly this run. Always false for routine runs.
+             */
+            review_forced?: boolean;
             review_head_sha?: string | null;
             /**
              * Format: int64
@@ -11069,6 +11130,29 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    review_enqueue: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateReviewJobRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReviewRaiseResult"];
+                };
             };
         };
     };

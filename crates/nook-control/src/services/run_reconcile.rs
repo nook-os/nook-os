@@ -128,6 +128,7 @@ pub async fn converge(
             source.kind(),
             item,
             note,
+            false,
         )
         .await
         {

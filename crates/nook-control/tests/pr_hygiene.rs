@@ -196,6 +196,7 @@ async fn recorded_verdict(
             review_pr_number: Some(pr),
             review_head_sha: Some(head.into()),
             build_fingerprint: None,
+            review_forced: false,
         })
         .await
         .unwrap();

@@ -670,9 +670,12 @@ async fn main() -> Result<()> {
         Command::Interactions(InteractionsCommand::Answer { id, response }) => {
             cli::interactions_answer(&id, &response).await
         }
-        Command::Reviews(ReviewsCommand::Enqueue { workspace, seed }) => {
-            cli::reviews_enqueue(&workspace, seed.as_deref()).await
-        }
+        Command::Reviews(ReviewsCommand::Enqueue {
+            workspace,
+            seed,
+            pr,
+            force,
+        }) => cli::reviews_enqueue(&workspace, seed.as_deref(), pr, force).await,
         Command::Epics(EpicsCommand::Run { epic, seed }) => {
             cli::epics_run(&epic, seed.as_deref()).await
         }
@@ -1109,6 +1112,14 @@ enum ReviewsCommand {
         /// The opening brief for the run.
         #[arg(long)]
         seed: Option<String>,
+        /// Converge only this pull request. Required for --force.
+        #[arg(long)]
+        pr: Option<i64>,
+        /// Re-review even when the head equals the last verdicted head
+        /// (MAIN-473) — the lever for evidence that changed under a verdict,
+        /// like a CI rerun turning green. A live run still refuses.
+        #[arg(long)]
+        force: bool,
     },
     /// The ceiling on a workspace's review loops, or read the current value.
     ///

@@ -52,6 +52,8 @@ pub struct NewLoopJob {
     /// The work item, for a `review` run: which PR, at which head.
     pub review_pr_number: Option<i64>,
     pub review_head_sha: Option<String>,
+    /// A human forced this review at an already-verdicted head (MAIN-473).
+    pub review_forced: bool,
     /// The work item, for a `build` run: what the card looked like when the
     /// run was raised (MAIN-458) — `review_head_sha`'s twin.
     pub build_fingerprint: Option<String>,
@@ -172,6 +174,17 @@ pub trait LoopJobRepository: Send + Sync {
         tenant: TenantId,
         workspace: WorkspaceId,
     ) -> ApiResult<Vec<RecordedVerdict>>;
+
+    /// The LIVE review run for one PR, if any — a targeted lookup on the same
+    /// predicate 0046's partial unique index arbitrates, so a refusal can name
+    /// the run to wait on unconditionally (MAIN-473), not only when it falls
+    /// inside some listing window.
+    async fn live_review_run_for(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+        pr: i64,
+    ) -> ApiResult<Option<JobId>>;
 
     /// A workspace's review runs, newest first — what the workspace's review
     /// surface reads. Bounded, because a busy repo accumulates one per push per
@@ -329,8 +342,9 @@ impl LoopJobRepository for DbLoopJobRepository {
             .query_one(
                 "INSERT INTO loop_jobs
                     (id, tenant_id, kind, target_task_id, workspace_id, requested_by,
-                     state, predecessor_job_id, seed, review_pr_number, review_head_sha, build_fingerprint)
-                 VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7, $8, $9, $10, $11)
+                     state, predecessor_job_id, seed, review_pr_number, review_head_sha,
+                     build_fingerprint, review_forced)
+                 VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7, $8, $9, $10, $11, $12)
                  RETURNING *",
                 params![
                     new.id,
@@ -343,7 +357,8 @@ impl LoopJobRepository for DbLoopJobRepository {
                     new.seed,
                     new.review_pr_number,
                     new.review_head_sha,
-                    new.build_fingerprint
+                    new.build_fingerprint,
+                    new.review_forced
                 ],
             )
             .await?)
@@ -491,6 +506,24 @@ impl LoopJobRepository for DbLoopJobRepository {
                            AND k.review_verdict IS NOT NULL AND k.review_verdict <> 'skipped'
                          ORDER BY k.created_at DESC, k.id DESC LIMIT 1)",
                 params![tenant, workspace.0],
+            )
+            .await?)
+    }
+
+    async fn live_review_run_for(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+        pr: i64,
+    ) -> ApiResult<Option<JobId>> {
+        Ok(self
+            .db
+            .query_scalar_opt::<JobId>(
+                "SELECT id FROM loop_jobs
+                  WHERE tenant_id = $1 AND workspace_id = $2 AND kind = 'review'
+                    AND review_pr_number = $3
+                    AND state IN ('queued', 'claimed', 'running', 'waiting_on_human')",
+                params![tenant, workspace.0, pr],
             )
             .await?)
     }
@@ -1366,7 +1399,7 @@ impl LoopJobRepository for FakeLoopJobRepository {
         }) {
             let e = newest.entry(j.review_pr_number.unwrap()).or_insert(j);
             // The SQL's tiebreak: created_at, then the time-ordered id.
-            if (j.created_at, j.id.0) > ((*e).created_at, (*e).id.0) {
+            if (j.created_at, j.id.0) > (e.created_at, e.id.0) {
                 *e = j;
             }
         }
@@ -1378,6 +1411,28 @@ impl LoopJobRepository for FakeLoopJobRepository {
                 review_verdict: j.review_verdict.clone().unwrap(),
             })
             .collect())
+    }
+
+    async fn live_review_run_for(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+        pr: i64,
+    ) -> ApiResult<Option<JobId>> {
+        let s = self.inner.lock().unwrap();
+        Ok(s.jobs
+            .iter()
+            .find(|j| {
+                j.tenant_id == tenant
+                    && j.workspace_id == Some(workspace)
+                    && j.kind == "review"
+                    && j.review_pr_number == Some(pr)
+                    && matches!(
+                        j.state.as_str(),
+                        "queued" | "claimed" | "running" | "waiting_on_human"
+                    )
+            })
+            .map(|j| j.id))
     }
 
     async fn create(&self, new: NewLoopJob) -> ApiResult<LoopJob> {
@@ -1399,6 +1454,7 @@ impl LoopJobRepository for FakeLoopJobRepository {
             review_pr_number: None,
             review_head_sha: None,
             review_verdict: None,
+            review_forced: new.review_forced,
             build_outcome: None,
             build_fingerprint: None,
         };

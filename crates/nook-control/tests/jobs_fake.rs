@@ -34,6 +34,7 @@ async fn queued(repo: &FakeLoopJobRepository, t: TenantId, task: TaskId) -> JobI
         predecessor_job_id: None,
         review_pr_number: None,
         review_head_sha: None,
+        review_forced: false,
         build_fingerprint: None,
     })
     .await
@@ -728,6 +729,7 @@ async fn one_epic_run_per_epic_and_the_live_one_is_named() {
         predecessor_job_id: None,
         review_pr_number: None,
         review_head_sha: None,
+        review_forced: false,
         build_fingerprint: None,
     })
     .await

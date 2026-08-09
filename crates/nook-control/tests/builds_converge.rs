@@ -520,6 +520,7 @@ async fn repair_items_key_on_the_rejected_head_and_stay_in_their_lane() {
             predecessor_job_id: None,
             review_pr_number: Some(7),
             review_head_sha: Some("rej1".into()),
+            review_forced: false,
             build_fingerprint: None,
         })
         .await
@@ -622,6 +623,7 @@ async fn repair_items_key_on_the_rejected_head_and_stay_in_their_lane() {
             predecessor_job_id: None,
             review_pr_number: Some(7),
             review_head_sha: Some("rej2".into()),
+            review_forced: false,
             build_fingerprint: None,
         })
         .await

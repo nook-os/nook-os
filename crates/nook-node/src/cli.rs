@@ -3898,11 +3898,22 @@ pub async fn builds_outcome(
 /// twice is safe: the second call prints the job the first one raised. The CLI
 /// deliberately does not decide that itself — a second notion of "already
 /// queued" out here is exactly what AC-3 forbids.
-pub async fn reviews_enqueue(workspace: &str, seed: Option<&str>) -> Result<()> {
+pub async fn reviews_enqueue(
+    workspace: &str,
+    seed: Option<&str>,
+    pr: Option<i64>,
+    force: bool,
+) -> Result<()> {
     let client = Client::from_config()?;
     let mut body = serde_json::json!({ "workspace_id": workspace });
     if let Some(seed) = seed {
         body["seed"] = serde_json::Value::String(seed.to_string());
+    }
+    if let Some(pr) = pr {
+        body["pr"] = serde_json::json!(pr);
+    }
+    if force {
+        body["force"] = serde_json::json!(true);
     }
     let r = client.post("/api/v1/reviews", body).await?;
 
