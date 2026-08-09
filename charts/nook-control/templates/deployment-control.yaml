@@ -117,6 +117,21 @@ spec:
                   name: {{ .Values.existingSecret }}
                   key: {{ $sk.postmarkToken }}
             {{- end }}
+            {{- if $sk.giphyKey }}
+            # Chat's GIF picker (MAIN-171). In the Secret rather than the
+            # ConfigMap because it is the operator's own API key — even though
+            # the control plane then hands it to signed-in browsers, which is
+            # how Giphy's web keys are meant to be used. `optional: true` like
+            # the GitHub token above: a Secret without the key must still start
+            # the pod, since no key is a supported state (chat drops the GIF
+            # button and nothing else changes).
+            - name: NOOK_GIPHY_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: {{ $sk.giphyKey }}
+                  optional: true
+            {{- end }}
             {{- if .Values.agent.enabled }}
             # Agent mTLS listener: the process reads the cert/key from the paths
             # the tlsSecret is mounted at (below), and advertises publicUrl in

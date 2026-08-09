@@ -20,3 +20,5 @@ export * from "./Select";
 export * from "./TypeSelect";
 export * from "./useAnchoredMenu";
 export * from "./ChatView";
+export * from "./EmojiPicker";
+export * from "./GifPicker";

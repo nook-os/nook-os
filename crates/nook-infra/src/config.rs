@@ -208,6 +208,18 @@ pub struct Config {
     /// Optional daily cap, same semantics as the monthly one. Unset by default.
     pub mail_max_per_day: Option<i64>,
 
+    // ── Giphy (chat GIFs, MAIN-171) ─────────────────────────────────────
+    /// Giphy API key, from `NOOK_GIPHY_KEY`. Unset — the shipped default, and
+    /// the only state an open-source deployment has until its operator brings
+    /// their own key — means chat's GIF button is not rendered at all. Nothing
+    /// else changes: the emoji picker and every other composer affordance work
+    /// exactly as they do with a key set.
+    ///
+    /// This is a browser-side key by Giphy's own design (their web SDK embeds
+    /// one), so `/api/v1/config` hands it to a signed-in client rather than
+    /// proxying searches through here.
+    pub giphy_key: Option<String>,
+
     // ── Trusted reverse proxies ─────────────────────────────────────────
     /// CIDRs whose `X-Forwarded-For` header we believe. Empty by default, which
     /// means NO proxy is trusted and the peer socket IP is always the client —
@@ -368,6 +380,8 @@ impl Config {
             ),
             mail_max_per_day: env_opt("MAIL_MAX_PER_DAY").and_then(|v| v.parse().ok()),
 
+            giphy_key: env_opt("NOOK_GIPHY_KEY"),
+
             // No proxy is trusted unless named, so XFF is ignored by default.
             trusted_proxies: env_opt("NOOK_TRUSTED_PROXIES")
                 .map(|v| v.split(',').filter_map(parse_trusted_proxy).collect())
@@ -526,6 +540,7 @@ impl Config {
             mail_notifications_enabled: false,
             mail_max_per_month: Some(100),
             mail_max_per_day: None,
+            giphy_key: None,
             trusted_proxies: Vec::new(),
             job_reap_grace_secs: 180,
             claim_session_grace_secs: 120,

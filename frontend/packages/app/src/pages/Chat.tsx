@@ -89,6 +89,14 @@ export function ChatPage() {
   });
   const meId = me?.user.id;
 
+  // What this deployment has wired (MAIN-171). Only the Giphy key today, and
+  // `null` whenever the operator has not brought one — which is what makes the
+  // composer's GIF button absent rather than broken (AC-3).
+  const { data: appConfig } = useQuery({
+    queryKey: ["config"],
+    queryFn: async () => (await api.GET("/api/v1/config")).data ?? null,
+  });
+
   // The caller's tenant role, from chat's own /api/me, gates the management
   // affordances (AC-5). A non-admin simply never sees them.
   const { data: chatIdentity } = useQuery({
@@ -636,6 +644,7 @@ export function ChatPage() {
             canDeleteAny={canManage}
             typing={typingLine}
             onTypingActivity={onTypingActivity}
+            giphyKey={appConfig?.giphy_key}
           />
           {threadParent && selectedId && (
             <ThreadPanel
@@ -649,6 +658,7 @@ export function ChatPage() {
               onEditMessage={onEditMessage}
               onDeleteMessage={onDeleteMessage}
               canDeleteAny={canManage}
+              giphyKey={appConfig?.giphy_key}
             />
           )}
         </div>

@@ -195,6 +195,10 @@ secretKeys:
   smtpPassword: ""
   # -- Secret key holding the Postmark server token. Env: POSTMARK_TOKEN. "" to omit.
   postmarkToken: ""
+  # -- Secret key holding the operator's Giphy API key (MAIN-171). Env:
+  #    NOOK_GIPHY_KEY. "" to omit — chat then has no GIF button, which is the
+  #    shipped state and a fully supported one. No key ships with this chart.
+  giphyKey: ""
   # -- Secret key holding the Redis URL (queue.provider=redis). Env: NOOK_REDIS_URL. "" to omit.
   redisUrl: ""
   # -- Secret key holding the AWS access key id (queue.provider=sqs, credentialsMode=secret).

@@ -800,6 +800,8 @@ async fn main() -> Result<()> {
             oidc_scopes,
             oidc_device_client_id,
             oidc_device_authorization_endpoint,
+            giphy,
+            giphy_key,
             mail_provider,
             mail_from,
             mail_token,
@@ -876,6 +878,8 @@ async fn main() -> Result<()> {
                 oidc_scopes,
                 oidc_device_client_id,
                 oidc_device_authorization_endpoint,
+                giphy,
+                giphy_key,
                 mail_provider,
                 mail_from,
                 mail_token,
@@ -1504,6 +1508,13 @@ enum K8sCommand {
         /// not advertise one. Emitted via controlPlane.extraEnv.
         #[arg(long)]
         oidc_device_authorization_endpoint: Option<String>,
+        /// Wire chat's Giphy GIF picker (secretKeys.giphyKey). Implied by
+        /// --giphy-key. Off leaves chat GIF-less, which is the default.
+        #[arg(long)]
+        giphy: bool,
+        /// Giphy API key → the printed secret command only, never written.
+        #[arg(long)]
+        giphy_key: Option<String>,
         /// MAIL_PROVIDER: "capture" (default, delivers nothing), "smtp", or
         /// "postmark". smtp/postmark take the Advanced mail path.
         #[arg(long)]

@@ -43,6 +43,10 @@ pub struct ServerAnswers {
     /// plane itself; offered here only so someone can look around first.
     pub dev_auth: bool,
     pub tenant_name: String,
+    /// The operator's own Giphy key, if they chose to bring one (MAIN-171
+    /// AC-6). `None` is both the default and a fully working deployment — chat
+    /// just has no GIF button — so nothing here nags about it being unset.
+    pub giphy_key: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -147,6 +151,16 @@ pub fn env_file(a: &ServerAnswers) -> String {
     }
     s.push('\n');
     let _ = writeln!(s, "DEFAULT_TENANT_NAME={}", a.tenant_name);
+
+    // Giphy (MAIN-171 AC-6): emitted ONLY when the operator brought a key.
+    // Writing an empty `NOOK_GIPHY_KEY=` would read as a half-configured
+    // feature waiting to be finished, when in fact absent is a complete,
+    // supported state — so the file says nothing at all instead (NG-3).
+    if let Some(key) = &a.giphy_key {
+        s.push_str("\n# Chat's GIF picker. Yours, from https://developers.giphy.com — it\n");
+        s.push_str("# reaches signed-in browsers, so treat it as public, not as a secret.\n");
+        let _ = writeln!(s, "NOOK_GIPHY_KEY={key}");
+    }
 
     s.push_str("\n# The agent listener terminates TLS in-process (only it knows which\n");
     s.push_str("# tenant's CA to judge a client certificate against), so it does not sit\n");
@@ -470,7 +484,26 @@ mod tests {
             oidc: None,
             dev_auth: false,
             tenant_name: "acme".into(),
+            giphy_key: None,
         }
+    }
+
+    /// MAIN-171 AC-6/NG-3: Giphy is offered, never required. Skipping it must
+    /// leave the `.env` with no trace of it — not an empty `NOOK_GIPHY_KEY=`,
+    /// which reads as a half-finished setup rather than the complete, supported
+    /// state it actually is.
+    #[test]
+    fn giphy_is_opt_in_and_absent_when_skipped() {
+        let cfg = settings(&env_file(&answers(Deployment::Compose)));
+        assert_eq!(cfg.get("NOOK_GIPHY_KEY"), None);
+
+        let mut a = answers(Deployment::Compose);
+        a.giphy_key = Some("gk-live-abc".into());
+        assert_eq!(
+            settings(&env_file(&a))["NOOK_GIPHY_KEY"],
+            "gk-live-abc",
+            "a key the operator brought must reach the control plane"
+        );
     }
 
     /// The placeholder in `.env.example` is sixty-four zeroes. Shipping that

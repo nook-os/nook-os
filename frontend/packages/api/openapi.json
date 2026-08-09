@@ -839,6 +839,31 @@
         }
       }
     },
+    "/api/v1/config": {
+      "get": {
+        "tags": [
+          "crate::routes::config"
+        ],
+        "summary": "GET /api/v1/config — the deployment's optional-feature configuration.",
+        "description": "Signed-in, unlike `/auth/providers`: the login screen has to know what it\nmay offer before anyone is authenticated, whereas nothing here is needed\nuntil a person is already inside the app. That lets it carry the Giphy key\n(MAIN-171) without publishing the operator's key to anonymous callers.",
+        "operationId": "app_config",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppConfig"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "not signed in"
+          }
+        }
+      }
+    },
     "/api/v1/dispatcher/suggest": {
       "post": {
         "tags": [
@@ -8628,6 +8653,19 @@
         "properties": {
           "response": {
             "type": "string"
+          }
+        }
+      },
+      "AppConfig": {
+        "type": "object",
+        "description": "Deployment-level configuration a signed-in client needs in order to know\nwhich optional features exist here — the `/auth/providers` idea applied to\nthe app rather than to sign-in, so the UI never renders a control that is\nwired to nothing.",
+        "properties": {
+          "giphy_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The operator's own Giphy API key (MAIN-171), or `None` when they have\nnot brought one. `None` is the shipped state and a fully supported one:\nchat simply offers no GIF button."
           }
         }
       },

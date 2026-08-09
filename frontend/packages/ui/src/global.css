@@ -5316,6 +5316,174 @@ tr:hover .row-action,
   cursor: default;
 }
 
+/* ── Composer pickers: emoji + GIPHY (MAIN-171) ────────────────────────────
+   Both triggers sit in the composer row at exactly --nook-chat-ctrl, matching
+   the input and the Send button beside them; both popups are portalled to the
+   body by useAnchoredMenu, so they are `position: fixed` and cannot be clipped
+   by the chat panel's overflow. */
+/* Left of the message box visually, after it in the DOM — see the comment on
+   the composer in ChatView. Both pickers carry this class, so they keep their
+   own relative order (emoji, then GIF). */
+.chat-composer-wrap { display: flex; order: -1; }
+.chat-composer-btn {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--nook-chat-ctrl);
+  height: var(--nook-chat-ctrl);
+  border: 1px solid var(--nook-border-bright);
+  border-radius: var(--nook-radius);
+  background: var(--nook-bg);
+  color: var(--nook-fg-dim);
+  font: inherit;
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s;
+}
+.chat-composer-btn.gif {
+  width: auto;
+  padding: 0 8px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+.chat-composer-btn:hover:not(:disabled),
+.chat-composer-btn.on {
+  color: var(--nook-accent);
+  border-color: var(--nook-accent);
+}
+.chat-composer-btn:focus-visible {
+  outline: none;
+  border-color: var(--nook-accent);
+  box-shadow: var(--nook-glow);
+}
+.chat-composer-btn:disabled { opacity: 0.5; cursor: default; }
+
+.chat-emoji-picker {
+  z-index: 500;
+  width: 264px;
+  padding: 5px;
+  border: 1px solid var(--nook-border-bright);
+  border-radius: var(--nook-radius);
+  background: var(--nook-bg-panel);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+}
+.chat-emoji-grid {
+  display: grid;
+  /* EIGHT columns, matching COLUMNS in EmojiPicker.tsx — arrow up/down move by
+     that many buttons, so the two must stay in step or the grid stops walking
+     in straight lines. */
+  grid-template-columns: repeat(8, 1fr);
+  gap: 2px;
+  max-height: 210px;
+  overflow-y: auto;
+}
+.chat-emoji-opt {
+  border: 0;
+  border-radius: var(--nook-radius);
+  background: transparent;
+  font: inherit;
+  font-size: 17px;
+  line-height: 1;
+  padding: 4px 0;
+  cursor: pointer;
+}
+.chat-emoji-opt:hover,
+.chat-emoji-opt:focus-visible {
+  outline: none;
+  background: color-mix(in srgb, var(--nook-accent) 18%, transparent);
+}
+
+.chat-gif-picker {
+  z-index: 500;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  width: 320px;
+  padding: 6px;
+  border: 1px solid var(--nook-border-bright);
+  border-radius: var(--nook-radius);
+  background: var(--nook-bg-panel);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+}
+.chat-gif-search {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid var(--nook-border-bright);
+  border-radius: var(--nook-radius);
+  background: var(--nook-bg);
+  color: var(--nook-fg);
+  font: inherit;
+  font-size: 12px;
+}
+.chat-gif-search:focus {
+  outline: none;
+  border-color: var(--nook-accent);
+  box-shadow: var(--nook-glow);
+}
+.chat-gif-results {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+  height: 240px;
+  overflow-y: auto;
+  align-content: start;
+}
+.chat-gif-note {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 4px;
+  color: var(--nook-fg-faint);
+  font-size: 12px;
+}
+.chat-gif-opt {
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--nook-radius);
+  background: var(--nook-bg);
+  cursor: pointer;
+  overflow: hidden;
+  line-height: 0;
+}
+.chat-gif-opt:hover,
+.chat-gif-opt:focus-visible {
+  outline: none;
+  border-color: var(--nook-accent);
+}
+.chat-gif-opt img {
+  width: 100%;
+  height: 74px;
+  object-fit: cover;
+  display: block;
+}
+/* GIPHY's attribution mark (AC-4) — required wherever their results are shown,
+   so it appears both here and under a posted GIF. */
+.chat-gif-attribution {
+  color: var(--nook-fg-faint);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  text-decoration: none;
+}
+.chat-gif-attribution:hover { color: var(--nook-accent); }
+.chat-body.gif {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+.chat-gif {
+  /* Bounded (AC-2): a 500px-tall GIF must not push the rest of the
+     conversation off screen. The anchor around it opens the original. */
+  max-width: 260px;
+  max-height: 200px;
+  border-radius: var(--nook-radius);
+  display: block;
+}
+
 /* ── Issue-type badge (MAIN-60) ────────────────────────────────────────────
    A compact type indicator toned from the shared vocabulary. Icon-only on
    cards (compact); icon + label in the detail selector and the filter. */

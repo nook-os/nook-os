@@ -29,6 +29,10 @@ export interface ThreadPanelProps {
   /** The viewer is a tenant admin — Delete is offered on any reply, not only
    *  their own (MAIN-116 AC-4). */
   canDeleteAny?: boolean;
+  /** The deployment's Giphy key (MAIN-171), passed straight through so a reply
+   *  composes the same way a channel message does. Absent → no GIF button, the
+   *  emoji picker either way. */
+  giphyKey?: string | null;
 }
 
 const PAGE_SIZE = 50;
@@ -44,6 +48,7 @@ export function ThreadPanel({
   onEditMessage,
   onDeleteMessage,
   canDeleteAny,
+  giphyKey,
 }: ThreadPanelProps) {
   const threadQuery = useInfiniteQuery({
     queryKey: ["chat", "thread", parent.id],
@@ -159,6 +164,7 @@ export function ThreadPanel({
         onEditMessage={onEditMessage}
         onDeleteMessage={onDeleteMessage}
         canDeleteAny={canDeleteAny}
+        giphyKey={giphyKey}
       />
     </aside>
   );

@@ -474,6 +474,19 @@ pub struct AuthProviders {
     pub device_client_id: Option<String>,
 }
 
+/// Deployment-level configuration a signed-in client needs in order to know
+/// which optional features exist here — the `/auth/providers` idea applied to
+/// the app rather than to sign-in, so the UI never renders a control that is
+/// wired to nothing.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct AppConfig {
+    /// The operator's own Giphy API key (MAIN-171), or `None` when they have
+    /// not brought one. `None` is the shipped state and a fully supported one:
+    /// chat simply offers no GIF button.
+    #[serde(default)]
+    pub giphy_key: Option<String>,
+}
+
 // ── Nodes ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]

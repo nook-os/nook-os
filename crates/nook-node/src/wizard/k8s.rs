@@ -59,6 +59,13 @@ pub struct InitOptions {
     pub oidc_device_client_id: Option<String>,
     /// Only needed when the issuer's discovery doc does not advertise one (AC-3).
     pub oidc_device_authorization_endpoint: Option<String>,
+    /// The operator's Giphy API key (MAIN-171 AC-6) → the printed secret command
+    /// only, never written (NG-4). Absent leaves chat GIF-less, which is the
+    /// default and a fully working deployment.
+    pub giphy_key: Option<String>,
+    /// Wire `secretKeys.giphyKey` without supplying the key here — for a re-run
+    /// against a Secret that already carries it.
+    pub giphy: bool,
     /// `capture` | `smtp` | `postmark` (AC-5). Any `mail_*` field also implies the
     /// Advanced mail path. Absent/`capture` leaves the chart default (delivers nothing).
     pub mail_provider: Option<String>,
@@ -600,6 +607,34 @@ pub fn run(opts: InitOptions, tty: Option<Tty>, discover: &Discover) -> Result<O
         None
     };
 
+    // ── Giphy GIFs in chat (MAIN-171 AC-6) ──────────────────────────────────
+    // Offered, never required (NG-3): the default answer is no, and no is a
+    // complete deployment — chat simply has no GIF button. Nothing is generated,
+    // because no key ships in this repo or its images; an operator brings their
+    // own or does without.
+    let giphy_seed =
+        opts.giphy || opts.giphy_key.is_some() || existing.giphy_enabled.unwrap_or(false);
+    let giphy_enabled = match &mut tty {
+        Some(t) => {
+            let on = t.confirm("Enable Giphy GIFs in chat? (optional)", giphy_seed)?;
+            if on {
+                t.say("  Create a free key at https://developers.giphy.com — \"Create an App\".");
+            }
+            on
+        }
+        None => giphy_seed,
+    };
+    // Secret: printed only (NG-4). A re-run against a Secret that already holds
+    // the key answers this blank and still gets `secretKeys.giphyKey` wired.
+    let giphy_key = if giphy_enabled {
+        match &mut tty {
+            Some(t) => t.optional("Giphy API key (NOOK_GIPHY_KEY)")?,
+            None => some_trimmed(opts.giphy_key.clone().unwrap_or_default()),
+        }
+    } else {
+        None
+    };
+
     // ── work queue provider (MAIN-153) ──────────────────────────────────────
     // Recommended = database (the chart default, zero extra infra) — no block.
     // redis/sqs each carry their own (mostly non-secret) config; the Redis URL
@@ -792,6 +827,9 @@ pub fn run(opts: InitOptions, tty: Option<Tty>, discover: &Discover) -> Result<O
             secret_keys.push(("smtpPassword", "SMTP_PASSWORD"));
         }
     }
+    if giphy_enabled {
+        secret_keys.push(("giphyKey", "NOOK_GIPHY_KEY"));
+    }
     if let Some(q) = &queue {
         match q.provider.as_str() {
             "redis" => secret_keys.push(("redisUrl", "NOOK_REDIS_URL")),
@@ -927,6 +965,7 @@ pub fn run(opts: InitOptions, tty: Option<Tty>, discover: &Discover) -> Result<O
         &session_secret(),
         oidc_client_secret.as_deref(),
         mail_token.as_deref(),
+        giphy_key.as_deref(),
         QueueSecrets {
             redis_url: redis_url.as_deref(),
             aws_access_key_id: aws_access_key_id.as_deref(),
@@ -1282,6 +1321,7 @@ fn secret_command(
     session_secret: &str,
     oidc_client_secret: Option<&str>,
     mail_token: Option<&str>,
+    giphy_key: Option<&str>,
     queue: QueueSecrets,
 ) -> String {
     let QueueSecrets {
@@ -1309,6 +1349,13 @@ fn secret_command(
             "SMTP_PASSWORD"
         };
         s.push_str(&format!(" \\\n  --from-literal={key}='{token}'"));
+    }
+    // Chat's Giphy key (MAIN-171). A secret only in the sense that it is the
+    // operator's own credential — the control plane hands it to signed-in
+    // browsers, which is what Giphy's web keys are for. It rides the same
+    // never-written path as the rest (NG-4).
+    if let Some(k) = giphy_key.and_then(some_trimmed_str) {
+        s.push_str(&format!(" \\\n  --from-literal=NOOK_GIPHY_KEY='{k}'"));
     }
     // Queue secrets (MAIN-153): the Redis URL (provider=redis) and the AWS keys
     // (sqs + credentialsMode=secret) join here and ONLY here (NG-4). The literal
@@ -1396,6 +1443,7 @@ struct Existing {
     oidc_scopes: Option<String>,
     oidc_device_client_id: Option<String>,
     device_auth_endpoint: Option<String>,
+    giphy_enabled: Option<bool>,
     mail_provider: Option<String>,
     mail_from: Option<String>,
     mail_send_enabled: Option<bool>,
@@ -1462,6 +1510,10 @@ fn parse_existing(text: &str) -> Existing {
     e.oidc_scopes = scalar(text, "scopes");
     e.oidc_device_client_id = scalar(text, "deviceClientId");
     e.device_auth_endpoint = extra_env_value(text, "OIDC_DEVICE_AUTHORIZATION_ENDPOINT");
+
+    // Giphy (MAIN-171) — the key was never stored (NG-4), so the only trace of a
+    // previous "yes" is the secret KEY name the chart was pointed at.
+    e.giphy_enabled = Some(nested_scalar(text, "secretKeys:", "giphyKey").is_some());
 
     // Mail — the token was never stored (NG-4). `provider` is a name shared with
     // the queue block, so it must be read scoped to `mail:` (a flat scan would
@@ -1597,6 +1649,8 @@ mod tests {
             oidc_scopes: None,
             oidc_device_client_id: None,
             oidc_device_authorization_endpoint: None,
+            giphy: false,
+            giphy_key: None,
             mail_provider: None,
             mail_from: None,
             mail_token: None,
@@ -1908,6 +1962,68 @@ mod tests {
         assert!(out.secret_command.contains("SESSION_SECRET='"));
         assert!(!out.secret_command.contains("OIDC_CLIENT_SECRET"));
         assert!(!out.secret_command.contains("SMTP_PASSWORD"));
+        assert!(!out.secret_command.contains("NOOK_GIPHY_KEY")); // MAIN-171 NG-3
+    }
+
+    /// MAIN-171 AC-6/NG-3/NG-4: Giphy is offered, never required. Skipping it
+    /// leaves no trace; taking it wires the secret KEY name in the values and
+    /// puts the key itself only in the printed command.
+    #[test]
+    fn giphy_is_optional_and_its_key_is_never_written() {
+        let dir = tmp();
+        let out = run(
+            InitOptions {
+                host: Some("nook.example.com".into()),
+                giphy_key: Some("gk-live-abc".into()),
+                ..base_opts(&dir)
+            },
+            None,
+            &no_probe,
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&out.path).unwrap();
+        assert!(text.contains("  giphyKey: NOOK_GIPHY_KEY"));
+        assert!(out
+            .secret_command
+            .contains("--from-literal=NOOK_GIPHY_KEY='gk-live-abc'"));
+        assert!(!text.contains("gk-live-abc"), "NG-4: never written to disk");
+
+        // A re-run recovers the "yes" from the wired key name — the key itself
+        // was never stored — so it keeps wiring the env even with no flag.
+        let out2 = run(
+            InitOptions {
+                host: Some("nook.example.com".into()),
+                ..base_opts(&dir)
+            },
+            None,
+            &no_probe,
+        )
+        .unwrap();
+        let text2 = std::fs::read_to_string(&out2.path).unwrap();
+        assert!(text2.contains("  giphyKey: NOOK_GIPHY_KEY"));
+        // …and prints nothing for it, because this run captured no key.
+        assert!(!out2.secret_command.contains("NOOK_GIPHY_KEY"));
+    }
+
+    /// `--giphy` without a key is the re-run shape: wire the chart to a Secret
+    /// that already carries it, without re-typing the key.
+    #[test]
+    fn giphy_can_be_wired_without_supplying_the_key() {
+        let dir = tmp();
+        let out = run(
+            InitOptions {
+                host: Some("nook.example.com".into()),
+                giphy: true,
+                ..base_opts(&dir)
+            },
+            None,
+            &no_probe,
+        )
+        .unwrap();
+        assert!(std::fs::read_to_string(&out.path)
+            .unwrap()
+            .contains("  giphyKey: NOOK_GIPHY_KEY"));
+        assert!(!out.secret_command.contains("NOOK_GIPHY_KEY"));
     }
 
     #[test]

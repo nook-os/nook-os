@@ -21,6 +21,8 @@
 import React, { useCallback, useLayoutEffect, useRef, useState } from "react";
 import { Copy, MoreHorizontal, Pencil, Reply, SmilePlus, Trash2 } from "lucide-react";
 import { ALLOWED_REACTIONS } from "@nookos/api";
+import { EmojiPicker } from "./EmojiPicker";
+import { GifPicker, giphyGifUrl } from "./GifPicker";
 import { Markdown } from "./Markdown";
 import { useAnchoredMenu } from "./useAnchoredMenu";
 
@@ -142,6 +144,36 @@ export interface ChatViewProps {
    *  finished loop job). Distinct from `disabled`, which shows the box greyed:
    *  when there is nothing to say TO, an inert box is just clutter. */
   hideComposer?: boolean;
+  /** The deployment's Giphy API key (MAIN-171 AC-2), from `/api/v1/config`.
+   *
+   *  Absent or null — the shipped state of any deployment whose operator has
+   *  not brought a key — renders NO GIF button at all (AC-3): not a disabled
+   *  one, not one that fails when pressed. The emoji picker is unaffected; it
+   *  needs no service. Callers that are not team chat (the loop's run view)
+   *  simply pass nothing. */
+  giphyKey?: string | null;
+}
+
+/**
+ * Splice `insert` over the range `[start, end)` and report where the caret ends
+ * up — the whole of "insert at the cursor" (AC-1), as a pure function so the
+ * behaviour is testable without a DOM selection.
+ *
+ * `end` handles the selection case: typing an emoji over selected text replaces
+ * it, which is what every editor does.
+ */
+export function insertAt(
+  text: string,
+  start: number,
+  end: number,
+  insert: string,
+): { text: string; caret: number } {
+  const from = Math.max(0, Math.min(start, text.length));
+  const to = Math.max(from, Math.min(end, text.length));
+  return {
+    text: text.slice(0, from) + insert + text.slice(to),
+    caret: from + insert.length,
+  };
 }
 
 const GROUP_GAP_MS = 5 * 60 * 1000;
@@ -407,6 +439,7 @@ export function ChatView({
   onTypingActivity,
   beforeComposer,
   hideComposer = false,
+  giphyKey,
 }: ChatViewProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -493,6 +526,32 @@ export function ChatView({
     }
   }, []);
 
+  /** Put a character where the caret is (AC-1), then leave the caret after it
+   *  and the focus in the box — so picking an emoji is a step in composing a
+   *  message rather than the end of one.
+   *
+   *  The caret has to be restored in an effect-like step after React has
+   *  re-rendered with the new value; setting `selectionStart` before that would
+   *  be overwritten by the re-render, which is the bug that puts the caret at
+   *  the end of the box. */
+  const insertEmoji = useCallback(
+    (emoji: string) => {
+      const el = inputRef.current;
+      const at = el?.selectionStart ?? draft.length;
+      const to = el?.selectionEnd ?? at;
+      const next = insertAt(draft, at, to, emoji);
+      setDraft(next.text);
+      requestAnimationFrame(() => {
+        const box = inputRef.current;
+        if (!box) return;
+        box.focus();
+        box.setSelectionRange(next.caret, next.caret);
+        autoGrow();
+      });
+    },
+    [draft, autoGrow],
+  );
+
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
       if (e.key === "Enter" && !e.shiftKey) {
@@ -536,6 +595,11 @@ export function ChatView({
             const canCopy = settled && m.body.trim().length > 0;
             const isEditing = editing?.id === m.id;
             const reactions = m.reactions ?? [];
+            // A message that IS a Giphy URL renders as the picture (MAIN-171
+            // AC-2). Recognised from the body, not from a flag, so a GIF posted
+            // before this shipped renders too — and so nothing but a giphy.com
+            // image URL can ever become an `<img>`.
+            const gif = m.deleted ? null : giphyGifUrl(m.body);
             return (
               <div
                 key={m.id}
@@ -570,6 +634,28 @@ export function ChatView({
                       }
                     }}
                   />
+                ) : gif ? (
+                  // A GIF message is its URL and nothing else (AC-2), so it
+                  // renders as the picture rather than as the link — bounded by
+                  // the stylesheet, and opening the full-size original in a new
+                  // tab when clicked. Checked BEFORE the markdown path: a bare
+                  // URL is valid markdown, and rendering it as an autolink is
+                  // exactly what this replaces.
+                  <div className="chat-body gif">
+                    <a href={gif} target="_blank" rel="noreferrer noopener">
+                      <img className="chat-gif" src={gif} alt="GIF" />
+                    </a>
+                    {/* AC-4: GIPHY's attribution mark travels with the GIF, not
+                        only with the picker it was chosen from. */}
+                    <a
+                      className="chat-gif-attribution"
+                      href="https://giphy.com"
+                      target="_blank"
+                      rel="noreferrer noopener"
+                    >
+                      via GIPHY
+                    </a>
+                  </div>
                 ) : (
                   <div className={`chat-body${m.markdown ? " md" : ""}`}>
                     {m.markdown ? (
@@ -672,6 +758,16 @@ export function ChatView({
           }}
           onKeyDown={onKeyDown}
         />
+        {/* The pickers sit AFTER the textarea in the DOM and are pulled back to
+            the left of it by `.chat-composer-wrap { order: -1 }`, so tabbing
+            into the composer lands on the message box — the primary control —
+            rather than on a picker. Visual order is unchanged. */}
+        <EmojiPicker onPick={insertEmoji} disabled={disabled} />
+        {/* AC-3: no key, no button. Not a disabled one — an affordance that is
+            always there and never works is worse than one that is not. */}
+        {giphyKey && (
+          <GifPicker apiKey={giphyKey} onPick={onSend} disabled={disabled} />
+        )}
         <button
           type="button"
           className="chat-send"
