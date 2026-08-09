@@ -411,9 +411,34 @@ pub async fn record_verdict(
             })?,
         };
         forge
-            .post_verdict(&repo, pr.max(0) as u64, head, label, body)
+            .post_verdict(
+                &repo,
+                pr.max(0) as u64,
+                head,
+                label,
+                body,
+                job.review_forced,
+            )
             .await
             .map_err(|e| ApiError::BadRequest(format!("posting the verdict failed: {e}")))?;
+
+        // The card mirror, CP-posted like the verdict itself (MAIN-477 AC-2):
+        // the skill used to append this line by hand and a card that cycled
+        // builder↔reviewer read as a wall of near-duplicates. Best-effort —
+        // the posted verdict is the record of truth — but never silent.
+        if let Err(e) = mirror_verdict_to_card(
+            state,
+            tenant,
+            &forge,
+            &repo,
+            pr.max(0) as u64,
+            head,
+            &req.verdict,
+        )
+        .await
+        {
+            tracing::warn!(pr, error = %e, "verdict card mirror failed — the PR verdict stands");
+        }
     }
 
     if state.jobs.set_review_verdict(job_id, &req.verdict).await? == 0 {
@@ -845,6 +870,93 @@ pub async fn record_build_outcome(
         .registry
         .publish(tenant, nook_proto::UiEvent::TaskChanged { task_id: task });
     state.jobs.reload(job_id).await
+}
+
+/// Is this exact conclusion already on the card? Same head AND same verdict
+/// wording — a redelivery would change nothing but a timestamp, which is not
+/// information. A new head or a changed verdict is a real event and appends.
+fn mirror_is_duplicate(existing_bodies: &[&str], head: &str, verdict_words: &str) -> bool {
+    let marker = format!("Loop review of {head}");
+    existing_bodies
+        .iter()
+        .any(|b| b.starts_with(&marker) && b.contains(verdict_words))
+}
+
+/// Mirror one verdict onto its board card, collapsed (MAIN-477 AC-2): the
+/// card is found through the PR body's `Closes <KEY>` join, and a comment for
+/// the SAME head and verdict is never appended twice — a redelivery changes
+/// nothing but a timestamp, which is not information. A new head or a changed
+/// verdict appends normally, preserving the card's history of real events.
+async fn mirror_verdict_to_card(
+    state: &AppState,
+    tenant: TenantId,
+    forge: &crate::services::forge::GithubForge,
+    repo: &crate::services::forge::Repo,
+    pr: u64,
+    head: &str,
+    verdict: &str,
+) -> anyhow::Result<()> {
+    use crate::services::forge::Forge as _;
+    let body = forge.pr_details(repo, pr).await?.body;
+    let Some(key) = closes_key(&body) else {
+        // No join line: nothing to mirror to, and the reviewer escalates that
+        // on the PR itself — not this mirror's job to repeat.
+        return Ok(());
+    };
+    // A key that does not resolve — a typo in `Closes`, another board's key —
+    // is exactly what an operator wants named in the log, so it propagates to
+    // the caller's warn instead of being swallowed (the mirror stays
+    // best-effort; the PR verdict already stands).
+    let task = crate::services::tasks::resolve_id(state.tasks.as_ref(), tenant, &key)
+        .await
+        .map_err(|e| anyhow::anyhow!("Closes {key} does not resolve to a card: {e:?}"))?;
+    let line = format!(
+        "Loop review of {head} — {}: https://github.com/{}/{}/pull/{pr}",
+        verdict.replace('_', " "),
+        repo.owner,
+        repo.name
+    );
+    let existing = state.tasks.comments_of(task).await?;
+    let bodies: Vec<&str> = existing.iter().map(|c| c.body_md.as_str()).collect();
+    if mirror_is_duplicate(&bodies, head, &verdict.replace('_', " ")) {
+        return Ok(());
+    }
+    state
+        .tasks
+        .create_comment(crate::repo::tasks::NewComment {
+            tenant,
+            task,
+            author_type: "system".into(),
+            author_id: None,
+            author_name: "nook-review loop".into(),
+            body_md: line.clone(),
+        })
+        .await?;
+    // The path this replaces went through the comment ROUTE, which feeds the
+    // activity feed (and the notification bridge) and repaints the card live.
+    // A mirror that skipped both would be a silent downgrade: same payload
+    // rules as the route — a private card's event carries no excerpt and no
+    // key, which is what keeps it out of feeds and channels.
+    let meta = state.tasks.task_visibility_naming(task, tenant).await?;
+    let mut payload = serde_json::json!({ "task_id": task, "author": "nook-review loop" });
+    if let Some((visibility, number, board_key)) = meta {
+        if visibility != "private" {
+            payload["excerpt"] = serde_json::json!(line.chars().take(140).collect::<String>());
+            if let (Some(k), Some(n)) = (board_key, number) {
+                payload["key"] = serde_json::json!(format!("{k}-{n}"));
+            }
+        }
+    }
+    crate::events::record(
+        state,
+        tenant,
+        crate::events::EventDraft::new("task.comment.created").payload(payload),
+    )
+    .await;
+    state
+        .registry
+        .publish(tenant, nook_proto::UiEvent::TaskChanged { task_id: task });
+    Ok(())
 }
 
 /// "Review this workspace NOW" — the manual path, and it is the SAME
@@ -2009,5 +2121,34 @@ mod tests {
         assert_eq!(closes_key("Closes the gap"), None, "no key shape");
         assert_eq!(closes_key("Closes MAIN-"), None, "no number");
         assert_eq!(closes_key(""), None);
+    }
+}
+
+#[cfg(test)]
+mod verdict_mirror_tests {
+    use super::mirror_is_duplicate;
+
+    /// MAIN-477 AC-2/AC-4: the card mirror never appends an identical line,
+    /// and never swallows a real event.
+    #[test]
+    fn the_mirror_collapses_duplicates_and_keeps_real_events() {
+        let existing = vec![
+            "Loop review of abc123 — changes requested: https://github.com/a/b/pull/7",
+            "PR opened: https://github.com/a/b/pull/7",
+        ];
+        assert!(mirror_is_duplicate(
+            &existing,
+            "abc123",
+            "changes requested"
+        ));
+        // A push is a new head — a real event.
+        assert!(!mirror_is_duplicate(
+            &existing,
+            "def456",
+            "changes requested"
+        ));
+        // The verdict changing at the same head is a real event too.
+        assert!(!mirror_is_duplicate(&existing, "abc123", "approved"));
+        assert!(!mirror_is_duplicate(&[], "abc123", "approved"));
     }
 }

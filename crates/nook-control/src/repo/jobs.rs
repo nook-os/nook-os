@@ -529,6 +529,9 @@ impl LoopJobRepository for DbLoopJobRepository {
     }
 
     async fn set_review_verdict(&self, id: JobId, verdict: &str) -> ApiResult<u64> {
+        // Dialect-dispatched `now()` (MAIN-477): the hardcoded literal predated
+        // the SQLite leg covering this path — `verdict_silence` is what covers
+        // it now, and is the test that found the slip.
         Ok(self
             .db
             .exec(

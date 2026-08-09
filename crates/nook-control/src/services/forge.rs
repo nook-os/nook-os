@@ -266,10 +266,51 @@ impl GithubForge {
         head_sha: &str,
         label: &str,
         body: &str,
+        forced: bool,
     ) -> anyhow::Result<()> {
-        self.issue_comment(repo, pr, &format!("Loop review of {head_sha}\n\n{body}"))
-            .await?;
+        // Idempotent per (PR, head, verdict) — MAIN-477 AC-1. Redelivery of the
+        // same conclusion (a retry, an outage replay, a clobber recovery) must
+        // not stack near-identical comments; the labels are still re-asserted
+        // below, because they are cheap and self-deduplicating. A FAILED
+        // pre-check falls through to posting: a flaky read must not block
+        // delivery, and the duplicate is the failure that costs less.
+        let duplicate = match self.delivered_facts(repo, pr).await {
+            Ok((comments, labels)) => {
+                already_delivered(&comments, &labels, head_sha, label, forced)
+            }
+            Err(e) => {
+                tracing::warn!(pr, error = %e, "verdict dedupe pre-check failed — posting anyway");
+                false
+            }
+        };
+        if !duplicate {
+            self.issue_comment(repo, pr, &format!("Loop review of {head_sha}\n\n{body}"))
+                .await?;
+        }
         self.replace_verdict_label(repo, pr, label).await
+    }
+
+    /// The two facts the verdict dedupe reads: every comment body on the PR —
+    /// `issue_comment_bodies` walks ALL pages, so the newest comment, which is
+    /// the one being looked for, is never off the end of page one — and the
+    /// PR's current label names.
+    async fn delivered_facts(
+        &self,
+        repo: &Repo,
+        pr: u64,
+    ) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+        let comments = self.issue_comment_bodies(repo, pr).await?;
+        let issue = self.get_json(self.issue_base(repo, pr)).await?;
+        let labels = issue
+            .get("labels")
+            .and_then(|l| l.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|l| l.get("name")?.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok((comments, labels))
     }
 
     fn issue_base(&self, repo: &Repo, pr: u64) -> String {
@@ -909,5 +950,127 @@ mod tests {
                  look for a credential the fleet does not provision"
             );
         }
+    }
+}
+
+/// Has THIS conclusion already been delivered to the PR? True only when both
+/// halves agree: our own `Loop review of <head>` comment exists AND the PR
+/// currently carries the same verdict label. A changed verdict at the same
+/// head (needs_human after changes_requested, say) posts normally, because
+/// the label half differs (MAIN-477 AC-1).
+pub fn already_delivered(
+    comment_bodies: &[String],
+    labels: &[String],
+    head_sha: &str,
+    label: &str,
+    forced: bool,
+) -> bool {
+    // A FORCED re-review always posts (MAIN-473). Forcing exists for the case
+    // where the evidence went stale while the conclusion stood — the head has
+    // not moved and the verdict word is the same, which is precisely what this
+    // dedupe reads as "already said". Suppressing it would leave the human who
+    // asked for the re-review looking at silence, and that is the regression
+    // this bypass exists to prevent.
+    if forced {
+        return false;
+    }
+    let marker = format!("Loop review of {head_sha}");
+    if !comment_bodies.iter().any(|b| b.starts_with(&marker)) {
+        return false;
+    }
+    // The label tells apart "same verdict" (ours present → duplicate) from
+    // "verdict CHANGED at this head" (a DIFFERENT verdict label present →
+    // post normally). NO verdict label at all is the mid-delivery failure —
+    // comment landed, labels did not — and reposting the comment there is
+    // the exact accretion this exists to stop; the caller re-asserts labels
+    // unconditionally, which is all that case still needs.
+    let ours = labels.iter().any(|l| l == label);
+    let another = labels
+        .iter()
+        .any(|l| VERDICT_LABELS.contains(&l.as_str()) && l != label);
+    ours || !another
+}
+
+#[cfg(test)]
+mod verdict_dedupe_tests {
+    use super::*;
+
+    fn v(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// MAIN-473: a FORCED re-review is never a duplicate. Its whole purpose is
+    /// the unchanged-head, unchanged-verdict case — stale evidence under a
+    /// standing conclusion — so the dedupe that is right for every other
+    /// redelivery would make forcing do nothing at all, silently.
+    #[test]
+    fn a_forced_re_review_always_posts() {
+        let comments = v(&["Loop review of abc123\n\nSummary: fine"]);
+        let approved = v(&["loop-approved"]);
+        assert!(
+            already_delivered(&comments, &approved, "abc123", "loop-approved", false),
+            "unforced, this is the duplicate AC-1 suppresses"
+        );
+        assert!(
+            !already_delivered(&comments, &approved, "abc123", "loop-approved", true),
+            "the same facts, forced, must post"
+        );
+    }
+
+    /// MAIN-477 AC-1/AC-4: same head + same verdict is a duplicate; a new
+    /// head or a changed verdict is not.
+    #[test]
+    fn redelivery_is_a_duplicate_but_new_facts_are_not() {
+        let comments = v(&["Loop review of abc123\n\nSummary: fine"]);
+        let approved = v(&["loop-approved"]);
+        assert!(already_delivered(
+            &comments,
+            &approved,
+            "abc123",
+            "loop-approved",
+            false
+        ));
+        // A push: new head, no comment for it yet.
+        assert!(!already_delivered(
+            &comments,
+            &approved,
+            "def456",
+            "loop-approved",
+            false
+        ));
+        // Same head, but the verdict CHANGED since — the label half disagrees.
+        assert!(!already_delivered(
+            &comments,
+            &approved,
+            "abc123",
+            "loop-changes-requested",
+            false
+        ));
+        // Nothing delivered at all.
+        assert!(!already_delivered(
+            &v(&[]),
+            &v(&[]),
+            "abc123",
+            "loop-approved",
+            false
+        ));
+        // The MID-DELIVERY failure: comment landed, labels did not. Reposting
+        // the comment is the accretion this exists to stop — the caller
+        // re-asserts labels either way.
+        assert!(already_delivered(
+            &comments,
+            &v(&[]),
+            "abc123",
+            "loop-approved",
+            false
+        ));
+        // An unrelated (non-verdict) label does not read as a changed verdict.
+        assert!(already_delivered(
+            &comments,
+            &v(&["enhancement"]),
+            "abc123",
+            "loop-approved",
+            false
+        ));
     }
 }
