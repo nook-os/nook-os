@@ -217,7 +217,6 @@ pub async fn start_work(
         ));
     };
 
-    // Create the worktree for the task branch.
     let rx = state
         .registry
         .request_op(node_id, |request_id| ControlToNode::AddWorktree {
