@@ -47,15 +47,36 @@ pub struct PullRequest {
     pub number: u64,
     pub head_sha: String,
     /// The PR's label names — how a repair item is recognized (MAIN-458):
-    /// `loop-changes-requested` at a head no repair run has answered.
+    /// `loop-changes-requested` at a head no repair run has answered. The
+    /// hygiene pass (MAIN-476) reads the same list the other way around: no
+    /// verdict label means nothing routes the PR, however the labels came to
+    /// be missing.
     pub labels: Vec<String>,
+}
+
+/// One pull request's merge-relevant detail, fetched one PR at a time — the
+/// list endpoint does not carry `mergeable`, so this is a second, per-PR read.
+///
+/// `mergeable` is GitHub's tri-state: `Some(false)` is a real conflict,
+/// `Some(true)` is clean, and `None` means GitHub is still computing — treat it
+/// as unknown and ask again on a later pass, never as either answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrDetails {
+    pub mergeable: Option<bool>,
+    /// The PR description — it carries the `Closes KEY` line that joins the PR
+    /// to its board card.
+    pub body: String,
 }
 
 /// What the reconciler needs to know about a repository's review queue.
 ///
-/// One operation, because one is all this card needs and a trait with methods
-/// nobody calls is a shape guess rather than a seam. Build status, check runs
-/// and mergeability are deliberately absent (NG-2).
+/// Started as one operation (MAIN-448 kept build status, check runs and
+/// mergeability deliberately absent). MAIN-476 widened it: a CONFLICTING PR
+/// must re-enter the repair queue, and a verdict label stripped outside the
+/// loop must be restored, so the hygiene pass needs per-PR detail and the two
+/// writes the reviewer's verdict path already performs. The write methods
+/// default to a loud refusal so a read-only forge stays read-only by simply
+/// not implementing them.
 #[async_trait::async_trait]
 pub trait Forge: Send + Sync {
     /// The open pull requests a reviewer would pick up, with their heads.
@@ -71,6 +92,33 @@ pub trait Forge: Send + Sync {
     /// count can never disagree with the list it came from.
     async fn open_prs_needing_review(&self, repo: &Repo) -> anyhow::Result<u32> {
         Ok(self.prs_needing_review(repo).await?.len() as u32)
+    }
+
+    /// One PR's merge detail — see [`PrDetails`].
+    async fn pr_details(&self, repo: &Repo, number: u64) -> anyhow::Result<PrDetails> {
+        let _ = (repo, number);
+        anyhow::bail!("this forge cannot read pull request details")
+    }
+
+    /// The bodies of a PR's issue comments, for once-per-head dedupe. An error
+    /// must stay an error — an empty list here means "prove it was never said",
+    /// and a forge that cannot read comments must not fake that proof.
+    async fn issue_comment_bodies(&self, repo: &Repo, number: u64) -> anyhow::Result<Vec<String>> {
+        let _ = (repo, number);
+        anyhow::bail!("this forge cannot read comments")
+    }
+
+    /// Post one comment on the PR.
+    async fn comment(&self, repo: &Repo, number: u64, body: &str) -> anyhow::Result<()> {
+        let _ = (repo, number, body);
+        anyhow::bail!("this forge cannot write comments")
+    }
+
+    /// Put exactly one verdict label on the PR, removing the other two — the
+    /// same replace the verdict path performs, so a PR can never carry two.
+    async fn set_verdict_label(&self, repo: &Repo, number: u64, label: &str) -> anyhow::Result<()> {
+        let _ = (repo, number, label);
+        anyhow::bail!("this forge cannot write labels")
     }
 }
 
@@ -141,7 +189,13 @@ impl GithubForge {
     /// A forge speaking as one WORKSPACE's own token (MAIN-456).
     pub fn from_token(token: &str) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            // The same 10s bound `from_env` carries, for the same reason: the
+            // hygiene pass runs inside the serial reconcile loop, and a forge
+            // that never answers must not hold every tenant behind it.
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .unwrap_or_default(),
             token: token.to_string(),
         }
     }
@@ -165,15 +219,33 @@ impl GithubForge {
 /// and a page-two count would still place the same reviewers.
 const PAGE: usize = 100;
 
+/// The comment-pagination bound: past this, `issue_comment_bodies` fails
+/// closed rather than pretending it read everything. Two thousand comments on
+/// one PR is far outside anything the loop produces.
+const MAX_COMMENT_PAGES: usize = 20;
+
 /// The verdict labels the loop maintains on a PR. Exactly one is present after
 /// a posted verdict — adding one means removing the other two, or a PR ends up
 /// simultaneously approved and changes-requested the first time a verdict
 /// changes.
-const VERDICT_LABELS: [&str; 3] = [
+pub(crate) const VERDICT_LABELS: [&str; 3] = [
     "loop-approved",
     "loop-changes-requested",
     "needs-human-review",
 ];
+
+/// The label a recorded verdict puts on a PR — the same mapping
+/// `jobs::record_verdict` validates against. `None` for `skipped`, which posts
+/// nothing, and for anything unrecognised: restoration (MAIN-476 AC-3) only
+/// ever re-applies a label this deployment's own verdict path could have set.
+pub fn verdict_label(verdict: &str) -> Option<&'static str> {
+    match verdict {
+        "approved" => Some("loop-approved"),
+        "changes_requested" => Some("loop-changes-requested"),
+        "needs_human" => Some("needs-human-review"),
+        _ => None,
+    }
+}
 
 impl GithubForge {
     /// Deliver a review verdict to the PR: the `Loop review of <sha>` comment
@@ -195,16 +267,29 @@ impl GithubForge {
         label: &str,
         body: &str,
     ) -> anyhow::Result<()> {
-        let base = format!(
+        self.issue_comment(repo, pr, &format!("Loop review of {head_sha}\n\n{body}"))
+            .await?;
+        self.replace_verdict_label(repo, pr, label).await
+    }
+
+    fn issue_base(&self, repo: &Repo, pr: u64) -> String {
+        format!(
             "https://api.github.com/repos/{}/{}/issues/{pr}",
             repo.owner, repo.name
-        );
-        self.send(
-            self.http.post(format!("{base}/comments")).json(
-                &serde_json::json!({ "body": format!("Loop review of {head_sha}\n\n{body}") }),
-            ),
         )
-        .await?;
+    }
+
+    async fn issue_comment(&self, repo: &Repo, pr: u64, body: &str) -> anyhow::Result<()> {
+        self.send(
+            self.http
+                .post(format!("{}/comments", self.issue_base(repo, pr)))
+                .json(&serde_json::json!({ "body": body })),
+        )
+        .await
+    }
+
+    async fn replace_verdict_label(&self, repo: &Repo, pr: u64, label: &str) -> anyhow::Result<()> {
+        let base = self.issue_base(repo, pr);
         for old in VERDICT_LABELS.iter().filter(|l| **l != label) {
             // 404 here means "was not set", which is the desired state, not a
             // failure.
@@ -223,6 +308,21 @@ impl GithubForge {
         )
         .await?;
         Ok(())
+    }
+
+    /// GET one JSON document, with the same error shape as `send`.
+    async fn get_json(&self, url: String) -> anyhow::Result<serde_json::Value> {
+        let resp = self.authed(self.http.get(url)).send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!(
+                "{} {}",
+                status.as_u16(),
+                body.trim().chars().take(300).collect::<String>()
+            );
+        }
+        Ok(resp.json().await?)
     }
 
     fn authed(&self, rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -275,6 +375,67 @@ impl Forge for GithubForge {
         }
         let prs: Vec<serde_json::Value> = resp.json().await?;
         Ok(needing_review(&prs))
+    }
+
+    async fn pr_details(&self, repo: &Repo, number: u64) -> anyhow::Result<PrDetails> {
+        let json = self
+            .get_json(format!(
+                "https://api.github.com/repos/{}/{}/pulls/{number}",
+                repo.owner, repo.name
+            ))
+            .await?;
+        Ok(PrDetails {
+            // `null` while GitHub is still computing — kept as unknown.
+            mergeable: json.get("mergeable").and_then(|v| v.as_bool()),
+            body: json
+                .get("body")
+                .and_then(|b| b.as_str())
+                .unwrap_or_default()
+                .to_string(),
+        })
+    }
+
+    async fn issue_comment_bodies(&self, repo: &Repo, number: u64) -> anyhow::Result<Vec<String>> {
+        // ALL pages, not page one. GitHub returns issue comments OLDEST-first
+        // with no way to ask for the tail, and the marker this feeds sits on
+        // the newest comments — a one-page read would make the dedupe fail
+        // PERMANENTLY on a PR with more than a hundred comments, posting a
+        // fresh comment every pass. The cap fails CLOSED: a thread too big to
+        // read fully is an error, and the caller then posts nothing rather
+        // than risking a repeat it cannot rule out.
+        let mut bodies = Vec::new();
+        for page in 1..=MAX_COMMENT_PAGES {
+            let json = self
+                .get_json(format!(
+                    "{}/comments?per_page={PAGE}&page={page}",
+                    self.issue_base(repo, number)
+                ))
+                .await?;
+            let arr = json
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("comments: expected an array"))?;
+            let count = arr.len();
+            bodies.extend(
+                arr.iter()
+                    .filter_map(|c| c.get("body").and_then(|b| b.as_str()))
+                    .map(str::to_string),
+            );
+            if count < PAGE {
+                return Ok(bodies);
+            }
+        }
+        anyhow::bail!(
+            "more than {} comments — cannot prove a marker absent",
+            MAX_COMMENT_PAGES * PAGE
+        )
+    }
+
+    async fn comment(&self, repo: &Repo, number: u64, body: &str) -> anyhow::Result<()> {
+        self.issue_comment(repo, number, body).await
+    }
+
+    async fn set_verdict_label(&self, repo: &Repo, number: u64, label: &str) -> anyhow::Result<()> {
+        self.replace_verdict_label(repo, number, label).await
     }
 }
 
@@ -605,7 +766,8 @@ mod tests {
     #[test]
     fn drafts_do_not_count_and_everything_else_does() {
         let prs = serde_json::json!([
-            { "number": 1, "draft": false, "head": { "sha": "aaa" } },
+            { "number": 1, "draft": false, "head": { "sha": "aaa" },
+              "labels": [ { "name": "loop-approved" }, { "name": "bug" } ] },
             { "number": 2, "draft": true, "head": { "sha": "bbb" } },
             // Absent `draft` is not a draft — an older API shape must not read
             // as one and quietly shrink the queue.
@@ -614,14 +776,15 @@ mod tests {
             // say whether it had changed.
             { "number": 4 },
         ]);
-        // Numbers AND heads, because the head is what a per-PR wakeup compares.
+        // Numbers AND heads, because the head is what a per-PR wakeup compares;
+        // labels ride along for the hygiene pass, absent reading as none.
         assert_eq!(
             needing_review(prs.as_array().unwrap()),
             vec![
                 PullRequest {
                     number: 1,
                     head_sha: "aaa".into(),
-                    labels: vec![],
+                    labels: vec!["loop-approved".into(), "bug".into()],
                 },
                 PullRequest {
                     number: 3,
