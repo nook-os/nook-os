@@ -181,7 +181,13 @@ services:
       interval: 3s
       timeout: 3s
       retries: 100
-      start_period: 300s
+      # cargo-watch compiles INSIDE the container before anything listens, and
+      # a cold .cache takes tens of minutes. Without a start_period covering
+      # that, interval×retries (~5min) flags the container unhealthy mid-build
+      # and `up -d` aborts the whole boot ("dependency failed to start").
+      # Failed probes during start_period don't count; the first success still
+      # flips healthy immediately, so a warm boot loses nothing.
+      start_period: 1800s
 
   # Team chat — its own service/container (MAIN-48). Shares the Postgres but
   # owns its tables in the `chat` schema, and validates NookOS sessions via the
@@ -210,7 +216,9 @@ services:
       interval: 3s
       timeout: 3s
       retries: 100
-      start_period: 300s
+      # 1800s like control-plane's: chat queues behind it on the shared cargo
+      # target lock, so its cold wait can far exceed its own compile time.
+      start_period: 1800s
 
   # The queue worker (MAIN-148): a long-running background process that drains
   # the durable queue and runs a handler per work_type. No HTTP surface, so no

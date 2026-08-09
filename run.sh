@@ -331,12 +331,20 @@ echo "  Edit .env to point OIDC_* at your IdP, or leave AUTH_DEV_MODE=true for d
 say "Destroying previous environment (data volumes; build caches kept)..."
 docker compose down -v --remove-orphans
 
-if command -v cargo >/dev/null && command -v pnpm >/dev/null; then
-  say "Regenerating TypeScript types from Rust..."
-  ./scripts/gen-types.sh || echo "  (type-gen failed — using committed generated types)"
-else
-  say "cargo/pnpm not found — skipping type-gen (committed generated types will be used)"
-fi
+# `down -v` keeps the bind-mounted caches, but the checkout can still be COLD —
+# a fresh worktree, or a hand-cleaned `.cache/`. Starting the three cargo-watch
+# services against a cold registry is the MAIN-425 race (the loser exits 101
+# and never retries), which presents as a control plane that is "Up" and never
+# serves. dev-up.sh has carried this guard since MAIN-425; run.sh went without.
+say "Checking the cargo registry..."
+./scripts/dev-prewarm.sh
+
+# No type-gen here, deliberately: booting must not write tracked files. The
+# committed schema.d.ts is the contract — whoever changes API types runs
+# ./scripts/gen-types.sh, and CI fails on drift (it regenerates and diffs).
+# Regenerating on every boot hid that responsibility, cost a host cargo build
+# each run, and dragged the host toolchain (corepack, nvm) into what should
+# be a docker-only path.
 
 # The operator node ships in the default stack now (MAIN-140); it joins with
 # NOOK_DEV_JOIN_TOKEN. An .env predating that token would leave it unable to
@@ -363,12 +371,10 @@ fi
 # shellcheck disable=SC2086  # $BUILD is a single flag or empty, by construction.
 docker compose up $BUILD -d
 
-say "Waiting for control plane..."
-for _ in $(seq 1 120); do
-  if curl -fsS "$CONTROL_URL"/healthz >/dev/null 2>&1; then break; fi
-  sleep 1
-done
-curl -fsS "$CONTROL_URL"/healthz >/dev/null || { echo "control plane failed to become healthy"; docker compose logs control-plane | tail -50; exit 1; }
+# Compile-aware: a cold cache means cargo-watch builds for many minutes before
+# the first /healthz, and the flat 120s timer here called that a failed boot.
+say "Waiting for control plane (a cold cache compiles first — this can take a while)..."
+./scripts/dev-wait-healthy.sh "$CONTROL_URL" || { echo "control plane failed to become healthy"; exit 1; }
 
 # The agent the loop runs on — offered here, after the stack is healthy, so the
 # operator-node is actually up to run the flow in.

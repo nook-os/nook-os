@@ -1,7 +1,7 @@
 {
   "name": "nookos-frontend",
   "private": true,
-  "packageManager": "pnpm@11.9.0",
+  "packageManager": "pnpm@11.20.0",
   "scripts": {
     "dev": "pnpm --filter @nookos/web dev",
     "build": "pnpm -r build",
