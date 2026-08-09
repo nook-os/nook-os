@@ -2462,6 +2462,12 @@ pub async fn task(key: &str, json: bool, revisions: bool) -> Result<()> {
     if !labels.is_empty() {
         println!("  labels: {}", labels.join(", "));
     }
+    // The recorded PR is what tells a build run it is REPAIRING, not building
+    // (MAIN-459 §2) — a card that only showed it on the --json path made every
+    // repair run look like fresh work.
+    if let Some(pr) = t["pr_url"].as_str().filter(|u| !u.is_empty()) {
+        println!("  pr: {pr}");
+    }
     if resp["is_blocked"].as_bool().unwrap_or(false) {
         let by: Vec<&str> = resp["blocked_by"]
             .as_array()
@@ -3833,6 +3839,56 @@ pub async fn builds_enqueue(task: &str) -> Result<()> {
              (not agent-ready, blocked, assigned, or already built at this content)"
         );
     }
+    Ok(())
+}
+
+/// `nook builds outcome <pr|blocked|nothing> …` (MAIN-459 AC-3) — a build run
+/// reports its conclusion, `reviews verdict`'s twin. Job-scoped: reads
+/// `NOOK_JOB_ID` from the run's own environment, so an agent cannot conclude a
+/// job it is not.
+///
+/// The control plane records the outcome, mirrors it to the board (comment,
+/// column, claim) and validates the PR's `Closes <KEY>` join — opening a PR
+/// without reporting it is the silent lie this call ends.
+pub async fn builds_outcome(
+    conclusion: &str,
+    url: Option<&str>,
+    question: Option<&str>,
+) -> Result<()> {
+    let job_id = std::env::var("NOOK_JOB_ID")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .context("NOOK_JOB_ID is not set — this command runs inside a build run")?;
+    // The CLI speaks the operator's words; the API records the precise fact.
+    let outcome = match conclusion {
+        "pr" => "pr_opened",
+        "blocked" => "blocked",
+        "nothing" => "nothing_to_do",
+        other => anyhow::bail!("conclusion must be pr | blocked | nothing, got {other:?}"),
+    };
+    let mut payload = serde_json::json!({ "outcome": outcome });
+    if let Some(u) = url {
+        payload["url"] = serde_json::Value::String(u.to_string());
+    }
+    if let Some(q) = question {
+        // `-` reads stdin, the same convention `gh --body-file -` taught.
+        let text = if q == "-" {
+            use std::io::Read;
+            let mut t = String::new();
+            std::io::stdin().read_to_string(&mut t)?;
+            t
+        } else {
+            q.to_string()
+        };
+        payload["question"] = serde_json::Value::String(text);
+    }
+    let job = Client::from_config()?
+        .post(&format!("/api/v1/jobs/{job_id}/outcome"), payload)
+        .await?;
+    println!(
+        "outcome {} recorded",
+        crate::style::ok_c(job["build_outcome"].as_str().unwrap_or("?")),
+    );
     Ok(())
 }
 

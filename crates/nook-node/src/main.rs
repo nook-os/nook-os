@@ -686,6 +686,11 @@ async fn main() -> Result<()> {
             cli::builds_scale(&workspace, count.as_deref()).await
         }
         Command::Builds(BuildsCommand::Enqueue { task }) => cli::builds_enqueue(&task).await,
+        Command::Builds(BuildsCommand::Outcome {
+            conclusion,
+            url,
+            question,
+        }) => cli::builds_outcome(&conclusion, url.as_deref(), question.as_deref()).await,
         Command::Notify {
             title,
             body,
@@ -1148,6 +1153,22 @@ enum BuildsCommand {
     Enqueue {
         /// The card, by key (MAIN-42) or id.
         task: String,
+    },
+    /// A build run reports how it ended — its LAST act (MAIN-459). Job-scoped:
+    /// reads `NOOK_JOB_ID`, so an agent cannot conclude a job it is not. The
+    /// control plane records the outcome, mirrors it to the board, and
+    /// validates the PR's `Closes` join.
+    Outcome {
+        /// `pr` (opened one) | `blocked` (a human must answer) | `nothing`
+        /// (nothing to do at this content).
+        conclusion: String,
+        /// The opened PR's URL. Required for `pr`.
+        #[arg(long)]
+        url: Option<String>,
+        /// The specific question a human can answer asynchronously. Required
+        /// for `blocked`; `-` reads stdin.
+        #[arg(long)]
+        question: Option<String>,
     },
 }
 

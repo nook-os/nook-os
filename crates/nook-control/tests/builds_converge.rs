@@ -370,6 +370,58 @@ async fn a_run_that_concluded_nothing_does_not_consume_the_card() {
 /// without a network.
 struct StaticForge(Vec<nook_control::services::forge::PullRequest>);
 
+/// A forge whose `pr_details` the test dictates — the seam the outcome call's
+/// Closes check reads through when the workspace has no token of its own.
+struct BodyForge(Result<String, String>);
+
+#[async_trait::async_trait]
+impl nook_control::services::forge::Forge for BodyForge {
+    async fn prs_needing_review(
+        &self,
+        _repo: &nook_control::services::forge::Repo,
+    ) -> anyhow::Result<Vec<nook_control::services::forge::PullRequest>> {
+        Ok(vec![])
+    }
+    async fn pr_details(
+        &self,
+        _repo: &nook_control::services::forge::Repo,
+        _number: u64,
+    ) -> anyhow::Result<nook_control::services::forge::PrDetails> {
+        match &self.0 {
+            Ok(body) => Ok(nook_control::services::forge::PrDetails {
+                mergeable: Some(true),
+                body: body.clone(),
+            }),
+            Err(e) => anyhow::bail!("{e}"),
+        }
+    }
+}
+
+/// Point the deployment forge at a dictated PR body (or a failure), against a
+/// remote whose CANONICAL casing differs from the lowercased stored form —
+/// which is the shape `gh pr create` echoes back.
+async fn with_body_forge(
+    bed: &TestBed,
+    state: &nook_control::state::AppState,
+    ws: WorkspaceId,
+    remote: &str,
+    body: Result<String, String>,
+) -> nook_control::state::AppState {
+    bed.db()
+        .exec(
+            "UPDATE workspaces SET git_remote_url = $2 WHERE id = $1",
+            params![ws, remote],
+        )
+        .await
+        .expect("remote");
+    let mut state = state.clone();
+    state.review_demand = std::sync::Arc::new(nook_control::services::forge::ReviewDemand::new(
+        Some(Box::new(BodyForge(body))),
+        std::time::Duration::ZERO,
+    ));
+    state
+}
+
 #[async_trait::async_trait]
 impl nook_control::services::forge::Forge for StaticForge {
     async fn prs_needing_review(
@@ -759,6 +811,263 @@ async fn applying_agent_ready_nudges_a_run_into_existence() {
     }
     assert_eq!(raised.len(), 1, "the nudge raised exactly one run");
     assert_eq!(raised[0].kind, "build");
+
+    bed.teardown().await;
+}
+
+/// MAIN-459 AC-3: the join is validated BEFORE anything is recorded. A PR url
+/// naming another repository is refused, and the refusal changes nothing —
+/// the outcome stays unrecorded, so the run can fix its report and try again.
+#[tokio::test]
+async fn a_pr_outcome_naming_another_repository_is_refused() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("bjoin").await;
+    let (user, _) = bed.user(tenant, "member").await;
+    let ws = bed.workspace(tenant).await;
+    bed.db()
+        .exec(
+            "UPDATE workspaces SET git_remote_url = 'git@github.com:acme/api.git' WHERE id = $1",
+            params![ws],
+        )
+        .await
+        .expect("remote");
+    let state = bed.app_state().await;
+    let board = board_fixture(&bed.db(), tenant).await;
+    approved_card(&bed.db(), tenant, board, ws, user, "join check").await;
+
+    let c = jobs::converge_builds(&state, tenant, user, ws, None)
+        .await
+        .expect("converge");
+    assert_eq!(c.raised, 1);
+    let job = c.jobs[0].clone();
+    state
+        .jobs
+        .transition(job.id, "running")
+        .await
+        .expect("to running");
+
+    let refused = jobs::record_build_outcome(
+        &state,
+        tenant,
+        job.id,
+        &BuildOutcomeRequest {
+            outcome: "pr_opened".into(),
+            url: Some("https://github.com/evil/other/pull/9".into()),
+            question: None,
+        },
+    )
+    .await;
+    assert!(refused.is_err(), "another repository's PR must be refused");
+    let live = state
+        .jobs
+        .get(tenant, job.id)
+        .await
+        .expect("read")
+        .expect("job");
+    assert_eq!(
+        live.build_outcome, None,
+        "a refused join records nothing — validate-before-record"
+    );
+
+    bed.teardown().await;
+}
+
+/// The other half of the validation contract: where the deployment cannot read
+/// the PR body (no forge credential, or a forge that does not answer for a
+/// repository that does not exist), the URL/repository half still applies and
+/// the Closes half is SKIPPED — availability must not gate recording.
+#[tokio::test]
+async fn an_unreadable_body_skips_the_closes_check_but_still_records() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("bjoin2").await;
+    let (user, _) = bed.user(tenant, "member").await;
+    let ws = bed.workspace(tenant).await;
+    let state = bed.app_state().await;
+    let state = with_body_forge(
+        &bed,
+        &state,
+        ws,
+        "git@github.com:nook-testing-nonexistent/api.git",
+        Err("503 upstream".into()),
+    )
+    .await;
+    let board = board_fixture(&bed.db(), tenant).await;
+    let card = approved_card(&bed.db(), tenant, board, ws, user, "skip check").await;
+
+    let c = jobs::converge_builds(&state, tenant, user, ws, None)
+        .await
+        .expect("converge");
+    assert_eq!(c.raised, 1);
+    let job = c.jobs[0].clone();
+    state
+        .jobs
+        .transition(job.id, "running")
+        .await
+        .expect("to running");
+
+    let done = jobs::record_build_outcome(
+        &state,
+        tenant,
+        job.id,
+        &BuildOutcomeRequest {
+            outcome: "pr_opened".into(),
+            url: Some("https://github.com/nook-testing-nonexistent/api/pull/9".into()),
+            question: None,
+        },
+    )
+    .await
+    .expect("recorded despite the unreadable body");
+    assert_eq!(done.build_outcome.as_deref(), Some("pr_opened"));
+    let row = state
+        .tasks
+        .get_row(tenant, card.id)
+        .await
+        .expect("read")
+        .expect("card");
+    assert_eq!(
+        row.pr_url.as_deref(),
+        Some("https://github.com/nook-testing-nonexistent/api/pull/9")
+    );
+
+    bed.teardown().await;
+}
+
+/// The repaired defect: `github_repo` lowercases the stored remote, while
+/// `gh pr create` echoes GitHub's canonical casing — the two must still match,
+/// or every outcome for a `Acme/API`-style repo is refused. The dictated body
+/// also proves the happy Closes path end to end.
+#[tokio::test]
+async fn a_canonically_cased_url_matches_a_lowercased_remote() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("bjoin3").await;
+    let (user, _) = bed.user(tenant, "member").await;
+    let ws = bed.workspace(tenant).await;
+    let board = board_fixture(&bed.db(), tenant).await;
+    let card = approved_card(&bed.db(), tenant, board, ws, user, "cased").await;
+    let state = bed.app_state().await;
+    let state = with_body_forge(
+        &bed,
+        &state,
+        ws,
+        "git@github.com:Acme/API.git",
+        // The fixture board's key is 'BC'; the helper's TaskItem does not
+        // carry the joined key, so it is rebuilt the way resolve_id reads it.
+        Ok(format!(
+            "What changed\n\nCloses BC-{}\n",
+            card.number.expect("seeded cards are numbered")
+        )),
+    )
+    .await;
+
+    let c = jobs::converge_builds(&state, tenant, user, ws, None)
+        .await
+        .expect("converge");
+    assert_eq!(c.raised, 1);
+    let job = c.jobs[0].clone();
+    state
+        .jobs
+        .transition(job.id, "running")
+        .await
+        .expect("to running");
+
+    let done = jobs::record_build_outcome(
+        &state,
+        tenant,
+        job.id,
+        &BuildOutcomeRequest {
+            outcome: "pr_opened".into(),
+            url: Some("https://github.com/Acme/API/pull/12".into()),
+            question: None,
+        },
+    )
+    .await
+    .expect("the canonical casing is this workspace's own repository");
+    assert_eq!(done.build_outcome.as_deref(), Some("pr_opened"));
+
+    bed.teardown().await;
+}
+
+/// The Closes half refuses by name when the body IS readable: no `Closes`
+/// line, and a key that is not this run's card — and a refusal records
+/// nothing, so the run can fix its PR and report again.
+#[tokio::test]
+async fn a_missing_or_wrong_closes_line_is_refused_and_records_nothing() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("bjoin4").await;
+    let (user, _) = bed.user(tenant, "member").await;
+    let ws = bed.workspace(tenant).await;
+    let board = board_fixture(&bed.db(), tenant).await;
+    approved_card(&bed.db(), tenant, board, ws, user, "no closes").await;
+    let state = bed.app_state().await;
+    let state = with_body_forge(
+        &bed,
+        &state,
+        ws,
+        "git@github.com:acme/api.git",
+        Ok("A body with no closing line at all".into()),
+    )
+    .await;
+
+    let c = jobs::converge_builds(&state, tenant, user, ws, None)
+        .await
+        .expect("converge");
+    assert_eq!(c.raised, 1);
+    let job = c.jobs[0].clone();
+    state
+        .jobs
+        .transition(job.id, "running")
+        .await
+        .expect("to running");
+
+    let refused = jobs::record_build_outcome(
+        &state,
+        tenant,
+        job.id,
+        &BuildOutcomeRequest {
+            outcome: "pr_opened".into(),
+            url: Some("https://github.com/acme/api/pull/7".into()),
+            question: None,
+        },
+    )
+    .await;
+    assert!(refused.is_err(), "a body without `Closes` is refused");
+
+    // Now the body closes a key that resolves to no card here.
+    let state = with_body_forge(
+        &bed,
+        &state,
+        ws,
+        "git@github.com:acme/api.git",
+        Ok("Closes ZZZ-999\n".into()),
+    )
+    .await;
+    let refused = jobs::record_build_outcome(
+        &state,
+        tenant,
+        job.id,
+        &BuildOutcomeRequest {
+            outcome: "pr_opened".into(),
+            url: Some("https://github.com/acme/api/pull/7".into()),
+            question: None,
+        },
+    )
+    .await;
+    assert!(refused.is_err(), "a key with no card here is refused");
+    let live = state
+        .jobs
+        .get(tenant, job.id)
+        .await
+        .expect("read")
+        .expect("job");
+    assert_eq!(live.build_outcome, None, "refusals record nothing");
 
     bed.teardown().await;
 }
