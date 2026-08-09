@@ -211,29 +211,47 @@ fn build_skill_is_directed_and_judgment_only() {
         );
     }
     assert!(
-        skill("nook-build").contains("version: 2.1.0"),
-        "nook-build's version must be bumped with the directed-only rewrite"
+        skill("nook-build").contains("version: 2.2.0"),
+        "nook-build's version must be bumped with every change to its text"
     );
 }
 
-/// MAIN-475: builder passes are isolated in per-card worktrees, and the
-/// worktree OUTLIVES the pass — that is what lets a repair resume the tree
-/// the build pass left warm; the platform, never the skill, prunes it. Two
-/// builders sharing one checkout once moved its branch under each other
-/// mid-build; these lines are what prevent a recurrence.
+/// MAIN-483: the skill states what a builder must ACT on, and no longer
+/// narrates what the platform now guarantees (MAIN-480 — the tree outliving
+/// its run, and being pruned when the work is done).
+///
+/// The prohibitions stay because nothing enforces them for an INTERACTIVE
+/// pass: NookOS is BYOA, so a human's own agent gets no platform-prepared tree
+/// and no node-side guard. Two builders sharing one checkout once moved its
+/// branch under each other mid-build; the incident stays named so a later pass
+/// cannot read the rule as unexplained noise and delete it.
 #[test]
 fn builder_pass_is_worktree_isolated() {
     let body = flat("nook-build");
     for line in [
-        "The checkout this run starts in is its own",
         "never relocate to a checkout other sessions may hold",
         "never switch a shared checkout's branch",
-        "**Worktrees persist; teardown is not the skill's job.**",
+        "**Teardown is not the skill's job.**",
         "Do not `git worktree remove` at the end of a pass.",
+        "2026-08-08",
+        "(MAIN-475)",
     ] {
         assert!(
             body.contains(line),
             "nook-build: worktree-isolation instruction changed or removed: {line:?}"
+        );
+    }
+    // The other half of the contract: narration the platform made mechanical
+    // must not creep back in. Every builder reads this text on every pass, and
+    // a rule an agent can reason around is worse than no rule.
+    for gone in [
+        "the node prepared a dedicated worktree",
+        "outlives the run on purpose",
+        "prunes it once the work is done",
+    ] {
+        assert!(
+            !body.contains(gone),
+            "nook-build: MAIN-480 guarantees this — the skill must not restate it: {gone:?}"
         );
     }
 }
