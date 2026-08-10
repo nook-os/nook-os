@@ -251,6 +251,12 @@ fake remote on a node that never reports. The dogfood workspace is the opposite
   - The range and the live leases are on the Nodes page: an owner can retune the range or release a stuck lease there, without a shell on the machine.
   - Unset range means the node leases nothing, deliberately — a guessed range would hand out ports something else is already listening on. A session on such a node simply gets no variables, which is fine: not every session runs a server.
   - This supersedes the macOS `lo0`-alias stopgap on Linux/WSL. Nice URLs (a reverse proxy in front of a leased port) are still future work.
+- **A node's LOOP CAPACITY is settable the same way, and the central value WINS (MAIN-508).** How many loop jobs a machine holds at once was env-only (`NOOK_MAX_LOOP_JOBS`, default 2), so changing it meant editing a unit file as root and `systemctl restart nook-node` — the one operation that strands every in-flight streaming build. It is now the port range's twin: `PUT /api/v1/nodes/{id}/capacity`, `nook set capacity azul 4`, and the Nodes page.
+  - **Precedence, highest first: the host's pin → the central value → what the node advertises → `CAPACITY_WHEN_UNREPORTED`.** Central beating the env is the feature, not an accident: the machine needing a retune is exactly the one whose unit file already names a number, so an env-wins rule would have left the restart in place and changed nothing.
+  - **A host that must decide locally sets `NOOK_MAX_LOOP_JOBS_PINNED=1`**, and the central write is then REFUSED by name rather than stored and quietly overruled. Deliberately a second variable: "2 jobs" and "and nobody else may say otherwise" are two statements, and every existing machine already makes the first.
+  - **Nothing restarts and nothing is signalled to the node.** Placement resolves the number from the stored row on every attempt, so a change lands at the next dispatch poll with running work untouched — which is the whole point.
+  - **`0` is a cordon at every level**: stop claiming, finish what you hold. It is a different statement from unset, which is why the column is nullable and has no default.
+  - `nook get nodes` prints the effective number and its source, so *"why is only one thing building"* is answerable without a shell on the box.
 
 ## UI direction
 

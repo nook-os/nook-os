@@ -2255,6 +2255,89 @@
         }
       }
     },
+    "/api/v1/nodes/{id}/capacity": {
+      "get": {
+        "tags": [
+          "crate::routes::nodes"
+        ],
+        "summary": "`GET /api/v1/nodes/{id}/capacity` — how many loop jobs this machine runs at\nonce, and who decided (MAIN-508 AC-1/AC-4). Visible to anyone who can see the\nnode, the same grade of fact as its port range.",
+        "operationId": "get_node_capacity",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodeCapacity"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "crate::routes::nodes"
+        ],
+        "summary": "`PUT /api/v1/nodes/{id}/capacity` — set or clear it (AC-1/AC-2).",
+        "description": "Owner-gated exactly as the port range is: this decides how much agent work\nruns on somebody's machine, so it is the machine owner's call.\n\nNothing is signalled to the node and nothing restarts. Placement reads the\nstored number on every attempt (`loop_capacity::of`), so the new value is in\nforce at the next dispatch poll while every running build is untouched —\nwhich is the entire reason this exists.",
+        "operationId": "set_node_capacity",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetNodeCapacityRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodeCapacity"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/nodes/{id}/clone": {
       "post": {
         "tags": [
@@ -9365,8 +9448,12 @@
               "null"
             ],
             "format": "int32",
-            "description": "How many loop jobs this node will hold at once (MAIN-142), from\n`NOOK_MAX_LOOP_JOBS`. `0` disables claiming entirely. Absent from an\nolder node's report, which reads as \"unspecified\" rather than zero —\nsee `nook_control::services::jobs::CAPACITY_WHEN_UNREPORTED`.",
+            "description": "How many loop jobs this node will hold at once (MAIN-142), from\n`NOOK_MAX_LOOP_JOBS`. `0` disables claiming entirely. Absent from an\nolder node's report, which reads as \"unspecified\" rather than zero —\nsee `nook_control::services::jobs::CAPACITY_WHEN_UNREPORTED`.\n\nIt is no longer the last word: an operator may set the number centrally\n(MAIN-508), and that wins unless [`Self::max_loop_jobs_pinned`] says the\nhost insists.",
             "minimum": 0
+          },
+          "max_loop_jobs_pinned": {
+            "type": "boolean",
+            "description": "This host insists on its own [`Self::max_loop_jobs`] (MAIN-508), from\n`NOOK_MAX_LOOP_JOBS_PINNED`.\n\nOff by default, because central-wins is the whole point of the setting:\na machine whose env already names a number is exactly the machine an\noperator needs to retune without a restart. The pin is the escape hatch\nfor a host that genuinely must decide locally — a box sized by something\noutside NookOS — and setting it makes the central write REFUSE rather\nthan be silently ignored."
           },
           "memory": {
             "type": "integer",
@@ -12232,6 +12319,25 @@
             ],
             "format": "date-time"
           },
+          "loop_capacity": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NodeCapacity",
+                "description": "The capacity actually in force and where it came from — computed per\nresponse from the two fields above plus what the node reports, never\nstored, exactly as [`Self::home_tenant`] is.\n\nServed on the node itself rather than left to each caller, because the\nprecedence has one definition (`loop_capacity::of`) and a CLI table or a\nUI badge re-deriving it is how the two start disagreeing."
+              }
+            ]
+          },
+          "max_loop_jobs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "An operator's loop-job capacity for this node, overriding what it\nadvertises (MAIN-508) — the port range's twin, and set the same way.\n`None` means \"use the node's own\"; `Some(0)` is a deliberate cordon and\nis a different statement from `None`."
+          },
           "name": {
             "type": "string"
           },
@@ -12436,6 +12542,49 @@
           }
         ],
         "description": "Why one node is not running a session for a spec (MAIN-431).\n\nOne vocabulary for every ground, shared by the status endpoint and the\ndry-run preview so the two cannot describe the same refusal differently.\nIt replaces a bare `bool` on the eligibility side and a `reason: String`\non the reporting side — \"not eligible\" and the literal `\"needs_clone\"`\nwere the only two things either could say.\n\nInternally tagged, so a client reads `kind` and then the fields that\nground carries. Each variant holds what makes it ACTIONABLE: knowing a\nselector did not match is not useful without knowing which key, what was\nwanted, and what the node actually has."
+      },
+      "NodeCapacity": {
+        "type": "object",
+        "description": "How many loop jobs a node runs at once, and who decided (MAIN-508).",
+        "required": [
+          "effective",
+          "source",
+          "pinned"
+        ],
+        "properties": {
+          "advertised": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "What the node itself reports (`NOOK_MAX_LOOP_JOBS`, else its default).",
+            "minimum": 0
+          },
+          "effective": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The number placement actually applies.",
+            "minimum": 0
+          },
+          "operator": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The operator's central value, kept separate so a UI can show what\nclearing it will fall back to.",
+            "minimum": 0
+          },
+          "pinned": {
+            "type": "boolean",
+            "description": "The host has pinned its own number, so the central value is refused\nrather than quietly ignored."
+          },
+          "source": {
+            "type": "string",
+            "description": "`host` (the machine pinned it) · `operator` (set centrally) · `node`\n(what the machine advertises) · `default` (nothing reported one).\n\nThe question this whole surface exists to answer is \"why is only one\nthing building\", and a number with no provenance cannot answer it."
+          }
+        }
       },
       "NodeId": {
         "type": "string",
@@ -13501,6 +13650,25 @@
                     "null"
                   ],
                   "format": "date-time"
+                },
+                "loop_capacity": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/components/schemas/NodeCapacity",
+                      "description": "The capacity actually in force and where it came from — computed per\nresponse from the two fields above plus what the node reports, never\nstored, exactly as [`Self::home_tenant`] is.\n\nServed on the node itself rather than left to each caller, because the\nprecedence has one definition (`loop_capacity::of`) and a CLI table or a\nUI badge re-deriving it is how the two start disagreeing."
+                    }
+                  ]
+                },
+                "max_loop_jobs": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int32",
+                  "description": "An operator's loop-job capacity for this node, overriding what it\nadvertises (MAIN-508) — the port range's twin, and set the same way.\n`None` means \"use the node's own\"; `Some(0)` is a deliberate cordon and\nis a different statement from `None`."
                 },
                 "name": {
                   "type": "string"
@@ -15006,6 +15174,19 @@
           },
           "workspace_id": {
             "$ref": "#/components/schemas/WorkspaceId"
+          }
+        }
+      },
+      "SetNodeCapacityRequest": {
+        "type": "object",
+        "description": "`PUT /nodes/{id}/capacity` — set or clear the operator's loop-job capacity\n(MAIN-508). `None` clears it back to whatever the node advertises.\n\nSigned on the wire on purpose: `u32` would refuse `-1` as a deserialization\nerror, which reaches the operator as a complaint about a field rather than\nabout the number they typed. Range-checked in the handler instead.",
+        "properties": {
+          "max_loop_jobs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
           }
         }
       },

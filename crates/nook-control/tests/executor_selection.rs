@@ -535,6 +535,137 @@ async fn a_zero_capacity_node_never_claims() {
     bed.teardown().await;
 }
 
+/// MAIN-508 AC-2, the criterion the whole card turns on: an operator's capacity
+/// is honoured by PLACEMENT, with the node agent untouched.
+///
+/// The node's `capabilities` — the only thing a restart rewrites — is never
+/// written after registration here. A job that could not be placed a moment ago
+/// is placed on the same row, so the number reached the dispatcher without the
+/// restart that would have stranded whatever that machine was building.
+#[tokio::test]
+async fn a_central_capacity_is_honoured_without_the_node_reporting_again() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, tenant, user, person, job) = setup(&bed).await;
+    let mut caps = caps_declaring(&["spec"], false);
+    caps["max_loop_jobs"] = json!(1);
+    let mine = node(&bed, tenant, Some(person), "online", caps.clone()).await;
+
+    // Its one slot is taken, so the job has nowhere to go.
+    let target = target_task(&bed, tenant, user).await;
+    let held = queued_job(&bed, tenant, user, target).await;
+    bed.db()
+        .exec(
+            "UPDATE loop_jobs SET state = 'running', executor_node_id = $2 WHERE id = $1",
+            params![held, mine],
+        )
+        .await
+        .expect("occupy");
+    let placed = jobs::select_executor(&state, tenant, job)
+        .await
+        .expect("select");
+    assert_eq!(placed.state, "queued");
+
+    // The operator raises it centrally. Nothing else moves: the held job is
+    // still running, and the node still advertises 1.
+    state
+        .nodes
+        .set_max_loop_jobs(mine, tenant, Some(3))
+        .await
+        .expect("set capacity");
+
+    let placed = jobs::select_executor(&state, tenant, job)
+        .await
+        .expect("select again");
+    assert_eq!(placed.state, "claimed", "the new number reached placement");
+    assert_eq!(placed.executor_node_id, Some(mine));
+
+    let (still, running): (serde_json::Value, i64) = bed
+        .db()
+        .query_one(
+            "SELECT n.capabilities, (SELECT count(*) FROM loop_jobs WHERE id = $2 AND state = 'running')
+               FROM nodes n WHERE n.id = $1",
+            params![mine, held],
+        )
+        .await
+        .expect("read back");
+    assert_eq!(
+        still, caps,
+        "the node never re-reported — no restart happened"
+    );
+    assert_eq!(running, 1, "and the work already on it was undisturbed");
+
+    bed.teardown().await;
+}
+
+/// AC-5's other half: the cordon is settable centrally too, and it stops the
+/// node being CHOSEN without touching what it is already running — which is
+/// what makes it usable on a machine mid-build.
+#[tokio::test]
+async fn a_central_zero_cordons_a_node_that_advertises_capacity() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, tenant, _user, person, job) = setup(&bed).await;
+    let mut caps = caps_declaring(&["spec"], false);
+    caps["max_loop_jobs"] = json!(4);
+    let mine = node(&bed, tenant, Some(person), "online", caps).await;
+
+    state
+        .nodes
+        .set_max_loop_jobs(mine, tenant, Some(0))
+        .await
+        .expect("cordon");
+
+    let placed = jobs::select_executor(&state, tenant, job)
+        .await
+        .expect("select");
+    assert_eq!(placed.state, "queued");
+    assert!(
+        placed
+            .queued_reason
+            .unwrap_or_default()
+            .contains("capacity"),
+        "a cordon reads as capacity, the same as the node's own zero does"
+    );
+
+    bed.teardown().await;
+}
+
+/// AC-3: a host that pins its own number keeps it, even against a central value
+/// already stored — the escape hatch for a box sized by something outside
+/// NookOS.
+#[tokio::test]
+async fn a_pinned_host_outranks_the_central_value_at_placement() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, tenant, _user, person, job) = setup(&bed).await;
+    let mut caps = caps_declaring(&["spec"], false);
+    caps["max_loop_jobs"] = json!(0);
+    caps["max_loop_jobs_pinned"] = json!(true);
+    let mine = node(&bed, tenant, Some(person), "online", caps).await;
+
+    // Stored directly: the endpoint refuses this write on a pinned node, and
+    // the point here is that even a value already in the column loses.
+    state
+        .nodes
+        .set_max_loop_jobs(mine, tenant, Some(4))
+        .await
+        .expect("store");
+
+    let placed = jobs::select_executor(&state, tenant, job)
+        .await
+        .expect("select");
+    assert_eq!(
+        placed.state, "queued",
+        "the host's own zero still governs the machine"
+    );
+
+    bed.teardown().await;
+}
+
 /// MAIN-383 AC-3: build placement is `role=build`, an owner's explicit label.
 /// An otherwise perfectly eligible node — owned, online, authorized, declaring
 /// `build` — gets no build work until it wears the label, and the queued

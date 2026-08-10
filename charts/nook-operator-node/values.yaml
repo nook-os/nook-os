@@ -123,6 +123,11 @@ loopKinds:
 
 # How many loop jobs this node holds at once. `0` stops it claiming entirely,
 # which is the way to quiesce an operator without deleting it.
+#
+# This is the FALLBACK since MAIN-508: `nook set capacity <node> <n>` sets the
+# number centrally and wins over this one, without the pod restart that strands
+# every in-flight build. Set NOOK_MAX_LOOP_JOBS_PINNED=1 in `extraEnv` if this
+# chart must keep the last word.
 maxLoopJobs: 2
 
 # Extra environment for the node process (e.g. RUST_LOG overrides).

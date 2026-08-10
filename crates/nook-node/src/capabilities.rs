@@ -88,6 +88,7 @@ pub fn detect() -> Capabilities {
         shared_operator: shared_operator(),
         loop_kinds: loop_kinds(),
         max_loop_jobs: Some(max_loop_jobs()),
+        max_loop_jobs_pinned: max_loop_jobs_pinned(),
         port_range: port_range(),
         runtime_auth: crate::runtime_auth::probe_all(),
     }
@@ -144,6 +145,11 @@ pub const DEFAULT_MAX_LOOP_JOBS: u32 = 2;
 /// How many loop jobs this node holds at once, from `NOOK_MAX_LOOP_JOBS`. `0`
 /// disables claiming; an unparseable value falls back to the default rather
 /// than to zero, because silently disabling a node is the worse failure.
+///
+/// This is what the node ADVERTISES, and since MAIN-508 it is no longer the
+/// last word: an operator's central value wins over it, so the number can be
+/// retuned without the restart that strands every in-flight build. A host that
+/// must keep the decision locally sets `NOOK_MAX_LOOP_JOBS_PINNED`.
 pub fn parse_max_loop_jobs(raw: &str) -> u32 {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -154,6 +160,18 @@ pub fn parse_max_loop_jobs(raw: &str) -> u32 {
 
 fn max_loop_jobs() -> u32 {
     parse_max_loop_jobs(&std::env::var("NOOK_MAX_LOOP_JOBS").unwrap_or_default())
+}
+
+/// Does this host insist on its own capacity (MAIN-508)? From
+/// `NOOK_MAX_LOOP_JOBS_PINNED`.
+///
+/// Off by default, and deliberately a SEPARATE variable from the number: "2
+/// jobs" and "and nobody else may say otherwise" are two statements, and every
+/// existing machine already makes the first. Folding the pin into the value
+/// would have pinned every node that ever set the number, which is the whole
+/// population this card is about.
+fn max_loop_jobs_pinned() -> bool {
+    env_truthy(&std::env::var("NOOK_MAX_LOOP_JOBS_PINNED").unwrap_or_default())
 }
 
 /// The port range this node offers sessions (MAIN-301), from

@@ -1025,6 +1025,12 @@ async fn main() -> Result<()> {
                 )
                 .await
             }
+            SetCmd::Capacity {
+                target,
+                jobs,
+                clear,
+                tenant,
+            } => cli::set_capacity(&target, jobs, clear, tenant.as_deref()).await,
         },
         Command::Rollout { cmd } => match cmd {
             RolloutCmd::Restart {
@@ -1369,6 +1375,35 @@ enum SetCmd {
         /// Drop every exclusion on this node.
         #[arg(long, conflicts_with = "exclude")]
         exclude_clear: bool,
+        /// Act in one of your other tenants. Slug or id. Overrides
+        /// NOOK_TENANT_ID; without either you get your home tenant.
+        #[arg(short = 'T', long)]
+        tenant: Option<String>,
+    },
+
+    /// How many loop jobs a node runs at once.
+    ///
+    /// `nook set capacity node/azul 4`, or `nook set capacity azul 4`. It takes
+    /// effect at the next dispatch poll: nothing restarts, so every build
+    /// already running on that machine is untouched.
+    ///
+    /// `0` is a cordon — the node stops being chosen and finishes what it
+    /// holds. `--clear` hands the decision back to the machine's own
+    /// `NOOK_MAX_LOOP_JOBS`.
+    ///
+    /// This number WINS over that variable, which is the point: the machine
+    /// needing a retune is the one whose unit file already names a number. A
+    /// host that must decide locally sets `NOOK_MAX_LOOP_JOBS_PINNED=1`, and
+    /// this command then refuses rather than being quietly ignored.
+    Capacity {
+        /// `node/<name-or-id>`, or just the name or id. An id may be any
+        /// unambiguous prefix.
+        target: String,
+        /// Concurrent loop jobs, `0` to cordon. Omit with --clear.
+        jobs: Option<i64>,
+        /// Fall back to whatever the node itself advertises.
+        #[arg(long, conflicts_with = "jobs")]
+        clear: bool,
         /// Act in one of your other tenants. Slug or id. Overrides
         /// NOOK_TENANT_ID; without either you get your home tenant.
         #[arg(short = 'T', long)]

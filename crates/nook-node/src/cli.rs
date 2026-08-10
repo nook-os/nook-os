@@ -1023,6 +1023,10 @@ fn columns(resource: &str, first: &Value) -> Vec<&'static str> {
             "capabilities.agent_version",
             "capabilities.cpus",
             "capabilities.memory",
+            // "why is only one thing building" is a question about this
+            // machine, and it was previously answerable only by ssh-ing to it
+            // and reading its unit file (MAIN-508).
+            "capacity",
             "capabilities.runtimes",
             "last_seen_at",
         ],
@@ -1077,6 +1081,22 @@ fn cell(row: &Value, key: &str) -> String {
             .and_then(Value::as_str)
             .and_then(age_of)
             .unwrap_or_else(|| "-".into());
+    }
+    // Nor is `capacity`: it is `loop_capacity` read as the pair that answers the
+    // question (AC-4). The number alone cannot say why it is what it is, and the
+    // source is the whole difference between "this box is small" and "somebody
+    // cordoned it".
+    if key == "capacity" {
+        let cap = row.get("loop_capacity");
+        let effective = cap.and_then(|c| c.get("effective")).and_then(Value::as_i64);
+        let source = cap
+            .and_then(|c| c.get("source"))
+            .and_then(Value::as_str)
+            .unwrap_or("?");
+        return match effective {
+            Some(n) => format!("{n} ({source})"),
+            None => "-".into(),
+        };
     }
     let mut node = row;
     for part in key.split('.') {
@@ -1637,6 +1657,84 @@ pub async fn set_ports(
             _ => println!(),
         }
     }
+    Ok(())
+}
+
+/// `nook set capacity node/<name> <jobs>` — how many loop jobs a node runs at
+/// once (MAIN-508).
+///
+/// `nook set ports`'s twin, and deliberately the same shape: the two are one
+/// sizing decision about a machine, and a second style for the second half is
+/// how an operator ends up unable to guess either.
+///
+/// Nothing restarts. The control plane reads the stored number at its next
+/// dispatch poll, so raising capacity no longer costs whatever that box is
+/// building.
+pub async fn set_capacity(
+    target: &str,
+    jobs: Option<i64>,
+    clear: bool,
+    tenant: Option<&str>,
+) -> Result<()> {
+    let want = target
+        .split_once('/')
+        .map(|(kind, rest)| {
+            if matches!(kind, "node" | "nodes") {
+                rest
+            } else {
+                target
+            }
+        })
+        .unwrap_or(target);
+
+    // `--clear` is a real operation and not an undo: handing the decision back
+    // to the machine is a state an operator chooses, so it is spelled rather
+    // than reached by typing the node's own number back in.
+    let body = match (jobs, clear) {
+        (Some(n), _) => serde_json::json!({ "max_loop_jobs": n }),
+        (None, true) => serde_json::json!({ "max_loop_jobs": null }),
+        (None, false) => bail!("give a number of jobs (0 cordons the node), or --clear"),
+    };
+
+    let mut client = Client::from_config()?;
+    if let Some(t) = tenant {
+        client.set_tenant(Some(t.to_string()));
+    }
+    let nodes = client.get("/api/v1/nodes").await?;
+    let node = pick_one(
+        nodes.as_array().cloned().unwrap_or_default(),
+        want,
+        &["name", "hostname", "id"],
+        "nodes",
+    )?;
+    let id = node
+        .get("id")
+        .and_then(Value::as_str)
+        .context("node row has no id")?;
+    let name = node.get("name").and_then(Value::as_str).unwrap_or(want);
+
+    let got = client
+        .put(&format!("/api/v1/nodes/{id}/capacity"), body)
+        .await?;
+
+    let effective = got.get("effective").and_then(Value::as_i64).unwrap_or(-1);
+    let source = got
+        .get("source")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    // Zero is the one value whose MEANING a bare number hides: "0" reads as a
+    // failed write, and this is the per-node cordon.
+    if effective == 0 {
+        println!("✓ {name} runs no loop jobs ({source}) — it finishes what it holds and claims nothing new");
+    } else {
+        println!("✓ {name} runs {effective} loop jobs at once ({source})");
+    }
+    if let Some(a) = got.get("advertised").and_then(Value::as_i64) {
+        if source == "operator" && a != effective {
+            println!("  the node itself advertises {a}; this setting wins");
+        }
+    }
+    println!("  in force at the next dispatch poll — nothing restarts");
     Ok(())
 }
 

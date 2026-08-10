@@ -72,13 +72,26 @@ async fn label_foreign_homes(
     Ok(())
 }
 
+/// Everything a node row carries that is computed per response rather than
+/// stored: the foreign-home label (MAIN-353) and the loop capacity in force
+/// (MAIN-508).
+///
+/// One call rather than two at each site, so an endpoint that serves nodes
+/// cannot pick up half of it and leave a table showing "-" where every other
+/// table shows a number.
+async fn decorate(state: &AppState, acting: TenantId, nodes: &mut [Node]) -> ApiResult<()> {
+    label_foreign_homes(state, acting, nodes).await?;
+    crate::services::loop_capacity::fill(nodes);
+    Ok(())
+}
+
 #[utoipa::path(get, path = "/api/v1/nodes",
     operation_id = "list_nodes", responses((status = 200, body = [Node])))]
 pub async fn list(State(state): State<AppState>, auth: AuthCtx) -> ApiResult<Json<Vec<Node>>> {
     let scope = visibility_scope(&state, &auth).await?;
     let mine = own_person(&state, &auth).await;
     let mut nodes = state.nodes.list(auth.tenant_id, scope, mine).await?;
-    label_foreign_homes(&state, auth.tenant_id, &mut nodes).await?;
+    decorate(&state, auth.tenant_id, &mut nodes).await?;
     Ok(Json(nodes))
 }
 
@@ -100,7 +113,7 @@ pub async fn page(
     let scope = visibility_scope(&state, &auth).await?;
     let mine = own_person(&state, &auth).await;
     let mut page = state.nodes.page(auth.tenant_id, scope, mine, &args).await?;
-    label_foreign_homes(&state, auth.tenant_id, &mut page.rows).await?;
+    decorate(&state, auth.tenant_id, &mut page.rows).await?;
     Ok(Json(Page {
         rows: page.rows,
         next_cursor: page.next_cursor,
@@ -143,7 +156,7 @@ pub async fn get_one(
             return Err(ApiError::NotFound);
         }
     }
-    label_foreign_homes(&state, auth.tenant_id, std::slice::from_mut(&mut node)).await?;
+    decorate(&state, auth.tenant_id, std::slice::from_mut(&mut node)).await?;
     Ok(Json(node))
 }
 
@@ -530,6 +543,83 @@ pub async fn set_port_exclusions(
     Ok(Json(ports_of(&state, &node).await?))
 }
 
+/// `GET /api/v1/nodes/{id}/capacity` — how many loop jobs this machine runs at
+/// once, and who decided (MAIN-508 AC-1/AC-4). Visible to anyone who can see the
+/// node, the same grade of fact as its port range.
+#[utoipa::path(get, path = "/api/v1/nodes/{id}/capacity",
+    operation_id = "get_node_capacity",
+    params(("id" = String, Path,)),
+    responses((status = 200, body = NodeCapacity), (status = 404)))]
+pub async fn get_capacity(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<NodeId>,
+) -> ApiResult<Json<NodeCapacity>> {
+    let node = visible_node(&state, &auth, id).await?;
+    Ok(Json(crate::services::loop_capacity::of(&node)))
+}
+
+/// `PUT /api/v1/nodes/{id}/capacity` — set or clear it (AC-1/AC-2).
+///
+/// Owner-gated exactly as the port range is: this decides how much agent work
+/// runs on somebody's machine, so it is the machine owner's call.
+///
+/// Nothing is signalled to the node and nothing restarts. Placement reads the
+/// stored number on every attempt (`loop_capacity::of`), so the new value is in
+/// force at the next dispatch poll while every running build is untouched —
+/// which is the entire reason this exists.
+#[utoipa::path(put, path = "/api/v1/nodes/{id}/capacity",
+    operation_id = "set_node_capacity",
+    params(("id" = String, Path,)),
+    request_body = SetNodeCapacityRequest,
+    responses((status = 200, body = NodeCapacity), (status = 400), (status = 403), (status = 404)))]
+pub async fn set_capacity(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<NodeId>,
+    Json(req): Json<SetNodeCapacityRequest>,
+) -> ApiResult<Json<NodeCapacity>> {
+    // A person sizes a machine; a node credential is not a person.
+    auth.require_user()?;
+    let node = visible_node(&state, &auth, id).await?;
+    require_owner(&state, &auth, &node, "set its loop capacity").await?;
+
+    // Refused rather than stored-and-overruled. Accepting a write the host
+    // outranks would leave an operator looking at a number the fleet does not
+    // use, with nothing on screen to explain the difference.
+    if crate::services::loop_capacity::pinned(&node) {
+        return Err(ApiError::BadRequest(format!(
+            "{} pins its loop capacity locally (NOOK_MAX_LOOP_JOBS_PINNED on the machine) — \
+             unset that there to set the number from here",
+            node.name
+        )));
+    }
+
+    let max = match req.max_loop_jobs {
+        None => None,
+        Some(n) if n < 0 => {
+            return Err(ApiError::BadRequest(
+                "capacity cannot be negative — 0 stops this node claiming work".into(),
+            ))
+        }
+        Some(n) if n > crate::services::loop_capacity::MAX_SETTABLE => {
+            return Err(ApiError::BadRequest(format!(
+                "{n} loop jobs at once is past the {} this accepts — that is a typo guard, \
+                 not a machine limit",
+                crate::services::loop_capacity::MAX_SETTABLE
+            )))
+        }
+        Some(n) => Some(n as i32),
+    };
+
+    let node = state
+        .nodes
+        .set_max_loop_jobs(id, auth.tenant_id, max)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok(Json(crate::services::loop_capacity::of(&node)))
+}
+
 /// `DELETE /api/v1/nodes/{id}/leases/{session}` — hand a port back without
 /// ending its session (AC-6).
 ///
@@ -831,6 +921,8 @@ mod tests {
             port_range_start: None,
             port_range_end: None,
             port_exclusions: None,
+            max_loop_jobs: None,
+            loop_capacity: None,
             updated_at: chrono::Utc::now(),
         }
     }

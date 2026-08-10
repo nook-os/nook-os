@@ -1647,12 +1647,14 @@ pub async fn select_executor(
     let mut chosen: Option<NodeId> = None;
     let mut blocked_by_capacity = false;
     for node in candidates {
-        let cap = state
-            .nodes
-            .loop_profile(node)
-            .await?
-            .and_then(|(_, cap)| cap)
-            .unwrap_or(CAPACITY_WHEN_UNREPORTED);
+        // The capacity IN FORCE, not merely what the node advertises (MAIN-508):
+        // read from the stored row on every attempt, so an operator's new number
+        // lands at the next poll without the node agent restarting — the restart
+        // being the thing that strands every in-flight build.
+        let cap = match state.nodes.by_id_any_tenant_or_none(node).await? {
+            Some(row) => crate::services::loop_capacity::of(&row).effective,
+            None => CAPACITY_WHEN_UNREPORTED,
+        };
         if cap == 0 {
             // A deliberate "stop claiming" rather than a busy node.
             blocked_by_capacity = true;

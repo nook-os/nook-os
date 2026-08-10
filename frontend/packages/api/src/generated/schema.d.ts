@@ -1133,6 +1133,37 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/nodes/{id}/capacity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/nodes/{id}/capacity` — how many loop jobs this machine runs at
+         *     once, and who decided (MAIN-508 AC-1/AC-4). Visible to anyone who can see the
+         *     node, the same grade of fact as its port range.
+         */
+        get: operations["get_node_capacity"];
+        /**
+         * `PUT /api/v1/nodes/{id}/capacity` — set or clear it (AC-1/AC-2).
+         * @description Owner-gated exactly as the port range is: this decides how much agent work
+         *     runs on somebody's machine, so it is the machine owner's call.
+         *
+         *     Nothing is signalled to the node and nothing restarts. Placement reads the
+         *     stored number on every attempt (`loop_capacity::of`), so the new value is in
+         *     force at the next dispatch poll while every running build is untouched —
+         *     which is the entire reason this exists.
+         */
+        put: operations["set_node_capacity"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/nodes/{id}/clone": {
         parameters: {
             query?: never;
@@ -4058,8 +4089,24 @@ export interface components {
              *     `NOOK_MAX_LOOP_JOBS`. `0` disables claiming entirely. Absent from an
              *     older node's report, which reads as "unspecified" rather than zero —
              *     see `nook_control::services::jobs::CAPACITY_WHEN_UNREPORTED`.
+             *
+             *     It is no longer the last word: an operator may set the number centrally
+             *     (MAIN-508), and that wins unless [`Self::max_loop_jobs_pinned`] says the
+             *     host insists.
              */
             max_loop_jobs?: number | null;
+            /**
+             * @description This host insists on its own [`Self::max_loop_jobs`] (MAIN-508), from
+             *     `NOOK_MAX_LOOP_JOBS_PINNED`.
+             *
+             *     Off by default, because central-wins is the whole point of the setting:
+             *     a machine whose env already names a number is exactly the machine an
+             *     operator needs to retune without a restart. The pin is the escape hatch
+             *     for a host that genuinely must decide locally — a box sized by something
+             *     outside NookOS — and setting it makes the central write REFUSE rather
+             *     than be silently ignored.
+             */
+            max_loop_jobs_pinned?: boolean;
             /** Format: int64 */
             memory: number;
             platform: string;
@@ -5321,6 +5368,15 @@ export interface components {
             labels: unknown;
             /** Format: date-time */
             last_seen_at?: string | null;
+            loop_capacity?: null | components["schemas"]["NodeCapacity"];
+            /**
+             * Format: int32
+             * @description An operator's loop-job capacity for this node, overriding what it
+             *     advertises (MAIN-508) — the port range's twin, and set the same way.
+             *     `None` means "use the node's own"; `Some(0)` is a deliberate cordon and
+             *     is a different statement from `None`.
+             */
+            max_loop_jobs?: number | null;
             name: string;
             /**
              * @description The owner has declined operator-authorize on this machine (MAIN-276).
@@ -5433,6 +5489,38 @@ export interface components {
         } | {
             /** @enum {string} */
             kind: "needs_clone";
+        };
+        /** @description How many loop jobs a node runs at once, and who decided (MAIN-508). */
+        NodeCapacity: {
+            /**
+             * Format: int32
+             * @description What the node itself reports (`NOOK_MAX_LOOP_JOBS`, else its default).
+             */
+            advertised?: number | null;
+            /**
+             * Format: int32
+             * @description The number placement actually applies.
+             */
+            effective: number;
+            /**
+             * Format: int32
+             * @description The operator's central value, kept separate so a UI can show what
+             *     clearing it will fall back to.
+             */
+            operator?: number | null;
+            /**
+             * @description The host has pinned its own number, so the central value is refused
+             *     rather than quietly ignored.
+             */
+            pinned: boolean;
+            /**
+             * @description `host` (the machine pinned it) · `operator` (set centrally) · `node`
+             *     (what the machine advertises) · `default` (nothing reported one).
+             *
+             *     The question this whole surface exists to answer is "why is only one
+             *     thing building", and a number with no provenance cannot answer it.
+             */
+            source: string;
         };
         /** Format: uuid */
         NodeId: string;
@@ -5894,6 +5982,15 @@ export interface components {
                 labels: unknown;
                 /** Format: date-time */
                 last_seen_at?: string | null;
+                loop_capacity?: null | components["schemas"]["NodeCapacity"];
+                /**
+                 * Format: int32
+                 * @description An operator's loop-job capacity for this node, overriding what it
+                 *     advertises (MAIN-508) — the port range's twin, and set the same way.
+                 *     `None` means "use the node's own"; `Some(0)` is a deliberate cordon and
+                 *     is a different statement from `None`.
+                 */
+                max_loop_jobs?: number | null;
                 name: string;
                 /**
                  * @description The owner has declined operator-authorize on this machine (MAIN-276).
@@ -6756,6 +6853,18 @@ export interface components {
              */
             instructions?: string | null;
             workspace_id: components["schemas"]["WorkspaceId"];
+        };
+        /**
+         * @description `PUT /nodes/{id}/capacity` — set or clear the operator's loop-job capacity
+         *     (MAIN-508). `None` clears it back to whatever the node advertises.
+         *
+         *     Signed on the wire on purpose: `u32` would refuse `-1` as a deserialization
+         *     error, which reaches the operator as a complaint about a field rather than
+         *     about the number they typed. Range-checked in the handler instead.
+         */
+        SetNodeCapacityRequest: {
+            /** Format: int64 */
+            max_loop_jobs?: number | null;
         };
         /**
          * @description Replace a node's operator-set labels and taints (MAIN-314). Both fields are
@@ -9703,6 +9812,76 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Session"];
                 };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_node_capacity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodeCapacity"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    set_node_capacity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetNodeCapacityRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodeCapacity"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             403: {
                 headers: {
