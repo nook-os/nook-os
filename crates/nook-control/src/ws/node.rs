@@ -990,6 +990,13 @@ async fn handle_message(
             let _ = crate::services::jobs::sweep_worktrees_on_node(state, tenant, node_id, &paths)
                 .await;
         }
+        // The same shape for the compose stacks those worktrees boot (MAIN-507
+        // AC-5): the node lists what is running, this side keeps every stack an
+        // unfinished card wants and brings down the rest.
+        NodeToControl::BuildStacksHeld { projects } => {
+            let _ = crate::services::stack_reaper::sweep_stacks_on_node(state, node_id, &projects)
+                .await;
+        }
         NodeToControl::Pong => {}
     }
     Ok(())

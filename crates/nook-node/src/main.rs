@@ -1,6 +1,7 @@
 mod capabilities;
 mod certs;
 mod cli;
+mod compose;
 mod config;
 mod conn;
 mod contexts;

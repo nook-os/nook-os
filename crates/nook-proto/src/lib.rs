@@ -22,6 +22,10 @@ pub const TMUX_SESSION_PREFIX: &str = "nook_";
 /// control plane (which stores it as managed content). See [`hooks`].
 pub mod hooks;
 
+/// Which docker compose project a build worktree's stack runs under, shared by
+/// the side that decides what may be reaped and the side that reaps it.
+pub mod compose;
+
 /// A git repository found under a node's workspace roots. Repositories are
 /// self-describing; the node reports, the control plane reconciles.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -244,6 +248,14 @@ pub enum NodeToControl {
     /// records.
     LoopWorktreesHeld {
         paths: Vec<String>,
+    },
+    /// Every build worktree compose project this node currently holds, reported
+    /// on (re)connect and periodically after (MAIN-507 AC-5). Same division of
+    /// labour as [`NodeToControl::LoopWorktreesHeld`]: whether a stack is still
+    /// wanted is a card fact the node cannot see, so it states what is running
+    /// and the control plane answers with the ones to bring down.
+    BuildStacksHeld {
+        projects: Vec<String>,
     },
     Pong,
     /// The head of a tunnel response: status and headers, before any body.
@@ -533,9 +545,27 @@ pub enum ControlToNode {
         branch: String,
     },
     /// Remove a git worktree checkout (the "done → prune" step).
+    ///
+    /// The node brings the worktree's compose stack down FIRST (MAIN-507 AC-3):
+    /// the project name is derived from this directory, so after git takes the
+    /// tree away nothing can name the containers it left running.
     RemoveWorktree {
         request_id: uuid::Uuid,
         worktree_path: String,
+    },
+    /// Bring build worktree compose projects down, volumes and all (MAIN-507).
+    ///
+    /// The control plane names them because it is the only side that knows
+    /// which cards are finished; the node reaps only names
+    /// [`crate::compose::is_build_stack_project`] accepts, so a bug on either
+    /// side still cannot reach a human's own stack (NG-3).
+    ///
+    /// Answered with [`NodeToControl::OpResult`], whose `path` carries the
+    /// projects that actually came down (`None` when nothing was running) —
+    /// that is what the card's report is written from (AC-7).
+    ReapBuildStacks {
+        request_id: uuid::Uuid,
+        projects: Vec<String>,
     },
     /// Stage a checkout and commit it. `paths` names what to stage; `None`
     /// stages everything (MAIN-325).

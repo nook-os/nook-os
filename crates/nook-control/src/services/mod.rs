@@ -101,6 +101,7 @@ pub mod secrets;
 pub mod session_queries;
 pub mod session_reaper;
 pub mod session_reconcile;
+pub mod stack_reaper;
 pub mod tasks;
 pub mod taskwork;
 pub mod triggers;

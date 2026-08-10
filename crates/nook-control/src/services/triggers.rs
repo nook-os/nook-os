@@ -110,7 +110,24 @@ pub async fn on_column_change(
     if old_col == new_col {
         return;
     }
-    if let Err(e) = run(state, tenant, task_id, board_id, new_col).await {
+    let col_type = match state.tasks.column_type_of(new_col).await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(
+                "automation: could not read the destination column for {task_id:?}: {e}"
+            );
+            None
+        }
+    };
+    // MAIN-507 AC-1: a card that just reached Done or canceled has no further
+    // use for the compose stack its build worktree started. This hangs off the
+    // column change rather than off one endpoint because every mover — the
+    // drag, `/move`, bulk, the merge reconciler — already funnels through here,
+    // and a reap only some of them fire is one that misses the common case.
+    if let Some(col_type) = col_type.as_deref() {
+        crate::services::stack_reaper::on_terminal_column(state, tenant, task_id, col_type);
+    }
+    if let Err(e) = run(state, tenant, task_id, board_id, col_type).await {
         // A failure to even LOAD the rules (bad column, unreadable config) is
         // itself best-effort — log and move on; the move already succeeded.
         tracing::warn!("automation: could not run rules for {task_id:?}: {e}");
@@ -122,9 +139,8 @@ async fn run(
     tenant: TenantId,
     task_id: TaskId,
     board_id: BoardId,
-    new_col: ColumnId,
+    col_type: Option<String>,
 ) -> crate::error::ApiResult<()> {
-    let col_type: Option<String> = state.tasks.column_type_of(new_col).await?;
     let Some(col_type) = col_type else {
         return Ok(());
     };
