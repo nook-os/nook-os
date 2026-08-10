@@ -107,7 +107,11 @@ async fn serve(db: nook_db::DbPool, cfg: Config) -> Result<()> {
             }
         }
         _ => {
-            tracing::warn!("OIDC not configured — IdP login disabled");
+            // INFO, not WARN (MAIN-397 AC-3): on a local install there is no
+            // identity provider by construction, so every launch would log a
+            // warning about the expected state. A misconfigured IdP still warns
+            // — that is the arm above, where discovery was attempted and failed.
+            tracing::info!("no identity provider configured — sign-in is local accounts");
             None
         }
     };
