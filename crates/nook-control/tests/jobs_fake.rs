@@ -792,3 +792,109 @@ async fn one_epic_run_per_epic_and_the_live_one_is_named() {
         None
     );
 }
+
+// ── MAIN-515: the fake repo says exactly what the SQL says ──────────────────
+//
+// The in-memory repo is a second definition of "who may run work", and the
+// whole risk of widening eligibility is that only one of the two widens. These
+// pin the fake to the same three sentences the SQL tests pin the database to:
+// your machine crosses, a shared operator does not, and nobody else's does.
+
+/// An ONLINE, claude-authorized node in `tenant` — `add` seeds it offline, and
+/// `record_capabilities` is what brings it up.
+async fn online_node(
+    nodes: &FakeNodeRepository,
+    tenant: TenantId,
+    owner: Option<uuid::Uuid>,
+    operator: bool,
+) -> NodeId {
+    let id = nodes.add(tenant, "n", owner, false);
+    let mut caps = serde_json::json!({
+        "loop_kinds": ["spec"],
+        "runtime_auth": [{ "runtime": "claude", "state": "authorized" }]
+    });
+    if operator {
+        caps["shared_operator"] = serde_json::json!(true);
+    }
+    nodes
+        .record_capabilities(
+            id,
+            nook_control::repo::nodes::ReportedCapabilities {
+                capabilities: caps,
+                hostname: "h".into(),
+                platform: "linux".into(),
+            },
+        )
+        .await
+        .unwrap();
+    id
+}
+
+#[tokio::test]
+async fn the_fake_lets_your_own_node_cross_tenants_and_nothing_else() {
+    let nodes = FakeNodeRepository::new();
+    let (a, b) = (tenant(), tenant());
+    let me = uuid::Uuid::now_v7();
+    let someone_else = uuid::Uuid::now_v7();
+
+    let mine_in_a = online_node(&nodes, a, Some(me), false).await;
+    let operator_in_a = online_node(&nodes, a, None, true).await;
+    let my_operator_in_a = online_node(&nodes, a, Some(me), true).await;
+    let theirs_in_a = online_node(&nodes, a, Some(someone_else), false).await;
+
+    assert_eq!(
+        nodes
+            .eligible_loop_executors(b, me, "claude", "spec")
+            .await
+            .unwrap(),
+        vec![mine_in_a],
+        "ownership crosses; sharing and other people's machines do not"
+    );
+    assert_eq!(
+        nodes
+            .eligible_loop_executors(b, someone_else, "claude", "spec")
+            .await
+            .unwrap(),
+        vec![theirs_in_a],
+        "…and the other person crossing gets THEIR machine, never mine"
+    );
+
+    // At home in A, nothing changed: the operators are still the fallback.
+    let at_home = nodes
+        .eligible_loop_executors(a, me, "claude", "spec")
+        .await
+        .unwrap();
+    assert_eq!(
+        at_home.first().copied(),
+        Some(mine_in_a),
+        "own before shared"
+    );
+    assert!(at_home.contains(&operator_in_a) && at_home.contains(&my_operator_in_a));
+    assert!(!at_home.contains(&theirs_in_a));
+}
+
+#[tokio::test]
+async fn the_fake_splits_elsewhere_into_crosses_and_refused() {
+    let nodes = FakeNodeRepository::new();
+    let (a, b) = (tenant(), tenant());
+    let me = uuid::Uuid::now_v7();
+
+    online_node(&nodes, a, Some(me), false).await;
+    online_node(&nodes, a, Some(me), true).await;
+    // Offline, and someone else's — neither is mine-and-online-elsewhere.
+    nodes.add(a, "dark", Some(me), false);
+    online_node(&nodes, a, Some(uuid::Uuid::now_v7()), false).await;
+    // In B itself, so not "elsewhere" at all.
+    online_node(&nodes, b, Some(me), false).await;
+
+    assert_eq!(
+        nodes.owned_online_elsewhere(b, me).await.unwrap(),
+        (1, 1),
+        "one machine that crosses, one shared operator that does not"
+    );
+    assert_eq!(
+        nodes.owned_online_elsewhere(a, me).await.unwrap(),
+        (1, 0),
+        "…and from A, the one I have in B"
+    );
+}

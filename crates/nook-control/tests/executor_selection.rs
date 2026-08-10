@@ -1053,3 +1053,336 @@ async fn a_lifted_cordon_makes_the_node_placeable_again() {
 
     bed.teardown().await;
 }
+
+// ── MAIN-515: ownership crosses tenants; sharing does not ────────────────────
+//
+// One human, two orgs, every machine joined under the first: before this, every
+// loop job raised in the second parked on "waiting for executor" forever,
+// because eligibility ANDed a hard `tenant_id` filter with person-based
+// ownership. Reachability already travelled with the owner (MAIN-353) — only
+// placement did not.
+
+/// A user in `tenant` for an EXISTING person — how one human holds two orgs.
+async fn member(bed: &TestBed, tenant: TenantId, person: Uuid, role: &str) -> UserId {
+    let user = UserId::new();
+    bed.db()
+        .exec(
+            "INSERT INTO users (id, tenant_id, person_id, display_name, email, role)
+             VALUES ($1, $2, $3, 'U', $4, $5)",
+            params![
+                user,
+                tenant,
+                person,
+                format!("u-{}@example.test", user.0.simple()),
+                role.to_string()
+            ],
+        )
+        .await
+        .expect("member");
+    user
+}
+
+/// One person's two tenants, and a queued `spec` job in the SECOND — the shape
+/// every test below starts from. Returns
+/// `(state, tenant_a, tenant_b, user_in_a, user_in_b, person, job_in_b)`.
+async fn two_tenants(bed: &TestBed) -> (AppState, TenantId, TenantId, UserId, UserId, Uuid, JobId) {
+    let a = bed.tenant("xta").await;
+    let b = bed.tenant("xtb").await;
+    let (in_a, person) = bed.user(a, "owner").await;
+    let in_b = member(bed, b, person, "owner").await;
+    let target = target_task(bed, b, in_b).await;
+    let job = queued_job(bed, b, in_b, target).await;
+    (bed.app_state().await, a, b, in_a, in_b, person, job)
+}
+
+/// AC-1, the reported bug: the machine follows its owner into their other org.
+#[tokio::test]
+async fn your_own_node_in_another_tenant_runs_your_job_here() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, a, b, _in_a, _user, person, job) = two_tenants(&bed).await;
+    let mine = node(&bed, a, Some(person), "online", caps("authorized", false)).await;
+
+    assert_eq!(
+        state
+            .nodes
+            .eligible_loop_executors(b, person, "claude", "spec")
+            .await
+            .expect("candidates"),
+        vec![mine],
+        "a node joined into A is a candidate for its owner's job in B"
+    );
+    let placed = jobs::select_executor(&state, b, job).await.expect("select");
+    assert_eq!(placed.state, "claimed");
+    assert_eq!(placed.executor_node_id, Some(mine));
+
+    bed.teardown().await;
+}
+
+/// AC-3, the edge the whole card turns on: crossing is OWNER-only. A teammate
+/// in B — or in A, for that matter — reaches nothing of yours.
+#[tokio::test]
+async fn a_teammate_in_the_other_tenant_gets_nothing_from_your_machine() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, a, b, _in_a, _user, person, _job) = two_tenants(&bed).await;
+    node(&bed, a, Some(person), "online", caps("authorized", false)).await;
+
+    let (teammate, teammate_person) = bed.user(b, "member").await;
+    assert!(
+        state
+            .nodes
+            .eligible_loop_executors(b, teammate_person, "claude", "spec")
+            .await
+            .expect("candidates")
+            .is_empty(),
+        "a personal machine is not made reachable to the other members of either tenant"
+    );
+
+    let target = target_task(&bed, b, teammate).await;
+    let theirs = queued_job(&bed, b, teammate, target).await;
+    let placed = jobs::select_executor(&state, b, theirs)
+        .await
+        .expect("select");
+    assert_eq!(placed.state, "queued");
+    assert_eq!(placed.executor_node_id, None);
+
+    bed.teardown().await;
+}
+
+/// AC-2: the shared-operator branch keeps its tenant scoping. A shared operator
+/// is a grant to ONE team, and it stays that team's — even when the requester
+/// is the person who joined it, which is the sharper half of the rule.
+#[tokio::test]
+async fn a_shared_operator_does_not_cross_tenants() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, a, b, in_a, _user, person, job) = two_tenants(&bed).await;
+    let unowned = node(&bed, a, None, "online", caps("authorized", true)).await;
+    let mine = node(&bed, a, Some(person), "online", caps("authorized", true)).await;
+
+    assert!(
+        state
+            .nodes
+            .eligible_loop_executors(b, person, "claude", "spec")
+            .await
+            .expect("candidates")
+            .is_empty(),
+        "neither an unowned nor an owner-joined shared operator serves another tenant"
+    );
+    assert_eq!(
+        jobs::select_executor(&state, b, job)
+            .await
+            .expect("select")
+            .state,
+        "queued"
+    );
+
+    // …and nothing was taken away from A: both are still candidates there,
+    // still in own-before-shared order.
+    assert_eq!(
+        state
+            .nodes
+            .eligible_loop_executors(a, person, "claude", "spec")
+            .await
+            .expect("candidates at home"),
+        vec![mine, unowned]
+    );
+    let target = target_task(&bed, a, in_a).await;
+    let at_home = queued_job(&bed, a, in_a, target).await;
+    let placed = jobs::select_executor(&state, a, at_home)
+        .await
+        .expect("select at home");
+    assert_eq!(placed.state, "claimed");
+    assert_eq!(placed.executor_node_id, Some(mine));
+
+    bed.teardown().await;
+}
+
+/// AC-4: crossing the boundary widens WHO is looked at, not WHAT is required.
+/// Offline, unauthorized and undeclared-kind all still exclude, and the reason
+/// no longer claims you have no node online when you plainly do.
+#[tokio::test]
+async fn every_eligibility_gate_still_applies_across_the_tenant_boundary() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, a, b, _in_a, _user, person, job) = two_tenants(&bed).await;
+    node(&bed, a, Some(person), "offline", caps("authorized", false)).await;
+    node(
+        &bed,
+        a,
+        Some(person),
+        "online",
+        caps("not_authorized", false),
+    )
+    .await;
+    node(
+        &bed,
+        a,
+        Some(person),
+        "online",
+        caps_declaring(&["review"], false),
+    )
+    .await;
+
+    assert!(
+        state
+            .nodes
+            .eligible_loop_executors(b, person, "claude", "spec")
+            .await
+            .expect("candidates")
+            .is_empty(),
+        "every gate that excluded at home excludes across the boundary too"
+    );
+    let held = jobs::select_executor(&state, b, job).await.expect("select");
+    assert_eq!(held.state, "queued");
+    let reason = held.queued_reason.unwrap_or_default();
+    assert!(
+        reason.contains("your online node(s)"),
+        "your nodes are online — wherever they are homed — so the reason must not \
+         say otherwise: {reason}"
+    );
+
+    // One node that passes every gate, in A, and the job places.
+    let good = node(
+        &bed,
+        a,
+        Some(person),
+        "online",
+        caps_declaring(&["spec"], false),
+    )
+    .await;
+    let placed = jobs::select_executor(&state, b, job)
+        .await
+        .expect("select again");
+    assert_eq!(placed.state, "claimed");
+    assert_eq!(placed.executor_node_id, Some(good));
+
+    bed.teardown().await;
+}
+
+/// AC-4's label gate, which is where placement used to be undone AFTER the
+/// candidate query was widened: the per-candidate lookup was tenant-scoped, so
+/// a cross-tenant node was fetched as `None` and silently dropped.
+#[tokio::test]
+async fn a_cross_tenant_build_still_needs_the_role_build_label() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, a, b, _in_a, user, person, _spec_job) = two_tenants(&bed).await;
+    let mine = node(&bed, a, Some(person), "online", build_caps(false)).await;
+    let target = target_task(&bed, b, user).await;
+    let job = queued_build_job(&bed, b, user, target).await;
+
+    let held = jobs::select_executor(&state, b, job).await.expect("select");
+    assert_eq!(
+        held.state, "queued",
+        "unlabeled is unlabeled, in any tenant"
+    );
+    assert!(
+        held.queued_reason
+            .unwrap_or_default()
+            .contains("role=build"),
+        "and the reason names the label rather than blaming tenancy"
+    );
+
+    bed.db()
+        .exec(
+            r#"UPDATE nodes SET labels = '{"role": "build"}' WHERE id = $1"#,
+            params![mine],
+        )
+        .await
+        .expect("label");
+    let placed = jobs::select_executor(&state, b, job)
+        .await
+        .expect("select again");
+    assert_eq!(placed.state, "claimed", "the label is the whole difference");
+    assert_eq!(placed.executor_node_id, Some(mine));
+
+    bed.teardown().await;
+}
+
+/// AC-4's capacity gate: a cordon on a cross-tenant node reads as capacity,
+/// exactly as it does at home.
+#[tokio::test]
+async fn capacity_still_stops_a_cross_tenant_candidate() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, a, b, _in_a, _user, person, job) = two_tenants(&bed).await;
+    let mut caps = caps_declaring(&["spec"], false);
+    caps["max_loop_jobs"] = json!(0);
+    node(&bed, a, Some(person), "online", caps).await;
+
+    let held = jobs::select_executor(&state, b, job).await.expect("select");
+    assert_eq!(held.state, "queued");
+    assert!(held.queued_reason.unwrap_or_default().contains("capacity"));
+
+    bed.teardown().await;
+}
+
+/// AC-6: when the only thing online is a shared operator in the owner's OTHER
+/// tenant, the refusal is tenancy — say so, rather than sending them hunting
+/// for capacity that was never the problem.
+#[tokio::test]
+async fn the_reason_names_tenancy_when_the_only_online_node_is_a_foreign_operator() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, a, b, _in_a, _user, person, job) = two_tenants(&bed).await;
+    node(&bed, a, Some(person), "online", caps("authorized", true)).await;
+
+    let held = jobs::select_executor(&state, b, job).await.expect("select");
+    assert_eq!(held.state, "queued");
+    let reason = held.queued_reason.unwrap_or_default();
+    assert!(
+        reason.contains("shared operator") && reason.contains("another of your tenants"),
+        "the reason names the rule that refused it: {reason}"
+    );
+    assert!(
+        !reason.contains("you have no node online"),
+        "…and does not claim the machine they are looking at is absent: {reason}"
+    );
+
+    bed.teardown().await;
+}
+
+/// AC-6's other half, and the state the first cut of this branch missed: an
+/// in-tenant shared operator that EXISTS but is ineligible must not turn the
+/// tenancy answer back into "you have no node online". Both facts get said —
+/// the operator here is no good, and the machines you can see are elsewhere.
+#[tokio::test]
+async fn an_ineligible_local_operator_does_not_bury_the_tenancy_reason() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, a, b, _in_a, _user, person, job) = two_tenants(&bed).await;
+    // Online and owned, but a shared operator in the OTHER tenant: refused for
+    // where it is joined.
+    node(&bed, a, Some(person), "online", caps("authorized", true)).await;
+    // …and this tenant does have an operator — it simply is not authorized.
+    node(&bed, b, None, "online", caps("not_authorized", true)).await;
+
+    let held = jobs::select_executor(&state, b, job).await.expect("select");
+    assert_eq!(held.state, "queued");
+    let reason = held.queued_reason.unwrap_or_default();
+    assert!(
+        !reason.contains("you have no node online"),
+        "the owner's machines ARE online — saying otherwise is the sentence \
+         that sent them hunting capacity: {reason}"
+    );
+    assert!(
+        reason.contains("another of your tenants"),
+        "the tenancy rule is still named: {reason}"
+    );
+    assert!(
+        reason.contains("not authorized"),
+        "…alongside the local operator's own state, which is also true: {reason}"
+    );
+
+    bed.teardown().await;
+}

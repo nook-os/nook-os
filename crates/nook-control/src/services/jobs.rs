@@ -1544,10 +1544,17 @@ async fn record_job_event(
 /// Place a queued job on an eligible executor, or leave it queued with the
 /// specific reason it could not be placed.
 ///
-/// Eligibility (AC-1): an ONLINE node in the tenant that reports the loop
-/// runtime `authorized` (MAIN-126), preferring one **owned by the requester**
-/// over the **shared operator** (`shared_operator` in the node's capabilities).
-/// No one else's machine is ever eligible.
+/// Eligibility (AC-1): an ONLINE node that reports the loop runtime
+/// `authorized` (MAIN-126), preferring one **owned by the requester** over the
+/// **shared operator** (`shared_operator` in the node's capabilities). No one
+/// else's machine is ever eligible. The owned leg reaches the requester's
+/// machines in every tenant they belong to (MAIN-515); the shared operator is
+/// its own tenant's alone.
+///
+/// **Every node lookup from here on is therefore unscoped by tenant.** A
+/// candidate may be homed elsewhere, and a tenant-scoped `get` would silently
+/// drop it at the next gate — which is exactly how the label filter below used
+/// to turn a cross-tenant candidate back into "no eligible executor".
 ///
 /// The claim is atomic (AC-2): the `UPDATE ... WHERE state = 'queued'` moves
 /// exactly one caller from `queued` to `claimed` and stamps `executor_node_id`,
@@ -1601,7 +1608,7 @@ pub async fn select_executor(
         if candidates.is_empty() {
             let name = state
                 .nodes
-                .get(tenant, pin)
+                .by_id_any_tenant_or_none(pin)
                 .await?
                 .map(|n| n.name)
                 .unwrap_or_else(|| pin.0.to_string());
@@ -1625,7 +1632,10 @@ pub async fn select_executor(
     let candidates = if let Some(selector) = placement_selector(&job.kind) {
         let mut kept = Vec::new();
         for node in candidates {
-            let Some(row) = state.nodes.get(tenant, node).await? else {
+            // Unscoped: a candidate owned by the requester may be homed in
+            // another of their tenants (MAIN-515), and `get(tenant, …)` returned
+            // None for it — dropping the very node this job was placed on.
+            let Some(row) = state.nodes.by_id_any_tenant_or_none(node).await? else {
                 continue;
             };
             let labels = crate::routes::nodes::placement_of(&row).labels;
@@ -1888,14 +1898,49 @@ pub async fn kind_wall_refusal(
 /// Phrase the specific gate that blocked placement (AC-3): distinguishes "no
 /// node of yours is online" from "your online nodes aren't authorized" from "no
 /// operator available", so the UI can tell the PM what to do.
+///
+/// "Yours" means yours ANYWHERE (MAIN-515), because that is what eligibility
+/// now means: an owned node in another of your tenants is a candidate, so
+/// counting only this tenant's would report "you have no node online" about a
+/// machine that is online and was rejected for some other gate entirely. The
+/// one thing tenancy still refuses is a shared operator elsewhere, and that
+/// gets its own sentence rather than the generic fall-through — the original
+/// report was of an owner hunting capacity that was never the problem.
 async fn no_executor_reason(
     state: &AppState,
     tenant: TenantId,
     person: Uuid,
     kind: &str,
 ) -> ApiResult<String> {
-    let owned_online: i64 = state.nodes.owned_online_count(tenant, person).await?;
+    let owned_here: i64 = state.nodes.owned_online_count(tenant, person).await?;
+    let (owned_elsewhere, operators_elsewhere) =
+        state.nodes.owned_online_elsewhere(tenant, person).await?;
     let operator_online: i64 = state.nodes.shared_operator_online_count(tenant).await?;
+    let owned_online = owned_here + owned_elsewhere;
+
+    // Gated on the person's own machines alone, NOT on whether this tenant also
+    // has an operator: with an in-tenant operator that is merely ineligible,
+    // the `(0, _)` arm below would say "you have no node online" — the one
+    // sentence AC-6 exists to prevent, and it would be said in exactly the
+    // state the bug was reported from. The operator's own state is added to
+    // the sentence instead of replacing it, because both facts are true and
+    // only one of them is surprising.
+    if owned_online == 0 && operators_elsewhere > 0 {
+        let here = if operator_online == 0 {
+            "and this tenant has none of its own".to_string()
+        } else {
+            format!(
+                "and this tenant's own is not authorized for the {LOOP_RUNTIME} runtime or does \
+                 not accept {kind} jobs"
+            )
+        };
+        return Ok(format!(
+            "no eligible executor: your only online node(s) are shared operators in another of \
+             your tenants, and a shared operator serves only the tenant it was joined to — \
+             {here}. Join a node to this tenant, or raise the {kind} job in the tenant that has \
+             the operator"
+        ));
+    }
 
     Ok(match (owned_online, operator_online) {
         (0, 0) => "no eligible executor: you have no node online and no shared operator is available".into(),
@@ -2156,25 +2201,20 @@ pub async fn refuse(state: &AppState, tenant: TenantId, id: JobId, reason: &str)
 /// back a card it has nothing to do with (MAIN-161 security).
 pub async fn refuse_from_node(
     state: &AppState,
-    tenant: TenantId,
     node: NodeId,
     id: JobId,
     reason: &str,
 ) -> ApiResult<()> {
-    if !is_executor(state, tenant, id, node).await? {
+    let Some(tenant) = executing_tenant(state, id, node).await? else {
         tracing::warn!(job = %id.0, node = %node.0, "node refused a job it does not execute — dropped");
         return Ok(());
-    }
+    };
     refuse(state, tenant, id, reason).await
 }
 
 /// Fail every job a node was executing when it disconnected (AC-4): the session
 /// died with the node. Terminal jobs are untouched (the guard in `transition`).
-pub async fn fail_stranded_for_node(
-    state: &AppState,
-    tenant: TenantId,
-    node: NodeId,
-) -> ApiResult<()> {
+pub async fn fail_stranded_for_node(state: &AppState, node: NodeId) -> ApiResult<()> {
     let stranded: Vec<JobId> = state.jobs.in_flight_on_node(node).await?;
     for id in stranded {
         append_transcript(
@@ -2185,6 +2225,12 @@ pub async fn fail_stranded_for_node(
         )
         .await
         .ok();
+        // Each job's OWN tenant (MAIN-515): the scan is by node, and a node may
+        // hold work from any tenant its owner belongs to, so the disconnecting
+        // connection's tenant is not the one to write the failure in.
+        let Some((tenant, _)) = state.jobs.tenant_and_target_of(id).await? else {
+            continue;
+        };
         let _ = transition(state, tenant, id, "failed").await;
     }
     Ok(())
@@ -2483,18 +2529,29 @@ fn waited(since: chrono::DateTime<chrono::Utc>) -> String {
     }
 }
 
-/// Is `node` the executor the job was placed on? The gate for accepting a node's
-/// streamed transcript / finish (MAIN-161 security): a node token is scoped to
-/// its OWN runs, so it must not be able to inject into or terminate another
-/// executor's job. `false` for a missing job, an unplaced one, or a mismatch.
-async fn is_executor(
+/// The tenant of the job `node` is executing, or `None` when it is not its
+/// executor. The gate for accepting a node's streamed transcript / finish
+/// (MAIN-161 security): a node token is scoped to its OWN runs, so it must not
+/// be able to inject into or terminate another executor's job. `None` for a
+/// missing job, an unplaced one, or a mismatch.
+///
+/// **The tenant is the JOB's, never the connection's (MAIN-515).** A node
+/// authenticates in the tenant the MACHINE was joined into, and since ownership
+/// crosses tenants a job placed there by its owner need not live in that one.
+/// Asking with the connection's tenant found no row, so every report from such
+/// a run — transcript, worktree, finish, refusal — was dropped as a spoof and
+/// the run completed with nothing recorded, to be reaped later as stalled. The
+/// node match below is what authorizes; the tenant is looked up, not asserted.
+async fn executing_tenant(
     state: &AppState,
-    tenant: TenantId,
     id: JobId,
     node: NodeId,
-) -> ApiResult<bool> {
+) -> ApiResult<Option<TenantId>> {
+    let Some((tenant, _)) = state.jobs.tenant_and_target_of(id).await? else {
+        return Ok(None);
+    };
     let exec: Option<Option<NodeId>> = state.jobs.executor_of(tenant, id).await?;
-    Ok(matches!(exec, Some(Some(n)) if n == node))
+    Ok(matches!(exec, Some(Some(n)) if n == node).then_some(tenant))
 }
 
 /// Append a transcript line reported by a node — ONLY for a job that node is
@@ -2502,13 +2559,12 @@ async fn is_executor(
 /// with a warning, never applied (MAIN-161 security).
 pub async fn transcript_from_node(
     state: &AppState,
-    tenant: TenantId,
     node: NodeId,
     id: JobId,
     source: &str,
     content: &str,
 ) -> ApiResult<()> {
-    if !is_executor(state, tenant, id, node).await? {
+    if executing_tenant(state, id, node).await?.is_none() {
         tracing::warn!(job = %id.0, node = %node.0, "node streamed transcript for a job it does not execute — dropped");
         return Ok(());
     }
@@ -2525,20 +2581,14 @@ pub async fn transcript_from_node(
 ///
 /// Same anti-spoof gate as the transcript: a node may only speak for a job it
 /// is actually executing.
-pub async fn turn_from_node(
-    state: &AppState,
-    tenant: TenantId,
-    node: NodeId,
-    id: JobId,
-    active: bool,
-) {
-    match is_executor(state, tenant, id, node).await {
-        Ok(true) => {}
+pub async fn turn_from_node(state: &AppState, node: NodeId, id: JobId, active: bool) {
+    let tenant = match executing_tenant(state, id, node).await {
+        Ok(Some(t)) => t,
         _ => {
             tracing::warn!(job = %id.0, node = %node.0, "node reported a turn for a job it does not execute — dropped");
             return;
         }
-    }
+    };
     if let Ok(Some(task_id)) = state.jobs.target_task_of_unscoped(id).await {
         state.registry.publish(
             tenant,
@@ -2556,16 +2606,15 @@ pub async fn turn_from_node(
 /// (MAIN-161 security).
 pub async fn finish_from_node(
     state: &AppState,
-    tenant: TenantId,
     node: NodeId,
     id: JobId,
     ok: bool,
     message: &str,
 ) -> ApiResult<()> {
-    if !is_executor(state, tenant, id, node).await? {
+    let Some(tenant) = executing_tenant(state, id, node).await? else {
         tracing::warn!(job = %id.0, node = %node.0, "node reported finish for a job it does not execute — dropped");
         return Ok(());
-    }
+    };
     finish(state, tenant, id, ok, message).await
 }
 
@@ -2581,15 +2630,14 @@ pub async fn finish_from_node(
 /// directory is still wanted.
 pub async fn record_worktree_from_node(
     state: &AppState,
-    tenant: TenantId,
     node: NodeId,
     id: JobId,
     path: &str,
 ) -> ApiResult<()> {
-    if !is_executor(state, tenant, id, node).await? {
+    let Some(tenant) = executing_tenant(state, id, node).await? else {
         tracing::warn!(job = %id.0, node = %node.0, "node reported a worktree for a job it does not execute — dropped");
         return Ok(());
-    }
+    };
     let job = load(state, tenant, id).await?;
     let Some(task) = job.target_task_id else {
         return Ok(());

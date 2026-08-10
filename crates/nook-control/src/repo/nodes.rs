@@ -299,6 +299,16 @@ pub trait NodeRepository: Send + Sync {
     /// `loop_kinds` must contain `kind`, and a `build` job is never offered to
     /// a shared operator **whatever that node declares** — the wall does not
     /// consult the node's own configuration, which is the point of it.
+    ///
+    /// **Ownership crosses tenants; sharing does not (MAIN-515).** A node the
+    /// requesting person owns is a candidate for their job in any tenant, not
+    /// only the tenant the machine was joined into — ownership keys on the
+    /// person (MAIN-130) and reachability already travels with it (MAIN-353),
+    /// so gating placement on `tenant_id` left a two-tenant owner's jobs
+    /// parked forever. A SHARED OPERATOR stays a resource of the tenant it was
+    /// joined to, even when the requester happens to own it: `shared` is a
+    /// grant to one team, and carrying it into another org would hand that
+    /// team's machine to an org it never consented to.
     async fn eligible_loop_executors(
         &self,
         tenant: TenantId,
@@ -328,12 +338,25 @@ pub trait NodeRepository: Send + Sync {
         cordon: Option<&nook_types::NodeCordon>,
     ) -> ApiResult<()>;
 
-    /// How many of this person's nodes are online — the first half of phrasing
-    /// *why* nothing could be placed.
+    /// How many of this person's nodes are online IN `tenant` — the first half
+    /// of phrasing *why* nothing could be placed.
     async fn owned_online_count(&self, tenant: TenantId, person: Uuid) -> ApiResult<i64>;
 
     /// How many shared operator nodes are online — the second half.
     async fn shared_operator_online_count(&self, tenant: TenantId) -> ApiResult<i64>;
+
+    /// This person's online nodes OUTSIDE `tenant`, split by whether placement
+    /// may cross to them (MAIN-515): `.0` are candidates for a job in any
+    /// tenant they belong to, `.1` are shared operators, which serve only the
+    /// tenant they were joined to.
+    ///
+    /// The split is what lets the queued reason name tenancy instead of
+    /// falling through to the generic "no eligible executor": `.0` counts as
+    /// "your online node(s)" wherever they live, and a nonzero `.1` with
+    /// nothing else online is the one case where the machine the owner is
+    /// looking at was refused *because* of where it is joined.
+    async fn owned_online_elsewhere(&self, tenant: TenantId, person: Uuid)
+        -> ApiResult<(i64, i64)>;
 
     /// This person's nodes with their last reported resource sample — the
     /// candidate set placement ranks (MAIN-292). The liveness filter is NOT here:
@@ -1015,14 +1038,19 @@ impl NodeRepository for DbNodeRepository {
         // The build wall (AC-3), in the WHERE clause rather than in a caller:
         // a shared operator drops out of the candidate set for a `build` job
         // before anything it declared is even read.
+        //
+        // The tenancy clause reads as two legs (MAIN-515). Inside `tenant`,
+        // unchanged: your node or the shared operator. Outside it, your node
+        // and never a shared operator — so a machine you own follows you into
+        // every org you belong to, and a machine a team shares stays theirs.
         Ok(self
             .db
             .query_scalar_all(
                 &format!(
                     "SELECT id FROM nodes
-                     WHERE tenant_id = $1
-                       AND status = 'online'
-                       AND (owner_person_id = $2 OR {operator})
+                     WHERE status = 'online'
+                       AND ( (tenant_id = $1 AND (owner_person_id = $2 OR {operator}))
+                             OR (owner_person_id = $2 AND NOT {operator}) )
                        AND NOT ($4 = 'build' AND {operator})
                        AND EXISTS (
                              SELECT 1
@@ -1104,6 +1132,40 @@ impl NodeRepository for DbNodeRepository {
                 params![tenant, person],
             )
             .await?)
+    }
+
+    async fn owned_online_elsewhere(
+        &self,
+        tenant: TenantId,
+        person: Uuid,
+    ) -> ApiResult<(i64, i64)> {
+        // Two counts rather than one aggregate with a FILTER: `count(*) FILTER`
+        // is Postgres-only spelling, and this pair is engine-neutral as written.
+        let crossing: i64 = self
+            .db
+            .query_scalar(
+                &format!(
+                    "SELECT count(*) FROM nodes
+                     WHERE tenant_id <> $1 AND owner_person_id = $2 AND status = 'online'
+                       AND NOT {}",
+                    shared_operator_clause(self.db.engine())
+                ),
+                params![tenant, person],
+            )
+            .await?;
+        let operators: i64 = self
+            .db
+            .query_scalar(
+                &format!(
+                    "SELECT count(*) FROM nodes
+                     WHERE tenant_id <> $1 AND owner_person_id = $2 AND status = 'online'
+                       AND {}",
+                    shared_operator_clause(self.db.engine())
+                ),
+                params![tenant, person],
+            )
+            .await?;
+        Ok((crossing, operators))
     }
 
     async fn owned_with_resources(
@@ -2236,11 +2298,21 @@ impl NodeRepository for FakeNodeRepository {
                 .and_then(|v| v.as_array())
                 .is_some_and(|ks| ks.iter().any(|k| k.as_str() == Some(kind)))
         };
+        // Inside `tenant`, yours or the shared operator; outside it, yours and
+        // never a shared operator (MAIN-515) — the SQL's two legs.
+        let reachable = |n: &FakeNode| {
+            let mine = n.node.owner_person_id == Some(person);
+            if n.node.tenant_id == tenant {
+                mine || is_operator(n)
+            } else {
+                mine && !is_operator(n)
+            }
+        };
         let mut eligible: Vec<&FakeNode> = s
             .nodes
             .iter()
-            .filter(|n| n.node.tenant_id == tenant && n.node.status == "online")
-            .filter(|n| n.node.owner_person_id == Some(person) || is_operator(n))
+            .filter(|n| n.node.status == "online")
+            .filter(|n| reachable(n))
             // The build wall, ahead of anything the node declared (AC-3).
             .filter(|n| !(kind == "build" && is_operator(n)))
             .filter(|n| authorized_for(n))
@@ -2321,6 +2393,34 @@ impl NodeRepository for FakeNodeRepository {
                     && n.node.status == "online"
             })
             .count() as i64)
+    }
+
+    async fn owned_online_elsewhere(
+        &self,
+        tenant: TenantId,
+        person: Uuid,
+    ) -> ApiResult<(i64, i64)> {
+        let s = self.inner.lock().unwrap();
+        let elsewhere = s.nodes.iter().filter(|n| {
+            n.node.tenant_id != tenant
+                && n.node.owner_person_id == Some(person)
+                && n.node.status == "online"
+        });
+        let (mut crossing, mut operators) = (0, 0);
+        for n in elsewhere {
+            let operator = n
+                .node
+                .capabilities
+                .get("shared_operator")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if operator {
+                operators += 1;
+            } else {
+                crossing += 1;
+            }
+        }
+        Ok((crossing, operators))
     }
 
     async fn owned_with_resources(

@@ -270,7 +270,7 @@ async fn handle(
     // Any loop job this node was executing died with it — fail it honestly with
     // its transcript tail preserved, rather than leaving it "running" forever
     // (MAIN-161 AC-4). The node cleans the orphaned worktree on its next connect.
-    let _ = crate::services::jobs::fail_stranded_for_node(&state, tenant, node_id).await;
+    let _ = crate::services::jobs::fail_stranded_for_node(&state, node_id).await;
     // Every tunnel into this machine is now a 502 factory: the port it names is
     // on a box nothing can reach (MAIN-404 AC-4). Closed here rather than left
     // for the idle sweep, because a URL that answers "nothing is listening" for
@@ -949,7 +949,6 @@ async fn handle_message(
             if let Ok(id) = job_id.parse::<uuid::Uuid>() {
                 crate::services::jobs::turn_from_node(
                     state,
-                    tenant,
                     node_id,
                     nook_types::JobId(id),
                     active,
@@ -967,7 +966,6 @@ async fn handle_message(
                 // inject into another executor's transcript.
                 let _ = crate::services::jobs::transcript_from_node(
                     state,
-                    tenant,
                     node_id,
                     nook_types::JobId(id),
                     &source,
@@ -988,7 +986,6 @@ async fn handle_message(
                 // complete or fail another executor's job.
                 let _ = crate::services::jobs::finish_from_node(
                     state,
-                    tenant,
                     node_id,
                     nook_types::JobId(id),
                     ok,
@@ -1003,7 +1000,6 @@ async fn handle_message(
             if let Ok(id) = job_id.parse::<uuid::Uuid>() {
                 let _ = crate::services::jobs::refuse_from_node(
                     state,
-                    tenant,
                     node_id,
                     nook_types::JobId(id),
                     &reason,
@@ -1017,7 +1013,6 @@ async fn handle_message(
             if let Ok(id) = job_id.parse::<uuid::Uuid>() {
                 let _ = crate::services::jobs::record_worktree_from_node(
                     state,
-                    tenant,
                     node_id,
                     nook_types::JobId(id),
                     &path,
