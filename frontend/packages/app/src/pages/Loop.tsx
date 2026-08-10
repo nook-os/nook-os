@@ -28,6 +28,7 @@ import { api, type LoopJob, type LoopJobTranscriptEntry } from "@nookos/api";
 import { ChatView, Empty, Panel, type ChatViewMessage } from "@nookos/ui";
 import type { StuckCause } from "../loop";
 import {
+  agentActivityLabel,
   composerMode,
   createLoopJob,
   fetchTaskJobs,
@@ -41,7 +42,7 @@ import {
   taskJobsKey,
 } from "../loop";
 import { answerInteraction } from "../Interactions";
-import { agentActivityLabel, transcriptMessages } from "../LoopPanel";
+import { transcriptMessages } from "../LoopPanel";
 import { fileSlug, TranscriptActions } from "../transcriptExport";
 
 /** The ticket this workspace is anchored to. Keys and uuids both resolve
@@ -476,6 +477,7 @@ export function LoopPage() {
               data-testid={mode === "readonly" ? "transcript" : `composer-${mode}`}
             >
               <ChatView
+                variant="transcript"
                 messages={loopMessages(transcript, asks)}
                 onSend={onSend}
                 hideComposer={mode === "readonly" || !taskId}

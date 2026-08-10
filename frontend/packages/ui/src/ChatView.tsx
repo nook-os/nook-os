@@ -19,7 +19,16 @@
 // Everything else (channel list, websockets, dedupe) belongs to the caller.
 
 import React, { useCallback, useLayoutEffect, useRef, useState } from "react";
-import { Copy, MoreHorizontal, Pencil, Reply, SmilePlus, Trash2 } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  Copy,
+  MoreHorizontal,
+  Pencil,
+  Reply,
+  SmilePlus,
+  Trash2,
+} from "lucide-react";
 import { ALLOWED_REACTIONS } from "@nookos/api";
 import { EmojiPicker } from "./EmojiPicker";
 import { GifPicker, giphyGifUrl } from "./GifPicker";
@@ -72,7 +81,23 @@ export interface ChatViewMessage {
    *  The caller decides — the view has no way to tell prose from a draft, and
    *  guessing would eventually render someone's message wrong. */
   markdown?: boolean | "chat";
+  /** This message is folded TOOL ACTIVITY rather than something its author said
+   *  (MAIN-499): the steps it stands for, in order, as they were recorded.
+   *
+   *  Presence is the discriminator — at `variant="transcript"` such a message
+   *  renders as its own kind, expandable to these lines, so "what it said" and
+   *  "what it did" are told apart at a glance. The folding is the caller's job
+   *  (`foldToolActivity`); this view only refuses to throw the detail away. */
+  activity?: string[];
 }
+
+/** How the list READS.
+ *
+ *  - `"chat"` — the default, and team chat's tuned density. Unchanged.
+ *  - `"transcript"` — an agent run: consecutive turns from one author share a
+ *    header however far apart they are, turns are separated vertically, and a
+ *    message carrying `activity` renders as tool activity (MAIN-499). */
+export type ChatViewVariant = "chat" | "transcript";
 
 export interface ChatViewProps {
   messages: ChatViewMessage[];
@@ -152,6 +177,9 @@ export interface ChatViewProps {
    *  needs no service. Callers that are not team chat (the loop's run view)
    *  simply pass nothing. */
   giphyKey?: string | null;
+  /** Which reading this list gets (MAIN-499). Omitted is `"chat"`, byte for
+   *  byte what every consumer rendered before the variant existed. */
+  variant?: ChatViewVariant;
 }
 
 /**
@@ -190,10 +218,21 @@ function authorLabel(m: ChatViewMessage): string {
   return m.authorName ?? `${m.authorId.slice(0, 8)}…`;
 }
 
-/** First of a run from one author within the grouping window → show a header. */
-function startsGroup(m: ChatViewMessage, prev: ChatViewMessage | undefined): boolean {
+/** First of a run from one author within the grouping window → show a header.
+ *
+ *  `windowed` is what the transcript variant drops (MAIN-499 AC-2): a chat
+ *  message five minutes later is a new thought and deserves a fresh header, but
+ *  an agent's turns are minutes apart BY NATURE, so the window put a repeated
+ *  "agent · 07:54 PM" over every single one. Consecutive turns from one author
+ *  are one run there, whatever the clock says. */
+function startsGroup(
+  m: ChatViewMessage,
+  prev: ChatViewMessage | undefined,
+  windowed: boolean,
+): boolean {
   if (!prev) return true;
   if (prev.authorId !== m.authorId) return true;
+  if (!windowed) return false;
   return new Date(m.createdAt).getTime() - new Date(prev.createdAt).getTime() > GROUP_GAP_MS;
 }
 
@@ -417,6 +456,54 @@ function MessageActions({
   );
 }
 
+/**
+ * A folded run of tool calls, as its own kind (MAIN-499 AC-4/AC-5).
+ *
+ * Dim, monospace and set apart, because `· 37 steps — Bash ×37` is not prose
+ * and reading it as prose is what made a long transcript a wall. The steps the
+ * line stands for are one click away rather than gone — exporting the whole
+ * transcript used to be the only way to see them.
+ *
+ * A line with no retained steps is not a button: an affordance that opens onto
+ * nothing is worse than no affordance.
+ */
+function ToolActivity({
+  label,
+  steps,
+  open,
+  onToggle,
+}: {
+  label: string;
+  steps: string[];
+  open: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <div className="chat-tool">
+      {steps.length === 0 ? (
+        <span className="chat-tool-line">{label}</span>
+      ) : (
+        <button
+          type="button"
+          className="chat-tool-line"
+          aria-expanded={open}
+          onClick={onToggle}
+        >
+          {open ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+          <span>{label}</span>
+        </button>
+      )}
+      {open && steps.length > 0 && (
+        <ul className="chat-tool-steps">
+          {steps.map((s, i) => (
+            <li key={`${i}-${s}`}>{s}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 export function ChatView({
   messages,
   onSend,
@@ -440,10 +527,19 @@ export function ChatView({
   beforeComposer,
   hideComposer = false,
   giphyKey,
+  variant = "chat",
 }: ChatViewProps) {
+  const transcript = variant === "transcript";
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [draft, setDraft] = useState("");
+  // Which folded activity lines the reader has opened, by message id. Keyed
+  // rather than a single open row: reading a transcript means comparing two
+  // runs of steps, not being shown one at a time.
+  const [openActivity, setOpenActivity] = useState<Record<string, boolean>>({});
+  const toggleActivity = useCallback((id: string) => {
+    setOpenActivity((prev) => ({ ...prev, [id]: !prev[id] }));
+  }, []);
   // Which message's body is being edited inline (MAIN-116 AC-3), and the
   // in-progress draft. Each row's popups own their own open state — see
   // `MessageActions`.
@@ -564,7 +660,13 @@ export function ChatView({
 
   return (
     <div className="chat-view">
-      <div className="chat-log" ref={scrollRef} onScroll={onScroll} role="log" aria-live="polite">
+      <div
+        className={`chat-log${transcript ? " transcript" : ""}`}
+        ref={scrollRef}
+        onScroll={onScroll}
+        role="log"
+        aria-live="polite"
+      >
         {hasMore && (
           <div className="chat-older">
             {loadingOlder ? "Loading older…" : "Scroll up for older messages"}
@@ -574,7 +676,10 @@ export function ChatView({
           <div className="chat-empty">{emptyLabel}</div>
         ) : (
           messages.map((m, i) => {
-            const head = startsGroup(m, messages[i - 1]);
+            const head = startsGroup(m, messages[i - 1], !transcript);
+            // Only the transcript has a "what it did" kind to separate from
+            // "what it said"; in chat every message is prose (AC-1).
+            const activity = transcript ? m.activity : undefined;
             const mine = currentUserId != null && m.authorId === currentUserId;
             // Reactions and edit/delete/react actions only apply to a settled,
             // non-deleted message. A deleted one shows only its placeholder.
@@ -604,6 +709,7 @@ export function ChatView({
               <div
                 key={m.id}
                 data-author={m.authorId}
+                data-kind={activity ? "activity" : undefined}
                 className={`chat-msg${head ? " head" : ""}${mine ? " mine" : ""}${
                   m.pending ? " pending" : ""
                 }${m.failed ? " failed" : ""}${m.deleted ? " deleted" : ""}`}
@@ -616,6 +722,13 @@ export function ChatView({
                 )}
                 {m.deleted ? (
                   <div className="chat-body deleted">message deleted</div>
+                ) : activity ? (
+                  <ToolActivity
+                    label={m.body}
+                    steps={activity}
+                    open={!!openActivity[m.id]}
+                    onToggle={() => toggleActivity(m.id)}
+                  />
                 ) : isEditing ? (
                   <textarea
                     className="chat-edit-input"

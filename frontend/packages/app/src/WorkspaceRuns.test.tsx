@@ -358,6 +358,64 @@ describe("the transcript", () => {
     expect(screen.getByText("Verdict").tagName).toBe("H2");
   });
 
+  it("reads as a transcript, with the folded activity as its own expandable kind (MAIN-499)", async () => {
+    state.builds = [build({ state: "completed" })];
+    state.transcript = [
+      { id: "l1", source: "agent", content: "· Bash cargo test", at: "2026-08-08T10:00:00Z" },
+      { id: "l2", source: "agent", content: "· Read src/lib.rs", at: "2026-08-08T10:00:01Z" },
+      { id: "l3", source: "agent", content: "all green", at: "2026-08-08T10:40:00Z" },
+    ];
+    renderRuns();
+    await screen.findByText("all green");
+    expect(document.querySelector(".chat-log")!.className).toContain("transcript");
+    // Forty minutes apart and still one header — chat's window would have put a
+    // second "agent" over the prose.
+    expect(screen.getAllByText("agent")).toHaveLength(1);
+    // And the fold is no longer a dead end: its steps are one click away.
+    const fold = screen.getByRole("button", { name: /2 steps/ });
+    fireEvent.click(fold);
+    expect(screen.getByText("· Bash cargo test")).toBeTruthy();
+    expect(screen.getByText("· Read src/lib.rs")).toBeTruthy();
+  });
+
+  it("says a live run is working, in the loop view's own words (AC-6)", async () => {
+    state.builds = [build({ state: "running" })];
+    state.transcript = [
+      { id: "t1", source: "agent", content: "reading the card", at: "2026-08-08T10:01:00Z" },
+    ];
+    renderRuns();
+    await screen.findByText("reading the card");
+    const typing = document.querySelector(".chat-typing");
+    expect(isVisible(typing)).toBe(true);
+    expect(typing!.textContent).toContain("the operator agent is working…");
+    // The animated part is the shared indicator, not a second one built here.
+    expect(document.querySelectorAll(".chat-typing-dots i")).toHaveLength(3);
+  });
+
+  it("says a queued run is waiting for an executor, not working", async () => {
+    state.builds = [build({ state: "queued" })];
+    state.transcript = [
+      { id: "t1", source: "system", content: "enqueued", at: "2026-08-08T10:01:00Z" },
+    ];
+    renderRuns();
+    await screen.findByText("enqueued");
+    expect(document.querySelector(".chat-typing")!.textContent).toContain(
+      "waiting for an executor…",
+    );
+  });
+
+  it("shows no indicator over a run that has finished", async () => {
+    // The indicator is the operator's only cue that the agent is alive; leaving
+    // it over a finished run is the specific lie `agentActivityLabel` prevents.
+    state.builds = [build({ state: "completed" })];
+    state.transcript = [
+      { id: "t1", source: "agent", content: "opened PR #12", at: "2026-08-08T10:01:00Z" },
+    ];
+    renderRuns();
+    await screen.findByText("opened PR #12");
+    expect(document.querySelector(".chat-typing")).toBeNull();
+  });
+
   it("copies the FULL transcript even when the view folds agent activity (MAIN-471)", async () => {
     state.reviews = [review()];
     state.transcript = [

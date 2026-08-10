@@ -2,8 +2,15 @@
 // what a transcript entry IS, and what a run filed. All view-agnostic, so the
 // page's decisions are testable without a DOM.
 import { describe, expect, it } from "vitest";
-import type { LoopJob } from "@nookos/api";
-import { composerMode, filedKeys, looksLikeMarkdown, stripAnsi, stuckCause } from "./loop";
+import type { LoopJob, LoopJobTranscriptEntry } from "@nookos/api";
+import {
+  composerMode,
+  filedKeys,
+  foldToolActivity,
+  looksLikeMarkdown,
+  stripAnsi,
+  stuckCause,
+} from "./loop";
 
 const job = (state: string): LoopJob =>
   ({ id: "j1", state, kind: "spec" }) as unknown as LoopJob;
@@ -175,5 +182,57 @@ describe("stuckCause (MAIN-297)", () => {
     // `undefined` is "we have not looked yet". Reading it as off would flash
     // the wrong diagnosis, and a Turn-on button, on every page load.
     expect(stuckCause(queued(), undefined)).toEqual({ kind: "waiting", detail: null });
+  });
+});
+
+describe("foldToolActivity", () => {
+  const line = (id: string, source: string, content: string): LoopJobTranscriptEntry =>
+    ({ id, job_id: "j1", source, content, at: "2026-08-08T10:00:00Z" }) as unknown as
+      LoopJobTranscriptEntry;
+
+  it("collapses a ladder of markers into one counted entry", () => {
+    const out = foldToolActivity([
+      line("l1", "system", "started"),
+      line("l2", "agent", "· Bash cargo test"),
+      line("l3", "agent", ""),
+      line("l4", "agent", "· Read src/lib.rs"),
+      line("l5", "agent", "· Bash cargo fmt"),
+      line("l6", "agent", "the tests pass"),
+    ]);
+    expect(out.map((e) => e.content)).toEqual([
+      "started",
+      "· 3 steps — Bash ×2 · Read",
+      "the tests pass",
+    ]);
+  });
+
+  it("keeps the steps a folded entry stands for (MAIN-499 AC-5)", () => {
+    // The fold is how the panel READS; discarding the detail made the line a
+    // dead end whose steps only a whole-transcript export could recover.
+    const out = foldToolActivity([
+      line("l1", "agent", "\u001b[32m· Bash cargo test\u001b[0m"),
+      line("l2", "agent", "· Read src/lib.rs"),
+    ]);
+    expect(out).toHaveLength(1);
+    // Stripped, because that is what a reader can read — the stored line keeps
+    // its escapes, and the export still carries them.
+    expect(out[0].steps).toEqual(["· Bash cargo test", "· Read src/lib.rs"]);
+  });
+
+  it("marks a single-tool fold with its one step too", () => {
+    const out = foldToolActivity([line("l1", "agent", "· Bash cargo test")]);
+    // The label drops the command; the step is where it survives.
+    expect(out[0].content).toBe("· Bash");
+    expect(out[0].steps).toEqual(["· Bash cargo test"]);
+  });
+
+  it("leaves a substantive turn alone, with no steps on it", () => {
+    // `steps` is the discriminator the view renders on: prose carrying one
+    // would read as tool activity.
+    const out = foldToolActivity([
+      line("l1", "agent", "I read the card and opened a PR."),
+      line("l2", "human", "· not a marker, a person's line"),
+    ]);
+    expect(out.map((e) => e.steps)).toEqual([undefined, undefined]);
   });
 });

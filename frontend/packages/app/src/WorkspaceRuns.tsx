@@ -18,7 +18,7 @@ import { useSearchParams } from "react-router-dom";
 import { api, type LoopJobTranscriptEntry } from "@nookos/api";
 import { ChatView, Empty, Panel, Pill } from "@nookos/ui";
 import { transcriptMessages } from "./LoopPanel";
-import { foldToolActivity, jobStateMeta } from "./loop";
+import { agentActivityLabel, foldToolActivity, jobStateMeta } from "./loop";
 import { fileSlug, TranscriptActions } from "./transcriptExport";
 
 /** What raised a run. The word a row shows, and the value the URL carries. */
@@ -203,7 +203,8 @@ export function WorkspaceRuns({
   const visible = runs ? filterRuns(runs, kind, stateOf) : [];
   // The open run if the filter still shows it, else the newest one that is —
   // so narrowing the list never leaves the transcript of a hidden run beside it.
-  const open = visible.find((r) => r.id === openId)?.id ?? visible[0]?.id ?? null;
+  const openRun = visible.find((r) => r.id === openId) ?? visible[0] ?? null;
+  const open = openRun?.id ?? null;
 
   const { data: detail } = useQuery({
     queryKey: ["job", open],
@@ -311,16 +312,22 @@ export function WorkspaceRuns({
                   // carries.
                   lines={detail.transcript}
                   filename={`${fileSlug(
-                    [workspaceName, visible.find((r) => r.id === open)?.label ?? "run"]
-                      .filter(Boolean)
-                      .join("-"),
+                    [workspaceName, openRun?.label ?? "run"].filter(Boolean).join("-"),
                   ).toLowerCase()}-${(open ?? "").slice(0, 8)}.md`}
                 />
               </div>
               <ChatView
+                // A run's transcript, read as a transcript (MAIN-499): grouped
+                // turns, and the folded activity as its own expandable kind.
+                variant="transcript"
                 // Folded like the Loop page folds it, so a ladder of `· Bash`
                 // lines reads as one activity entry there and here alike.
                 messages={transcriptMessages(foldToolActivity(detail.transcript))}
+                // A live run says so, in the same words and with the same
+                // indicator the ticket's loop view uses (AC-6). Silent for a
+                // finished run — `agentActivityLabel` returns null there, which
+                // is the whole reason this is not a `state === "running"` test.
+                typing={openRun ? agentActivityLabel(openRun.state) : null}
                 // Read-only on purpose: a managed run is the control plane's
                 // work, not a conversation somebody steers. The composer is
                 // HIDDEN, not disabled — there is nothing here to say anything

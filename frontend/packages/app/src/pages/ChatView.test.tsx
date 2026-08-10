@@ -467,3 +467,187 @@ describe("ChatView markdown modes (MAIN-455 polish)", () => {
     expect(bars).toHaveLength(1);
   });
 });
+
+// MAIN-499: ONE component, two readings. A transcript's turns are minutes apart
+// by nature and half its lines are things the agent DID rather than said — chat's
+// density renders both as the same wall of prose.
+//
+// The caveat MAIN-300's block already states applies here too: jsdom loads no
+// stylesheet, so "dim, monospace, set apart" (AC-4) and the turn separation
+// (AC-3) are CSS. What is asserted below is what CSS keys off — that the log
+// carries the variant class and that an activity line is a different kind of
+// node from a body — plus everything that is behaviour: the grouping rule, the
+// expand, and the untouched default.
+describe("ChatView transcript variant (MAIN-499)", () => {
+  const turn = (over: Partial<ChatViewMessage>): ChatViewMessage => ({
+    id: "t1",
+    authorId: "agent",
+    authorName: "agent",
+    body: "",
+    createdAt: "2026-08-08T10:00:00Z",
+    ...over,
+  });
+
+  /** Two turns from one author, well outside chat's five-minute window — the
+   *  gap that put a fresh "agent · 07:54 PM" over every single agent turn. */
+  const farApart = [
+    turn({ id: "a", body: "reading the card" }),
+    turn({ id: "b", body: "opening a PR", createdAt: "2026-08-08T10:31:00Z" }),
+  ];
+
+  it("groups consecutive turns from one author under one header, however far apart", () => {
+    render(<ChatView variant="transcript" messages={farApart} onSend={vi.fn()} />);
+    expect(screen.getAllByText("agent")).toHaveLength(1);
+    expect(document.querySelectorAll(".chat-msg-head")).toHaveLength(1);
+  });
+
+  it("still starts a group when the author changes", () => {
+    render(
+      <ChatView
+        variant="transcript"
+        messages={[
+          ...farApart,
+          turn({
+            id: "c",
+            authorId: "system",
+            authorName: "system",
+            body: "run finished",
+            createdAt: "2026-08-08T10:32:00Z",
+          }),
+        ]}
+        onSend={vi.fn()}
+      />,
+    );
+    expect(document.querySelectorAll(".chat-msg-head")).toHaveLength(2);
+  });
+
+  it("leaves chat's window alone — the same two turns get two headers there", () => {
+    // NG-1 in one assertion: the variant adds a reading, it does not retune the
+    // one team chat was given.
+    render(<ChatView messages={farApart} onSend={vi.fn()} />);
+    expect(screen.getAllByText("agent")).toHaveLength(2);
+  });
+
+  it("marks the log so the transcript's spacing has something to key off", () => {
+    const { container, rerender } = render(
+      <ChatView variant="transcript" messages={farApart} onSend={vi.fn()} />,
+    );
+    expect(container.querySelector(".chat-log")!.className).toContain("transcript");
+    rerender(<ChatView messages={farApart} onSend={vi.fn()} />);
+    expect(container.querySelector(".chat-log")!.className).not.toContain("transcript");
+  });
+
+  it("renders a folded line as its own kind rather than as prose", () => {
+    const { container } = render(
+      <ChatView
+        variant="transcript"
+        messages={[
+          turn({ id: "a", body: "· 37 steps — Bash ×37", activity: ["· Bash cargo test"] }),
+          turn({ id: "b", body: "all green", createdAt: "2026-08-08T10:02:00Z" }),
+        ]}
+        onSend={vi.fn()}
+      />,
+    );
+    const rows = container.querySelectorAll(".chat-msg");
+    expect(rows[0].getAttribute("data-kind")).toBe("activity");
+    // "What it did" is not a body: the prose node the reader's eye follows is
+    // absent on the activity row and present on the turn beside it.
+    expect(rows[0].querySelector(".chat-body")).toBeNull();
+    expect(rows[0].querySelector(".chat-tool-line")).toBeTruthy();
+    expect(rows[1].getAttribute("data-kind")).toBeNull();
+    expect(rows[1].querySelector(".chat-body")).toBeTruthy();
+  });
+
+  it("expands a folded line to the steps it stands for, and folds it again", () => {
+    const steps = ["· Bash cargo test", "· Read src/lib.rs", "· Bash cargo fmt"];
+    render(
+      <ChatView
+        variant="transcript"
+        messages={[turn({ body: "· 3 steps — Bash ×2 · Read", activity: steps })]}
+        onSend={vi.fn()}
+      />,
+    );
+    const line = screen.getByRole("button", { name: /3 steps/ });
+    expect(line.getAttribute("aria-expanded")).toBe("false");
+    for (const s of steps) expect(screen.queryByText(s)).toBeNull();
+
+    fireEvent.click(line);
+    expect(line.getAttribute("aria-expanded")).toBe("true");
+    for (const s of steps) expect(screen.getByText(s)).toBeTruthy();
+
+    fireEvent.click(line);
+    expect(line.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByText(steps[0])).toBeNull();
+  });
+
+  it("opens one folded line without closing another", () => {
+    // Reading a transcript means comparing two runs of steps, not being shown
+    // one at a time.
+    render(
+      <ChatView
+        variant="transcript"
+        messages={[
+          turn({ id: "a", body: "· Bash", activity: ["· Bash one"] }),
+          turn({ id: "b", body: "· Read", activity: ["· Read two"] }),
+        ]}
+        onSend={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /· Bash/ }));
+    fireEvent.click(screen.getByRole("button", { name: /· Read/ }));
+    expect(screen.getByText("· Bash one")).toBeTruthy();
+    expect(screen.getByText("· Read two")).toBeTruthy();
+  });
+
+  it("offers no expander for a line with no retained steps", () => {
+    // An affordance that opens onto nothing is worse than no affordance.
+    const { container } = render(
+      <ChatView
+        variant="transcript"
+        messages={[turn({ body: "· Bash", activity: [] })]}
+        onSend={vi.fn()}
+      />,
+    );
+    expect(container.querySelector("button.chat-tool-line")).toBeNull();
+    expect(container.querySelector(".chat-tool-line")!.textContent).toBe("· Bash");
+  });
+
+  it("renders the chat variant exactly as it renders no variant at all (AC-1)", () => {
+    // The default's whole promise, asserted as the DOM rather than as intent —
+    // activity included, which chat has no kind for and must read as prose.
+    const messages = [
+      ...fakeMessages,
+      { ...fakeMessages[2], id: "m4", body: "· 2 steps — Bash ×2", activity: ["· Bash a"] },
+    ];
+    const { container: byDefault } = render(
+      <ChatView messages={messages} onSend={vi.fn()} />,
+    );
+    const html = byDefault.innerHTML;
+    cleanup();
+    const { container: named } = render(
+      <ChatView variant="chat" messages={messages} onSend={vi.fn()} />,
+    );
+    expect(named.innerHTML).toBe(html);
+    expect(named.querySelector(".chat-tool-line")).toBeNull();
+    expect(screen.getByText("· 2 steps — Bash ×2")).toBeTruthy();
+  });
+
+  it("shows the live indicator through the same markup the reduced-motion rule names", () => {
+    // AC-8: the transcript introduces no second animated thing. The dots are
+    // still `.chat-typing-dots i` — the exact selector global.css switches off
+    // under `prefers-reduced-motion` — and there is nothing else moving.
+    const { container } = render(
+      <ChatView
+        variant="transcript"
+        messages={farApart}
+        onSend={vi.fn()}
+        typing="the operator agent is working…"
+      />,
+    );
+    const dots = container.querySelectorAll(".chat-typing-dots i");
+    expect(dots).toHaveLength(3);
+    expect(container.querySelector(".chat-typing")!.textContent).toContain(
+      "the operator agent is working…",
+    );
+  });
+});
