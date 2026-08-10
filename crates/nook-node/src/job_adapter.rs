@@ -346,6 +346,44 @@ pub fn write_turn(stdin: &SharedStdin, text: &str) -> Result<(), String> {
 /// How many recent lines to keep for a failure message.
 const TAIL_LINES: usize = 40;
 
+/// Ask the kernel to kill this child when we die (MAIN-506).
+///
+/// The unit sets `KillMode=process` so that an agent restart spares a
+/// terminal's tmux server — correct, and untouched. But a STREAMING job has no
+/// tmux: this agent is the only reader of the child's stdout, so a child that
+/// outlives us produces output nobody records, no outcome, and no verdict —
+/// it just burns CPU and disk until a human notices. There is nothing to
+/// preserve, so the child goes with us.
+///
+/// Applied HERE and only here, which is what keeps AC-4 true: the tmux path in
+/// `sessions` never comes through this function, and `PR_SET_PDEATHSIG` is
+/// cleared across `fork` anyway, so a daemonising server could not inherit it.
+///
+/// The signal fires when the spawning THREAD exits, not the process — so the
+/// thread that calls [`StreamingSession::spawn`] must be the one that pumps and
+/// waits. `loop_job::run_agent_once` does exactly that, on its own blocking
+/// thread, from spawn to `wait`.
+///
+/// Linux only. macOS has no `PR_SET_PDEATHSIG` equivalent, so there the child
+/// is left to notice its stdin EOF, and the control plane's stall reaper is what
+/// stops the JOB from hanging in `running` regardless of the process.
+fn die_with_parent(cmd: &mut Command) {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: `prctl` is async-signal-safe and this closure runs between
+        // fork and exec, where only such calls are legal.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = cmd;
+}
+
 impl StreamingSession {
     /// Spawn the runtime in `cwd` with `args`, wired for structured streaming.
     ///
@@ -368,6 +406,7 @@ impl StreamingSession {
         for (k, v) in extra_env {
             cmd.env(k, v);
         }
+        die_with_parent(&mut cmd);
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("could not start {runtime}: {e}"))?;
@@ -445,6 +484,31 @@ mod tests {
         assert_eq!(adapter_for("hermes"), Adapter::Tmux);
         assert_eq!(adapter_for("codex"), Adapter::Tmux);
         assert_eq!(adapter_for(""), Adapter::Tmux);
+    }
+
+    /// MAIN-506 AC-3: the streaming child does not outlive the agent.
+    ///
+    /// Spawned from a thread that then exits, which is exactly what
+    /// `PR_SET_PDEATHSIG` keys on — so a `sleep 60` that comes back in well
+    /// under a second came back because the kernel killed it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_streaming_child_dies_with_the_thread_that_spawned_it() {
+        let mut session = std::thread::spawn(|| {
+            StreamingSession::spawn("sleep", &["60".to_string()], Path::new("/"), &[])
+        })
+        .join()
+        .expect("the spawning thread")
+        .expect("sleep");
+
+        let started = std::time::Instant::now();
+        // Killed by a signal, so there is no exit code — the point is that this
+        // returns at all rather than blocking for the full minute.
+        assert_eq!(session.wait(), None, "the child was signalled, not exited");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "the child outlived its spawning thread"
+        );
     }
 
     #[test]

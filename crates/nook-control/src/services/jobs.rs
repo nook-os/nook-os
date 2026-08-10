@@ -2169,6 +2169,59 @@ pub async fn reap_stale_executors(state: &AppState, grace_secs: u64) -> ApiResul
     Ok(reaped.len() as u64)
 }
 
+/// Fail every in-flight job that has gone silent past `stall_secs` (MAIN-506) —
+/// the orphan [`reap_stale_executors`] structurally cannot see.
+///
+/// An executor agent that restarts mid-run leaves its streaming child alive with
+/// nobody reading its stdout: output reaches nobody, no outcome is ever
+/// recorded, and a restarted agent resumes a FRESH run rather than re-adopting
+/// this one. The NODE, meanwhile, is perfectly healthy — it reconnected and is
+/// heartbeating — so the liveness cutoff above never trips and the job sits
+/// `running` forever. Hence the different signal: the job's own progress, which
+/// is what actually stopped.
+///
+/// Progress is "a new transcript entry or a state change", because that is what
+/// a live streaming run produces continuously — an entry per assistant message
+/// and per tool call. The window has to outlast the longest single tool call a
+/// build might make (a full test suite), which is why `job_stall_secs` defaults
+/// to an hour rather than to the starvation window's half.
+///
+/// Everything downstream is deliberately identical to a liveness reap: the same
+/// transcript line, the same `job.state_changed` event, and the same handback,
+/// so a build card whose run was orphaned comes back to the board and becomes
+/// eligible for a fresh — `--resume`-warm — run under the ordinary failure
+/// backoff.
+pub async fn reap_stalled_jobs(state: &AppState, stall_secs: u64) -> ApiResult<u64> {
+    let stalled = state.jobs.reap_stalled_jobs(stall_secs as i64).await?;
+
+    for crate::repo::jobs::StalledJob {
+        id,
+        tenant,
+        target_task_id: target,
+        last_progress_at,
+    } in &stalled
+    {
+        append_transcript(
+            state,
+            *id,
+            "system",
+            &format!(
+                "no progress since {} — the executor agent is no longer reading this run, \
+                 reaped after {stall_secs}s",
+                last_progress_at.to_rfc3339()
+            ),
+        )
+        .await
+        .ok();
+        if let Ok(job) = load(state, *tenant, *id).await {
+            let private = target_is_private(state, *tenant, *target).await;
+            record_job_event(state, *tenant, "job.state_changed", &job, private).await;
+            crate::services::build_handback::on_run_concluded(state, *tenant, &job).await;
+        }
+    }
+    Ok(stalled.len() as u64)
+}
+
 // The two ways a `queued` job ends without ever running (MAIN-496). Until this,
 // `queued` had exactly one forward exit — `queued -> claimed` — so a job nothing
 // could place churned forever: `reap_stale_executors` sees only jobs with an

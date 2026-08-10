@@ -102,6 +102,18 @@ pub struct ReapedJob {
     pub node_last_seen_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// A job the reaper found orphaned: still `claimed`/`running` on a HEALTHY node,
+/// but silent past the stall window (MAIN-506). `last_progress_at` is the moment
+/// it last showed a sign of life, which the transcript line quotes.
+#[derive(Debug, Clone)]
+pub struct StalledJob {
+    pub id: JobId,
+    pub tenant: TenantId,
+    /// `None` for a `review` job — it has no ticket.
+    pub target_task_id: Option<TaskId>,
+    pub last_progress_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// A job the reaper ended while it was still `queued` (MAIN-496), with what it
 /// was waiting on. `queued_reason` is preserved rather than overwritten — it is
 /// the record of why the run never placed (AC-5).
@@ -150,6 +162,37 @@ impl QueuedCandidate {
             queued_reason: self.queued_reason,
             queued_since: self.created_at,
             reason_since: self.updated_at,
+        }
+    }
+}
+
+/// One silent in-flight job, read before the fail — for `QueuedCandidate`'s
+/// reason (SQLite's `RETURNING` reaches neither an alias nor a joined table).
+///
+/// The two progress facts are read SEPARATELY and folded in Rust rather than
+/// with `GREATEST`, which SQLite does not have under that name. Both are needed:
+/// `updated_at` alone would call a job that has just been claimed stale as soon
+/// as it inherited an old row's clock, and the transcript alone is `NULL` for a
+/// run that has not written a line yet.
+#[derive(nook_db::FromDbRow)]
+struct StalledCandidate {
+    id: JobId,
+    tenant_id: TenantId,
+    target_task_id: Option<TaskId>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+    last_entry_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl StalledCandidate {
+    fn into_stalled(self) -> StalledJob {
+        StalledJob {
+            id: self.id,
+            tenant: self.tenant_id,
+            target_task_id: self.target_task_id,
+            last_progress_at: self
+                .last_entry_at
+                .unwrap_or(self.updated_at)
+                .max(self.updated_at),
         }
     }
 }
@@ -322,6 +365,21 @@ pub trait LoopJobRepository: Send + Sync {
     /// reapers cannot double-fail a job and a job that resumed between scan and
     /// update falls out of the guard untouched.
     async fn reap_stale_executors(&self, grace_secs: i64) -> ApiResult<Vec<ReapedJob>>;
+
+    /// Fail every `claimed`/`running` job that has shown no progress — no new
+    /// transcript entry, no state change — for more than `stall_secs`, whatever
+    /// its node's liveness says (MAIN-506).
+    ///
+    /// This is the orphan case [`Self::reap_stale_executors`] structurally
+    /// cannot see: an executor agent that restarted leaves its streaming child
+    /// running with nobody reading it, and the NODE is fine — heartbeating,
+    /// `last_seen_at` at now — so the liveness cutoff never trips and the job
+    /// sits `running` forever. Job-level progress is the signal because
+    /// job-level progress is what actually stopped.
+    ///
+    /// `waiting_on_human` is excluded for the same reason it is excluded there:
+    /// a paused run is silent by design, indefinitely.
+    async fn reap_stalled_jobs(&self, stall_secs: i64) -> ApiResult<Vec<StalledJob>>;
 
     /// Cancel `tenant`'s `queued` jobs whose target card has reached a terminal
     /// column (MAIN-496 AC-1). A closed card is unambiguous evidence the run is
@@ -1056,6 +1114,64 @@ impl LoopJobRepository for DbLoopJobRepository {
             .collect())
     }
 
+    async fn reap_stalled_jobs(&self, stall_secs: i64) -> ApiResult<Vec<StalledJob>> {
+        // The silence test, spelled once and re-asserted as the UPDATE's guard.
+        // `{n}` is the stall window's placeholder; `{j}` is how the job row is
+        // named where the fragment lands (the outer table in the read, the
+        // implicit target in the write).
+        let silent = |j: &str, n: &str| {
+            let cutoff = time_math(self.db.engine()).now_minus_scaled(
+                &type_mapping(self.db.engine()).cast(n, "bigint"),
+                "1 second",
+            );
+            format!(
+                "{j}.updated_at < {cutoff}
+                 AND COALESCE((SELECT MAX(t.at) FROM loop_job_transcript t
+                                WHERE t.job_id = {j}.id), {j}.updated_at) < {cutoff}"
+            )
+        };
+        let candidates: Vec<StalledCandidate> = self
+            .db
+            .query_all(
+                &format!(
+                    "SELECT j.id, j.tenant_id, j.target_task_id, j.updated_at,
+                            (SELECT MAX(t.at) FROM loop_job_transcript t
+                              WHERE t.job_id = j.id) AS last_entry_at
+                       FROM loop_jobs j
+                      WHERE j.state IN ('claimed', 'running') AND {}",
+                    silent("j", "$1")
+                ),
+                params![stall_secs],
+            )
+            .await?;
+        let mut stalled = Vec::new();
+        for c in candidates {
+            // Re-asserted, not assumed — the same exactly-once property the
+            // executor claim has, so every replica may scan. A job that spoke
+            // between the read and the write has its transcript (and, on a
+            // transition, its `updated_at`) at now, falls out of this guard,
+            // and keeps running.
+            let failed = self
+                .db
+                .exec(
+                    &format!(
+                        "UPDATE loop_jobs SET state = 'failed', updated_at = {now}
+                          WHERE id = $1 AND state IN ('claimed', 'running')
+                            AND {}",
+                        silent("loop_jobs", "$2"),
+                        now = type_mapping(self.db.engine()).now(),
+                    ),
+                    params![c.id, stall_secs],
+                )
+                .await?
+                > 0;
+            if failed {
+                stalled.push(c.into_stalled());
+            }
+        }
+        Ok(stalled)
+    }
+
     async fn cancel_queued_on_finished_cards(
         &self,
         tenant: TenantId,
@@ -1361,6 +1477,15 @@ impl FakeLoopJobRepository {
         let mut s = self.inner.lock().unwrap();
         if let Some(j) = s.jobs.iter_mut().find(|j| j.id == id) {
             j.state = state.to_string();
+        }
+    }
+
+    /// Push a job's clock back, so a scan that measures silence has something
+    /// to measure — `set_node_last_seen`'s twin for job-level progress.
+    pub fn force_updated_at(&self, id: JobId, at: chrono::DateTime<chrono::Utc>) {
+        let mut s = self.inner.lock().unwrap();
+        if let Some(j) = s.jobs.iter_mut().find(|j| j.id == id) {
+            j.updated_at = at;
         }
     }
 }
@@ -1840,6 +1965,47 @@ impl LoopJobRepository for FakeLoopJobRepository {
                 tenant: j.tenant_id,
                 target_task_id: j.target_task_id,
                 node_last_seen_at: *last_seen,
+            });
+        }
+        Ok(out)
+    }
+
+    async fn reap_stalled_jobs(&self, stall_secs: i64) -> ApiResult<Vec<StalledJob>> {
+        let mut s = self.inner.lock().unwrap();
+        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(stall_secs);
+        let last_entry: Vec<(JobId, chrono::DateTime<chrono::Utc>)> = s
+            .transcript
+            .iter()
+            .map(|e| (e.job_id, e.at))
+            .fold(Vec::new(), |mut acc, (job, at)| {
+                match acc.iter_mut().find(|(j, _)| *j == job) {
+                    Some((_, newest)) if *newest < at => *newest = at,
+                    Some(_) => {}
+                    None => acc.push((job, at)),
+                }
+                acc
+            });
+        let mut out = Vec::new();
+        for j in s.jobs.iter_mut() {
+            if !matches!(j.state.as_str(), "claimed" | "running") {
+                continue;
+            }
+            let progress = last_entry
+                .iter()
+                .find(|(id, _)| *id == j.id)
+                .map(|(_, at)| *at)
+                .unwrap_or(j.updated_at)
+                .max(j.updated_at);
+            if progress >= cutoff {
+                continue;
+            }
+            j.state = "failed".into();
+            j.updated_at = chrono::Utc::now();
+            out.push(StalledJob {
+                id: j.id,
+                tenant: j.tenant_id,
+                target_task_id: j.target_task_id,
+                last_progress_at: progress,
             });
         }
         Ok(out)

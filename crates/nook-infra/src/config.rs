@@ -242,6 +242,20 @@ pub struct Config {
     /// enough to outlast a node restart or an operator upgrade, short enough
     /// that a starved card surfaces within the hour instead of never.
     pub job_starve_secs: u64,
+    /// How many seconds a `claimed`/`running` job may go without a single new
+    /// transcript entry before the reaper treats it as orphaned and fails it
+    /// (MAIN-506). Measured on the JOB's own progress, not the node's liveness,
+    /// because the case this catches is an executor agent that restarted:
+    /// the node is healthy and heartbeating, so `job_reap_grace_secs` never
+    /// trips, while the run itself has stopped producing output forever.
+    ///
+    /// Default 3600 (1 hour), deliberately far longer than the starvation
+    /// window: a streaming run emits a transcript entry per assistant message
+    /// and per tool call, but ONE tool call can legitimately be a full test
+    /// suite, so the threshold has to outlast the longest single command a
+    /// build might run. `waiting_on_human` is exempt — a paused run makes no
+    /// progress by design.
+    pub job_stall_secs: u64,
 
     // ── Board-card claim leases (MAIN-229) ──────────────────────────────
     /// How many seconds a card's bound session's node may be unseen before the
@@ -421,6 +435,9 @@ impl Config {
             job_starve_secs: env_opt("NOOK_JOB_STARVE_SECS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1_800),
+            job_stall_secs: env_opt("NOOK_JOB_STALL_SECS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3_600),
 
             claim_session_grace_secs: env_opt("NOOK_CLAIM_SESSION_GRACE_SECS")
                 .and_then(|v| v.parse().ok())
@@ -589,6 +606,7 @@ impl Config {
             tunnel_idle_secs: 1800,
             job_reap_grace_secs: 180,
             job_starve_secs: 1_800,
+            job_stall_secs: 3_600,
             claim_session_grace_secs: 120,
             max_claim_secs: 14_400,
             claim_reap_scan_secs: 30,
