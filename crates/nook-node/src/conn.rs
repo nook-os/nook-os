@@ -33,6 +33,10 @@ fn port_is_free(port: i32) -> bool {
     std::net::TcpListener::bind(("0.0.0.0", p)).is_ok()
 }
 const DISCOVERY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+/// How often to tell the control plane which build compose stacks are up
+/// (MAIN-507). Ten minutes: it costs one `docker compose ls`, and the thing it
+/// catches — a stack whose card finished — is measured in hours of idle RAM.
+const STACK_REPORT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
 /// How often to reconsider our certificate.
 ///
 /// Six hours against a seven-day renewal window: a node that is asleep, or one
@@ -312,6 +316,28 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
             let _ = tx.blocking_send(NodeToControl::LoopWorktreesHeld { paths });
         });
     }
+
+    // The same report for compose stacks (MAIN-507 AC-5), and on a timer as
+    // well as on connect: a node that stays up for days accumulates the stacks
+    // of every card that finished in between, and only the control plane can
+    // say which of them belong to a card that is over.
+    let stacks_tx = ctl_tx.clone();
+    let stacks_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(STACK_REPORT_INTERVAL);
+        loop {
+            interval.tick().await; // the first tick is immediate: the connect-time report
+            let projects = tokio::task::spawn_blocking(crate::compose::build_stacks_held)
+                .await
+                .unwrap_or_default();
+            if stacks_tx
+                .send(NodeToControl::BuildStacksHeld { projects })
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
 
     // Heartbeat carries a live resource sample so triage/humans can see which
     // machine can take the work.
@@ -771,6 +797,23 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                     }
                 });
             }
+            ControlToNode::ReapBuildStacks {
+                request_id,
+                projects,
+            } => {
+                let tx = ctl_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let reaped = crate::compose::reap_projects(&projects);
+                    let _ = tx.blocking_send(NodeToControl::OpResult {
+                        request_id,
+                        ok: reaped.ok,
+                        // What actually came down, so the card can say so
+                        // (AC-7); `None` when nothing was running.
+                        path: (!reaped.projects.is_empty()).then(|| reaped.projects.join(", ")),
+                        message: reaped.message,
+                    });
+                });
+            }
             ControlToNode::RemoveWorktree {
                 request_id,
                 worktree_path,
@@ -778,7 +821,11 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 let tx = ctl_tx.clone();
                 let roots = cfg.workspace_roots.clone();
                 tokio::task::spawn_blocking(move || {
-                    let outcome = crate::gitops::remove_worktree(&worktree_path);
+                    // The stack goes first (MAIN-507 AC-3) — see the function.
+                    let outcome = crate::compose::reap_then_remove_worktree(
+                        &worktree_path,
+                        crate::gitops::remove_worktree,
+                    );
                     let ok = outcome.ok;
                     let _ = tx.blocking_send(NodeToControl::OpResult {
                         request_id,
@@ -1218,6 +1265,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
     cert_check.abort();
     heartbeat.abort();
     discovery_task.abort();
+    stacks_task.abort();
     Ok(())
 }
 

@@ -383,6 +383,12 @@ pub trait TaskRepository: Send + Sync {
     /// reconnecting node's report is checked against (MAIN-480 AC-1).
     async fn worktree_paths_on_node(&self, node: NodeId) -> ApiResult<Vec<String>>;
 
+    /// The subset of those whose card has NOT finished — what the compose-stack
+    /// sweep protects (MAIN-507 AC-6). A card in review has a finished build and
+    /// a live worktree, and a repair run reuses both, so "the build is over" is
+    /// not the test; reaching a terminal column is.
+    async fn active_worktree_paths_on_node(&self, node: NodeId) -> ApiResult<Vec<String>>;
+
     /// Move a card to `column`. Leaving a `started` column clears the claim
     /// lease (MAIN-229 AC-2) — the destination's type decides, in the same
     /// statement, so every mover (drag, `/move`, bulk) is covered by one rule.
@@ -1373,6 +1379,21 @@ impl TaskRepository for DbTaskRepository {
             .query_all(
                 "SELECT worktree_path FROM tasks
                   WHERE worktree_node_id = $1 AND worktree_path IS NOT NULL",
+                params![node],
+            )
+            .await?;
+        Ok(rows.into_iter().map(|(p,)| p).collect())
+    }
+
+    async fn active_worktree_paths_on_node(&self, node: NodeId) -> ApiResult<Vec<String>> {
+        let rows: Vec<(String,)> = self
+            .db
+            .query_all(
+                "SELECT t.worktree_path FROM tasks t
+                   JOIN board_columns c ON c.id = t.column_id
+                  WHERE t.worktree_node_id = $1 AND t.worktree_path IS NOT NULL
+                    AND t.archived_at IS NULL
+                    AND c.type NOT IN ('completed', 'canceled')",
                 params![node],
             )
             .await?;
@@ -3387,6 +3408,23 @@ impl TaskRepository for FakeTaskRepository {
             .tasks
             .iter()
             .filter(|t| t.worktree_node_id == Some(node))
+            .filter_map(|t| t.worktree_path.clone())
+            .collect())
+    }
+
+    async fn active_worktree_paths_on_node(&self, node: NodeId) -> ApiResult<Vec<String>> {
+        let st = self.inner.lock().unwrap();
+        let terminal: Vec<ColumnId> = st
+            .columns
+            .iter()
+            .filter(|c| matches!(c.r#type.as_str(), "completed" | "canceled"))
+            .map(|c| c.id)
+            .collect();
+        Ok(st
+            .tasks
+            .iter()
+            .filter(|t| t.worktree_node_id == Some(node))
+            .filter(|t| t.archived_at.is_none() && !terminal.contains(&t.column_id))
             .filter_map(|t| t.worktree_path.clone())
             .collect())
     }

@@ -1277,6 +1277,7 @@ fn request_kind(msg: &ControlToNode) -> Option<(Uuid, RequestKind)> {
         ControlToNode::CloneRepo { request_id, .. }
         | ControlToNode::AddWorktree { request_id, .. }
         | ControlToNode::RemoveWorktree { request_id, .. }
+        | ControlToNode::ReapBuildStacks { request_id, .. }
         | ControlToNode::InitProject { request_id, .. }
         | ControlToNode::CaptureSession { request_id, .. } => Some((*request_id, RequestKind::Op)),
         ControlToNode::GetGitStatus { request_id, .. } => Some((*request_id, RequestKind::Git)),
