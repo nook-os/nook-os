@@ -131,6 +131,11 @@ enum Command {
         /// epics are excluded too — both are enforced server-side.
         #[arg(long)]
         backlog: bool,
+        /// Include finished cards (Done, Canceled). Excluded by default, so a
+        /// card left labelled `agent-ready` after it merged is not offered as
+        /// work — also enforced server-side.
+        #[arg(long)]
+        done: bool,
         #[arg(long)]
         json: bool,
     },
@@ -554,6 +559,7 @@ async fn main() -> Result<()> {
             workspace,
             all_workspaces,
             backlog,
+            done,
             json,
         } => {
             cli::tasks(
@@ -569,6 +575,7 @@ async fn main() -> Result<()> {
                 workspace.as_deref(),
                 all_workspaces,
                 backlog,
+                done,
                 json,
             )
             .await

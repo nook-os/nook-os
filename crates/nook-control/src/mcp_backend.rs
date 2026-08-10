@@ -587,6 +587,8 @@ impl NookBackend for McpBackend {
                 archived: None,
                 // Backlog excluded by default here too (MAIN-80); opt in via the tool.
                 backlog: f.backlog,
+                // And finished work (MAIN-464), same shape.
+                done: f.done,
                 limit: f.limit,
                 cursor: None,
             },

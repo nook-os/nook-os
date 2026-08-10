@@ -118,8 +118,9 @@ pub trait NookBackend: Send + Sync + 'static {
     // uuid, because a key is what an agent is handed — in a PR body, in a
     // branch name, in the reply to filing an issue.
     /// Find work: the compound pick filter, as one query. By default it excludes
-    /// tasks in a `backlog` column and `type='epic'` tasks — the backlog is a
-    /// human refinement space and an epic is a container, neither buildable.
+    /// tasks in a `backlog` column, tasks in a `completed`/`canceled` column and
+    /// `type='epic'` tasks — the backlog is a human refinement space, a finished
+    /// card is over, and an epic is a container; none is buildable.
     async fn list_tasks(&self, f: TaskQuery) -> anyhow::Result<Vec<TaskItem>>;
     /// One whole issue: body, labels, comments, relations, blocked state.
     async fn get_task(&self, task: String) -> anyhow::Result<serde_json::Value>;
@@ -234,6 +235,9 @@ pub struct TaskQuery {
     /// Include tasks in a `backlog` column (default false — the backlog is a
     /// human refinement space the loop never draws from).
     pub backlog: Option<bool>,
+    /// Include tasks in a `completed`/`canceled` column (default false —
+    /// finished work is not work).
+    pub done: Option<bool>,
     pub limit: Option<i64>,
 }
 

@@ -5365,6 +5365,15 @@
             }
           },
           {
+            "name": "done",
+            "in": "query",
+            "description": "Include tasks in a `completed`- or `canceled`-type column. Default\n(absent/false) excludes them: finished work is not work (MAIN-464). Set\n`done=true` to see them. Independent of labels, and lifted by `parent=`\nor by `column_type=completed|canceled`.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "required": false,
