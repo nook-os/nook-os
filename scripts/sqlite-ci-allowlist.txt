@@ -31,8 +31,10 @@
 # Measured on two full runs of `cargo test --workspace --no-fail-fast` under
 # sqlite://, which produced identical failure sets — nothing here is flaky.
 #
-# 137 test binaries: 116 COVERED, 20 pending below, 1 deliberately Postgres-only —
+# 141 test binaries: 121 COVERED, 19 pending below, 1 deliberately Postgres-only —
 # the numbers check-sqlite-ci.sh itself reports, not arithmetic on this file.
+# (Re-read from a real run by MAIN-472, which deleted `node_owner`; it said
+# 137/116/20 before that.)
 # (Re-read from a real run by MAIN-442, which deleted `task_workspace`. The line
 # below said 103/61/41 while the file held 21 entries: cards deleted their lines
 # and left this count behind, which is what a hand-maintained tally does. It is
@@ -66,8 +68,15 @@ review_column              # raw sqlx / bed.pool in the test itself (MAIN-268)
 squash_restamp             # raw sqlx / bed.pool in the test itself (MAIN-268)
 task_checkout_ids          # raw sqlx / bed.pool in the test itself (MAIN-268)
 
-# ── production still emits Postgres SQL (MAIN-423, the dialect-sweep residue) ──
-node_owner                 # production still emits Postgres SQL on this path (MAIN-423)
+# ── the MAIN-423 residue, and what MEASURING it found (MAIN-472) ──
+#
+# MAIN-423 closed as a tracker on 2026-08-08 and its one surviving line —
+# node_owner — moved here. It was measured rather than inherited, and the reason
+# it had carried since MAIN-289 was wrong: nothing on that path emits
+# Postgres-only SQL from production. Its single remaining failure was
+# `UPDATE nodes n SET …` in the TEST itself, which SQLite refuses for want of
+# the `AS` that Postgres treats as optional. Fixed there, so the line is DELETED
+# and no entry names MAIN-423 any more.
 
 # ── still production Postgres SQL, re-tagged by MAIN-293 ──
 #
