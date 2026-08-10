@@ -213,6 +213,20 @@ pub enum NodeToControl {
         ok: bool,
         message: String,
     },
+    /// The node REFUSED to launch a build run's agent (MAIN-482). Its working
+    /// directory was not a worktree of the node's own loop clone cache, was a
+    /// checkout the node reports to the control plane, or had HEAD attached to
+    /// the repository's default branch.
+    ///
+    /// Not a `JobFinished { ok: false }`, because the board consequence
+    /// differs: a refused run never reached its agent, so no outcome will ever
+    /// be reported for it — and the outcome handler is the only thing that
+    /// releases the loop's claim. The control plane answers this by giving the
+    /// card back rather than leaving it claimed with nothing running (AC-6).
+    JobRefused {
+        job_id: String,
+        reason: String,
+    },
     /// Where a BUILD run's worktree is, reported once the node has created or
     /// adopted it (MAIN-480 AC-4). The tree outlives the run, so the control
     /// plane records it on the card: that record is what pins later passes to

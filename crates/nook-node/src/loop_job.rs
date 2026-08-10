@@ -93,6 +93,20 @@ fn finished(out: &Sender<NodeToControl>, job_id: &str, ok: bool, message: impl I
     });
 }
 
+/// Report a run the node REFUSED to launch (MAIN-482 AC-6).
+///
+/// Distinct from `finished(ok=false)` because the board consequence differs: a
+/// refused run never reached its agent, so nothing will ever report an outcome
+/// for it — and the outcome handler is the only thing that releases the loop's
+/// claim. Saying "refused" rather than "failed" is what lets the control plane
+/// give the card back instead of leaving it claimed with nothing running.
+fn refused(out: &Sender<NodeToControl>, job_id: &str, reason: impl Into<String>) {
+    let _ = out.blocking_send(NodeToControl::JobRefused {
+        job_id: job_id.to_string(),
+        reason: reason.into(),
+    });
+}
+
 /// The node-local clone cache root, per control plane so two control planes on
 /// one machine never share a mirror (mirrors MAIN-58's per-cp isolation).
 fn cache_base(server: &str) -> PathBuf {
@@ -987,6 +1001,102 @@ fn default_branch_name(cache: &Path) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Why a build run may not launch its agent here (MAIN-482).
+///
+/// "No automated builder ever works on the primary clone or the default
+/// branch" was prose in the build skill until now — a rule that costs tokens
+/// on every pass and that an agent can reason its way around. These are the
+/// same rule as code, checked at the moment the node controls.
+#[derive(Debug, PartialEq, Eq)]
+enum LaunchRefusal {
+    /// The working directory is not a worktree of this node's own loop clone
+    /// cache. Anything else is somebody's checkout.
+    OutsideCache,
+    /// It IS a path discovery reports as a `node_workspaces` checkout — the
+    /// primary clone, or a human's worktree. The escape hatch for parallel
+    /// work while the loop runs is exactly this directory (NG-2).
+    KnownCheckout,
+    /// HEAD is attached to the repository's default branch. Detached (the
+    /// clean start) and attached to the card's own branch (resuming
+    /// interrupted work) are both legitimate.
+    OnDefaultBranch(String),
+}
+
+impl LaunchRefusal {
+    /// The transcript's whole account of the refusal: what was refused, and the
+    /// working directory it was refused for.
+    fn message(&self, worktree: &Path) -> String {
+        let wd = worktree.display();
+        match self {
+            Self::OutsideCache => format!(
+                "refusing to build in {wd}: a build run works only in a worktree of this \
+                 node's own loop clone cache"
+            ),
+            Self::KnownCheckout => format!(
+                "refusing to build in {wd}: that is a checkout this node reports to the \
+                 control plane — the primary clone or a human's worktree — and it is \
+                 reserved for people, not builders"
+            ),
+            Self::OnDefaultBranch(branch) => format!(
+                "refusing to build in {wd}: HEAD is attached to {branch}, the repository's \
+                 default branch. A build pass starts detached at the pushed head, or on \
+                 the card's own branch"
+            ),
+        }
+    }
+}
+
+/// Is `path` a proper descendant of `base`? Both are compared canonicalized
+/// where the filesystem allows it, so a symlinked home (`/home` → `/var/home`)
+/// or a `..` in a configured root cannot make a legitimate worktree read as an
+/// outsider.
+fn is_inside(path: &Path, base: &Path) -> bool {
+    let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let (path, base) = (real(path), real(base));
+    path != base && path.starts_with(&base)
+}
+
+/// May a BUILD run launch its agent in `worktree`? `None` is yes.
+///
+/// Pure, so every case in AC-5 is a unit test rather than a live node: the
+/// caller supplies the cache's worktree base, the checkout paths discovery
+/// reports, the branch HEAD is attached to (`None` = detached), and the
+/// repository's default branch.
+fn build_launch_refusal(
+    worktree: &Path,
+    wt_base: &Path,
+    checkouts: &[PathBuf],
+    attached: Option<&str>,
+    default_branch: &str,
+) -> Option<LaunchRefusal> {
+    if !is_inside(worktree, wt_base) {
+        return Some(LaunchRefusal::OutsideCache);
+    }
+    // Equality, not containment: a cache worktree is a descendant of the cache
+    // base, and a containment test against a root somebody pointed discovery at
+    // could swallow the very tree this is protecting.
+    let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let here = real(worktree);
+    if checkouts.iter().any(|c| real(c) == here) {
+        return Some(LaunchRefusal::KnownCheckout);
+    }
+    if attached.is_some_and(|b| b == default_branch) {
+        return Some(LaunchRefusal::OnDefaultBranch(default_branch.to_string()));
+    }
+    None
+}
+
+/// Every checkout path this node reports to the control plane — the rows
+/// `node_workspaces` is built from, which is the same list AC-1 refuses to
+/// build in. Read at launch rather than cached: a human can make a worktree
+/// between one pass and the next.
+fn known_checkout_paths(cfg: &NodeConfig) -> Vec<PathBuf> {
+    crate::discovery::scan(&cfg.workspace_roots)
+        .into_iter()
+        .map(|w| PathBuf::from(w.path))
+        .collect()
+}
+
 /// Add a per-job worktree off `cache`, into `<wt_base>/<job>` so concurrent jobs
 /// on the same workspace get distinct trees.
 ///
@@ -1516,6 +1626,27 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
             }
         }
     }
+    // The launch guard (MAIN-482 AC-1/AC-2). Deliberately here — after every
+    // step that can still MOVE the tree (adoption, reset, seeding) and before
+    // anything that commits the platform to this directory, so a refused run
+    // neither pins the card to a bad checkout nor starts an agent in one.
+    //
+    // Build only (AC-4): review, spec and epic-run trees are rebuilt every
+    // pass and a human's session is governed by the skill, not by this.
+    if kind == "build" {
+        if let Some(refusal) = build_launch_refusal(
+            &worktree,
+            &wt_base,
+            &known_checkout_paths(&cfg),
+            attached_branch(&worktree).as_deref(),
+            &default_branch,
+        ) {
+            refused(&out, &job_id, refusal.message(&worktree));
+            unregister(&dirname);
+            return;
+        }
+    }
+
     // Tell the control plane where this card works (AC-4). It records the path
     // on the card, which is what pins later passes here, what `prune-worktree`
     // addresses, and what stops `reconcile` treating the tree as an orphan.
@@ -2816,6 +2947,146 @@ mod tests {
         .expect("mirror clone");
         assert_eq!(default_branch_name(&cache).as_deref(), Some("main"));
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── MAIN-482: where a build run may and may not launch ─────────────────
+
+    /// A cache worktree, a primary clone and a human's worktree, as real
+    /// directories — `build_launch_refusal` canonicalizes, so paths that exist
+    /// are what the guard actually sees on a node.
+    struct Layout {
+        tmp: PathBuf,
+        wt_base: PathBuf,
+        cache_worktree: PathBuf,
+        checkouts: Vec<PathBuf>,
+    }
+
+    fn layout(tag: &str) -> Layout {
+        let tmp =
+            std::env::temp_dir().join(format!("nook-482-{tag}-{}", uuid::Uuid::now_v7().simple()));
+        let wt_base = tmp.join("clone-cache/cp/worktrees");
+        let cache_worktree = wt_base.join(build_dirname("ws-1", "MAIN-482"));
+        let primary = tmp.join("workspace/nook-os");
+        let human = tmp.join("workspace/nook-os-feature");
+        for d in [&cache_worktree, &primary, &human] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        Layout {
+            tmp,
+            wt_base,
+            cache_worktree,
+            checkouts: vec![primary, human],
+        }
+    }
+
+    /// AC-1: the primary clone is the human's escape hatch for parallel work
+    /// while the loop runs (NG-2). A build run pointed at it is refused before
+    /// the agent starts, not merely discouraged in prose.
+    #[test]
+    fn a_build_run_is_refused_in_a_checkout_outside_the_clone_cache() {
+        let l = layout("outside");
+        let primary = l.checkouts[0].clone();
+
+        let refusal = build_launch_refusal(&primary, &l.wt_base, &l.checkouts, None, "main");
+
+        assert_eq!(refusal, Some(LaunchRefusal::OutsideCache));
+        let said = refusal.unwrap().message(&primary);
+        assert!(
+            said.contains(&primary.display().to_string()) && said.contains("clone cache"),
+            "the transcript must name the directory and the rule: {said}"
+        );
+        let _ = std::fs::remove_dir_all(&l.tmp);
+    }
+
+    /// AC-1's second half: a path can be inside the cache AND be a checkout
+    /// this node reports — an operator who pointed a workspace root at the
+    /// cache. Being reported to the control plane is what makes a directory
+    /// somebody's, so containment alone is not enough.
+    #[test]
+    fn a_build_run_is_refused_in_a_directory_the_node_reports_as_a_checkout() {
+        let l = layout("known");
+        let mut checkouts = l.checkouts.clone();
+        checkouts.push(l.cache_worktree.clone());
+
+        assert_eq!(
+            build_launch_refusal(&l.cache_worktree, &l.wt_base, &checkouts, None, "main"),
+            Some(LaunchRefusal::KnownCheckout)
+        );
+        let _ = std::fs::remove_dir_all(&l.tmp);
+    }
+
+    /// AC-2: attached to the repository's default branch is the one HEAD a
+    /// build pass may not start from, and the refusal names the branch.
+    #[test]
+    fn a_build_run_is_refused_on_the_default_branch() {
+        let l = layout("default");
+
+        let refusal = build_launch_refusal(
+            &l.cache_worktree,
+            &l.wt_base,
+            &l.checkouts,
+            Some("main"),
+            "main",
+        );
+
+        assert_eq!(refusal, Some(LaunchRefusal::OnDefaultBranch("main".into())));
+        assert!(
+            refusal.unwrap().message(&l.cache_worktree).contains("main"),
+            "which branch was refused is the whole of the message"
+        );
+        // …and it is the REPOSITORY's default, not the string `main`: a repo
+        // whose default is `trunk` refuses `trunk` and permits `main`.
+        assert_eq!(
+            build_launch_refusal(
+                &l.cache_worktree,
+                &l.wt_base,
+                &l.checkouts,
+                Some("main"),
+                "trunk"
+            ),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&l.tmp);
+    }
+
+    /// AC-2: both legitimate start states pass — detached at the pushed head
+    /// (a clean pass) and attached to the card's own branch (resuming work an
+    /// interrupted pass left behind).
+    #[test]
+    fn a_detached_cache_worktree_and_the_cards_own_branch_both_launch() {
+        let l = layout("ok");
+
+        assert_eq!(
+            build_launch_refusal(&l.cache_worktree, &l.wt_base, &l.checkouts, None, "main"),
+            None,
+            "detached at the pushed head is how every clean pass starts"
+        );
+        assert_eq!(
+            build_launch_refusal(
+                &l.cache_worktree,
+                &l.wt_base,
+                &l.checkouts,
+                Some("main-482-guards"),
+                "main"
+            ),
+            None,
+            "attached to the card's own branch is how a resumed pass starts"
+        );
+        let _ = std::fs::remove_dir_all(&l.tmp);
+    }
+
+    /// The cache base itself is not a worktree of the cache. A build run whose
+    /// path resolved to it would be operating on the directory that holds
+    /// every card's tree.
+    #[test]
+    fn the_worktree_base_itself_is_not_a_place_to_build() {
+        let l = layout("base");
+
+        assert_eq!(
+            build_launch_refusal(&l.wt_base, &l.wt_base, &l.checkouts, None, "main"),
+            Some(LaunchRefusal::OutsideCache)
+        );
+        let _ = std::fs::remove_dir_all(&l.tmp);
     }
 
     /// MAIN-480 AC-1: reconcile is what deleted a build tree on every node

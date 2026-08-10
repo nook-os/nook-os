@@ -955,6 +955,20 @@ async fn handle_message(
                 .await;
             }
         }
+        // The node would not launch this build run's agent (MAIN-482): the
+        // card comes back rather than staying claimed with nothing running.
+        NodeToControl::JobRefused { job_id, reason } => {
+            if let Ok(id) = job_id.parse::<uuid::Uuid>() {
+                let _ = crate::services::jobs::refuse_from_node(
+                    state,
+                    tenant,
+                    node_id,
+                    nook_types::JobId(id),
+                    &reason,
+                )
+                .await;
+            }
+        }
         // Where a build run's worktree is (MAIN-480 AC-4) — the record that
         // pins later passes here and makes the tree prunable from the board.
         NodeToControl::LoopWorktreeReady { job_id, path } => {

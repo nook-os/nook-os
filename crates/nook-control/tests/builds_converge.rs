@@ -1116,3 +1116,124 @@ async fn a_missing_or_wrong_closes_line_is_refused_and_records_nothing() {
 
     bed.teardown().await;
 }
+
+/// MAIN-482 AC-6: a run the node REFUSED to launch never reaches the outcome
+/// handler — which is the only thing that releases the loop's claim — so the
+/// refusal has to give the card back itself. Otherwise a guarded build leaves
+/// the board claiming work in progress with nothing running.
+#[tokio::test]
+async fn a_refused_run_returns_its_card_to_the_queue_with_the_reason_on_it() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("bref").await;
+    let (user, _) = bed.user(tenant, "member").await;
+    let ws = bed.workspace(tenant).await;
+    let state = bed.app_state().await;
+    let board = board_fixture(&bed.db(), tenant).await;
+    let card = approved_card(&bed.db(), tenant, board, ws, user, "guarded").await;
+
+    let c = jobs::converge_builds(&state, tenant, user, ws, None)
+        .await
+        .expect("converge");
+    let job = c.jobs[0].clone();
+    state
+        .jobs
+        .transition(job.id, "running")
+        .await
+        .expect("to running");
+    let started = state
+        .tasks
+        .get_row(tenant, card.id)
+        .await
+        .expect("read")
+        .expect("card");
+    assert_eq!(started.assignee_user_id, Some(user), "claimed by the raise");
+
+    let reason = "refusing to build in /srv/repos/api: that is a checkout this node \
+                  reports to the control plane";
+    jobs::refuse(&state, tenant, job.id, reason)
+        .await
+        .expect("refuse");
+
+    let row = state
+        .tasks
+        .get_row(tenant, card.id)
+        .await
+        .expect("read")
+        .expect("card");
+    assert_eq!(row.assignee_user_id, None, "the claim came back");
+    let todo = state
+        .tasks
+        .column_of_type(board, "unstarted")
+        .await
+        .expect("column")
+        .expect("unstarted");
+    assert_eq!(row.column_id, todo, "and so did the card");
+    assert!(
+        state
+            .tasks
+            .comments_of(card.id)
+            .await
+            .expect("comments")
+            .iter()
+            .any(|c| c.body_md.contains("reports to the control plane")
+                && c.author_name == "nook-build loop"),
+        "the refusal names itself on the card, or it looks like the loop simply lost it"
+    );
+
+    let live = state
+        .jobs
+        .get(tenant, job.id)
+        .await
+        .expect("read")
+        .expect("job");
+    assert_eq!(live.state, "failed", "a refusal is not a completed run");
+    assert_eq!(
+        live.build_outcome, None,
+        "nothing concluded — the agent never started"
+    );
+
+    // Back in the pick contract a human reads — unassigned, unblocked, and on
+    // an `agent-ready` card again.
+    let rows = query_rows(
+        state.tasks.as_ref(),
+        tenant,
+        user,
+        &TaskFilter {
+            label: vec!["agent-ready".into()],
+            not_label: vec!["blocked".into()],
+            assignee: Some("none".into()),
+            workspace: Some(ws.0),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("pick");
+    assert_eq!(rows.len(), 1, "the card is pickable again");
+
+    // Not INSTANTLY re-raised, though, and that is `run_reconcile`'s ordinary
+    // failure backoff doing its job rather than anything this refusal did: a
+    // guard refuses the same tree deterministically, so an unheld re-raise
+    // would be a refusal every poll interval forever.
+    let held = jobs::converge_builds(&state, tenant, user, ws, None)
+        .await
+        .expect("converge 2");
+    assert_eq!(held.raised, 0, "held by the failure backoff, not lost");
+
+    // Once that hold expires the card is picked up again, which is what makes
+    // the handback worth anything (AC-6).
+    bed.db()
+        .exec(
+            "UPDATE loop_jobs SET updated_at = $1 WHERE id = $2",
+            params![chrono::Utc::now() - chrono::Duration::hours(1), job.id],
+        )
+        .await
+        .expect("age the refused run past its backoff");
+    let again = jobs::converge_builds(&state, tenant, user, ws, None)
+        .await
+        .expect("converge 3");
+    assert_eq!(again.raised, 1, "and the next pass picks it up");
+
+    bed.teardown().await;
+}
