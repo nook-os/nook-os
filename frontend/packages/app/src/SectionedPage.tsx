@@ -70,6 +70,16 @@ export function SectionedPage({
   const selectedId = params.get("section");
   const active = visible.find((s) => s.id === selectedId) ?? visible[0] ?? null;
 
+  // Below the medium breakpoint the nav is a horizontal strip that scrolls, so
+  // a section late in the list sits off-screen with nothing saying it exists
+  // (MAIN-497 AC-2). `nearest` scrolls only the ancestors that need it, which
+  // is also why this is safe to run at every width: in the desktop rail an
+  // already-visible item moves nothing, and the document never scrolls.
+  const activeRef = React.useRef<HTMLButtonElement>(null);
+  React.useEffect(() => {
+    activeRef.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [active?.id]);
+
   const pick = (id: string) => {
     const next = new URLSearchParams(params);
     next.set("section", id);
@@ -102,27 +112,34 @@ export function SectionedPage({
               if (e.key === "Escape") setTerm("");
             }}
           />
-          {groups.map((g) => (
-            <React.Fragment key={g.name}>
-              <div className="spage-group">{g.name}</div>
-              {g.items.map((s) => (
-                <button
-                  key={s.id}
-                  className={`spage-item${active?.id === s.id ? " active" : ""}`}
-                  aria-current={active?.id === s.id ? "true" : undefined}
-                  onClick={() => pick(s.id)}
-                >
-                  <span className="spage-item-title">{s.title}</span>
-                  {s.badge && <span className="spage-badge">{s.badge}</span>}
-                </button>
-              ))}
-            </React.Fragment>
-          ))}
-          {visible.length === 0 && (
-            <div className="spage-empty faint small">
-              <SearchX size={12} /> nothing matches “{term}”
-            </div>
-          )}
+          {/* One element holding every group and item, so the compact strip has
+              a single box to turn into a scrolling row with the finder above it
+              rather than beside it. `display: contents` above the breakpoint,
+              so the rail is laid out exactly as it was before it existed. */}
+          <div className="spage-list">
+            {groups.map((g) => (
+              <React.Fragment key={g.name}>
+                <div className="spage-group">{g.name}</div>
+                {g.items.map((s) => (
+                  <button
+                    key={s.id}
+                    ref={active?.id === s.id ? activeRef : undefined}
+                    className={`spage-item${active?.id === s.id ? " active" : ""}`}
+                    aria-current={active?.id === s.id ? "true" : undefined}
+                    onClick={() => pick(s.id)}
+                  >
+                    <span className="spage-item-title">{s.title}</span>
+                    {s.badge && <span className="spage-badge">{s.badge}</span>}
+                  </button>
+                ))}
+              </React.Fragment>
+            ))}
+            {visible.length === 0 && (
+              <div className="spage-empty faint small">
+                <SearchX size={12} /> nothing matches “{term}”
+              </div>
+            )}
+          </div>
         </nav>
         <div className="spage-content">{active?.render()}</div>
       </div>

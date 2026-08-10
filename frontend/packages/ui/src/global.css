@@ -4305,6 +4305,11 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   min-height: 0;
 }
 .spage-find { margin-bottom: 6px; }
+/* The groups-and-items box. `contents` here and a real flex row at compact:
+   the rail keeps the nav itself as the one scroller — the finder scrolls away
+   with the list exactly as it always has — while the strip gets a box of its
+   own to scroll sideways under a finder that stays put. */
+.spage-list { display: contents; }
 .spage-group {
   margin: 8px 6px 3px;
   font-size: 10px;
@@ -4382,11 +4387,65 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   gap: 10px;
   padding: 10px;
 }
+/* ── medium: the rail rotates into a strip (MAIN-497) ───────────────────────
+   Stacking the rail's ten links vertically above the content put the whole
+   section list between a phone and the thing it came to read. Rotating it is
+   the same answer MAIN-187 gave the shell one level up: every destination stays
+   on screen, in the same order, in the same shape — the strip scrolls instead
+   of the list growing. No drawer and no new state, for the reason that card
+   wrote down (NG-4). Reflow, not a second design: same theme, same controls. */
 @media (max-width: 1024px) {
   /* One column: the nav sizes to its content on top, and the content row takes
-     the rest — the rail must not eat half a small screen. */
-  .spage { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
-  .spage-nav { overflow-y: visible; }
+     the rest — the rail must not eat half a small screen. `minmax(0, …)` on the
+     column, because a `1fr` track floors at its content and a row of section
+     names is wider than a phone — which is how the DOCUMENT ends up scrolling
+     sideways (AC-6). */
+  .spage { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .spage-nav { overflow-y: visible; min-width: 0; }
+  .spage-list {
+    display: flex;
+    flex-direction: row;
+    align-items: stretch;
+    gap: 4px;
+    /* The STRIP scrolls; the page does not (AC-6, MAIN-418's rule). */
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .spage-list::-webkit-scrollbar { display: none; }
+  /* Group headings stay in the strip: they are what says the order is grouped
+     rather than arbitrary, and dropping them at small size would be exactly the
+     "mobile lite" variant AC-7 forbids. Scoped through `.spage-list` to
+     out-specify `.spage-group:first-of-type`'s rail margin, which would
+     otherwise survive into the row. */
+  .spage-list .spage-group {
+    align-self: center;
+    flex: none;
+    margin: 0 2px 0 6px;
+  }
+  .spage-list .spage-group:first-child { margin-left: 0; }
+  .spage-item {
+    width: auto;
+    flex: none;
+    /* 44px, MAIN-418's session-navigator floor, so the two touch surfaces do
+       not disagree about how big a tap target is (AC-5). */
+    min-height: 44px;
+    padding: 5px 10px;
+  }
+  /* The finder's phone rules stay on the PHONE breakpoint, which is where
+     MAIN-418 put the identical pair. The item floor above is AC-5 and belongs
+     to the strip, so it holds wherever the strip does; these two are not. A
+     16px input exists to stop iOS zooming the page on focus, and a 44px one to
+     be hit with a thumb — neither is a reason at 1024px, where the pointer is a
+     mouse and the only thing a 16px field in a 12–13px console would do is
+     break the density AC-7 protects. */
+  @media (max-width: 640px) {
+    .spage-find {
+      min-height: 44px;
+      font-size: 16px;
+    }
+  }
 }
 
 /* ── Operator surface ───────────────────────────────────────────────────── */
