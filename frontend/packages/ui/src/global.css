@@ -4799,6 +4799,14 @@ tr:hover .row-action,
   color: var(--nook-fg-dim);
   border-bottom: 1px solid var(--nook-border);
 }
+/* The head's right-hand controls: the gear, and the drawer's close (MAIN-498).
+   A box of their own so `space-between` keeps putting "Channels" on the left
+   whether there are two of them, one, or none. */
+.chat-channels-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
 /* The gear that opens the channel-management modal (MAIN-94), admin-only. */
 .chat-channels-manage {
   display: inline-flex;
@@ -4983,6 +4991,74 @@ tr:hover .row-action,
   border-bottom: 1px solid var(--nook-border);
   color: var(--nook-fg-bright);
   font-size: 13px;
+}
+
+/* ── compact: the channel list becomes a drawer (MAIN-498) ─────────────────
+   `200px minmax(0, 1fr)` gives a 375px phone a rail wider than the room it
+   indexes, and the messages, their authors and the composer share what is
+   left. The list cannot rotate into a strip the way the section rail did
+   (MAIN-497): it is unbounded, grouped under category headers and carries
+   unread state, none of which survives a single scrolling line. So it leaves
+   the grid and covers the room instead, and the room takes the full width.
+
+   It FOLLOWS `.git-drawer` rather than sharing its rules (NG-4), for one
+   reason: that drawer is `fixed` over the whole viewport, and AC-5 needs this
+   one to stop at the page's edges so the shell's bottom bar stays visible and
+   tappable. `absolute` inside `.chat-page` — which `.nook-main` already clips
+   — is what buys that. Everything else is the same drawer: the same dimming
+   scrim that closes on a tap, the same slide, and MAIN-418's width. */
+@media (max-width: 640px) {
+  .chat-page {
+    /* One column. `minmax(0, …)` and not `1fr`, because a `1fr` track floors
+       at its content and a message list is wider than a phone — which is how
+       the DOCUMENT ends up with a horizontal scrollbar (AC-6). */
+    grid-template-columns: minmax(0, 1fr);
+    max-width: 100vw;
+    overflow-x: hidden;
+    /* The containing block for the drawer and its scrim: what keeps both
+       inside the page and off the bottom bar (AC-5). */
+    position: relative;
+  }
+  .chat-drawer-scrim {
+    position: absolute;
+    inset: 0;
+    z-index: 79;
+    background: rgba(0, 0, 0, 0.55);
+  }
+  /* Inset by the page's own padding, because an absolutely-positioned child is
+     laid out against the PADDING box — `0` here would put the drawer's border
+     hard against the viewport edge while the room it covers is inset 10px. */
+  .chat-page > .chat-channels {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    bottom: 10px;
+    /* MAIN-418's session drawer, to the pixel: one drawer width in the
+       product, not two (AC-4). */
+    width: min(86vw, 340px);
+    z-index: 80;
+    box-shadow: 8px 0 24px rgba(0, 0, 0, 0.6);
+    animation: chat-drawer-in 0.16s ease-out;
+  }
+  /* 40px, the shell's tap-target floor (MAIN-187 AC-3) — which the 32px
+     title bars cannot hold, so they grow to it here. A control the width of a
+     thumb inside a bar shorter than one is clipped by `.chat-main`'s
+     `overflow: hidden`, not merely tight. */
+  .chat-main-head,
+  .chat-channels-head {
+    height: 40px;
+  }
+  .chat-drawer-toggle,
+  .chat-channels-manage {
+    min-width: 40px;
+    min-height: 40px;
+  }
+}
+
+@keyframes chat-drawer-in {
+  from {
+    transform: translateX(-100%);
+  }
 }
 
 /* ── ChatView (reusable) ── */

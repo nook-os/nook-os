@@ -135,6 +135,15 @@ function renderPage() {
   );
 }
 
+// The width the page is rendered at. jsdom's own default is the desktop one,
+// restored before every test so a compact case cannot leave the next on a phone.
+const DESKTOP_WIDTH = 1024;
+const PHONE_WIDTH = 375;
+
+function setViewport(width: number) {
+  Object.defineProperty(window, "innerWidth", { value: width, configurable: true });
+}
+
 beforeEach(() => {
   liveCallback = null;
   updateCallback = null;
@@ -164,6 +173,7 @@ beforeEach(() => {
   // effect (AC-3) runs deterministically.
   vi.spyOn(document, "hasFocus").mockReturnValue(true);
   localStorage.clear(); // category collapse state must not leak between tests
+  setViewport(DESKTOP_WIDTH);
 });
 afterEach(() => cleanup());
 
@@ -224,6 +234,136 @@ describe("ChatPage channel categories (MAIN-179)", () => {
 // the frames the stream delivers. Fake timers because the whole contract is a
 // clock — a 4s local expiry and a 3s send throttle — and `shouldAdvanceTime`
 // keeps react-query's own awaits working while the test jumps that clock.
+// MAIN-498: on a phone the channel list is a drawer over the message view. The
+// stylesheet's half is asserted in `chatDrawerStyles.test.ts` — jsdom evaluates
+// no media query, so what a rendered test can prove is which controls exist and
+// what each of them does.
+describe("ChatPage channel drawer at compact (MAIN-498)", () => {
+  const openDrawer = async () => {
+    await userEvent.click(await screen.findByLabelText("show channels"));
+    return screen.findByLabelText("Channels");
+  };
+
+  beforeEach(() => setViewport(PHONE_WIDTH));
+
+  it("keeps the list out of the page until the header control opens it (AC-1/AC-2)", async () => {
+    renderPage();
+    // The room is the whole page: the rail is not merely narrow, it is absent.
+    await screen.findByText("old message");
+    expect(screen.queryByLabelText("Channels")).toBeNull();
+
+    const drawer = await openDrawer();
+    expect(within(drawer).getByText("general")).toBeTruthy();
+  });
+
+  it("closes on a scrim tap (AC-2)", async () => {
+    const { container } = renderPage();
+    await openDrawer();
+    const scrim = container.querySelector(".chat-drawer-scrim");
+    expect(scrim).not.toBeNull();
+    await userEvent.click(scrim as Element);
+    await waitFor(() => expect(screen.queryByLabelText("Channels")).toBeNull());
+  });
+
+  it("closes from the control in its own head", async () => {
+    // Not one of AC-2's three routes, but the drawer takes 86vw and the scrim
+    // left to tap is a sliver — the same close `.git-drawer-close` gives its
+    // drawer, for the same reason.
+    renderPage();
+    const drawer = await openDrawer();
+    await userEvent.click(within(drawer).getByLabelText("close channels"));
+    await waitFor(() => expect(screen.queryByLabelText("Channels")).toBeNull());
+  });
+
+  it("closes on Escape (AC-2)", async () => {
+    renderPage();
+    await openDrawer();
+    // On `window`, not on the drawer: the key has to land wherever focus
+    // happens to be, and after a tap that is the toggle in the header.
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByLabelText("Channels")).toBeNull());
+  });
+
+  it("closes when a channel is picked, and opens that channel (AC-2)", async () => {
+    chatState.channels = [
+      { id: "c1", name: "general", slug: "general", owner_type: "tenant", archived: false, unread_count: 0, category_id: null, position: 0, created_at: "2026-07-25T09:00:00Z" },
+      { id: "c2", name: "random", slug: "random", owner_type: "tenant", archived: false, unread_count: 0, category_id: null, position: 1, created_at: "2026-07-25T09:00:00Z" },
+    ];
+    renderPage();
+    const drawer = await openDrawer();
+    await userEvent.click(within(drawer).getByText("random"));
+
+    await waitFor(() => expect(screen.queryByLabelText("Channels")).toBeNull());
+    // The pick landed: the header names the channel the drawer just closed on.
+    expect(await screen.findByText("random")).toBeTruthy();
+  });
+
+  it("closes when a DM is picked (AC-2)", async () => {
+    chatState.dms = [
+      {
+        id: "d1",
+        created_at: "2026-07-25T09:00:00Z",
+        unread_count: 0,
+        participants: [
+          { person_id: "p-me", display_name: "Me" },
+          { person_id: "p-bob", display_name: "Bob" },
+        ],
+      },
+    ];
+    renderPage();
+    const drawer = await openDrawer();
+    await userEvent.click(within(drawer).getByText("Bob"));
+    await waitFor(() => expect(screen.queryByLabelText("Channels")).toBeNull());
+  });
+
+  it("renders categories and unread badges inside the drawer (AC-3)", async () => {
+    identity.role = "admin";
+    withCategories();
+    chatState.channels = chatState.channels.map((c) =>
+      c.id === "c2" ? { ...c, unread_count: 7 } : c,
+    );
+    renderPage();
+    const drawer = await openDrawer();
+    // Nothing is dropped for being small: the same groups, in the same order,
+    // with the same count pill the rail shows.
+    expect(within(drawer).getByText("(uncategorized)")).toBeTruthy();
+    expect(within(drawer).getByText("Team")).toBeTruthy();
+    expect(within(drawer).getByText("standup")).toBeTruthy();
+    expect(within(drawer).getByLabelText("7 unread")).toBeTruthy();
+  });
+
+  it("forgets an open drawer on the way out of compact, so narrowing back does not reopen it", async () => {
+    renderPage();
+    await openDrawer();
+
+    // Widen past the breakpoint: the rail is back, and the drawer's own chrome
+    // is gone with it.
+    act(() => {
+      setViewport(DESKTOP_WIDTH);
+      window.dispatchEvent(new Event("resize"));
+    });
+    await waitFor(() => expect(screen.queryByLabelText("show channels")).toBeNull());
+
+    // …and narrowing back lands on the message view, not on a drawer nobody
+    // asked for a second time.
+    act(() => {
+      setViewport(PHONE_WIDTH);
+      window.dispatchEvent(new Event("resize"));
+    });
+    await waitFor(() => expect(screen.queryByLabelText("show channels")).not.toBeNull());
+    expect(screen.queryByLabelText("Channels")).toBeNull();
+  });
+
+  it("above the breakpoint there is a rail and no drawer chrome at all (AC-7)", async () => {
+    setViewport(DESKTOP_WIDTH);
+    const { container } = renderPage();
+    expect(await screen.findByLabelText("Channels")).toBeTruthy();
+    expect(screen.queryByLabelText("show channels")).toBeNull();
+    expect(screen.queryByLabelText("close channels")).toBeNull();
+    expect(container.querySelector(".chat-drawer-scrim")).toBeNull();
+  });
+});
+
 describe("ChatPage presence and typing (MAIN-163)", () => {
   beforeEach(() => vi.useFakeTimers({ shouldAdvanceTime: true }));
   afterEach(() => vi.useRealTimers());

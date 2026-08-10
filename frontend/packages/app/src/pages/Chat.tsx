@@ -10,7 +10,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { Settings } from "lucide-react";
+import { PanelLeftClose, PanelLeftOpen, Settings, X } from "lucide-react";
 import {
   api,
   channelHistory,
@@ -49,6 +49,7 @@ import {
   TYPING_PING_MS,
   type TypingState,
 } from "./chatPresence";
+import { useCompact } from "../compact";
 import { askConfirm, askText, notify } from "../dialogs";
 import { type ContextMenuItem } from "../contextMenu";
 import { ChannelManager } from "./ChannelManager";
@@ -178,6 +179,38 @@ export function ChatPage() {
   const [pickingDm, setPickingDm] = useState(false);
   // The open thread's parent id, or null when no thread panel is showing.
   const [threadParentId, setThreadParentId] = useState<string | null>(null);
+
+  // On a phone the channel list covers the room it belongs to, so it is a
+  // drawer with a header control rather than a column (MAIN-498).
+  const compact = useCompact();
+  const [drawerRequested, setDrawerRequested] = useState(false);
+  const drawerOpen = compact && drawerRequested;
+  const closeDrawer = useCallback(() => setDrawerRequested(false), []);
+
+  // Leaving compact forgets the request, so narrowing BACK does not reopen a
+  // drawer nobody asked for a second time. The `&& compact` above is not
+  // redundant with this: it holds for the render in which the width flips,
+  // before this effect runs, so the drawer cannot flash behind the rail.
+  useEffect(() => {
+    if (!compact) setDrawerRequested(false);
+  }, [compact]);
+
+  useEffect(() => {
+    if (!drawerOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closeDrawer();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [drawerOpen, closeDrawer]);
+
+  // Picking a conversation is what the drawer was opened FOR, so it dismisses
+  // itself — a drawer that survives its own selection covers the messages the
+  // tap just asked for (MAIN-187, MAIN-498 AC-2).
+  const pickConversation = useCallback((id: string) => {
+    setSelectedId(id);
+    setDrawerRequested(false);
+  }, []);
 
   // Auto-select the first channel once the list loads, but never fight a user's
   // choice or point at a conversation (channel OR dm) that has since vanished.
@@ -548,70 +581,105 @@ export function ChatPage() {
 
   return (
     <div className="chat-page">
-      <aside className="chat-channels" aria-label="Channels">
-        <div className="chat-channels-head">
-          <span>Channels</span>
-          {canManage && (
+      {/* Only ever in the DOM while the drawer is open, which is only ever at
+          compact: a scrim styled out of the way still spans the page, and the
+          click it swallows is the one meant for a message (AC-7). */}
+      {drawerOpen && (
+        <div className="chat-drawer-scrim" aria-hidden="true" onClick={closeDrawer} />
+      )}
+      {(!compact || drawerOpen) && (
+        <aside className="chat-channels" aria-label="Channels">
+          <div className="chat-channels-head">
+            <span>Channels</span>
+            <span className="chat-channels-actions">
+              {canManage && (
+                <button
+                  type="button"
+                  className="chat-channels-manage"
+                  onClick={() => setManaging(true)}
+                  title="manage channels"
+                  aria-label="manage channels"
+                >
+                  <Settings size={13} />
+                </button>
+              )}
+              {/* The drawer covers 86vw, so the scrim left to tap is a sliver.
+                  Same close affordance `.git-drawer-close` gives its drawer. */}
+              {compact && (
+                <button
+                  type="button"
+                  className="chat-channels-manage"
+                  onClick={closeDrawer}
+                  title="close channels"
+                  aria-label="close channels"
+                >
+                  <X size={13} />
+                </button>
+              )}
+            </span>
+          </div>
+          <ChannelSidebar
+            channels={channels}
+            categories={categories}
+            selectedId={selectedId}
+            onSelect={pickConversation}
+            canManage={canManage}
+            menuItems={channelMenuItems}
+            loading={channelsQuery.isLoading}
+          />
+
+          <div className="chat-channels-head">
+            <span>Direct Messages</span>
             <button
               type="button"
               className="chat-channels-manage"
-              onClick={() => setManaging(true)}
-              title="manage channels"
-              aria-label="manage channels"
+              onClick={() => setPickingDm(true)}
+              title="new direct message"
+              aria-label="new direct message"
             >
-              <Settings size={13} />
+              <Plus size={13} />
             </button>
+          </div>
+          {dms.length === 0 ? (
+            <div className="chat-channels-empty">No direct messages yet.</div>
+          ) : (
+            dms.map((d) => (
+              <button
+                key={d.id}
+                type="button"
+                className={`chat-channel${d.id === selectedId ? " active" : ""}`}
+                onClick={() => pickConversation(d.id)}
+              >
+                <span className="chat-channel-hash">@</span>
+                <PresenceDot
+                  online={dmHasOnline(d)}
+                  label={`${dmName(d, chatIdentity?.person_id)} is online`}
+                />
+                {dmName(d, chatIdentity?.person_id)}
+                {(d.unread_count ?? 0) > 0 && (
+                  <span className="chat-unread" aria-label={`${d.unread_count} unread`}>
+                    {unreadLabel(d.unread_count ?? 0)}
+                  </span>
+                )}
+              </button>
+            ))
           )}
-        </div>
-        <ChannelSidebar
-          channels={channels}
-          categories={categories}
-          selectedId={selectedId}
-          onSelect={setSelectedId}
-          canManage={canManage}
-          menuItems={channelMenuItems}
-          loading={channelsQuery.isLoading}
-        />
-
-        <div className="chat-channels-head">
-          <span>Direct Messages</span>
-          <button
-            type="button"
-            className="chat-channels-manage"
-            onClick={() => setPickingDm(true)}
-            title="new direct message"
-            aria-label="new direct message"
-          >
-            <Plus size={13} />
-          </button>
-        </div>
-        {dms.length === 0 ? (
-          <div className="chat-channels-empty">No direct messages yet.</div>
-        ) : (
-          dms.map((d) => (
-            <button
-              key={d.id}
-              type="button"
-              className={`chat-channel${d.id === selectedId ? " active" : ""}`}
-              onClick={() => setSelectedId(d.id)}
-            >
-              <span className="chat-channel-hash">@</span>
-              <PresenceDot
-                online={dmHasOnline(d)}
-                label={`${dmName(d, chatIdentity?.person_id)} is online`}
-              />
-              {dmName(d, chatIdentity?.person_id)}
-              {(d.unread_count ?? 0) > 0 && (
-                <span className="chat-unread" aria-label={`${d.unread_count} unread`}>
-                  {unreadLabel(d.unread_count ?? 0)}
-                </span>
-              )}
-            </button>
-          ))
-        )}
-      </aside>
+        </aside>
+      )}
       <section className="chat-main">
         <header className="chat-main-head">
+          {compact && (
+            <button
+              type="button"
+              className="btn small icon chat-drawer-toggle"
+              onClick={() => setDrawerRequested((v) => !v)}
+              aria-expanded={drawerOpen}
+              title={drawerOpen ? "hide channels" : "show channels"}
+              aria-label={drawerOpen ? "hide channels" : "show channels"}
+            >
+              {drawerOpen ? <PanelLeftClose size={13} /> : <PanelLeftOpen size={13} />}
+            </button>
+          )}
           {activeTitle ? (
             <>
               <span className="chat-channel-hash">{activeDm ? "@" : "#"}</span>
