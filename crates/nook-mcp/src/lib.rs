@@ -521,15 +521,20 @@ pub struct NotebookCreateFolderParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct NotebookUpdateFolderParams {
-    /// The folder to rename and/or move.
+pub struct NotebookRenameFolderParams {
+    /// The folder to rename.
     pub id: String,
-    /// New name. Omit to leave it alone.
-    #[serde(default)]
-    pub name: Option<String>,
-    /// Move under this folder. Omit to leave it where it is; pass an empty
-    /// string to move it to the notebook root. A move that would put a folder
-    /// inside its own subtree is refused.
+    /// Its new name.
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct NotebookMoveFolderParams {
+    /// The folder to move.
+    pub id: String,
+    /// Move it under this folder. Omit (or pass an empty string) to move it to
+    /// the notebook root. A move that would put a folder inside its own subtree
+    /// is refused.
     #[serde(default)]
     pub parent_id: Option<String>,
 }
@@ -539,8 +544,9 @@ pub struct NotebookFolderIdParams {
     pub id: String,
 }
 
-/// The tri-state a move needs, from the flat string MCP clients can express:
-/// absent = leave alone, empty = move to the root, an id = move under it.
+/// The tri-state an UPDATE's move needs, from the flat string MCP clients can
+/// express: absent = leave alone, empty = move to the root, an id = move under
+/// it.
 ///
 /// A tool schema cannot easily carry `Option<Option<T>>`, and "" is the one
 /// value that is never a valid uuid — so it is unambiguous rather than a
@@ -550,6 +556,17 @@ fn parse_move_target(s: Option<String>) -> Result<Option<Option<UserNoteFolderId
         None => Ok(None),
         Some(v) if v.trim().is_empty() => Ok(Some(None)),
         Some(v) => Ok(Some(Some(parse_folder_id(v.trim())?))),
+    }
+}
+
+/// A parent folder for a tool whose whole job is placement — create, and the
+/// dedicated move. Here absent means the ROOT, not "leave alone": there is no
+/// prior place to leave a new folder in, and a move that changes nothing is not
+/// a move a client meant to ask for.
+fn parse_parent(s: Option<String>) -> Result<Option<UserNoteFolderId>, McpError> {
+    match s.as_deref().map(str::trim) {
+        None | Some("") => Ok(None),
+        Some(v) => Ok(Some(parse_folder_id(v)?)),
     }
 }
 
@@ -564,9 +581,9 @@ fn parse_folder_id(s: &str) -> Result<UserNoteFolderId, McpError> {
 }
 
 #[derive(Deserialize, JsonSchema)]
-pub struct NotebookListParams {
-    /// Case-insensitive substring over note title + folder path. Omit to list all.
-    pub q: Option<String>,
+pub struct NotebookSearchParams {
+    /// Case-insensitive substring matched against note title + folder path.
+    pub q: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -591,7 +608,8 @@ pub struct NotebookUpdateParams {
     pub title: Option<String>,
     /// New markdown body. Omit to leave unchanged.
     pub content_md: Option<String>,
-    /// Move the note into this folder id. Omit to leave it where it is.
+    /// Move the note into this folder id, at any depth. Omit to leave it where
+    /// it is; pass an empty string to move it to the notebook root.
     pub folder_id: Option<String>,
 }
 
@@ -1044,19 +1062,40 @@ impl NookMcp {
     // request extensions, which rmcp exposes via `Extension<Parts>`.
 
     #[tool(
-        description = "List your personal notebook notes (title + folder path only; bodies are \
-                       never returned). Optional `q` filters by case-insensitive substring."
+        description = "List every note in your personal notebook (title + folder path only; \
+                       bodies are never returned). Use notebook_search to filter."
     )]
     async fn notebook_list_notes(
         &self,
         Extension(parts): Extension<Parts>,
-        Parameters(p): Parameters<NotebookListParams>,
     ) -> Result<CallToolResult, McpError> {
         let person = require_person(&parts)?;
         to_result(
             &self
                 .backend
-                .notebook_list_notes(person, p.q)
+                .notebook_list_notes(person, None)
+                .await
+                .map_err(backend_err)?,
+        )
+    }
+
+    #[tool(
+        description = "Search your notebook by a case-insensitive substring of a note's title or \
+                       its folder path. Returns title + folder path only — a note's body is never \
+                       searched and never returned here, and a sealed note's body is not readable \
+                       over MCP at all (the server cannot decrypt it). Read a hit with \
+                       notebook_get_note."
+    )]
+    async fn notebook_search(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(p): Parameters<NotebookSearchParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let person = require_person(&parts)?;
+        to_result(
+            &self
+                .backend
+                .notebook_list_notes(person, Some(p.q))
                 .await
                 .map_err(backend_err)?,
         )
@@ -1108,8 +1147,10 @@ impl NookMcp {
     }
 
     #[tool(
-        description = "Update one of your notebook notes: change its title, body, or move it to \
-                       a folder. A sealed note's body cannot be updated this way."
+        description = "Update one of your notebook notes: change its title, body, or file it \
+                       under a folder at any depth. Omit folder_id to leave the note where it \
+                       is; pass an empty string to move it to the notebook root. A sealed note's \
+                       body cannot be updated this way."
     )]
     async fn notebook_update_note(
         &self,
@@ -1118,12 +1159,7 @@ impl NookMcp {
     ) -> Result<CallToolResult, McpError> {
         let person = require_person(&parts)?;
         let id = parse_note_id(&p.id)?;
-        // `folder_id` present → move into that folder; absent → leave in place.
-        // (Moving a note back to the root is not exposed over MCP in v1.)
-        let folder_id = match p.folder_id.as_deref() {
-            Some(s) => Some(Some(parse_folder_id(s)?)),
-            None => None,
-        };
+        let folder_id = parse_move_target(p.folder_id)?;
         let req = UpdateUserNote {
             title: p.title,
             content_md: p.content_md,
@@ -1169,7 +1205,8 @@ impl NookMcp {
     }
 
     #[tool(
-        description = "Create a folder in your personal notebook. Give parent_id to nest it inside another folder."
+        description = "Create a folder in your personal notebook. Give parent_id to nest it \
+                       inside another folder, to any depth; omit it for a folder at the root."
     )]
     async fn notebook_create_folder(
         &self,
@@ -1177,10 +1214,7 @@ impl NookMcp {
         Parameters(p): Parameters<NotebookCreateFolderParams>,
     ) -> Result<CallToolResult, McpError> {
         let person = require_person(&parts)?;
-        let parent_id = match p.parent_id.as_deref().map(str::trim) {
-            None | Some("") => None,
-            Some(v) => Some(parse_folder_id(v)?),
-        };
+        let parent_id = parse_parent(p.parent_id)?;
         to_result(
             &self
                 .backend
@@ -1197,16 +1231,16 @@ impl NookMcp {
     }
 
     #[tool(
-        description = "Rename or move a notebook folder. Omit parent_id to leave it where it is; pass an empty string to move it to the notebook root."
+        description = "Rename a notebook folder. Its contents and its place in the tree are \
+                       untouched — use notebook_move_folder to move it."
     )]
-    async fn notebook_update_folder(
+    async fn notebook_rename_folder(
         &self,
         Extension(parts): Extension<Parts>,
-        Parameters(p): Parameters<NotebookUpdateFolderParams>,
+        Parameters(p): Parameters<NotebookRenameFolderParams>,
     ) -> Result<CallToolResult, McpError> {
         let person = require_person(&parts)?;
         let id = parse_folder_id(p.id.trim())?;
-        let parent_id = parse_move_target(p.parent_id)?;
         to_result(
             &self
                 .backend
@@ -1214,8 +1248,41 @@ impl NookMcp {
                     person,
                     id,
                     UpdateUserNoteFolder {
-                        name: p.name,
-                        parent_id,
+                        name: Some(p.name),
+                        // `None` is "leave the parent alone", which is the whole
+                        // difference between this tool and the next one.
+                        parent_id: None,
+                    },
+                )
+                .await
+                .map_err(backend_err)?,
+        )
+    }
+
+    #[tool(
+        description = "Move a notebook folder under another folder, at any depth, taking its \
+                       notes and sub-folders with it. Omit parent_id to move it to the notebook \
+                       root. Moving a folder inside its own subtree is refused."
+    )]
+    async fn notebook_move_folder(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(p): Parameters<NotebookMoveFolderParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let person = require_person(&parts)?;
+        let id = parse_folder_id(p.id.trim())?;
+        let parent_id = parse_parent(p.parent_id)?;
+        to_result(
+            &self
+                .backend
+                .notebook_update_folder(
+                    person,
+                    id,
+                    UpdateUserNoteFolder {
+                        name: None,
+                        // Always `Some`: a move tool always sets the parent, and
+                        // `Some(None)` is the root.
+                        parent_id: Some(parent_id),
                     },
                 )
                 .await
@@ -1330,6 +1397,65 @@ mod tests {
             "pointed not-a-user error: {}",
             err.message
         );
+    }
+
+    /// MAIN-210 AC-1/AC-2: the two ways a flat string carries a folder target,
+    /// and why they differ. An update leaves the parent alone when the field is
+    /// absent, so "move to the root" needs the empty string; a create or a
+    /// dedicated move has no "leave alone" case, so absent already means root.
+    #[test]
+    fn a_folder_target_says_leave_alone_root_or_here() {
+        let id = UserNoteFolderId::new();
+        assert!(matches!(parse_move_target(None), Ok(None)));
+        assert!(matches!(
+            parse_move_target(Some("  ".into())),
+            Ok(Some(None))
+        ));
+        assert_eq!(
+            parse_move_target(Some(format!(" {id} "))).unwrap(),
+            Some(Some(id)),
+            "an id is trimmed, not rejected"
+        );
+        assert!(parse_move_target(Some("not-a-uuid".into())).is_err());
+
+        assert!(matches!(parse_parent(None), Ok(None)));
+        assert!(matches!(parse_parent(Some("".into())), Ok(None)));
+        assert_eq!(parse_parent(Some(id.to_string())).unwrap(), Some(id));
+        assert!(parse_parent(Some("not-a-uuid".into())).is_err());
+    }
+
+    /// MAIN-210 AC-6: EVERY notebook tool is person-scoped, so every one of them
+    /// must take the caller's identity and refuse a static-token call. Asserted
+    /// against the source text rather than one tool at a time — the risk is a
+    /// tool added later that forgets, and a per-tool test only covers the tools
+    /// somebody remembered to write one for.
+    #[test]
+    fn every_notebook_tool_requires_a_person() {
+        let src = include_str!("lib.rs");
+        // The tool impls only: the trait declares methods of the same names
+        // further up, and they take an already-resolved person.
+        let section = src
+            .split_once("#[tool_router]")
+            .expect("the tool impl block")
+            .1
+            .split_once("#[tool_handler]")
+            .expect("the end of the tool impl block")
+            .0;
+        let tools: Vec<&str> = section.split("async fn notebook_").skip(1).collect();
+        assert_eq!(
+            tools.len(),
+            11,
+            "the notebook tool surface changed — check the new tool too"
+        );
+        for body in tools {
+            let name: String = body.chars().take_while(|c| *c != '(').collect();
+            let head = &body[..body.find(".backend").unwrap_or(body.len())];
+            assert!(
+                head.contains("require_person(&parts)?"),
+                "notebook_{name} does not resolve a person — a static-token \
+                 caller would reach somebody's notebook"
+            );
+        }
     }
 
     #[test]
