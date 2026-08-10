@@ -4983,6 +4983,57 @@ tr:hover .row-action,
   text-decoration: underline;
 }
 
+/* ── The transcript variant (MAIN-499) ──────────────────────────────────────
+   An agent run is not a conversation: its turns are long, its author is one of
+   three words, and half its lines are things it DID rather than said. Every
+   rule here is scoped to `.transcript`, which is what keeps chat's deliberately
+   tight density (NG-1) exactly as it was. No animation lives in this block —
+   the only moving part on either variant is the typing indicator, whose
+   reduced-motion rule is further down and unchanged. */
+.chat-log.transcript { gap: 10px; }
+.chat-log.transcript .chat-msg { padding: 2px 8px; }
+/* A new speaker starts a TURN, with room around it — the separation that makes
+   a transcript read as a sequence rather than as one paragraph. */
+.chat-log.transcript .chat-msg.head { margin-top: 20px; }
+.chat-log.transcript .chat-msg.head:first-child { margin-top: 0; }
+.chat-log.transcript .chat-msg-head { margin-bottom: 3px; }
+/* Folded tool activity: its own kind, quiet and monospaced, so the eye skips it
+   on the way to what the agent actually said. */
+.chat-tool { display: flex; flex-direction: column; align-items: flex-start; }
+.chat-tool-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--nook-fg-faint);
+  font-family: var(--nook-font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: left;
+}
+button.chat-tool-line { cursor: pointer; }
+button.chat-tool-line:hover { color: var(--nook-fg-dim); }
+.chat-tool-steps {
+  margin: 3px 0 0 5px;
+  padding: 0 0 0 8px;
+  border-left: 1px solid var(--nook-border);
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.chat-tool-steps li {
+  color: var(--nook-fg-dim);
+  font-family: var(--nook-font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* ── Reactions + message actions (MAIN-116, MAIN-300) ──────────────────────
    Reaction pills sit persistently under a message; the actions live in a bar
    that floats over its upper-right corner on hover (below). A deleted message

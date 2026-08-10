@@ -35,8 +35,8 @@ vi.mock("@nookos/api", () => ({
   },
 }));
 
-import { LoopPanel, LoopActionButton, agentActivityLabel } from "./LoopPanel";
-import { loopAction } from "./loop";
+import { LoopPanel, LoopActionButton } from "./LoopPanel";
+import { agentActivityLabel, loopAction } from "./loop";
 import { useLive } from "./live";
 
 function job(over: Record<string, unknown> = {}) {

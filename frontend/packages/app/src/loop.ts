@@ -176,6 +176,13 @@ export function looksLikeMarkdown(content: string): boolean {
   return hasHeading || hasFence || constructs >= 2;
 }
 
+/** A transcript entry as the fold leaves it. `steps` is present on — and only
+ *  on — an entry the fold produced: the marker lines it stands for, kept so the
+ *  view can hand them back (MAIN-499 AC-5). Discarding them made `· 37 steps —
+ *  Bash ×37` a dead end whose detail only a whole-transcript export could
+ *  recover. */
+export type FoldedTranscriptEntry = LoopJobTranscriptEntry & { steps?: string[] };
+
 /**
  * Fold a run of consecutive agent tool-markers (`· Bash`, `· Read`, …) into ONE
  * activity entry, and drop the empty tool-result placeholders between them — so
@@ -186,12 +193,14 @@ export function looksLikeMarkdown(content: string): boolean {
  */
 export function foldToolActivity(
   transcript: LoopJobTranscriptEntry[],
-): LoopJobTranscriptEntry[] {
+): FoldedTranscriptEntry[] {
   const isMarker = (e: LoopJobTranscriptEntry) =>
     e.source === "agent" && /^·\s+\S/.test(stripAnsi(e.content));
   const isBlank = (e: LoopJobTranscriptEntry) => stripAnsi(e.content).trim() === "";
-  const out: LoopJobTranscriptEntry[] = [];
-  let run: { first: LoopJobTranscriptEntry; tools: string[] } | null = null;
+  const out: FoldedTranscriptEntry[] = [];
+  // `steps` are the marker lines themselves — the record the label summarises;
+  // `tools` are just their first words, which is all the label needs.
+  let run: { first: LoopJobTranscriptEntry; tools: string[]; steps: string[] } | null = null;
   const flush = () => {
     if (!run) return;
     const counts = new Map<string, number>();
@@ -201,15 +210,19 @@ export function foldToolActivity(
       .join(" · ");
     const label =
       run.tools.length === 1 ? `· ${summary}` : `· ${run.tools.length} steps — ${summary}`;
-    out.push({ ...run.first, content: label });
+    out.push({ ...run.first, content: label, steps: run.steps });
     run = null;
   };
   for (const e of transcript) {
     if (isBlank(e)) continue; // empty tool-result placeholder — nothing to show
     if (isMarker(e)) {
-      const tool = stripAnsi(e.content).replace(/^·\s+/, "").split(/\s+/)[0];
-      if (!run) run = { first: e, tools: [] };
+      const line = stripAnsi(e.content);
+      const tool = line.replace(/^·\s+/, "").split(/\s+/)[0];
+      if (!run) run = { first: e, tools: [], steps: [] };
       run.tools.push(tool);
+      // Stripped, because that is what a reader can read (MAIN-161 NG-2 keeps
+      // the escapes on the stored line, which the export still carries).
+      run.steps.push(line);
     } else {
       flush();
       out.push(e);
@@ -253,6 +266,54 @@ export function filedKeys(
     }
   }
   return out;
+}
+
+/** What the activity indicator should say for a job in `state`, or null for no
+ *  indicator (MAIN-237 AC-4, MAIN-240 AC-2).
+ *
+ *  It lives HERE, with the loop's other view-agnostic decisions, because three
+ *  surfaces show that indicator — the ticket's panel, the Loop workspace and a
+ *  workspace's Runs list — and the third of them reaching into the first's
+ *  module for it (MAIN-499 AC-7) said the panel owned a rule that is the loop's.
+ *
+ *  Only a job that could still be producing output gets one. A job paused on a
+ *  human is NOT working — it is waiting on you, which the interaction surface
+ *  says far better — and a finished job is finished. Showing "working…" in
+ *  either case is the specific lie this is meant to prevent: it is the operator's
+ *  only cue that the agent is alive.
+ *
+ *  `turn` is the real signal the streaming adapter reports (`job_turn`), and it
+ *  OUTRANKS the inference — that is the whole point of MAIN-240. State can only
+ *  ever say "this job is running", which stays true in the gap between turns
+ *  when the agent is sitting idle waiting to be steered; the adapter can say
+ *  which of those two it actually is.
+ *
+ *  It is deliberately allowed to silence the indicator and never to raise one:
+ *
+ *  - `undefined` — no adapter reported. The tmux fallback path (NG-1) never
+ *    will, so it keeps the inferred label exactly as before.
+ *  - `active: false` — a real "not working right now". Believed, so a job
+ *    between turns stops claiming to work.
+ *  - `active: true` — agrees with the inference; nothing to add.
+ *
+ *  `queued` and `claimed` ignore `turn` entirely: their labels describe the
+ *  executor, not the agent, and no turn can be in flight before a process
+ *  exists. Only `running` is turn-gated. */
+export function agentActivityLabel(
+  state: string,
+  turn?: { active: boolean },
+): string | null {
+  switch (state) {
+    case "queued":
+      return "waiting for an executor…";
+    case "claimed":
+      return "the operator agent is starting…";
+    case "running":
+      if (turn && !turn.active) return null;
+      return "the operator agent is working…";
+    default:
+      return null;
+  }
 }
 
 /** How a job's state reads in the panel: a human label and a colour tone. */

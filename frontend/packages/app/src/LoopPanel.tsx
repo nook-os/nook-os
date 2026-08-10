@@ -11,8 +11,9 @@ import React, { useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Play, RotateCcw, Ban, ChevronRight, ChevronDown, Maximize2 } from "lucide-react";
-import { api, type LoopJobTranscriptEntry } from "@nookos/api";
+import { api } from "@nookos/api";
 import {
+  agentActivityLabel,
   createLoopJob,
   fetchTaskJobs,
   isActiveJob,
@@ -22,6 +23,7 @@ import {
   loopAction,
   stripAnsi,
   taskJobsKey,
+  type FoldedTranscriptEntry,
 } from "./loop";
 import { ChatView, type ChatViewMessage } from "@nookos/ui";
 import { answerInteraction, useTaskInteractions } from "./Interactions";
@@ -33,7 +35,7 @@ import { useLive } from "./live";
  *  bespoke `loop-line` rows this replaces were the fork the MAIN-128 comment
  *  admitted to ("rather than importing the coupled ChatView"). */
 export function transcriptMessages(
-  lines: LoopJobTranscriptEntry[],
+  lines: FoldedTranscriptEntry[],
 ): ChatViewMessage[] {
   return lines.map((l) => ({
     id: l.id,
@@ -49,50 +51,10 @@ export function transcriptMessages(
     body: stripAnsi(l.content),
     createdAt: l.at,
     markdown: looksLikeMarkdown(l.content),
+    // Only a FOLDED entry carries steps, and carrying them through is what
+    // makes the line its own kind rather than prose (MAIN-499 AC-4/AC-5).
+    activity: l.steps,
   }));
-}
-
-/** What the activity indicator should say for a job in `state`, or null for no
- *  indicator (MAIN-237 AC-4, MAIN-240 AC-2).
- *
- *  Only a job that could still be producing output gets one. A job paused on a
- *  human is NOT working — it is waiting on you, which the interaction surface
- *  says far better — and a finished job is finished. Showing "working…" in
- *  either case is the specific lie this is meant to prevent: it is the operator's
- *  only cue that the agent is alive.
- *
- *  `turn` is the real signal the streaming adapter reports (`job_turn`), and it
- *  OUTRANKS the inference — that is the whole point of MAIN-240. State can only
- *  ever say "this job is running", which stays true in the gap between turns
- *  when the agent is sitting idle waiting to be steered; the adapter can say
- *  which of those two it actually is.
- *
- *  It is deliberately allowed to silence the indicator and never to raise one:
- *
- *  - `undefined` — no adapter reported. The tmux fallback path (NG-1) never
- *    will, so it keeps the inferred label exactly as before.
- *  - `active: false` — a real "not working right now". Believed, so a job
- *    between turns stops claiming to work.
- *  - `active: true` — agrees with the inference; nothing to add.
- *
- *  `queued` and `claimed` ignore `turn` entirely: their labels describe the
- *  executor, not the agent, and no turn can be in flight before a process
- *  exists. Only `running` is turn-gated. */
-export function agentActivityLabel(
-  state: string,
-  turn?: { active: boolean },
-): string | null {
-  switch (state) {
-    case "queued":
-      return "waiting for an executor…";
-    case "claimed":
-      return "the operator agent is starting…";
-    case "running":
-      if (turn && !turn.active) return null;
-      return "the operator agent is working…";
-    default:
-      return null;
-  }
 }
 
 /** The entry action's button — start a spec/decompose run, or re-run. Shared
@@ -247,6 +209,7 @@ function LoopJobView({
       )}
 
       <ChatView
+        variant="transcript"
         messages={transcriptMessages(shown)}
         emptyLabel="No transcript yet — it fills in as the agent works."
         typing={agentActivityLabel(detail.state, turn)}
