@@ -55,6 +55,7 @@ import {
   NAV_PREFS_KEY,
   type NavPrefs,
 } from "./sessionNav";
+import { useViewportWidth } from "./compact";
 
 /** Width, collapsed and pinned, stored against the PERSON rather than the
  *  browser (AC-6). A pane you arranged on your laptop is the pane you get on
@@ -96,18 +97,6 @@ function useNavPrefs() {
   // over — the pane flashes at 260px before jumping to the width you set, and
   // a click landing in that window WRITES the default back over it.
   return { prefs, write, loaded: settings !== undefined };
-}
-
-function useViewportWidth(): number {
-  const [w, setW] = React.useState(() =>
-    typeof window === "undefined" ? 1600 : window.innerWidth,
-  );
-  React.useEffect(() => {
-    const onResize = () => setW(window.innerWidth);
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, []);
-  return w;
 }
 
 /** The team this pane is listing, and the way to change it.
