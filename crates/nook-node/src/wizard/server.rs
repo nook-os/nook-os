@@ -196,6 +196,20 @@ pub fn init(opts: InitOptions) -> Result<()> {
 
     let tenant_name = t.text("Organisation name", Some("default"))?;
 
+    // ---- Giphy GIFs in chat (MAIN-171 AC-6)
+    //
+    // Asked, never required (NG-3). Skipping is the default and the answer most
+    // people should give: the deployment is fully functional without it, chat
+    // simply has no GIF button. Nothing is generated here — no key ships in
+    // this repo or its images, so the only way to have one is to bring one.
+    t.say("");
+    let giphy_key = if t.confirm("Enable Giphy GIFs in chat? (optional)", false)? {
+        t.say("  Create a free key at https://developers.giphy.com — \"Create an App\".");
+        t.optional("Giphy API key (blank to skip)")?
+    } else {
+        None
+    };
+
     let answers = ServerAnswers {
         public_url: public_url.clone(),
         agent_url: agent_url.clone(),
@@ -209,6 +223,7 @@ pub fn init(opts: InitOptions) -> Result<()> {
         oidc,
         dev_auth,
         tenant_name,
+        giphy_key,
     };
 
     // ---- write

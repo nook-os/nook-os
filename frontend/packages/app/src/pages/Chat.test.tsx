@@ -31,7 +31,15 @@ vi.mock("@nookos/api", () => ({
   // ChatView (in @nookos/ui) imports this from the same module; the whole-module
   // mock must provide it or the picker crashes.
   ALLOWED_REACTIONS: ["👍", "👎", "❤️", "😄", "🎉", "😕", "🚀", "👀", "🙌", "🔥", "✅", "❌"],
-  api: { GET: vi.fn(async () => ({ data: { user: { id: "me" } } })) },
+  api: {
+    GET: vi.fn(async (path: string) =>
+      // `/api/v1/config` is the deployment's optional-feature surface. No Giphy
+      // key here, which is the shipped state and the one AC-3 pins.
+      path === "/api/v1/config"
+        ? { data: { giphy_key: null } }
+        : { data: { user: { id: "me" } } },
+    ),
+  },
   me: vi.fn(async () => ({
     user_id: "me",
     tenant_id: "t",

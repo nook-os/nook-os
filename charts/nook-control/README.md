@@ -64,6 +64,7 @@ it with `secretKeyRef` — nothing secret is ever rendered into a manifest.
 | `OIDC_CLIENT_SECRET` | `oidcClientSecret` | if OIDC | |
 | `NOOK_S3_ACCESS_KEY_ID` | `s3AccessKeyId` | if S3 | |
 | `NOOK_S3_SECRET_ACCESS_KEY` | `s3SecretAccessKey` | if S3 | |
+| `NOOK_GIPHY_KEY` | `giphyKey` | no | chat's GIF picker. Omit → no GIF button, everything else unchanged |
 
 Set an optional key's value to the key name inside your Secret to wire it; leave
 it `""` to omit that env var. Non-secret config (`APP_ENV`, `PUBLIC_BASE_URL`,

@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod boards;
 pub mod bulk;
+pub mod config;
 pub mod dispatcher;
 pub mod dist;
 pub mod events;
@@ -99,6 +100,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/me/tenants", get(auth::my_tenants))
         .route("/me/tenant", post(auth::switch_tenant))
         .route("/auth/providers", get(auth::providers))
+        // The app's optional-feature configuration, signed-in (MAIN-171).
+        .route("/config", get(config::app_config))
         .route("/auth/local/status", get(local_auth::status))
         .route("/auth/oidc/exchange", post(oidc_exchange::exchange))
         .route("/auth/local/login", post(local_auth::login))

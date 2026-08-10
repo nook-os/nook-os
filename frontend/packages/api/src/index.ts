@@ -11,6 +11,8 @@ export type User = Schemas["User"];
 export type MeResponse = Schemas["MeResponse"];
 export type TenantMembership = Schemas["TenantMembership"];
 export type Capabilities = Schemas["Capabilities"];
+/** What optional features this deployment has wired (MAIN-171). */
+export type AppConfig = Schemas["AppConfig"];
 export type NodeInfo = Schemas["Node"];
 export type Workspace = Schemas["Workspace"];
 export type GitCredential = Schemas["GitCredential"];
@@ -84,6 +86,7 @@ export * from "./ws";
 export * from "./endpoint";
 export * from "./write-failure";
 export * from "./chat";
+export * from "./giphy";
 
 // Same-origin by default: dev (Vite proxies /api) and production (the control
 // plane fronts the app) both work with no configuration.

@@ -420,6 +420,29 @@ export interface paths {
         patch: operations["update_comment"];
         trace?: never;
     };
+    "/api/v1/config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * GET /api/v1/config — the deployment's optional-feature configuration.
+         * @description Signed-in, unlike `/auth/providers`: the login screen has to know what it
+         *     may offer before anyone is authenticated, whereas nothing here is needed
+         *     until a person is already inside the app. That lets it carry the Giphy key
+         *     (MAIN-171) without publishing the operator's key to anonymous callers.
+         */
+        get: operations["app_config"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/dispatcher/suggest": {
         parameters: {
             query?: never;
@@ -3694,6 +3717,20 @@ export interface components {
         /** @description Answer a pending interaction — the one endpoint the CLI and web both call. */
         AnswerInteractionRequest: {
             response: string;
+        };
+        /**
+         * @description Deployment-level configuration a signed-in client needs in order to know
+         *     which optional features exist here — the `/auth/providers` idea applied to
+         *     the app rather than to sign-in, so the UI never renders a control that is
+         *     wired to nothing.
+         */
+        AppConfig: {
+            /**
+             * @description The operator's own Giphy API key (MAIN-171), or `None` when they have
+             *     not brought one. `None` is the shipped state and a fully supported one:
+             *     chat simply offers no GIF button.
+             */
+            giphy_key?: string | null;
         };
         /** @description Terminal attach socket messages (browser → control plane). */
         AttachClientMessage: {
@@ -8489,6 +8526,32 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    app_config: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AppConfig"];
+                };
+            };
+            /** @description not signed in */
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };
