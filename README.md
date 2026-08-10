@@ -90,6 +90,45 @@ curl -fsSL https://<your-nook-host>/install.sh | sh -s -- --token nook_join_…
 
 Nodes connect **outbound** over WebSocket — no inbound SSH, no public ports, nothing to expose. The node reports its own capabilities (CPU, GPU, docker, tmux, git, installed runtimes like `claude`) and discovers git repositories under its workspace roots. Workspaces — not machines — are the unit you think in; one workspace can exist on many nodes.
 
+## Reach a port on any machine (tunnels)
+
+A dev server on a node is on that node's loopback. `nook tunnel` publishes it at
+a name anyone in the tenant can open:
+
+```bash
+nook tunnel 3000     # → https://acme-api-azul.tunnels.example.com
+nook tunnel list     # what is open, and how long each has been idle
+nook tunnel stop     # close this session's tunnels
+```
+
+The subdomain is **derived** from the workspace and the machine, never typed —
+a name a person invents collides with another tenant's in the same zone and
+can't be guessed back later. Access is membership of the tunnel's tenant and
+nothing else: a browser is bounced through the apex once to prove who it is, a
+script sends a `nook_user_` token. None of NookOS's own credentials are
+forwarded to whatever is listening on the port.
+
+**It is off until you set `TUNNEL_DOMAIN`**, and that name needs infrastructure
+that has to exist first — this is deliberately not inferred from
+`PUBLIC_BASE_URL`, because inferring it produces a URL that resolves nowhere:
+
+1. A **wildcard DNS record**, `*.<domain>` → this control plane.
+2. A **wildcard TLS certificate** for `*.<domain>`. Per-host certificates cannot
+   work here — the hosts are invented at runtime. Let's Encrypt issues wildcards
+   only over the DNS-01 challenge.
+3. Whatever proxy terminates that TLS forwarding `*.<domain>` to the control
+   plane **with the `Host` header intact**. The host is the only thing that says
+   which tunnel a request is for.
+
+**Tunnels do not survive a restart, and that is the design rather than a gap.**
+They are held in memory: a tunnel is a live route to a live process, and a table
+that outlived both could only ever describe something that had gone. Restart the
+control plane and every tunnel has to be opened again. They also end on their
+own — with the session that opened them, when their node disconnects, and after
+`TUNNEL_IDLE_SECS` (default 30 minutes) with no traffic. Both variables are
+documented in `.env.example`; on Kubernetes they go in the chart's
+`controlPlane.extraEnv`, alongside the wildcard host on your ingress.
+
 ## For AI clients (MCP)
 
 ```text

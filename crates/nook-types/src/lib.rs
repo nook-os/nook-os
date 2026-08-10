@@ -3115,6 +3115,44 @@ pub struct AgentStateItem {
     pub state: String,
 }
 
+/// Open a tunnel to a port on a machine (MAIN-404 AC-1).
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct CreateTunnelRequest {
+    /// The port on the node's own loopback to expose.
+    pub port: u16,
+    /// Which machine. Optional only for a node credential, which is already
+    /// confined to itself; a person has to say.
+    #[serde(default)]
+    pub node_id: Option<NodeId>,
+    /// The session this tunnel belongs to, when it was opened from one. It is
+    /// what makes the tunnel end with the terminal that opened it (AC-4), and
+    /// it is also where the label's name comes from.
+    #[serde(default)]
+    pub session_id: Option<SessionId>,
+}
+
+/// A live tunnel. Assembled from memory, not read from a table — tunnels do not
+/// survive a control-plane restart, by design (MAIN-9 NG-8).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct TunnelView {
+    /// The subdomain it answers on, and the id `stop` takes.
+    pub label: String,
+    /// Where to open it. The whole reason for creating one, so it is returned
+    /// rather than left for the caller to assemble out of the label and a
+    /// configuration value it cannot see.
+    pub url: String,
+    pub node_id: NodeId,
+    pub node_name: String,
+    pub port: u16,
+    #[serde(default)]
+    pub session_id: Option<SessionId>,
+    pub created_at: DateTime<Utc>,
+    /// Seconds since a request last came through it. What the idle sweep
+    /// measures, reported so a person can see a tunnel about to be swept
+    /// instead of discovering it gone.
+    pub idle_secs: u64,
+}
+
 /// Deleting a workspace. Records always go; the checkouts on disk only go
 /// when explicitly asked for (and if they stay, discovery re-adds them).
 #[derive(Debug, Clone, Default, Deserialize, ToSchema)]

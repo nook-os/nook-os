@@ -271,6 +271,15 @@ async fn handle(
     // its transcript tail preserved, rather than leaving it "running" forever
     // (MAIN-161 AC-4). The node cleans the orphaned worktree on its next connect.
     let _ = crate::services::jobs::fail_stranded_for_node(&state, tenant, node_id).await;
+    // Every tunnel into this machine is now a 502 factory: the port it names is
+    // on a box nothing can reach (MAIN-404 AC-4). Closed here rather than left
+    // for the idle sweep, because a URL that answers "nothing is listening" for
+    // half an hour reads as a broken app rather than an absent machine. A
+    // reconnect opens fresh tunnels; nothing here tries to restore these, which
+    // is the same in-memory contract a restart has (MAIN-9 NG-8).
+    for tunnel in state.registry.take_tunnels_for_node(node_id) {
+        crate::routes::tunnels::closed(&state, &tunnel, "node disconnected").await;
+    }
     state.registry.publish(
         tenant,
         UiEvent::NodeStatus {
@@ -671,6 +680,14 @@ async fn handle_message(
             // A dead session has no agent state — clear it so a spinner does not
             // outlive the terminal, on screen now or on the next reload.
             clear_agent_state(state, tenant, session_id);
+            // A tunnel opened from this session pointed at something the session
+            // was running, so it has nothing behind it now (MAIN-404 AC-4).
+            // Alongside the housekeeping above rather than under the `ended`
+            // guard below, for the same reason: the tmux really is gone, whoever
+            // ended it — a Stop leaves the port just as dead as a crash.
+            for tunnel in state.registry.take_tunnels_for_session(session_id) {
+                crate::routes::tunnels::closed(state, &tunnel, "session exited").await;
+            }
             state.registry.publish_session(
                 session_id,
                 nook_proto::AttachServerMessage::Status {

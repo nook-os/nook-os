@@ -269,6 +269,14 @@ pub struct Config {
     /// tunnel that resolves nowhere.
     pub tunnel_domain: Option<String>,
 
+    /// How many seconds a tunnel may go unused before the sweep tears it down
+    /// (MAIN-404 AC-3). A tunnel costs nothing to re-open and holds a port on
+    /// somebody's machine open to the whole tenant while it exists, so the
+    /// default is a window rather than forever. Default 1800 (30 minutes);
+    /// `0` disables the sweep, which is a deliberate choice an operator can
+    /// make and never one they get by leaving the variable out.
+    pub tunnel_idle_secs: u64,
+
     // ── Workspace discovery ─────────────────────────────────────────────
     /// How many seconds a checkout may stay tombstoned (`node_workspaces
     /// .missing_at`) before the retention sweep hard-deletes it (MAIN-220). A
@@ -422,6 +430,9 @@ impl Config {
             // like instead of re-normalising and drifting.
             tunnel_domain: env_opt("TUNNEL_DOMAIN")
                 .map(|d| d.trim().trim_matches('.').to_ascii_lowercase()),
+            tunnel_idle_secs: env_opt("TUNNEL_IDLE_SECS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1800),
 
             workspace_missing_retention_secs: env_opt("NOOK_WORKSPACE_MISSING_RETENTION_SECS")
                 .and_then(|v| v.parse().ok())
@@ -564,6 +575,7 @@ impl Config {
             // Off, like a fresh deployment: a test that wants the tunnel surface
             // sets the domain itself, so nothing gets host dispatch by accident.
             tunnel_domain: None,
+            tunnel_idle_secs: 1800,
             job_reap_grace_secs: 180,
             claim_session_grace_secs: 120,
             max_claim_secs: 14_400,

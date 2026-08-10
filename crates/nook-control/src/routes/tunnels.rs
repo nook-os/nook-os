@@ -1,38 +1,49 @@
-//! The tunnel HTTP surface: host dispatch, the grant exchange, and the proxy
-//! that carries a request to a node (MAIN-403).
+//! Everything served under `/api/v1/tunnels`, plus the host surface a tunnel
+//! answers on (MAIN-403, MAIN-404).
 //!
-//! Three things live here and nothing else does. [`host_dispatch`] is a layer,
-//! not a route, because it has to decide BEFORE routing: a request whose `Host`
-//! is `<label>.<TUNNEL_DOMAIN>` is answered by this module whatever its path
-//! says, so a tunnel can never reach the control plane's own API (AC-1).
+//! **The host surface (9b).** [`host_dispatch`] is a layer, not a route,
+//! because it has to decide BEFORE routing: a request whose `Host` is
+//! `<label>.<TUNNEL_DOMAIN>` is answered by this module whatever its path says,
+//! so a tunnel can never reach the control plane's own API (403 AC-1).
 //! [`authorize`] is the apex half of the cross-subdomain grant flow — the only
 //! place a session cookie is read, because the session cookie is host-only and
 //! a subdomain never sees it. And [`proxy`] is what actually forwards, after
 //! [`crate::tunnels::forwarded_headers`] has taken NookOS's credentials out of
-//! the request (AC-4).
+//! the request (403 AC-4).
 //!
-//! The rules those three apply are in `crate::tunnels`, tested without a
+//! **The lifecycle API (9c).** [`create`], [`list`] and [`stop`] are how a
+//! tunnel comes into existence and goes away on purpose (404 AC-1). They are
+//! here rather than in a module of their own because they are the same
+//! resource: everything under `/api/v1/tunnels` and everything under
+//! `*.<TUNNEL_DOMAIN>` reads the one in-memory table, and splitting them would
+//! only mean two files that must not disagree.
+//!
+//! The rules the host surface applies are in `crate::tunnels`, tested without a
 //! database, a node or wildcard DNS.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Body;
-use axum::extract::{Query, Request, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Redirect, Response};
+use axum::Json;
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use nook_proto::{ControlToNode, NodeToControl};
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::auth::SESSION_COOKIE;
+use crate::auth::{AuthCtx, SESSION_COOKIE};
+use crate::error::{ApiError, ApiResult};
+use crate::events::{self, EventDraft};
 use crate::state::AppState;
 use crate::tunnels::{
     self, Access, Credential, AUTHORIZE_PATH, GRANT_PATH, RESERVED_PREFIX, TUNNEL_COOKIE,
 };
 use crate::ws::registry::{Registry, Tunnel};
-use nook_types::{TenantId, UserId};
+use nook_types::{CreateTunnelRequest, TenantId, TunnelView, UserId};
 
 /// The most of a request body a tunnel will buffer.
 ///
@@ -105,7 +116,16 @@ async fn serve(state: AppState, label: String, req: Request) -> Response {
     }
 
     match access(&state, &tunnel, req.headers()).await {
-        Access::Allow => proxy(&state, &tunnel, req).await,
+        Access::Allow => {
+            // What the idle sweep measures (MAIN-404 AC-3), counted here rather
+            // than on every request to the host: a bounce to the apex or a
+            // refusal is somebody failing to reach the app, and a tunnel nobody
+            // can get into is exactly one that should be swept.
+            if let Some(announce) = announce_interval(&state) {
+                state.registry.touch_tunnel(&tunnel.label, announce);
+            }
+            proxy(&state, &tunnel, req).await
+        }
         // Only a navigation is bounced. A 307 preserves the method, so
         // redirecting a POST would re-post the body to the apex's authorize
         // endpoint, which does not take one — and a fetch() that got a login
@@ -361,6 +381,231 @@ fn redeem(state: &AppState, tunnel: &Tunnel, raw_query: &str) -> Response {
         .max_age(cookie::time::Duration::seconds(tunnels::COOKIE_TTL_SECS))
         .build();
     (CookieJar::new().add(cookie), Redirect::temporary(&next)).into_response()
+}
+
+// ── Lifecycle: create, list, stop (MAIN-404 AC-1) ──────────────────────────
+
+/// `POST /api/v1/tunnels` — open a tunnel to a port on a machine.
+///
+/// The label is DERIVED, never supplied: a name a person types is a name that
+/// collides with another tenant's in the same zone and cannot be guessed back
+/// (MAIN-402 AC-5). What the caller chooses is the port and the machine.
+#[utoipa::path(post, path = "/api/v1/tunnels",
+    operation_id = "create_tunnel",
+    request_body = CreateTunnelRequest,
+    responses((status = 200, body = TunnelView), (status = 400), (status = 403), (status = 404)))]
+pub async fn create(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Json(req): Json<CreateTunnelRequest>,
+) -> ApiResult<Json<TunnelView>> {
+    let domain = zone(&state)?;
+    if req.port == 0 {
+        return Err(ApiError::BadRequest("port must be 1-65535".into()));
+    }
+
+    // A node credential is already confined to one machine, so it need not name
+    // it; a person must, because they can reach several.
+    let node_id = match (req.node_id, auth.principal) {
+        (Some(id), _) => id,
+        (None, crate::auth::Principal::Node(self_id)) => self_id,
+        (None, crate::auth::Principal::User) => {
+            return Err(ApiError::BadRequest(
+                "say which machine to tunnel from: node_id".into(),
+            ))
+        }
+    };
+    // The same gate session start uses: you may expose a port on a machine you
+    // may run the thing behind it on. Not `require_node_owner` — a shared
+    // operator node is the normal place work runs, and a tunnel you cannot open
+    // to your own dev server there is a tunnel for nothing.
+    auth.require_node_may_use(&state, node_id).await?;
+
+    let node = state
+        .nodes
+        .get(auth.tenant_id, node_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    if !state.registry.node_online(node_id) {
+        return Err(ApiError::BadRequest(format!(
+            "node {} is not connected, so a tunnel to it would answer nothing",
+            node.name
+        )));
+    }
+
+    // A session binds the tunnel's LIFETIME (AC-4), so it has to be one of this
+    // tenant's, on this node. Otherwise a caller could hang their tunnel off
+    // somebody else's terminal and have it torn down with theirs.
+    let session = match req.session_id {
+        Some(id) => {
+            let s = state
+                .sessions
+                .by_id_unscoped(id)
+                .await?
+                .filter(|s| s.tenant_id == auth.tenant_id && s.node_id == node_id)
+                .ok_or(ApiError::NotFound)?;
+            Some(s)
+        }
+        None => None,
+    };
+
+    // The stem: the workspace a person is looking for, disambiguated by the
+    // machine. With no session — a bare port on a box — there is no repository
+    // to name it after, so the port does the naming instead of a blank.
+    let workspace = match session.as_ref().and_then(|s| s.workspace_id) {
+        Some(id) => state
+            .workspaces
+            .name_and_remote(id, auth.tenant_id)
+            .await?
+            .map(|(name, _)| name),
+        None => None,
+    };
+    let stem = nook_proto::tunnel::subdomain_for(
+        &workspace.unwrap_or_else(|| format!("port-{}", req.port)),
+        &node.name,
+    );
+
+    let created_at = chrono::Utc::now();
+    let tunnel = state.registry.open_tunnel_route(&stem, |label| Tunnel {
+        label,
+        tenant_id: auth.tenant_id,
+        node_id,
+        node_name: node.name.clone(),
+        port: req.port,
+        session_id: session.as_ref().map(|s| s.id),
+        created_at,
+    });
+
+    events::record(
+        &state,
+        auth.tenant_id,
+        EventDraft::new("tunnel.opened")
+            .node(node_id)
+            .payload(serde_json::json!({
+                "label": tunnel.label,
+                "port": tunnel.port,
+                "session_id": tunnel.session_id,
+            })),
+    )
+    .await;
+    tracing::info!(
+        label = %tunnel.label, port = tunnel.port, node = %node.name,
+        "tunnel opened"
+    );
+
+    Ok(Json(view(&state, &tunnel, Duration::ZERO, &domain)))
+}
+
+/// `GET /api/v1/tunnels` — every tunnel open in the caller's tenant.
+///
+/// Readable by any member, and that is not a widening: membership of the
+/// tunnel's tenant is the whole of a tunnel's access policy (MAIN-9 NG-6), so
+/// everyone this lists it to could already reach every one of them.
+#[utoipa::path(get, path = "/api/v1/tunnels",
+    operation_id = "list_tunnels",
+    responses((status = 200, body = [TunnelView])))]
+pub async fn list(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+) -> ApiResult<Json<Vec<TunnelView>>> {
+    let domain = zone(&state)?;
+    Ok(Json(
+        state
+            .registry
+            .tunnels_for_tenant(auth.tenant_id)
+            .iter()
+            .map(|(t, idle)| view(&state, t, *idle, &domain))
+            .collect(),
+    ))
+}
+
+/// `DELETE /api/v1/tunnels/{label}` — close one.
+#[utoipa::path(delete, path = "/api/v1/tunnels/{label}",
+    operation_id = "stop_tunnel",
+    params(("label" = String, Path,)),
+    responses((status = 204), (status = 403), (status = 404)))]
+pub async fn stop(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(label): Path<String>,
+) -> ApiResult<StatusCode> {
+    // A tunnel in another tenant is NOT FOUND, never forbidden: the labels share
+    // one zone, and "you may not stop that" confirms somebody else has it.
+    let tunnel = state
+        .registry
+        .tunnel_route(&label)
+        .filter(|t| t.tenant_id == auth.tenant_id)
+        .ok_or(ApiError::NotFound)?;
+    auth.require_node_may_use(&state, tunnel.node_id).await?;
+
+    // Re-read through the take: between the lookup above and here the sweep or
+    // a node disconnect may have closed it, and reporting a close we did not
+    // perform would be a small lie in the audit trail.
+    let Some(gone) = state.registry.take_tunnel_route(&label) else {
+        return Ok(StatusCode::NO_CONTENT);
+    };
+    closed(&state, &gone, "stopped").await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Announce a tunnel's end, wherever it came from — the API, the idle sweep, a
+/// session exiting or a node disconnecting. One place, so an operator reading
+/// the activity feed sees the same shape of record for all four and the reason
+/// is the only difference.
+pub async fn closed(state: &AppState, tunnel: &Tunnel, reason: &str) {
+    tracing::info!(
+        label = %tunnel.label, port = tunnel.port, node = %tunnel.node_name, reason,
+        "tunnel closed"
+    );
+    events::record(
+        state,
+        tunnel.tenant_id,
+        EventDraft::new("tunnel.closed")
+            .node(tunnel.node_id)
+            .payload(serde_json::json!({
+                "label": tunnel.label,
+                "port": tunnel.port,
+                "session_id": tunnel.session_id,
+                "reason": reason,
+            })),
+    )
+    .await;
+}
+
+/// The configured zone, or the refusal that says the deployment has not set one
+/// up. A 400 and not a 500: nothing is broken, the feature is simply off.
+fn zone(state: &AppState) -> ApiResult<String> {
+    state.cfg.tunnel_domain.clone().ok_or_else(|| {
+        ApiError::BadRequest(
+            "tunnels are not enabled here — this deployment has no TUNNEL_DOMAIN, which \
+             also needs a wildcard DNS record and a certificate for *.<domain>"
+                .into(),
+        )
+    })
+}
+
+fn view(state: &AppState, tunnel: &Tunnel, idle: Duration, domain: &str) -> TunnelView {
+    TunnelView {
+        url: origin(state, &tunnel.label, domain),
+        label: tunnel.label.clone(),
+        node_id: tunnel.node_id,
+        node_name: tunnel.node_name.clone(),
+        port: tunnel.port,
+        session_id: tunnel.session_id,
+        created_at: tunnel.created_at,
+        idle_secs: idle.as_secs(),
+    }
+}
+
+/// How often a replica re-announces that a tunnel is in use: a quarter of the
+/// idle window, so a tunnel being used somewhere is refreshed everywhere at
+/// least three times before any replica could consider it idle.
+///
+/// `None` with the sweep off — nothing reads the idle clock then, and a
+/// quarter of zero would be a NOTIFY per second per busy tunnel for a number
+/// nobody looks at.
+fn announce_interval(state: &AppState) -> Option<Duration> {
+    (state.cfg.tunnel_idle_secs > 0).then(|| Duration::from_secs(state.cfg.tunnel_idle_secs / 4))
 }
 
 // ── The proxy ──────────────────────────────────────────────────────────────

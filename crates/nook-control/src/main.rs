@@ -194,6 +194,12 @@ async fn serve(db: nook_db::DbPool, cfg: Config) -> Result<()> {
     // loops off would otherwise collect rows forever with no way to stop it.
     nook_control::services::session_reaper::start(state.clone());
 
+    // Tear down tunnels nobody has used inside the window (MAIN-404 AC-3), so a
+    // port exposed to a tenant is not held open until the next restart. Returns
+    // immediately when no `TUNNEL_DOMAIN` is configured — there is nothing that
+    // could have created one.
+    nook_control::services::tunnel_reaper::start(state.clone());
+
     // Converge sessions to what workspaces declare (MAIN-316). Every replica
     // runs it; a partial unique index on live managed sessions per
     // (workspace, node) is what makes one starter win rather than a lease.

@@ -79,6 +79,7 @@ async fn fixture(bed: &TestBed, state: &AppState, label: &str) -> Fixture {
         node_name: "beelink".into(),
         port: 3000,
         session_id: None,
+        created_at: chrono::Utc::now(),
     });
     Fixture {
         tenant,
@@ -498,6 +499,238 @@ async fn neither_nook_cookie_nor_a_nook_token_reaches_the_app_behind_the_tunnel(
     assert_eq!(body_string(res).await, "upstream body");
 
     bed.teardown().await;
+}
+
+/// MAIN-404 AC-1 and AC-2's server half: create, list and stop, through the
+/// router, with the credential the CLI actually presents.
+///
+/// The round trip is the point. `create` derives a label nobody typed, and it is
+/// the same label `list` reports, `stop` takes and — the assertion that ties the
+/// lifecycle to 9b — the host surface then stops resolving.
+#[tokio::test]
+async fn a_tunnel_is_created_listed_and_stopped_through_the_api() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let state = state(&bed).await;
+    let tenant = bed.tenant("tun").await;
+    let (user, person) = bed.user(tenant, "owner").await;
+    state
+        .identity
+        .grant_membership(tenant, user, "owner")
+        .await
+        .expect("membership");
+    let node = bed.node(tenant, person).await;
+    // Online is a precondition of creating one: a tunnel to a machine that is
+    // not connected could only ever answer 502.
+    let (tx, _node_rx) = tokio::sync::mpsc::channel(8);
+    state.registry.register_node(
+        node,
+        NodeHandle {
+            tenant_id: tenant,
+            tx,
+        },
+    );
+    let token = token_for(&state, tenant, user).await;
+
+    let created = json(
+        &state,
+        post_json(
+            &token,
+            "/api/v1/tunnels",
+            serde_json::json!({ "port": 3000, "node_id": node }),
+        ),
+        StatusCode::OK,
+    )
+    .await;
+    let label = created["label"]
+        .as_str()
+        .expect("a derived label")
+        .to_string();
+    assert!(!label.is_empty());
+    assert_eq!(
+        created["url"].as_str().unwrap_or_default(),
+        format!("http://{label}.{ZONE}"),
+        "the URL is returned, not left for the caller to assemble"
+    );
+
+    let listed = json(
+        &state,
+        authed(&token, "GET", "/api/v1/tunnels"),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(listed.as_array().map(Vec::len), Some(1), "{listed}");
+    assert_eq!(listed[0]["label"].as_str(), Some(label.as_str()));
+
+    // It resolves on the host surface — the whole point of having created it.
+    let res = send(&state, get(&format!("{label}.{ZONE}"), "/")).await;
+    assert_eq!(
+        res.status(),
+        StatusCode::TEMPORARY_REDIRECT,
+        "an anonymous browser is bounced to authorize, which means the label RESOLVED"
+    );
+
+    let res = send(
+        &state,
+        authed(&token, "DELETE", &format!("/api/v1/tunnels/{label}")),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    let listed = json(
+        &state,
+        authed(&token, "GET", "/api/v1/tunnels"),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(listed.as_array().map(Vec::len), Some(0), "{listed}");
+    // And the host stops resolving: a stopped tunnel is not merely delisted.
+    let res = send(&state, get(&format!("{label}.{ZONE}"), "/")).await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    bed.teardown().await;
+}
+
+/// A tunnel belongs to a tenant, and the label space is shared. Another
+/// tenant's is NOT FOUND rather than forbidden — a refusal would confirm that
+/// somebody else holds that name.
+#[tokio::test]
+async fn another_tenants_tunnel_is_not_found_rather_than_refused() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let state = state(&bed).await;
+    let f = fixture(&bed, &state, "api").await;
+
+    let other = bed.tenant("other").await;
+    let (stranger, _) = bed.user(other, "member").await;
+    state
+        .identity
+        .grant_membership(other, stranger, "member")
+        .await
+        .expect("membership");
+    let theirs = token_for(&state, other, stranger).await;
+
+    let res = send(
+        &state,
+        authed(&theirs, "DELETE", &format!("/api/v1/tunnels/{}", f.label)),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    assert!(
+        state.registry.tunnel_route(&f.label).is_some(),
+        "and it is still there"
+    );
+
+    // Nor does it appear in their listing.
+    let listed = json(
+        &state,
+        authed(&theirs, "GET", "/api/v1/tunnels"),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(listed.as_array().map(Vec::len), Some(0), "{listed}");
+
+    bed.teardown().await;
+}
+
+/// AC-4 through the real dispatch path: the tunnel a session opened is gone
+/// once the node reports that session exited, and the host stops resolving it.
+#[tokio::test]
+async fn a_session_exiting_closes_the_tunnel_it_opened() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let state = state(&bed).await;
+    let f = fixture(&bed, &state, "api").await;
+    let session = nook_types::SessionId::new();
+    state.registry.put_tunnel_route(Tunnel {
+        label: "bound".into(),
+        tenant_id: f.tenant,
+        node_id: f.node,
+        node_name: "beelink".into(),
+        port: 5173,
+        session_id: Some(session),
+        created_at: chrono::Utc::now(),
+    });
+
+    for tunnel in state.registry.take_tunnels_for_session(session) {
+        nook_control::routes::tunnels::closed(&state, &tunnel, "session exited").await;
+    }
+
+    assert!(state.registry.tunnel_route("bound").is_none());
+    let res = send(&state, get(&format!("bound.{ZONE}"), "/")).await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    // The tunnel that was NOT the session's is untouched.
+    assert!(state.registry.tunnel_route(&f.label).is_some());
+
+    bed.teardown().await;
+}
+
+/// A deployment with no `TUNNEL_DOMAIN` cannot create one, and says why rather
+/// than handing back a URL that resolves nowhere.
+#[tokio::test]
+async fn creating_a_tunnel_needs_a_configured_zone() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let mut cfg = Config::for_test();
+    cfg.tunnel_domain = None;
+    let state = AppState::new(bed.db(), cfg, None).await;
+    let tenant = bed.tenant("tun").await;
+    let (user, person) = bed.user(tenant, "owner").await;
+    state
+        .identity
+        .grant_membership(tenant, user, "owner")
+        .await
+        .expect("membership");
+    let node = bed.node(tenant, person).await;
+    let token = token_for(&state, tenant, user).await;
+
+    let res = send(
+        &state,
+        post_json(
+            &token,
+            "/api/v1/tunnels",
+            serde_json::json!({ "port": 3000, "node_id": node }),
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let body = body_string(res).await;
+    assert!(body.contains("TUNNEL_DOMAIN"), "{body}");
+
+    bed.teardown().await;
+}
+
+fn authed(token: &str, method: &str, path: &str) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(path)
+        .header(axum::http::header::HOST, "localhost:8080")
+        .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap()
+}
+
+fn post_json(token: &str, path: &str, body: serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(path)
+        .header(axum::http::header::HOST, "localhost:8080")
+        .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+async fn json(state: &AppState, req: Request<Body>, expect: StatusCode) -> serde_json::Value {
+    let res = send(state, req).await;
+    let status = res.status();
+    let body = body_string(res).await;
+    assert_eq!(status, expect, "{body}");
+    serde_json::from_str(&body).unwrap_or_else(|e| panic!("not json ({e}): {body}"))
 }
 
 async fn body_string(res: axum::response::Response) -> String {
