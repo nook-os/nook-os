@@ -134,15 +134,16 @@ pub struct NodeFacts {
     /// reported none (an older node) and is treated as unknown, not incapable —
     /// eligibility falls back to selector + taints alone.
     pub runtimes: Vec<String>,
-    /// How many loop jobs this node holds at once — `capabilities.max_loop_jobs`,
-    /// the number an operator already sets with `NOOK_MAX_LOOP_JOBS`.
+    /// How many loop jobs this node holds at once — the capacity in force
+    /// (`loop_capacity::of`): an operator's central number if one is set,
+    /// else what the machine advertises from `NOOK_MAX_LOOP_JOBS`.
     ///
     /// It is the ceiling on sharded placement (MAIN-446 AC-1), and it is the
     /// node's EXISTING number rather than a second one: a review loop is agent
     /// work on that machine exactly as a loop job is, and two answers to "how
     /// much agent work does this box run" would immediately disagree.
     ///
-    /// `None` is an unreported cap (an older agent), which reads as
+    /// `None` is an unresolved cap, which reads as
     /// [`jobs::CAPACITY_WHEN_UNREPORTED`] for the reason given there — the
     /// shipped default, not permission to take everything.
     pub max_loop_jobs: Option<u32>,
@@ -1472,14 +1473,11 @@ pub(crate) async fn node_facts(
                     .collect()
             })
             .unwrap_or_default();
-        // The node's own loop-job ceiling (MAIN-446), read from the same
-        // `capabilities` blob the dispatcher reads it from — absent means an
-        // agent too old to report it, not a node that runs nothing.
-        let max_loop_jobs = node
-            .capabilities
-            .get("max_loop_jobs")
-            .and_then(|v| v.as_u64())
-            .map(|n| n as u32);
+        // The node's loop-job ceiling (MAIN-446), resolved exactly as the
+        // dispatcher resolves it (MAIN-508) — the operator's central number if
+        // there is one, else what the machine advertises. Two answers to "how
+        // much agent work does this box run" would immediately disagree.
+        let max_loop_jobs = Some(crate::services::loop_capacity::of(&node).effective);
         out.push(NodeFacts {
             id: node.id,
             online: state.registry.node_online(node.id),

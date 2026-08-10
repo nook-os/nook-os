@@ -334,6 +334,12 @@ pub fn build_router(state: AppState) -> Router {
             "/nodes/{id}/leases/{session}",
             delete_route(nodes::release_lease),
         )
+        // The port range's twin (MAIN-508): the other half of sizing a machine,
+        // reached the same way rather than through a second style.
+        .route(
+            "/nodes/{id}/capacity",
+            get(nodes::get_capacity).put(nodes::set_capacity),
+        )
         .route("/nodes/{id}/authorize", post(nodes::authorize))
         .route(
             "/nodes/{id}/operator-authorize-optout",

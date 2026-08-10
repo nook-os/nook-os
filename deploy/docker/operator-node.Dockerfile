@@ -110,5 +110,7 @@ ENV NOOK_SHARED_OPERATOR=1
 # plane refuses build work on any shared operator whatever it declares.
 ENV NOOK_LOOP_KINDS=spec,decompose,review,epic-run
 # How many loop jobs it holds at once. `0` would stop it claiming entirely.
+# The fallback since MAIN-508: `nook set capacity` overrides it centrally, so
+# retuning this machine no longer needs a rebuild or a restart.
 ENV NOOK_MAX_LOOP_JOBS=2
 ENTRYPOINT ["node-entrypoint.sh"]

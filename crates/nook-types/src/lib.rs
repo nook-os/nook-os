@@ -542,8 +542,23 @@ pub struct Capabilities {
     /// `NOOK_MAX_LOOP_JOBS`. `0` disables claiming entirely. Absent from an
     /// older node's report, which reads as "unspecified" rather than zero —
     /// see `nook_control::services::jobs::CAPACITY_WHEN_UNREPORTED`.
+    ///
+    /// It is no longer the last word: an operator may set the number centrally
+    /// (MAIN-508), and that wins unless [`Self::max_loop_jobs_pinned`] says the
+    /// host insists.
     #[serde(default)]
     pub max_loop_jobs: Option<u32>,
+    /// This host insists on its own [`Self::max_loop_jobs`] (MAIN-508), from
+    /// `NOOK_MAX_LOOP_JOBS_PINNED`.
+    ///
+    /// Off by default, because central-wins is the whole point of the setting:
+    /// a machine whose env already names a number is exactly the machine an
+    /// operator needs to retune without a restart. The pin is the escape hatch
+    /// for a host that genuinely must decide locally — a box sized by something
+    /// outside NookOS — and setting it makes the central write REFUSE rather
+    /// than be silently ignored.
+    #[serde(default)]
+    pub max_loop_jobs_pinned: bool,
     /// The port range this node offers sessions, `[start, end]` inclusive
     /// (MAIN-301). Absent from a node too old to report one, which reads as
     /// "no ports to lease" rather than a guessed range — inventing one would
@@ -663,8 +678,45 @@ pub struct Node {
     /// is taken and is deliberately not modelled.
     #[serde(default)]
     pub port_exclusions: Option<serde_json::Value>,
+    /// An operator's loop-job capacity for this node, overriding what it
+    /// advertises (MAIN-508) — the port range's twin, and set the same way.
+    /// `None` means "use the node's own"; `Some(0)` is a deliberate cordon and
+    /// is a different statement from `None`.
+    #[serde(default)]
+    pub max_loop_jobs: Option<i32>,
+    /// The capacity actually in force and where it came from — computed per
+    /// response from the two fields above plus what the node reports, never
+    /// stored, exactly as [`Self::home_tenant`] is.
+    ///
+    /// Served on the node itself rather than left to each caller, because the
+    /// precedence has one definition (`loop_capacity::of`) and a CLI table or a
+    /// UI badge re-deriving it is how the two start disagreeing.
+    #[serde(default)]
+    #[db(skip)]
+    pub loop_capacity: Option<NodeCapacity>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// How many loop jobs a node runs at once, and who decided (MAIN-508).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct NodeCapacity {
+    /// The number placement actually applies.
+    pub effective: u32,
+    /// `host` (the machine pinned it) · `operator` (set centrally) · `node`
+    /// (what the machine advertises) · `default` (nothing reported one).
+    ///
+    /// The question this whole surface exists to answer is "why is only one
+    /// thing building", and a number with no provenance cannot answer it.
+    pub source: String,
+    /// The operator's central value, kept separate so a UI can show what
+    /// clearing it will fall back to.
+    pub operator: Option<u32>,
+    /// What the node itself reports (`NOOK_MAX_LOOP_JOBS`, else its default).
+    pub advertised: Option<u32>,
+    /// The host has pinned its own number, so the central value is refused
+    /// rather than quietly ignored.
+    pub pinned: bool,
 }
 
 /// A node's refusal to take work unless the work tolerates it (MAIN-314).
@@ -820,6 +872,18 @@ pub struct SetNodePortsRequest {
     pub start: Option<i32>,
     #[serde(default)]
     pub end: Option<i32>,
+}
+
+/// `PUT /nodes/{id}/capacity` — set or clear the operator's loop-job capacity
+/// (MAIN-508). `None` clears it back to whatever the node advertises.
+///
+/// Signed on the wire on purpose: `u32` would refuse `-1` as a deserialization
+/// error, which reaches the operator as a complaint about a field rather than
+/// about the number they typed. Range-checked in the handler instead.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct SetNodeCapacityRequest {
+    #[serde(default)]
+    pub max_loop_jobs: Option<i64>,
 }
 
 /// Ports to rule out on a node. An EMPTY list clears them — there is no

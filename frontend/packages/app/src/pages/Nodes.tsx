@@ -29,6 +29,7 @@ import { useLive } from "../live";
 import { AddNodeModal } from "../AddNodeModal";
 import { NodePlacement } from "../NodePlacement";
 import { NodePorts } from "../NodePorts";
+import { NodeCapacity } from "../NodeCapacity";
 import { SectionedPage, type PageSection } from "../SectionedPage";
 
 /** The caller's standing toward a node, mirroring the server's rules
@@ -604,6 +605,16 @@ export function NodeDetail() {
       group: "Scheduling",
       keywords: ["lease", "range", "listener", "port"],
       render: () => <NodePorts nodeId={node.id} canEdit={owned} />,
+    },
+    {
+      // How much agent work this machine takes (MAIN-508) — the port range's
+      // twin, beside it because they are one sizing decision. Owner-only to
+      // edit, same rule and same reason.
+      id: "capacity",
+      title: "Loop capacity",
+      group: "Scheduling",
+      keywords: ["loop", "jobs", "concurrency", "cordon", "build", "capacity"],
+      render: () => <NodeCapacity nodeId={node.id} canEdit={owned} />,
     },
     {
       id: "workspaces",

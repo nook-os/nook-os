@@ -313,6 +313,10 @@ pub trait NodeRepository: Send + Sync {
 
     /// The loop kinds a node declares, and the cap it reports. `None` capacity
     /// means an older node that never reported one.
+    ///
+    /// That cap is what the node ADVERTISES, not the one placement applies —
+    /// an operator's central value may outrank it (MAIN-508). Ask
+    /// `services::loop_capacity::of` for the number in force.
     async fn loop_profile(&self, id: NodeId) -> ApiResult<Option<(Vec<String>, Option<u32>)>>;
 
     /// How many of this person's nodes are online — the first half of phrasing
@@ -356,6 +360,16 @@ pub trait NodeRepository: Send + Sync {
         id: NodeId,
         tenant: TenantId,
         ports: Option<Vec<i32>>,
+    ) -> ApiResult<Option<Node>>;
+
+    /// Set or clear an operator's loop-job capacity for a node (MAIN-508).
+    /// `None` clears it, falling back to whatever the node advertises; `Some(0)`
+    /// is a cordon and is stored as such.
+    async fn set_max_loop_jobs(
+        &self,
+        id: NodeId,
+        tenant: TenantId,
+        max: Option<i32>,
     ) -> ApiResult<Option<Node>>;
 
     // ── the liveness lease and what the socket reports ──────────────────────
@@ -493,7 +507,8 @@ pub trait TenantCaRepository: Send + Sync {
 /// decodes from, and the reason two SELECTs cannot drift apart.
 const NODE_COLUMNS: &str = "id, tenant_id, name, hostname, platform, capabilities, resources, \
      status, last_seen_at, owner_person_id, shared, created_at, updated_at, labels, taints, \
-     port_range_start, port_range_end, port_exclusions, operator_authorize_optout";
+     port_range_start, port_range_end, port_exclusions, operator_authorize_optout, \
+     max_loop_jobs";
 
 /// The tenant node list's sort allowlist — the paged endpoint's contract half.
 pub const NODE_PAGE_SORTS: &[(&str, &str)] = &[
@@ -1132,6 +1147,26 @@ impl NodeRepository for DbNodeRepository {
             .await?)
     }
 
+    async fn set_max_loop_jobs(
+        &self,
+        id: NodeId,
+        tenant: TenantId,
+        max: Option<i32>,
+    ) -> ApiResult<Option<Node>> {
+        Ok(self
+            .db
+            .query_opt(
+                &format!(
+                    "UPDATE nodes SET max_loop_jobs = $3, updated_at = {now}
+                      WHERE id = $1 AND tenant_id = $2
+                  RETURNING {NODE_COLUMNS}",
+                    now = type_mapping(self.db.engine()).now()
+                ),
+                params![id, tenant, max],
+            )
+            .await?)
+    }
+
     async fn shared_operator_online_count(&self, tenant: TenantId) -> ApiResult<i64> {
         Ok(self
             .db
@@ -1602,6 +1637,8 @@ impl FakeNodeRepository {
                 port_range_start: None,
                 port_range_end: None,
                 port_exclusions: None,
+                max_loop_jobs: None,
+                loop_capacity: None,
             },
             token_hash: String::new(),
             owning_instance_id: None,
@@ -2022,6 +2059,8 @@ impl NodeRepository for FakeNodeRepository {
                 port_range_start: None,
                 port_range_end: None,
                 port_exclusions: None,
+                max_loop_jobs: None,
+                loop_capacity: None,
                 created_at: now,
                 updated_at: now,
             },
@@ -2309,6 +2348,24 @@ impl NodeRepository for FakeNodeRepository {
             p.dedup();
             serde_json::to_value(p).unwrap_or(serde_json::Value::Null)
         });
+        Ok(Some(n.node.clone()))
+    }
+
+    async fn set_max_loop_jobs(
+        &self,
+        id: NodeId,
+        tenant: TenantId,
+        max: Option<i32>,
+    ) -> ApiResult<Option<Node>> {
+        let mut st = self.inner.lock().unwrap();
+        let Some(n) = st
+            .nodes
+            .iter_mut()
+            .find(|n| n.node.id == id && n.node.tenant_id == tenant)
+        else {
+            return Ok(None);
+        };
+        n.node.max_loop_jobs = max;
         Ok(Some(n.node.clone()))
     }
 
