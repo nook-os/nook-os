@@ -543,6 +543,38 @@ pub trait TaskRepository: Send + Sync {
     async fn release_assignment(&self, id: TaskId, tenant: TenantId)
         -> ApiResult<Option<TaskItem>>;
 
+    /// Release a claim ONLY while `holder` still holds it under a lease
+    /// (MAIN-489 AC-7). The lease is the fence the claim reaper draws: a card a
+    /// human dragged into progress has none, and a card a human took over has
+    /// another assignee — so neither is undone by a run of ours dying. `true`
+    /// when the release actually happened.
+    async fn release_claim_of(
+        &self,
+        id: TaskId,
+        tenant: TenantId,
+        holder: UserId,
+    ) -> ApiResult<bool>;
+
+    /// The card's consecutive concluded-nothing build count (MAIN-489 AC-4).
+    /// `0` for a card that has none, and for one that is gone.
+    async fn build_failures(&self, id: TaskId, tenant: TenantId) -> ApiResult<i32>;
+
+    /// Add one to that count, and report the new total.
+    async fn bump_build_failures(&self, id: TaskId, tenant: TenantId) -> ApiResult<i32>;
+
+    /// Zero that count, but only when it has reached `at_least` — `0` zeroes
+    /// unconditionally. The threshold is what makes one call serve both resets:
+    /// an outcome spends whatever is there, while a card re-entering the pick
+    /// with a FULL set can only have got there through a human's hand (the
+    /// `blocked` label lifted, or the card named to the manual trigger), so its
+    /// strikes are spent too (AC-5/AC-6).
+    async fn clear_build_failures(
+        &self,
+        id: TaskId,
+        tenant: TenantId,
+        at_least: i32,
+    ) -> ApiResult<()>;
+
     /// Attach or detach the `agent-ready` label, creating it if new. One method
     /// because the upsert exists only to feed the attach/detach.
     async fn set_agent_ready(&self, tenant: TenantId, id: TaskId, on: bool) -> ApiResult<()>;
@@ -1997,6 +2029,67 @@ impl TaskRepository for DbTaskRepository {
             .await?)
     }
 
+    async fn release_claim_of(
+        &self,
+        id: TaskId,
+        tenant: TenantId,
+        holder: UserId,
+    ) -> ApiResult<bool> {
+        let rows = self
+            .db
+            .exec(
+                &format!(
+                    "UPDATE tasks SET assignee_user_id = NULL, claim_expires_at = NULL,
+                updated_at = {}
+         WHERE id = $1 AND tenant_id = $2 AND assignee_user_id = $3
+           AND claim_expires_at IS NOT NULL",
+                    type_mapping(self.db.engine()).now()
+                ),
+                params![id, tenant, holder],
+            )
+            .await?;
+        Ok(rows > 0)
+    }
+
+    async fn build_failures(&self, id: TaskId, tenant: TenantId) -> ApiResult<i32> {
+        Ok(self
+            .db
+            .query_scalar_opt(
+                "SELECT build_failure_strikes FROM tasks WHERE id = $1 AND tenant_id = $2",
+                params![id, tenant],
+            )
+            .await?
+            .unwrap_or(0))
+    }
+
+    async fn bump_build_failures(&self, id: TaskId, tenant: TenantId) -> ApiResult<i32> {
+        Ok(self
+            .db
+            .query_scalar_opt(
+                "UPDATE tasks SET build_failure_strikes = build_failure_strikes + 1
+         WHERE id = $1 AND tenant_id = $2 RETURNING build_failure_strikes",
+                params![id, tenant],
+            )
+            .await?
+            .unwrap_or(0))
+    }
+
+    async fn clear_build_failures(
+        &self,
+        id: TaskId,
+        tenant: TenantId,
+        at_least: i32,
+    ) -> ApiResult<()> {
+        self.db
+            .exec(
+                "UPDATE tasks SET build_failure_strikes = 0
+         WHERE id = $1 AND tenant_id = $2 AND build_failure_strikes >= $3",
+                params![id, tenant, at_least],
+            )
+            .await?;
+        Ok(())
+    }
+
     async fn set_agent_ready(&self, tenant: TenantId, id: TaskId, on: bool) -> ApiResult<()> {
         let label_id: Uuid = self
             .db
@@ -2612,6 +2705,8 @@ struct FakeState {
     tasks: Vec<TaskItem>,
     /// `(task, label_name)`
     task_labels: Vec<(Uuid, String)>,
+    /// Consecutive build runs that concluded nothing, per task (MAIN-489).
+    build_failures: HashMap<Uuid, i32>,
     comments: Vec<TaskComment>,
     desc_revisions: Vec<TaskDescriptionRevision>,
     labels: Vec<Label>,
@@ -3693,6 +3788,54 @@ impl TaskRepository for FakeTaskRepository {
         t.claim_expires_at = None;
         t.updated_at = chrono::Utc::now();
         Ok(Some(t.clone()))
+    }
+
+    async fn release_claim_of(
+        &self,
+        id: TaskId,
+        tenant: TenantId,
+        holder: UserId,
+    ) -> ApiResult<bool> {
+        let mut st = self.inner.lock().unwrap();
+        let Some(t) = st
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == id && t.tenant_id == tenant)
+        else {
+            return Ok(false);
+        };
+        if t.assignee_user_id != Some(holder) || t.claim_expires_at.is_none() {
+            return Ok(false);
+        }
+        t.assignee_user_id = None;
+        t.claim_expires_at = None;
+        t.updated_at = chrono::Utc::now();
+        Ok(true)
+    }
+
+    async fn build_failures(&self, id: TaskId, _tenant: TenantId) -> ApiResult<i32> {
+        let st = self.inner.lock().unwrap();
+        Ok(st.build_failures.get(&id.0).copied().unwrap_or(0))
+    }
+
+    async fn bump_build_failures(&self, id: TaskId, _tenant: TenantId) -> ApiResult<i32> {
+        let mut st = self.inner.lock().unwrap();
+        let n = st.build_failures.entry(id.0).or_insert(0);
+        *n += 1;
+        Ok(*n)
+    }
+
+    async fn clear_build_failures(
+        &self,
+        id: TaskId,
+        _tenant: TenantId,
+        at_least: i32,
+    ) -> ApiResult<()> {
+        let mut st = self.inner.lock().unwrap();
+        if st.build_failures.get(&id.0).copied().unwrap_or(0) >= at_least {
+            st.build_failures.remove(&id.0);
+        }
+        Ok(())
     }
 
     async fn set_agent_ready(&self, _tenant: TenantId, id: TaskId, on: bool) -> ApiResult<()> {

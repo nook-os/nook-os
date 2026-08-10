@@ -209,6 +209,13 @@ pub trait LoopJobRepository: Send + Sync {
     /// card's board number — the same key `BuildWork` items carry — with
     /// `build_fingerprint`/`build_outcome` in the roles head-sha/verdict play
     /// for reviews.
+    ///
+    /// All THREE terminal states are an attempt HERE (MAIN-489), because this
+    /// is the wakeup REST and not the failure ladder: a canceled run's card is
+    /// handed straight back now, so leaving it out would re-raise it on the
+    /// very next pass. The ladder itself still reads `failed` alone, which is
+    /// the distinction MAIN-496 drew when it chose to cancel a queued job it
+    /// could not place rather than fail it.
     async fn build_run_heads(
         &self,
         tenant: TenantId,
@@ -757,7 +764,8 @@ impl LoopJobRepository for DbLoopJobRepository {
                 "SELECT t.number AS item_key, j.build_fingerprint AS fingerprint, j.updated_at
                    FROM loop_jobs j JOIN tasks t ON t.id = j.target_task_id
                   WHERE j.tenant_id = $1 AND j.workspace_id = $2 AND j.kind = 'build'
-                    AND (j.state = 'failed' OR (j.state = 'completed' AND j.build_outcome IS NULL))
+                    AND (j.state IN ('failed', 'canceled')
+                         OR (j.state = 'completed' AND j.build_outcome IS NULL))
                     AND j.updated_at = (
                         SELECT MAX(k.updated_at) FROM loop_jobs k
                          WHERE k.workspace_id = j.workspace_id
@@ -765,7 +773,7 @@ impl LoopJobRepository for DbLoopJobRepository {
                            AND k.kind = 'build'
                            AND ((k.build_fingerprint LIKE 'repair:%')
                                 = (j.build_fingerprint LIKE 'repair:%'))
-                           AND (k.state = 'failed'
+                           AND (k.state IN ('failed', 'canceled')
                                 OR (k.state = 'completed' AND k.build_outcome IS NULL)))",
                 params![tenant, workspace.0],
             )
@@ -1465,7 +1473,7 @@ impl LoopJobRepository for FakeLoopJobRepository {
                 "completed" if j.build_outcome.is_some() => {
                     e.done_head = j.build_fingerprint.clone()
                 }
-                "failed" | "completed" => {
+                "failed" | "canceled" | "completed" => {
                     e.attempted_head = j.build_fingerprint.clone();
                     e.attempted_at = Some(j.updated_at);
                 }

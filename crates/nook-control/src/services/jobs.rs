@@ -490,6 +490,19 @@ pub async fn converge_builds(
         .await?
         .into_iter()
         .collect();
+    // MAIN-489 AC-5: the manual trigger overrules the loop's OWN escalation —
+    // a card it labelled `blocked` after three runs concluded nothing — and
+    // nothing else. A card a human blocked for their own reason stays blocked
+    // however it is named, so the strike count is the whole permission.
+    let unblock_task = match only_task {
+        Some(t)
+            if state.tasks.build_failures(t, tenant).await?
+                >= crate::services::build_handback::MAX_STRIKES =>
+        {
+            Some(t)
+        }
+        _ => None,
+    };
     let source = crate::services::work_source::BuildWork {
         tasks: state.tasks.as_ref(),
         tenant,
@@ -497,6 +510,7 @@ pub async fn converge_builds(
         demand: &state.review_demand,
         token,
         rejected_heads,
+        unblock_task,
     };
     use crate::services::work_source::WorkSource;
     let Some(mut items) = source.items(workspace, ws.git_remote_url.as_deref()).await else {
@@ -531,6 +545,21 @@ pub async fn converge_builds(
             {
                 continue;
             }
+            // AC-5 (MAIN-489): a card can only reach a claim carrying a FULL
+            // set of strikes through a human's hand — the `blocked` label they
+            // lifted, or the card they named to the manual trigger below. Both
+            // nudges therefore spend the strikes, and this is the one place
+            // that has to know it.
+            if let Err(e) = state
+                .tasks
+                .clear_build_failures(task, tenant, crate::services::build_handback::MAX_STRIKES)
+                .await
+            {
+                // Never fatal after a successful claim: returning here would
+                // leave the card held for a run this pass then never raises,
+                // which is the wedge this whole mechanism exists to prevent.
+                tracing::warn!(%workspace, error = %e, "could not spend a nudged card's strikes");
+            }
             claimed = Some(task);
         }
         let raised = raise_run(
@@ -556,7 +585,7 @@ pub async fn converge_builds(
                 // with nothing working it — and, released but left in the
                 // started column, would read as unheld work in progress.
                 if let Some(task) = claimed {
-                    if let Err(e) = give_card_back(state, tenant, task).await {
+                    if let Err(e) = give_card_back(state, tenant, task, None).await {
                         tracing::warn!(%workspace, error = ?e, "could not give a compensated card back");
                     }
                 }
@@ -574,26 +603,45 @@ pub async fn converge_builds(
 /// Give a card the loop holds back to the board: release the claim, and return
 /// it to the unstarted column.
 ///
-/// One definition, because the two callers must not drift. The claim and the
+/// One definition, because the callers must not drift. The claim and the
 /// column are a pair: released but left in the started column reads as unheld
 /// work in progress, and moved back while still assigned is out of every
 /// future pick with nothing working it. Used to compensate a run that never
-/// materialized, and (MAIN-482 AC-6) to undo the claim of one the node refused
-/// to launch — refusals never reach the outcome handler, which is otherwise
-/// the only thing that releases a claim.
+/// materialized, and (MAIN-482 AC-6, generalised by MAIN-489) to undo the claim
+/// of any run that ended without an outcome — those never reach the outcome
+/// handler, which is otherwise the only thing that releases a claim.
+///
+/// `held_by` is the fence, and it is why there is one function rather than two.
+/// `None` releases whatever holds the card — right for compensating a claim we
+/// took moments ago in the same call. `Some(user)` releases only while that
+/// user still holds it UNDER A LEASE, which is what stops a run's death
+/// undoing a human's own claim (MAIN-489 AC-7): a card somebody took over has
+/// another assignee, and one dragged into progress by hand has no lease. It
+/// answers `false` and moves nothing when the card was not ours to give back.
 ///
 /// A failed release is logged and the move still attempted, which is the
 /// compensation path's own behaviour: the two writes fail independently, and
 /// abandoning the column move because the release failed would leave the card
 /// in the started column as well as assigned — strictly worse than half of the
-/// pair landing.
+/// pair landing. A `held_by` that does not match is the other case entirely:
+/// nothing was released, so there is no half to complete.
 pub(crate) async fn give_card_back(
     state: &AppState,
     tenant: TenantId,
     task: TaskId,
-) -> ApiResult<()> {
-    if let Err(e) = state.tasks.release_assignment(task, tenant).await {
-        tracing::warn!(task = %task.0, error = %e, "could not release a claim");
+    held_by: Option<UserId>,
+) -> ApiResult<bool> {
+    match held_by {
+        Some(holder) => {
+            if !state.tasks.release_claim_of(task, tenant, holder).await? {
+                return Ok(false);
+            }
+        }
+        None => {
+            if let Err(e) = state.tasks.release_assignment(task, tenant).await {
+                tracing::warn!(task = %task.0, error = %e, "could not release a claim");
+            }
+        }
     }
     let row = state
         .tasks
@@ -625,7 +673,7 @@ pub(crate) async fn give_card_back(
             },
         )
         .await?;
-    Ok(())
+    Ok(true)
 }
 
 /// The `Closes KEY` line — the reviewer's only join from a PR to its contract,
@@ -813,6 +861,12 @@ pub async fn record_build_outcome(
     // source reads `pr_url` off the card). The transcript carries the manual
     // fix an operator needs.
     let board = async {
+        // AC-6 (MAIN-489): this run concluded something, so the card's run of
+        // runs that concluded nothing is over. Three failures spread across
+        // successful builds must never add up to an escalation.
+        if !is_repair {
+            state.tasks.clear_build_failures(task, tenant, 0).await?;
+        }
         match concluded {
             Concluded::PrOpened(url) => {
                 // The reviewer's ONLY join from a PR to its contract is the
@@ -1226,6 +1280,13 @@ pub async fn transition(
     // answers the now-canceled ask is told so clearly; see `interactions::answer`.)
     if matches!(to, "failed" | "canceled") {
         crate::services::interactions::cancel_for_job(state, tenant, id).await;
+    }
+    // MAIN-489: a build run that ends having recorded NO outcome still owes its
+    // card an answer. Here rather than in `finish`, because every way a run can
+    // reach terminal — a node's report, the executor reaper, a cancel — comes
+    // through this one write path.
+    if is_terminal(to) {
+        crate::services::build_handback::on_run_concluded(state, tenant, &updated).await;
     }
     Ok(updated)
 }
@@ -1961,17 +2022,21 @@ pub async fn finish(
 /// A REPAIR run's card was never claimed by the loop and may be held by a
 /// human — its comment lands but the claim is left alone, mirroring the
 /// outcome handler's rule.
+///
+/// **The giving back is the TRANSITION's** since MAIN-489: `failed` reaches
+/// [`crate::services::build_handback::on_run_concluded`], which releases the
+/// claim, returns the card and counts the attempt. Doing it here as well would
+/// clear the assignee before that guarded release could recognise the card as
+/// ours — and a refusal that never counted would be the one failure mode
+/// exempt from the three-strike stop, which is the class most likely to repeat
+/// forever (a node misconfigured the same way on every pass).
 pub async fn refuse(state: &AppState, tenant: TenantId, id: JobId, reason: &str) -> ApiResult<()> {
     let reason = reason.trim();
     let job = load(state, tenant, id).await?;
     append_transcript(state, id, "system", reason).await.ok();
 
     if let Some(task) = job.target_task_id {
-        let is_repair = job
-            .build_fingerprint
-            .as_deref()
-            .is_some_and(|f| f.starts_with("repair:"));
-        // The comment first, then the release — the order a human reads: the
+        // The comment first, then the transition — the order a human reads: the
         // card explains why it came back before it reappears in the queue.
         if let Err(e) = state
             .tasks
@@ -1987,16 +2052,9 @@ pub async fn refuse(state: &AppState, tenant: TenantId, id: JobId, reason: &str)
         {
             tracing::warn!(job = %id, task = %task.0, error = ?e, "could not comment a refusal");
         }
-        if !is_repair {
-            if let Err(e) = give_card_back(state, tenant, task).await {
-                // Loud: the run is over either way, and a card left claimed
-                // with nothing running is the state this exists to remove.
-                tracing::error!(
-                    job = %id, task = %task.0, error = ?e,
-                    "a refused build run could not give its card back — release it by hand"
-                );
-            }
-        }
+        // The handback nudges the UI for a card it gives back; a REPAIR run's
+        // card it deliberately leaves alone, and the comment above still has
+        // to reach the surfaces watching it.
         state
             .registry
             .publish(tenant, nook_proto::UiEvent::TaskChanged { task_id: task });
@@ -2100,6 +2158,10 @@ pub async fn reap_stale_executors(state: &AppState, grace_secs: u64) -> ApiResul
         if let Ok(job) = load(state, *tenant, *id).await {
             let private = target_is_private(state, *tenant, *target).await;
             record_job_event(state, *tenant, "job.state_changed", &job, private).await;
+            // The UPDATE above went round `transition`, so the handback it
+            // carries has to be repeated here — a build run reaped with its
+            // node is exactly the shape that wedged a card (MAIN-489).
+            crate::services::build_handback::on_run_concluded(state, *tenant, &job).await;
         }
     }
     Ok(reaped.len() as u64)
