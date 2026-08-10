@@ -194,3 +194,36 @@ exclude = [
   "frontend/apps/desktop/src-tauri/target",
   "frontend/apps/desktop/src-tauri/binaries/",
 ]
+
+# What a concluded build run gives back to the disk (MAIN-493).
+#
+# Every path here is the compiler's output and nothing else: delete it and the
+# next pass rebuilds exactly what it needs. Cargo names an artifact for its unit
+# CONFIGURATION rather than its content, so each differently-configured build —
+# clippy, the Postgres test leg, the SQLite leg, host and container — adds a
+# whole artifact set and removes none. One build worktree's `target/` reached
+# 120 GB and filled the machine on 2026-08-09. `docs/build-artifact-growth.md`
+# has the measurements.
+#
+# The two `.cache/cargo-target*` entries are the CONTAINERS' target dirs
+# (`docker-compose.yml` bind-mounts them at `/app/target-docker*`) and are the
+# biggest of the set. They are written by root inside the container, so a
+# host-side delete may only get part of them; that is reported, not fatal.
+#
+# NOT here, deliberately: `.cache/cargo-registry` and `.cache/web-node-modules`
+# are DOWNLOAD caches, refilled from the network rather than by compiling, and
+# `node_modules/` likewise. Reclaim is for what a rebuild reproduces locally.
+#
+# These overlap `exclude` above because both name the same class from opposite
+# ends — what a fresh tree must not be GIVEN, and what a concluded one must not
+# KEEP — and neither list is derivable from the other: `.nook-secrets/` is
+# excluded and must never be reclaimed, `.cache/cargo-target` is reclaimed via
+# the broader `/.cache/` exclusion.
+reclaim = [
+  "/target",
+  "/target-docker",
+  "/target-docker-node",
+  "/.cache/cargo-target",
+  "/.cache/cargo-target-node",
+  "frontend/apps/desktop/src-tauri/target",
+]
