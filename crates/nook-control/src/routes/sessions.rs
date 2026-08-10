@@ -607,6 +607,13 @@ pub async fn delete(
         );
     }
     state.sessions.delete(id, auth.tenant_id).await?;
+    // Belt and braces for the tunnels this session opened (MAIN-404 AC-4). The
+    // node's `SessionExited` report closes them for a live session, but a row
+    // deleted while its node is offline never produces one — and that tunnel
+    // would then outlive not just the terminal but its record.
+    for tunnel in state.registry.take_tunnels_for_session(id) {
+        crate::routes::tunnels::closed(&state, &tunnel, "session deleted").await;
+    }
     events::record(
         &state,
         auth.tenant_id,

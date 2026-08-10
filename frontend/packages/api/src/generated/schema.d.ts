@@ -2946,6 +2946,51 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tunnels": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/tunnels` — every tunnel open in the caller's tenant.
+         * @description Readable by any member, and that is not a widening: membership of the
+         *     tunnel's tenant is the whole of a tunnel's access policy (MAIN-9 NG-6), so
+         *     everyone this lists it to could already reach every one of them.
+         */
+        get: operations["list_tunnels"];
+        put?: never;
+        /**
+         * `POST /api/v1/tunnels` — open a tunnel to a port on a machine.
+         * @description The label is DERIVED, never supplied: a name a person types is a name that
+         *     collides with another tenant's in the same zone and cannot be guessed back
+         *     (MAIN-402 AC-5). What the caller chooses is the port and the machine.
+         */
+        post: operations["create_tunnel"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tunnels/{label}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** `DELETE /api/v1/tunnels/{label}` — close one. */
+        delete: operations["stop_tunnel"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/vault/passkeys": {
         parameters: {
             query?: never;
@@ -4564,6 +4609,16 @@ export interface components {
             name?: string | null;
             /** @description The runtime to run — `bash` by default, but any the node has installed. */
             runtime?: string | null;
+        };
+        /** @description Open a tunnel to a port on a machine (MAIN-404 AC-1). */
+        CreateTunnelRequest: {
+            node_id?: null | components["schemas"]["NodeId"];
+            /**
+             * Format: int32
+             * @description The port on the node's own loopback to expose.
+             */
+            port: number;
+            session_id?: null | components["schemas"]["SessionId"];
         };
         /** @description Create a note. Body defaults to empty; `folder_id` None places it at root. */
         CreateUserNote: {
@@ -7209,6 +7264,34 @@ export interface components {
         Toleration: {
             effect: string;
             key: string;
+        };
+        /**
+         * @description A live tunnel. Assembled from memory, not read from a table — tunnels do not
+         *     survive a control-plane restart, by design (MAIN-9 NG-8).
+         */
+        TunnelView: {
+            /** Format: date-time */
+            created_at: string;
+            /**
+             * Format: int64
+             * @description Seconds since a request last came through it. What the idle sweep
+             *     measures, reported so a person can see a tunnel about to be swept
+             *     instead of discovering it gone.
+             */
+            idle_secs: number;
+            /** @description The subdomain it answers on, and the id `stop` takes. */
+            label: string;
+            node_id: components["schemas"]["NodeId"];
+            node_name: string;
+            /** Format: int32 */
+            port: number;
+            session_id?: null | components["schemas"]["SessionId"];
+            /**
+             * @description Where to open it. The whole reason for creating one, so it is returned
+             *     rather than left for the caller to assemble out of the label and a
+             *     configuration value it cannot see.
+             */
+            url: string;
         };
         /** @description Live events pushed to browsers over `/api/v1/ws/ui`. */
         UiEvent: {
@@ -13089,6 +13172,97 @@ export interface operations {
         requestBody?: never;
         responses: {
             204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_tunnels: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TunnelView"][];
+                };
+            };
+        };
+    };
+    create_tunnel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateTunnelRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TunnelView"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    stop_tunnel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                label: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };

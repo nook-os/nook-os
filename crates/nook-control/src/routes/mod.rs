@@ -499,7 +499,13 @@ pub fn build_router(state: AppState) -> Router {
         // The apex half of the tunnel grant flow (MAIN-403). Unauthenticated by
         // construction — it is where a signed-out person arrives — and it reads
         // the session cookie itself rather than taking `AuthCtx`.
-        .route("/tunnels/authorize", get(tunnels::authorize));
+        //
+        // Registered BEFORE `/tunnels/{label}` so the literal path is not
+        // captured as a label, the same ordering `/sessions/agent-states` needs.
+        .route("/tunnels/authorize", get(tunnels::authorize))
+        // The lifecycle (MAIN-404 AC-1). These DO take `AuthCtx`.
+        .route("/tunnels", get(tunnels::list).post(tunnels::create))
+        .route("/tunnels/{label}", delete_route(tunnels::stop));
 
     // MCP: streamable-HTTP service guarded by the static MCP token (dev) or an
     // OIDC access token from the configured issuer.

@@ -232,6 +232,16 @@ enum Command {
     /// deliberate enqueue per pass.
     #[command(subcommand)]
     Epics(EpicsCommand),
+    /// Reach a port on this machine from anywhere in the tenant (MAIN-9).
+    ///
+    ///     nook tunnel 3000        open one, and print its URL
+    ///     nook tunnel list        what is open
+    ///     nook tunnel stop        close this session's tunnels
+    ///
+    /// `tunnel` is the singular this reads as in a sentence; `tunnels` is the
+    /// group's own plural name, per docs/cli-style.md. Both work.
+    #[command(visible_alias = "tunnel")]
+    Tunnels(TunnelsArgs),
     /// Tell the fleet something happened.
     ///
     /// Fans out to every connected UI and every configured channel (Slack,
@@ -686,6 +696,15 @@ async fn main() -> Result<()> {
         Command::Epics(EpicsCommand::Run { epic, seed }) => {
             cli::epics_run(&epic, seed.as_deref()).await
         }
+        Command::Tunnels(TunnelsArgs {
+            command: Some(TunnelsCommand::List { json }),
+            ..
+        }) => cli::tunnels_list(json).await,
+        Command::Tunnels(TunnelsArgs {
+            command: Some(TunnelsCommand::Stop { label }),
+            ..
+        }) => cli::tunnels_stop(label.as_deref()).await,
+        Command::Tunnels(TunnelsArgs { port, json, .. }) => cli::tunnels_open(port, json).await,
         Command::Reviews(ReviewsCommand::Verdict { verdict, body }) => {
             cli::reviews_verdict(&verdict, body.as_deref()).await
         }
@@ -1192,6 +1211,36 @@ enum BuildsCommand {
         #[arg(long)]
         question: Option<String>,
     },
+}
+
+/// `nook tunnels <port>` with `list` and `stop` beside it.
+///
+/// The bare port is a positional on the GROUP rather than an `open` verb,
+/// because opening one is what people do ninety-nine times out of a hundred and
+/// `nook tunnel 3000` is the sentence they already say. `args_conflicts_with_
+/// subcommands` is what keeps clap from reading `list` as a port.
+#[derive(clap::Args)]
+#[command(args_conflicts_with_subcommands = true)]
+struct TunnelsArgs {
+    /// The port on this machine to expose.
+    port: Option<u16>,
+    /// Print the tunnel as JSON instead of a sentence.
+    #[arg(long)]
+    json: bool,
+    #[command(subcommand)]
+    command: Option<TunnelsCommand>,
+}
+
+#[derive(Subcommand)]
+enum TunnelsCommand {
+    /// Every tunnel open in this tenant.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Close a tunnel. Without a label, closes the ones this session opened —
+    /// or, outside a session, the ones on this machine.
+    Stop { label: Option<String> },
 }
 
 #[derive(Subcommand)]

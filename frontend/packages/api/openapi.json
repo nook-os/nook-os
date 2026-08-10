@@ -6838,6 +6838,100 @@
         }
       }
     },
+    "/api/v1/tunnels": {
+      "get": {
+        "tags": [
+          "crate::routes::tunnels"
+        ],
+        "summary": "`GET /api/v1/tunnels` — every tunnel open in the caller's tenant.",
+        "description": "Readable by any member, and that is not a widening: membership of the\ntunnel's tenant is the whole of a tunnel's access policy (MAIN-9 NG-6), so\neveryone this lists it to could already reach every one of them.",
+        "operationId": "list_tunnels",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TunnelView"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::routes::tunnels"
+        ],
+        "summary": "`POST /api/v1/tunnels` — open a tunnel to a port on a machine.",
+        "description": "The label is DERIVED, never supplied: a name a person types is a name that\ncollides with another tenant's in the same zone and cannot be guessed back\n(MAIN-402 AC-5). What the caller chooses is the port and the machine.",
+        "operationId": "create_tunnel",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTunnelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TunnelView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/tunnels/{label}": {
+      "delete": {
+        "tags": [
+          "crate::routes::tunnels"
+        ],
+        "summary": "`DELETE /api/v1/tunnels/{label}` — close one.",
+        "operationId": "stop_tunnel",
+        "parameters": [
+          {
+            "name": "label",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/vault/passkeys": {
       "get": {
         "tags": [
@@ -10463,6 +10557,43 @@
               "null"
             ],
             "description": "The runtime to run — `bash` by default, but any the node has installed."
+          }
+        }
+      },
+      "CreateTunnelRequest": {
+        "type": "object",
+        "description": "Open a tunnel to a port on a machine (MAIN-404 AC-1).",
+        "required": [
+          "port"
+        ],
+        "properties": {
+          "node_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NodeId",
+                "description": "Which machine. Optional only for a node credential, which is already\nconfined to itself; a person has to say."
+              }
+            ]
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The port on the node's own loopback to expose.",
+            "minimum": 0
+          },
+          "session_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SessionId",
+                "description": "The session this tunnel belongs to, when it was opened from one. It is\nwhat makes the tunnel end with the terminal that opened it (AC-4), and\nit is also where the label's name comes from."
+              }
+            ]
           }
         }
       },
@@ -16008,6 +16139,60 @@
           },
           "key": {
             "type": "string"
+          }
+        }
+      },
+      "TunnelView": {
+        "type": "object",
+        "description": "A live tunnel. Assembled from memory, not read from a table — tunnels do not\nsurvive a control-plane restart, by design (MAIN-9 NG-8).",
+        "required": [
+          "label",
+          "url",
+          "node_id",
+          "node_name",
+          "port",
+          "created_at",
+          "idle_secs"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "idle_secs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Seconds since a request last came through it. What the idle sweep\nmeasures, reported so a person can see a tunnel about to be swept\ninstead of discovering it gone.",
+            "minimum": 0
+          },
+          "label": {
+            "type": "string",
+            "description": "The subdomain it answers on, and the id `stop` takes."
+          },
+          "node_id": {
+            "$ref": "#/components/schemas/NodeId"
+          },
+          "node_name": {
+            "type": "string"
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "session_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SessionId"
+              }
+            ]
+          },
+          "url": {
+            "type": "string",
+            "description": "Where to open it. The whole reason for creating one, so it is returned\nrather than left for the caller to assemble out of the label and a\nconfiguration value it cannot see."
           }
         }
       },

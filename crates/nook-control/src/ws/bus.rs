@@ -78,6 +78,21 @@ pub enum BusMessage {
         request_id: Uuid,
         frame: nook_proto::NodeToControl,
     },
+    /// A tunnel was opened or closed (MAIN-404). Broadcast, because the replica
+    /// that serves `<label>.<zone>` is whichever one the load balancer picked
+    /// and every one of them has to be able to resolve the label.
+    ///
+    /// `tunnel: None` withdraws it. One message for both directions rather than
+    /// a pair, so a peer cannot implement one and quietly miss the other.
+    TunnelRoute {
+        origin: Uuid,
+        label: String,
+        tunnel: Option<Box<crate::ws::registry::Tunnel>>,
+    },
+    /// A tunnel served a request somewhere, so the receiver's idle clock for it
+    /// is stale (MAIN-404 AC-3). Throttled at the sender to one per announce
+    /// interval — a message per tunnel request would be a traffic amplifier.
+    TunnelUsed { origin: Uuid, label: String },
     /// Terminal frame for viewers attached on the receiving instance.
     SessionFrame {
         session_id: SessionId,

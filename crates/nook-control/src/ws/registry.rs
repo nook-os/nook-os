@@ -41,7 +41,7 @@ pub struct GitStatusPayload {
 /// need it are the failure ones — "nothing is listening on port 3000 on node
 /// `beelink`" — and reaching the database to render a 502 is a query made at
 /// the worst possible moment.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Tunnel {
     pub label: String,
     /// Whose tunnel it is. Membership of THIS tenant is the entire access
@@ -51,9 +51,26 @@ pub struct Tunnel {
     pub node_name: String,
     /// The port on the node's own loopback.
     pub port: u16,
-    /// The session the tunnel was opened from, when there is one. MAIN-404
-    /// tears a tunnel down with its session; nothing here reads it.
+    /// The session the tunnel was opened from, when there is one. It is what
+    /// ends the tunnel with the terminal that opened it (MAIN-404 AC-4).
     pub session_id: Option<SessionId>,
+    /// When it was opened. Wall clock, unlike the idle timer beside it, because
+    /// this one is shown to a person and travels to other replicas — neither of
+    /// which an `Instant` can do.
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// A tunnel plus the two clocks only the local process can keep.
+struct TunnelEntry {
+    tunnel: Tunnel,
+    /// When a request last came through here. An `Instant`, so it is this
+    /// replica's own monotonic reading and no clock skew can make a tunnel look
+    /// used in the future.
+    last_used: Instant,
+    /// When this replica last told its peers the tunnel is in use — `None`
+    /// until it has. What keeps a busy tunnel to one NOTIFY per announce
+    /// interval instead of one per request; see [`Registry::touch_tunnel`].
+    last_announced: Option<Instant>,
 }
 
 /// Completion of a long-running node operation.
@@ -117,10 +134,16 @@ pub struct Registry {
     /// label → what that tunnel host resolves to (MAIN-403). Live state, held
     /// like the rest of it: a restart drops every tunnel (MAIN-9 NG-8).
     ///
-    /// Local to this replica. Nothing publishes an entry here yet — creating a
-    /// tunnel is MAIN-404's — so the cross-replica question lands with the code
-    /// that creates them, alongside list and stop.
-    tunnel_routes: DashMap<String, Tunnel>,
+    /// REPLICATED, not local (MAIN-404). A tunnel host is served by whichever
+    /// replica the load balancer picked, so a route only one replica knows
+    /// about is a URL that works about as often as you are lucky — and `list`
+    /// would show a different answer per replica. Every put and take is
+    /// broadcast; the copies are equal and none of them is an owner, so no
+    /// tunnel is stranded by the replica that opened it going away.
+    tunnel_routes: DashMap<String, TunnelEntry>,
+    /// Serialises label allocation — see [`Registry::open_tunnel_route`]. Held
+    /// only across a pure derivation and one insert, never across an await.
+    tunnel_open: std::sync::Mutex<()>,
     /// Grant ids already exchanged for a tunnel cookie, so the second exchange
     /// of one fails. See [`Registry::spend_grant`].
     spent_grants: DashMap<Uuid, Instant>,
@@ -186,6 +209,7 @@ impl Registry {
             pending_tunnels: DashMap::new(),
             remote_pending_tunnels: DashMap::new(),
             tunnel_routes: DashMap::new(),
+            tunnel_open: std::sync::Mutex::new(()),
             spent_grants: DashMap::new(),
             remote_viewers: DashMap::new(),
             bus_tx: OnceLock::new(),
@@ -600,21 +624,167 @@ impl Registry {
     /// What `<label>.<TUNNEL_DOMAIN>` currently points at, or `None` — which the
     /// surface answers with its 404 page rather than the SPA.
     pub fn tunnel_route(&self, label: &str) -> Option<Tunnel> {
-        self.tunnel_routes.get(label).map(|t| t.clone())
+        self.tunnel_routes.get(label).map(|e| e.tunnel.clone())
     }
 
-    /// Publish a tunnel at its label, replacing any tunnel already there.
-    ///
-    /// The lifecycle around this — who may create one, the idle sweep, teardown
-    /// on session exit — is MAIN-404's; this is only the table the HTTP surface
-    /// resolves against, so 9b is testable and 9c has one place to write.
+    /// Publish a tunnel at its label, replacing any tunnel already there, and
+    /// tell every other replica.
     pub fn put_tunnel_route(&self, tunnel: Tunnel) {
-        self.tunnel_routes.insert(tunnel.label.clone(), tunnel);
+        self.announce_route(tunnel.label.clone(), Some(Box::new(tunnel.clone())));
+        self.put_tunnel_local(tunnel);
     }
 
-    /// Forget a tunnel. Returns what was there, so a caller can report it.
+    /// Forget a tunnel, here and everywhere. Returns what was there, so a caller
+    /// can report what it closed.
     pub fn take_tunnel_route(&self, label: &str) -> Option<Tunnel> {
-        self.tunnel_routes.remove(label).map(|(_, t)| t)
+        let gone = self.take_tunnel_local(label);
+        if gone.is_some() {
+            self.announce_route(label.to_string(), None);
+        }
+        gone
+    }
+
+    /// Every tunnel a tenant currently has, with how long each has been idle.
+    ///
+    /// The idle reading is THIS replica's, which is the honest one to report: it
+    /// is what this replica's sweep would act on, and peers relay their own use
+    /// within an announce interval of serving it.
+    pub fn tunnels_for_tenant(&self, tenant: TenantId) -> Vec<(Tunnel, Duration)> {
+        let mut out: Vec<(Tunnel, Duration)> = self
+            .tunnel_routes
+            .iter()
+            .filter(|e| e.tunnel.tenant_id == tenant)
+            .map(|e| (e.tunnel.clone(), e.last_used.elapsed()))
+            .collect();
+        // Newest first: the tunnel somebody just opened is the one they are
+        // looking for.
+        out.sort_by_key(|(t, _)| std::cmp::Reverse(t.created_at));
+        out
+    }
+
+    /// Claim the first free label from `stem` and publish `build(label)` there,
+    /// as one step.
+    ///
+    /// Not `tunnel_label_taken` then `put_tunnel_route`, because those are two
+    /// decisions and a tunnel's whole identity is the label: two callers opening
+    /// one at the same moment would both find `api` free and the second would
+    /// silently replace the first's route with its own.
+    ///
+    /// The lock closes that window WITHIN a replica, which is where it is wide
+    /// (a person and their agent both running `nook tunnels 3000`). Across
+    /// replicas it stays open for as long as the announcement takes, because
+    /// the table is broadcast state and not a consensus — the same trade the
+    /// rest of this in-memory design makes.
+    pub fn open_tunnel_route(&self, stem: &str, build: impl FnOnce(String) -> Tunnel) -> Tunnel {
+        let _held = self.tunnel_open.lock().unwrap_or_else(|e| e.into_inner());
+        let label = nook_proto::tunnel::unique_subdomain(stem, &|l| {
+            // Across ALL tenants: a label is a host in one shared zone, so two
+            // tenants cannot both have `api`.
+            self.tunnel_routes.contains_key(l)
+        });
+        let tunnel = build(label);
+        self.put_tunnel_route(tunnel.clone());
+        tunnel
+    }
+
+    /// Record that a request came through, and — no more often than
+    /// `announce_after` — tell the other replicas so their idle clocks agree.
+    ///
+    /// Throttled rather than per-request because the alternative is a NOTIFY
+    /// for every HTTP request through every tunnel, which is a traffic
+    /// amplifier and not a bookkeeping scheme. The cost is that the window is
+    /// only honoured to within `announce_after` across replicas: a tunnel used
+    /// on one replica can be swept by another that last heard about it an
+    /// announce interval ago. A quarter-window is the caller's choice and keeps
+    /// that error well inside the window's own precision.
+    pub fn touch_tunnel(&self, label: &str, announce_after: Duration) {
+        let mut announce = false;
+        if let Some(mut e) = self.tunnel_routes.get_mut(label) {
+            let now = Instant::now();
+            e.last_used = now;
+            // Never announced (the tunnel's first request) always announces:
+            // opening one and using it immediately is the common case, and
+            // starting the throttle already spent would swallow exactly that.
+            if e.last_announced
+                .is_none_or(|at| now.duration_since(at) >= announce_after)
+            {
+                e.last_announced = Some(now);
+                announce = true;
+            }
+        }
+        if announce {
+            self.queue(Outbound::Broadcast(BusMessage::TunnelUsed {
+                origin: self.instance_id,
+                label: label.to_string(),
+            }));
+        }
+    }
+
+    /// Every tunnel that has gone unused for `idle`, removed and announced.
+    ///
+    /// Run on every replica, over its own copies. That is safe precisely
+    /// because the removal is broadcast: two replicas deciding at once produce
+    /// the same tunnel closed once, not two closures of different things.
+    pub fn sweep_idle_tunnels(&self, idle: Duration) -> Vec<Tunnel> {
+        let stale: Vec<String> = self
+            .tunnel_routes
+            .iter()
+            .filter(|e| e.last_used.elapsed() >= idle)
+            .map(|e| e.key().clone())
+            .collect();
+        stale
+            .into_iter()
+            .filter_map(|label| self.take_tunnel_route(&label))
+            .collect()
+    }
+
+    /// Close every tunnel pointing at a node — it disconnected, so all of them
+    /// are 502 factories now (MAIN-404 AC-4).
+    pub fn take_tunnels_for_node(&self, node: NodeId) -> Vec<Tunnel> {
+        self.take_tunnels_where(|t| t.node_id == node)
+    }
+
+    /// Close every tunnel a session opened: the terminal is gone, and so is
+    /// whatever was listening on the port it exposed (MAIN-404 AC-4).
+    pub fn take_tunnels_for_session(&self, session: SessionId) -> Vec<Tunnel> {
+        self.take_tunnels_where(|t| t.session_id == Some(session))
+    }
+
+    fn take_tunnels_where(&self, pred: impl Fn(&Tunnel) -> bool) -> Vec<Tunnel> {
+        // Collect the labels first: removing while iterating a DashMap is how
+        // you deadlock a shard against itself.
+        let hits: Vec<String> = self
+            .tunnel_routes
+            .iter()
+            .filter(|e| pred(&e.tunnel))
+            .map(|e| e.key().clone())
+            .collect();
+        hits.into_iter()
+            .filter_map(|label| self.take_tunnel_route(&label))
+            .collect()
+    }
+
+    fn put_tunnel_local(&self, tunnel: Tunnel) {
+        self.tunnel_routes.insert(
+            tunnel.label.clone(),
+            TunnelEntry {
+                tunnel,
+                last_used: Instant::now(),
+                last_announced: None,
+            },
+        );
+    }
+
+    fn take_tunnel_local(&self, label: &str) -> Option<Tunnel> {
+        self.tunnel_routes.remove(label).map(|(_, e)| e.tunnel)
+    }
+
+    fn announce_route(&self, label: String, tunnel: Option<Box<Tunnel>>) {
+        self.queue(Outbound::Broadcast(BusMessage::TunnelRoute {
+            origin: self.instance_id,
+            label,
+            tunnel,
+        }));
     }
 
     /// Redeem a grant id, returning `false` if it has already been used.
@@ -933,6 +1103,39 @@ impl Registry {
                     tracing::warn!(%request_id, "bus TunnelFrame carrying a non-tunnel frame");
                 }
             }
+            BusMessage::TunnelRoute {
+                origin,
+                label,
+                tunnel,
+            } => {
+                // A broadcast comes back to its sender too. Applying our own
+                // would be harmless for a take and wrong for a put: it would
+                // reset the idle clock of a tunnel we already hold.
+                if origin == self.instance_id {
+                    return;
+                }
+                match tunnel {
+                    Some(t) if t.label == label => self.put_tunnel_local(*t),
+                    // A route whose payload names a different label than the key
+                    // is a peer disagreeing with itself; take the label out
+                    // rather than publish something at a name it did not claim.
+                    Some(_) => {
+                        tracing::warn!(%label, "bus TunnelRoute payload names another label");
+                        self.take_tunnel_local(&label);
+                    }
+                    None => {
+                        self.take_tunnel_local(&label);
+                    }
+                }
+            }
+            BusMessage::TunnelUsed { origin, label } => {
+                if origin == self.instance_id {
+                    return;
+                }
+                if let Some(mut e) = self.tunnel_routes.get_mut(&label) {
+                    e.last_used = Instant::now();
+                }
+            }
             BusMessage::OpReply {
                 request_id,
                 ok,
@@ -1097,6 +1300,121 @@ struct SessionViewers {
 struct ViewerInfo {
     size: Option<(u16, u16)>,
     last_active: Instant,
+}
+
+#[cfg(test)]
+mod tunnel_route_tests {
+    use super::*;
+    use nook_types::{NodeId, SessionId, TenantId};
+
+    fn tunnel(label: &str, tenant: TenantId, node: NodeId, session: Option<SessionId>) -> Tunnel {
+        Tunnel {
+            label: label.into(),
+            tenant_id: tenant,
+            node_id: node,
+            node_name: "beelink".into(),
+            port: 3000,
+            session_id: session,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    /// The label allocator is the tunnel's identity: two callers opening one at
+    /// the same instant must not both get `api`.
+    #[test]
+    fn a_second_tunnel_at_one_stem_gets_the_next_label() {
+        let r = Registry::new();
+        let (t, n) = (TenantId::new(), NodeId(Uuid::now_v7()));
+        let first = r.open_tunnel_route("api", |label| tunnel(&label, t, n, None));
+        let second = r.open_tunnel_route("api", |label| tunnel(&label, t, n, None));
+        assert_eq!(first.label, "api");
+        assert_eq!(second.label, "api-2", "the first was not replaced");
+        assert!(r.tunnel_route("api").is_some());
+    }
+
+    /// A label is a host in ONE shared zone, so uniqueness cannot be per-tenant.
+    #[test]
+    fn another_tenant_cannot_take_a_label_already_in_use() {
+        let r = Registry::new();
+        let n = NodeId(Uuid::now_v7());
+        r.open_tunnel_route("api", |l| tunnel(&l, TenantId::new(), n, None));
+        let theirs = r.open_tunnel_route("api", |l| tunnel(&l, TenantId::new(), n, None));
+        assert_eq!(theirs.label, "api-2");
+    }
+
+    /// AC-4, both halves: a tunnel dies with the session it was opened from and
+    /// with the machine it points at — and neither takes anything else with it.
+    #[test]
+    fn teardown_takes_a_sessions_tunnels_and_a_nodes_tunnels_and_no_others() {
+        let r = Registry::new();
+        let t = TenantId::new();
+        let (node_a, node_b) = (NodeId(Uuid::now_v7()), NodeId(Uuid::now_v7()));
+        let session = SessionId::new();
+        r.open_tunnel_route("bound", |l| tunnel(&l, t, node_a, Some(session)));
+        r.open_tunnel_route("loose", |l| tunnel(&l, t, node_a, None));
+        r.open_tunnel_route("elsewhere", |l| tunnel(&l, t, node_b, None));
+
+        let gone = r.take_tunnels_for_session(session);
+        assert_eq!(gone.len(), 1);
+        assert_eq!(gone[0].label, "bound");
+        assert!(
+            r.tunnel_route("loose").is_some(),
+            "a tunnel with no session outlives one exiting"
+        );
+
+        let gone = r.take_tunnels_for_node(node_a);
+        assert_eq!(gone.len(), 1, "only the node's own: {gone:?}");
+        assert_eq!(gone[0].label, "loose");
+        assert!(
+            r.tunnel_route("elsewhere").is_some(),
+            "another machine's tunnel is untouched"
+        );
+    }
+
+    /// AC-3: the sweep is measured from the last request through the tunnel,
+    /// not from when it was opened.
+    #[test]
+    fn the_idle_sweep_takes_the_unused_and_spares_the_touched() {
+        let r = Registry::new();
+        let (t, n) = (TenantId::new(), NodeId(Uuid::now_v7()));
+        r.open_tunnel_route("busy", |l| tunnel(&l, t, n, None));
+        r.open_tunnel_route("quiet", |l| tunnel(&l, t, n, None));
+        // Age both past the window, then use one — which is the whole point:
+        // an old tunnel somebody is still using is not an idle one.
+        let window = Duration::from_secs(600);
+        for label in ["busy", "quiet"] {
+            let mut e = r.tunnel_routes.get_mut(label).expect("just inserted");
+            e.last_used = Instant::now() - window - Duration::from_secs(1);
+        }
+        r.touch_tunnel("busy", Duration::from_secs(150));
+
+        let swept = r.sweep_idle_tunnels(window);
+        assert_eq!(swept.len(), 1, "{swept:?}");
+        assert_eq!(swept[0].label, "quiet");
+        assert!(r.tunnel_route("busy").is_some());
+        assert!(
+            r.sweep_idle_tunnels(window).is_empty(),
+            "a second pass finds nothing left to take"
+        );
+    }
+
+    /// Listing is per tenant and newest-first, because the tunnel somebody just
+    /// opened is the one they are looking for.
+    #[test]
+    fn a_tenant_lists_its_own_tunnels_newest_first() {
+        let r = Registry::new();
+        let (mine, theirs) = (TenantId::new(), TenantId::new());
+        let n = NodeId(Uuid::now_v7());
+        let mut older = tunnel("older", mine, n, None);
+        older.created_at -= chrono::Duration::minutes(5);
+        r.put_tunnel_route(older);
+        r.open_tunnel_route("newer", |l| tunnel(&l, mine, n, None));
+        r.open_tunnel_route("not-mine", |l| tunnel(&l, theirs, n, None));
+
+        let listed = r.tunnels_for_tenant(mine);
+        let labels: Vec<&str> = listed.iter().map(|(t, _)| t.label.as_str()).collect();
+        assert_eq!(labels, ["newer", "older"]);
+    }
 }
 
 #[cfg(test)]

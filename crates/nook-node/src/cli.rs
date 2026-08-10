@@ -3956,6 +3956,145 @@ pub async fn reviews_enqueue(
     Ok(())
 }
 
+/// `nook tunnel <port>` (MAIN-404 AC-2) — expose a port on THIS machine.
+///
+/// The machine is named from `node.toml` rather than asked for: a tunnel is to
+/// something running here, and a person who had to type their own node id every
+/// time would copy the wrong one eventually. A user token can reach several
+/// machines, so it is the CLI's job to say which — a node token is already
+/// confined to one and the control plane fills it in.
+pub async fn tunnels_open(port: Option<u16>, json: bool) -> Result<()> {
+    let Some(port) = port else {
+        bail!("which port? `nook tunnel 3000` — or `nook tunnel list` to see what is open");
+    };
+    let client = Client::from_config()?;
+    let mut body = serde_json::json!({ "port": port });
+    if let Ok(cfg) = NodeConfig::load() {
+        body["node_id"] = Value::String(cfg.node_id);
+    }
+    // Binds the tunnel's life to this terminal's: exit the session and the
+    // tunnel goes with it, rather than outliving what it pointed at.
+    if let Some(session) = session_from_env() {
+        body["session_id"] = Value::String(session);
+    }
+
+    let tunnel = client.post("/api/v1/tunnels", body).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&tunnel)?);
+        return Ok(());
+    }
+    println!(
+        "{} {}",
+        crate::style::success(&format!("port {port} →")),
+        crate::style::bold(tunnel["url"].as_str().unwrap_or_default())
+    );
+    println!(
+        "{}",
+        crate::style::dim(
+            "anyone in this tenant can open it, signed in; it ends with this session, \
+             when it goes idle, or on `nook tunnel stop`"
+        )
+    );
+    Ok(())
+}
+
+/// `nook tunnel list` — what is open in this tenant.
+pub async fn tunnels_list(json: bool) -> Result<()> {
+    let client = Client::from_config()?;
+    let tunnels = client.get("/api/v1/tunnels").await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&tunnels)?);
+        return Ok(());
+    }
+    let rows = tunnels.as_array().cloned().unwrap_or_default();
+    if rows.is_empty() {
+        println!("{}", crate::style::dim("no tunnels are open"));
+        return Ok(());
+    }
+    for t in &rows {
+        println!(
+            "{}  {}  {}",
+            crate::style::bold(t["label"].as_str().unwrap_or("?")),
+            t["url"].as_str().unwrap_or("?"),
+            crate::style::dim(&format!(
+                "{}:{} · idle {}",
+                t["node_name"].as_str().unwrap_or("?"),
+                t["port"].as_u64().unwrap_or(0),
+                humanize_secs(t["idle_secs"].as_u64().unwrap_or(0)),
+            ))
+        );
+    }
+    Ok(())
+}
+
+/// `nook tunnel stop [label]` — close one, or everything this session opened.
+///
+/// The no-argument form is the one people reach for, and it must not be "close
+/// everything": a tunnel belongs to whoever opened it, and the session (or,
+/// outside one, the machine) is the narrowest honest reading of "mine".
+pub async fn tunnels_stop(label: Option<&str>) -> Result<()> {
+    let client = Client::from_config()?;
+    let labels = match label {
+        Some(l) => vec![l.to_string()],
+        None => mine(&client).await?,
+    };
+    if labels.is_empty() {
+        println!(
+            "{}",
+            crate::style::dim("nothing to stop — no tunnel here is yours")
+        );
+        return Ok(());
+    }
+    for label in labels {
+        client
+            .delete(&format!("/api/v1/tunnels/{label}"))
+            .await
+            .with_context(|| format!("stopping tunnel {label}"))?;
+        println!("{} {}", crate::style::ok_c("closed"), label);
+    }
+    Ok(())
+}
+
+/// The labels of the tunnels this session opened — or, with no session, the
+/// ones on this machine.
+async fn mine(client: &Client) -> Result<Vec<String>> {
+    let session = session_from_env();
+    let node = NodeConfig::load().ok().map(|c| c.node_id);
+    if session.is_none() && node.is_none() {
+        bail!("name the tunnel to stop — this is neither a nook session nor a joined machine");
+    }
+    Ok(client
+        .get("/api/v1/tunnels")
+        .await?
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter(|t| match &session {
+            Some(s) => t["session_id"].as_str() == Some(s.as_str()),
+            None => t["node_id"].as_str() == node.as_deref(),
+        })
+        .filter_map(|t| t["label"].as_str().map(str::to_string))
+        .collect())
+}
+
+fn session_from_env() -> Option<String> {
+    std::env::var("NOOK_SESSION_ID")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// Seconds as something a person reads at a glance. Only ever an age, so the
+/// units stop at hours — a tunnel idle for days has been swept.
+fn humanize_secs(secs: u64) -> String {
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m", secs / 60),
+        _ => format!("{}h", secs / 3600),
+    }
+}
+
 /// `nook epics run <KEY>` (MAIN-144) — enqueue ONE epic-runner pass on the
 /// fleet. Manual by design: invocation is authorization, there is no schedule
 /// and no auto-feed, and a second enqueue while one runs is refused with the
