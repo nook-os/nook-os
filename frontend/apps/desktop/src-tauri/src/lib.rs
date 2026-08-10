@@ -24,17 +24,63 @@ pub struct Endpoint {
     pub token: String,
 }
 
+/// The key the LOCAL entry is filed under, in place of a URL (MAIN-399).
+///
+/// Local's address is a port chosen fresh on every launch, so a URL cannot be
+/// its identity: the row, its token and its per-server tab state would all move
+/// house each time the app started. A reserved key is stable, and the running
+/// address is resolved against it at load time instead.
+pub const LOCAL_KEY: &str = "local";
+
+/// What kind of thing a stored entry is.
+///
+/// A remote is an address a person typed. LOCAL is a process this app owns —
+/// same list (switching between the two is the upgrade path), different
+/// substance: no host to show and nothing to edit as a URL.
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PlaneKind {
+    #[default]
+    Remote,
+    Local,
+}
+
 /// One stored control plane. `base_url` is the identity — one entry per URL
-/// (AC-5). `label` is a human rename (the host still shows underneath, AC-3);
-/// `account` is who last authenticated here, for the row subtitle.
+/// (AC-5), or `LOCAL_KEY` for the one this app runs itself. `label` is a human
+/// rename (the host still shows underneath, AC-3); `account` is who last
+/// authenticated here, for the row subtitle.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ControlPlane {
     pub base_url: String,
     pub token: String,
+    /// Absent in files written before MAIN-399 — every entry there was remote.
+    #[serde(default)]
+    pub kind: PlaneKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+}
+
+impl ControlPlane {
+    fn is_local(&self) -> bool {
+        self.kind == PlaneKind::Local
+    }
+}
+
+/// The active control plane as the webview needs it: the stable key it is filed
+/// under, plus the address to actually talk to.
+///
+/// For a remote the two are the same string. For LOCAL they differ, and that is
+/// the whole reason this is not just an `Endpoint` — the key is what the tab
+/// state, the account backfill and the switcher are all keyed by, and handing
+/// the webview only this launch's port would namespace them by a number that
+/// changes.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct ActiveEndpoint {
+    pub key: String,
+    pub base_url: String,
+    pub token: String,
 }
 
 /// The whole desktop store: every control plane, and which one is active (by
@@ -61,15 +107,54 @@ impl Store {
         self.control_planes.iter().find(|c| c.base_url == active)
     }
 
-    /// The active control plane as the back-compat `Endpoint` the web bundle
-    /// loads at startup (empty when nothing is configured yet).
-    fn active_endpoint(&self) -> Endpoint {
+    /// The active control plane as the web bundle loads it at startup.
+    ///
+    /// `local_base_url` is where the bundled control plane is listening this
+    /// launch (empty until it is healthy, which is also how a local stack that
+    /// never came up reports itself — the caller then shows its log rather than
+    /// pointing the app at nothing).
+    fn active_endpoint(&self, local_base_url: &str) -> ActiveEndpoint {
         self.active_entry()
-            .map(|c| Endpoint {
-                base_url: c.base_url.clone(),
+            .map(|c| ActiveEndpoint {
+                key: c.base_url.clone(),
+                base_url: if c.is_local() {
+                    local_base_url.to_string()
+                } else {
+                    c.base_url.clone()
+                },
                 token: c.token.clone(),
             })
             .unwrap_or_default()
+    }
+
+    /// Guarantee the LOCAL row exists, first in the list, and is active when
+    /// nothing valid is.
+    ///
+    /// Idempotent, and run on every read: an install that predates this grows
+    /// the row without losing a remote or its token (AC-1), and a fresh one
+    /// starts on Local instead of on a connect screen asking a question its user
+    /// cannot answer (AC-2).
+    fn ensure_local(&mut self) {
+        if !self.control_planes.iter().any(ControlPlane::is_local) {
+            self.control_planes.insert(
+                0,
+                ControlPlane {
+                    base_url: LOCAL_KEY.to_string(),
+                    kind: PlaneKind::Local,
+                    ..ControlPlane::default()
+                },
+            );
+        }
+        // An `active` naming nothing in the list — a hand-edited file, or a
+        // forget that raced — used to load as "unconfigured" and show the
+        // connect screen. There is always somewhere to fall back to now.
+        let known = self
+            .active
+            .as_deref()
+            .is_some_and(|a| self.control_planes.iter().any(|c| c.base_url == a));
+        if !known {
+            self.active = Some(LOCAL_KEY.to_string());
+        }
     }
 
     /// Add a server, or — if its URL is already stored — replace that entry's
@@ -80,6 +165,12 @@ impl Store {
         if url.is_empty() {
             return;
         }
+        // A credential for LOCAL lands on the reserved row rather than making a
+        // second one beside it — it has to be the same row the switcher, the
+        // account and the tab state are all filed under.
+        if url == LOCAL_KEY {
+            self.ensure_local();
+        }
         match self.control_planes.iter_mut().find(|c| c.base_url == url) {
             Some(existing) => {
                 existing.token = ep.token;
@@ -87,17 +178,23 @@ impl Store {
             None => self.control_planes.push(ControlPlane {
                 base_url: url.clone(),
                 token: ep.token,
-                label: None,
-                account: None,
+                ..ControlPlane::default()
             }),
         }
         self.active = Some(url);
     }
 
     /// Remove a server and its token. Forgetting the active one re-points active
-    /// to the first remaining entry, or `None` when the list empties (AC-7).
+    /// to the first remaining entry (AC-7) — which, with Local always first, is
+    /// Local once the last remote is gone.
     fn forget(&mut self, url: &str) {
         let url = normalize(url);
+        // Local is not forgettable. Its database is still on disk and its token
+        // is the way back into that account, so "forget" here would not remove a
+        // stored address — it would strand the instance (AC-3).
+        if url == LOCAL_KEY {
+            return;
+        }
         self.control_planes.retain(|c| c.base_url != url);
         if self.active.as_deref() == Some(url.as_str()) {
             self.active = self.control_planes.first().map(|c| c.base_url.clone());
@@ -125,6 +222,15 @@ impl Store {
 /// Read `text` into a `Store`, migrating the old single-endpoint shape
 /// forward. Pure, so the migration is unit-testable without a Tauri handle.
 fn parse_store(text: &str) -> Store {
+    let mut store = parse_stored_shape(text);
+    // Every store has a Local row, however it arrived here — including the
+    // empty one a fresh install reads (MAIN-399). Adding it on READ rather than
+    // only on write is what makes an upgrade need no migration step.
+    store.ensure_local();
+    store
+}
+
+fn parse_stored_shape(text: &str) -> Store {
     // The new shape carries `control_planes`.
     if let Ok(store) = serde_json::from_str::<Store>(text) {
         if !store.control_planes.is_empty() || text.contains("\"control_planes\"") {
@@ -141,8 +247,7 @@ fn parse_store(text: &str) -> Store {
                 control_planes: vec![ControlPlane {
                     base_url: url,
                     token: old.token,
-                    label: None,
-                    account: None,
+                    ..ControlPlane::default()
                 }],
             };
         }
@@ -163,11 +268,22 @@ fn config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 }
 
 fn read_store(app: &tauri::AppHandle) -> Result<Store, String> {
-    let path = config_path(app)?;
-    match fs::read_to_string(&path) {
+    read_store_at(&config_path(app)?)
+}
+
+/// Split from `read_store` so the MISSING-file case can be tested without a
+/// Tauri handle. That case is the one a fresh install actually takes, and it is
+/// the one that must not diverge from an empty file.
+fn read_store_at(path: &std::path::Path) -> Result<Store, String> {
+    match fs::read_to_string(path) {
         Ok(text) => Ok(parse_store(&text)),
-        // Not configured yet is the ordinary first-run state, not a failure.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Store::default()),
+        // Not configured yet is the ordinary first-run state, not a failure —
+        // and it has to produce what an empty file produces. Returning a bare
+        // `Store::default()` here skipped `ensure_local`, so the very first
+        // launch after an install got no Local row and showed the connect
+        // screen; it then "fixed itself" on the second launch, because by then
+        // the write-back had created a file for this arm to stop taking.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(parse_store("")),
         Err(e) => Err(format!("cannot read {}: {e}", path.display())),
     }
 }
@@ -187,14 +303,21 @@ fn write_store(app: &tauri::AppHandle, store: &Store) -> Result<(), String> {
     Ok(())
 }
 
-/// Load the ACTIVE control plane as an `Endpoint`, migrating the on-disk file
-/// forward on the way (writing the upgraded shape back so it happens once).
+/// Load the ACTIVE control plane, migrating the on-disk file forward on the way
+/// (writing the upgraded shape back so it happens once).
+///
+/// When that entry is Local, the address comes from the running stack rather
+/// than from disk — a port chosen this launch is never something to persist.
 #[tauri::command]
-fn load_endpoint(app: tauri::AppHandle) -> Result<Endpoint, String> {
+fn load_endpoint(
+    app: tauri::AppHandle,
+    local: tauri::State<'_, LocalStackState>,
+) -> Result<ActiveEndpoint, String> {
     let store = read_store(&app)?;
     // Persist the migrated shape so the one-time conversion is durable.
     let _ = write_store(&app, &store);
-    Ok(store.active_endpoint())
+    let local_base_url = local.0.lock().unwrap().base_url.clone();
+    Ok(store.active_endpoint(&local_base_url))
 }
 
 /// The whole store, for the control-plane switcher (rows, active, accounts).
@@ -622,20 +745,64 @@ mod nav_tests {
 
 #[cfg(test)]
 mod store_tests {
-    use super::{parse_store, Endpoint, Store};
+    use super::{parse_store, read_store_at, ControlPlane, Endpoint, PlaneKind, Store, LOCAL_KEY};
+
+    /// Every store carries Local now, so a test about remotes wants the rest.
+    fn remotes(store: &Store) -> Vec<&ControlPlane> {
+        store
+            .control_planes
+            .iter()
+            .filter(|c| !c.is_local())
+            .collect()
+    }
+
+    /// AC-2, at the seam a fresh install actually crosses: there is no
+    /// `desktop.json` at all on the first launch after an install.
+    ///
+    /// Asserted HERE rather than over `parse_store` alone, because the
+    /// missing-file arm is the one path that never reaches `parse_store` — so a
+    /// test phrased in strings passes while the scenario it is named for fails,
+    /// which is exactly what happened.
+    #[test]
+    fn a_missing_config_file_reads_as_a_fresh_install_on_local() {
+        let absent = std::env::temp_dir().join(format!(
+            "nook-desktop-{}-never-created/desktop.json",
+            std::process::id()
+        ));
+        assert!(
+            !absent.exists(),
+            "the point of the test is that it is not there"
+        );
+
+        let store = read_store_at(&absent).expect("first run is not a failure");
+        assert_eq!(
+            store.active.as_deref(),
+            Some(LOCAL_KEY),
+            "no connect screen"
+        );
+        assert_eq!(store.control_planes.len(), 1);
+        assert!(store.control_planes[0].is_local());
+        assert!(!absent.exists(), "and reading did not create anything");
+
+        // No file and an empty file are the same first run. They diverged once,
+        // and the divergence was invisible from the second launch onwards.
+        let empty = parse_store("");
+        assert_eq!(store.control_planes, empty.control_planes);
+        assert_eq!(store.active, empty.active);
+    }
 
     #[test]
     fn old_single_endpoint_migrates_to_a_one_entry_active_list() {
         // The pre-list shape on disk: a bare {base_url, token}.
         let store =
             parse_store(r#"{"base_url":"https://nook.example.com/","token":"nook_user_abc"}"#);
-        assert_eq!(store.control_planes.len(), 1, "one entry");
+        assert_eq!(remotes(&store).len(), 1, "one entry");
         assert_eq!(
             store.active.as_deref(),
             Some("https://nook.example.com"),
             "and it is active (trailing slash normalized away)"
         );
-        let ep = store.active_endpoint();
+        let ep = store.active_endpoint("http://127.0.0.1:41007");
         assert_eq!(ep.base_url, "https://nook.example.com");
         assert_eq!(ep.token, "nook_user_abc", "nobody is asked to reconnect");
     }
@@ -644,22 +811,160 @@ mod store_tests {
     fn the_new_list_shape_round_trips() {
         let json = r#"{"control_planes":[{"base_url":"https://a","token":"t1","label":"work"}],"active":"https://a"}"#;
         let store = parse_store(json);
-        assert_eq!(store.control_planes.len(), 1);
-        assert_eq!(store.control_planes[0].label.as_deref(), Some("work"));
+        assert_eq!(remotes(&store).len(), 1);
+        assert_eq!(remotes(&store)[0].label.as_deref(), Some("work"));
+        assert_eq!(
+            remotes(&store)[0].kind,
+            PlaneKind::Remote,
+            "an entry written before MAIN-399 is a remote"
+        );
         assert_eq!(store.active.as_deref(), Some("https://a"));
     }
 
     #[test]
-    fn an_empty_or_unconfigured_file_is_an_empty_store() {
-        assert!(parse_store("").control_planes.is_empty());
-        assert!(parse_store("{}").control_planes.is_empty());
-        assert!(parse_store(r#"{"base_url":"","token":""}"#)
-            .control_planes
-            .is_empty());
-        // An empty new-shape list stays empty and active-less, not misread as old.
-        let empty = parse_store(r#"{"control_planes":[],"active":null}"#);
-        assert!(empty.control_planes.is_empty());
-        assert!(empty.active.is_none());
+    fn an_empty_or_unconfigured_file_has_no_remotes() {
+        assert!(remotes(&parse_store("")).is_empty());
+        assert!(remotes(&parse_store("{}")).is_empty());
+        assert!(remotes(&parse_store(r#"{"base_url":"","token":""}"#)).is_empty());
+        // An empty new-shape list stays empty of remotes, not misread as old.
+        assert!(remotes(&parse_store(r#"{"control_planes":[],"active":null}"#)).is_empty());
+    }
+
+    /// AC-2: a fresh install boots into Local. Nothing is stored, nobody has
+    /// typed a URL, and the app still has somewhere to go — so the connect
+    /// screen, which asks "which server?", never renders.
+    #[test]
+    fn a_fresh_install_is_active_on_local_with_no_url_to_answer() {
+        for virgin in ["", "{}", r#"{"control_planes":[],"active":null}"#] {
+            let store = parse_store(virgin);
+            assert_eq!(store.control_planes.len(), 1, "{virgin:?}: just Local");
+            assert!(store.control_planes[0].is_local());
+            assert_eq!(store.active.as_deref(), Some(LOCAL_KEY));
+
+            // And it resolves to wherever the bundled stack came up this launch.
+            let ep = store.active_endpoint("http://127.0.0.1:41007");
+            assert_eq!(ep.base_url, "http://127.0.0.1:41007");
+            assert_eq!(ep.key, LOCAL_KEY, "keyed by the stable id, not the port");
+        }
+    }
+
+    /// AC-1: an install that predates Local grows the row and loses nothing —
+    /// same remotes, same tokens, same active server.
+    #[test]
+    fn an_existing_install_gains_local_without_losing_its_remotes() {
+        let store = parse_store(
+            r#"{"control_planes":[
+                 {"base_url":"https://a","token":"t1"},
+                 {"base_url":"https://b","token":"t2","account":"me@example.com"}],
+               "active":"https://b"}"#,
+        );
+        assert_eq!(remotes(&store).len(), 2, "both remotes survive");
+        assert_eq!(remotes(&store)[0].token, "t1", "and their credentials");
+        assert_eq!(
+            remotes(&store)[1].account.as_deref(),
+            Some("me@example.com")
+        );
+        assert_eq!(
+            store.active.as_deref(),
+            Some("https://b"),
+            "an upgrade does not yank anyone off the server they were using"
+        );
+        assert!(
+            store.control_planes.iter().any(ControlPlane::is_local),
+            "Local is in the same list (AC-1)"
+        );
+    }
+
+    /// The port changes every launch, so it can never be the identity: the key
+    /// stays `local` while the address follows the running stack.
+    #[test]
+    fn locals_address_follows_the_running_stack_but_its_key_does_not() {
+        let store = parse_store("{}");
+        for port in ["http://127.0.0.1:1234", "http://127.0.0.1:59999"] {
+            let ep = store.active_endpoint(port);
+            assert_eq!(ep.base_url, port);
+            assert_eq!(ep.key, LOCAL_KEY);
+        }
+        // A local stack that never became healthy reports no address, which is
+        // what makes the caller show its log instead of loading the app.
+        assert!(store.active_endpoint("").base_url.is_empty());
+    }
+
+    /// AC-3: switching away and back returns to the same account. The database
+    /// is a file at a fixed path, untouched by any of this; the credential that
+    /// opens it is what a switch could plausibly drop, so assert it does not.
+    #[test]
+    fn switching_away_from_local_and_back_keeps_its_token_and_account() {
+        let mut store = parse_store("{}");
+        store.upsert_active(ep(LOCAL_KEY, "nook_user_local"));
+        store.set_account(LOCAL_KEY, "owner@localhost");
+
+        store.upsert_active(ep("https://a", "t1")); // graduate to a remote
+        assert_eq!(store.active.as_deref(), Some("https://a"));
+
+        // …and come back.
+        store.active = Some(LOCAL_KEY.to_string());
+        let local = store.active_entry().expect("the local entry");
+        assert_eq!(local.token, "nook_user_local", "same account (AC-3)");
+        assert_eq!(local.account.as_deref(), Some("owner@localhost"));
+        assert_eq!(
+            store.control_planes.iter().filter(|c| c.is_local()).count(),
+            1,
+            "and one Local row throughout, never a second"
+        );
+    }
+
+    /// The remote's credentials are the other half of AC-1: a trip through
+    /// Local must not cost you the server you came from.
+    #[test]
+    fn a_trip_through_local_leaves_a_remotes_credentials_alone() {
+        let mut store = parse_store("{}");
+        store.upsert_active(ep("https://a", "t1"));
+        store.set_account("https://a", "me@example.com");
+        store.rename("https://a", "work");
+
+        store.active = Some(LOCAL_KEY.to_string());
+        store.active = Some("https://a".to_string());
+
+        let a = remotes(&store)[0];
+        assert_eq!(a.token, "t1");
+        assert_eq!(a.account.as_deref(), Some("me@example.com"));
+        assert_eq!(a.label.as_deref(), Some("work"));
+    }
+
+    /// Local's database is still on disk after a "forget", and its token is the
+    /// way back into that account — so the row is not forgettable at all.
+    #[test]
+    fn local_cannot_be_forgotten() {
+        let mut store = parse_store("{}");
+        store.upsert_active(ep(LOCAL_KEY, "nook_user_local"));
+        store.forget(LOCAL_KEY);
+        assert_eq!(store.control_planes.len(), 1);
+        assert_eq!(store.control_planes[0].token, "nook_user_local");
+        assert_eq!(store.active.as_deref(), Some(LOCAL_KEY));
+    }
+
+    /// Forgetting the last remote lands on Local rather than on the connect
+    /// screen — there is always an instance to be in now.
+    #[test]
+    fn forgetting_the_last_remote_falls_back_to_local() {
+        let mut store = parse_store("{}");
+        store.upsert_active(ep("https://a", "t1"));
+        store.forget("https://a");
+        assert!(remotes(&store).is_empty());
+        assert_eq!(store.active.as_deref(), Some(LOCAL_KEY));
+    }
+
+    /// A stored `active` naming nothing in the list — hand-edited, or a file
+    /// written by a build that has since changed — loads as Local rather than
+    /// as "unconfigured".
+    #[test]
+    fn an_active_that_names_nothing_falls_back_to_local() {
+        let store = parse_store(
+            r#"{"control_planes":[{"base_url":"https://a","token":"t1"}],"active":"https://gone"}"#,
+        );
+        assert_eq!(store.active.as_deref(), Some(LOCAL_KEY));
+        assert_eq!(remotes(&store).len(), 1, "the remote is still there");
     }
 
     fn ep(url: &str, token: &str) -> Endpoint {

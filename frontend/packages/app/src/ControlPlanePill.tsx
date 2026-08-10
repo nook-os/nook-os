@@ -12,15 +12,14 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Check, Plus, Server, ChevronDown } from "lucide-react";
 import { ContextMenuRegion } from "./contextMenu";
 import { useAnchoredMenu } from "@nookos/ui";
-import { isDesktop, type ControlPlane } from "./desktop";
+import { isDesktop, isLocalPlane, type ControlPlane } from "./desktop";
 import {
+  displayName,
   forgetControlPlaneAndReconcile,
-  healthCache,
   healthDot,
-  HEALTH_TTL,
-  hostOf,
-  probeCached,
+  probeInto,
   renameControlPlaneWithDialog,
+  subtitleOf,
   switchToControlPlane,
   useControlPlanes,
   type Health,
@@ -52,17 +51,7 @@ function Pill() {
   useEffect(() => {
     if (!open) return;
     let alive = true;
-    for (const cp of servers) {
-      const cached = healthCache.get(cp.base_url);
-      if (cached && Date.now() - cached.at < HEALTH_TTL) {
-        setHealth((h) => ({ ...h, [cp.base_url]: cached.ok ? "up" : "down" }));
-        continue;
-      }
-      setHealth((h) => ({ ...h, [cp.base_url]: "checking" }));
-      void probeCached(cp.base_url).then((ok) => {
-        if (alive) setHealth((h) => ({ ...h, [cp.base_url]: ok ? "up" : "down" }));
-      });
-    }
+    probeInto(servers, setHealth, () => alive);
     return () => {
       alive = false;
     };
@@ -97,10 +86,10 @@ function Pill() {
       <button
         className="cp-pill"
         onClick={() => setOpen((o) => !o)}
-        title={`control plane — ${hostOf(active.base_url)}`}
+        title={`control plane — ${subtitleOf(active)}`}
       >
         <Server size={13} />
-        <span className="cp-pill-label">{active.label || hostOf(active.base_url)}</span>
+        <span className="cp-pill-label">{displayName(active)}</span>
         <ChevronDown size={12} />
       </button>
 
@@ -108,7 +97,34 @@ function Pill() {
         <>
           {servers.map((cp) => {
             const isActive = cp.base_url === activeUrl;
-            return (
+            const local = isLocalPlane(cp);
+            const row = (
+              <button
+                className={`cp-row${isActive ? " current" : ""}`}
+                onClick={() => switchTo(cp.base_url)}
+                title={subtitleOf(cp)}
+              >
+                <span className="cp-row-check">{isActive && <Check size={13} />}</span>
+                {dot(cp)}
+                <span className="cp-row-text">
+                  <span className="cp-row-name">{displayName(cp)}</span>
+                  {/* When a custom label is set, the host shows underneath so a
+                      rename never hides the machine (AC-3). Local has no host to
+                      show and is not renamed, so it says what it is instead. */}
+                  {(local || cp.label) && (
+                    <span className="cp-row-host">{subtitleOf(cp)}</span>
+                  )}
+                  {cp.account && <span className="cp-row-account">{cp.account}</span>}
+                </span>
+              </button>
+            );
+            // Rename and Forget are both edits to a stored ADDRESS, and Local is
+            // not one: there is no URL to relabel, and forgetting it would
+            // discard the only credential to a database still sitting on disk
+            // (AC-3/AC-4). So its row carries no manage menu at all.
+            return local ? (
+              <React.Fragment key={cp.base_url}>{row}</React.Fragment>
+            ) : (
               // Right-click a server row → rename/forget, via the shared menu
               // (MAIN-168). `display: contents` keeps the dropdown layout intact.
               <ContextMenuRegion
@@ -119,22 +135,7 @@ function Pill() {
                   { label: "Forget", onSelect: () => void forget(cp) },
                 ]}
               >
-                <button
-                  className={`cp-row${isActive ? " current" : ""}`}
-                  onClick={() => switchTo(cp.base_url)}
-                >
-                  <span className="cp-row-check">{isActive && <Check size={13} />}</span>
-                  {dot(cp)}
-                  <span className="cp-row-text">
-                    <span className="cp-row-name">
-                      {cp.label || hostOf(cp.base_url)}
-                    </span>
-                    {/* When a custom label is set, the host shows underneath so a
-                        rename never hides the machine (AC-3). */}
-                    {cp.label && <span className="cp-row-host">{hostOf(cp.base_url)}</span>}
-                    {cp.account && <span className="cp-row-account">{cp.account}</span>}
-                  </span>
-                </button>
+                {row}
               </ContextMenuRegion>
             );
           })}

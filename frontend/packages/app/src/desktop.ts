@@ -13,12 +13,36 @@ export interface DesktopEndpoint {
   token: string;
 }
 
-/** One stored control plane. `base_url` is the identity (one entry per URL). */
+/**
+ * The key the LOCAL control plane is filed under, in place of a URL.
+ *
+ * The bundled stack listens on a port chosen fresh every launch, so a URL could
+ * never be its identity — the row, its token and its per-server tab state would
+ * move house on every start. The shell resolves the running address against
+ * this key at load time.
+ */
+export const LOCAL_CONTROL_PLANE = "local";
+
+/** One stored control plane. `base_url` is the identity (one entry per URL),
+ *  or `LOCAL_CONTROL_PLANE` for the one this app runs itself. */
 export interface ControlPlane {
   base_url: string;
   token: string;
+  /** Absent on entries written before MAIN-399 — all of those were remote. */
+  kind?: "local" | "remote";
   label?: string | null;
   account?: string | null;
+}
+
+/** The one this app runs itself, rather than an address someone typed. */
+export function isLocalPlane(cp: Pick<ControlPlane, "base_url" | "kind">): boolean {
+  return cp.kind === "local" || cp.base_url === LOCAL_CONTROL_PLANE;
+}
+
+/** The active control plane: the stable key it is filed under, and the address
+ *  to actually talk to. They differ only for Local, whose address is a port. */
+export interface ActiveEndpoint extends DesktopEndpoint {
+  key: string;
 }
 
 /** The desktop store: every control plane and which is active (by base_url). */
@@ -69,19 +93,25 @@ function invoke(): Invoke | null {
 /**
  * Load the stored endpoint and point the API client at it.
  *
- * Returns the endpoint so the caller can decide whether to show the connect
- * screen: an empty `base_url` means nobody has configured this install yet.
+ * Returns the endpoint so the caller can decide what to render: an empty
+ * `base_url` on a LOCAL active entry means the bundled stack never came up (its
+ * log is the thing to show); on a remote it means nobody has configured this
+ * install yet.
+ *
+ * What is remembered as "active" is the KEY, not the address — Local's address
+ * is this launch's port, and namespacing tab state by it would discard those
+ * preferences every start.
  */
-export async function initDesktop(): Promise<DesktopEndpoint | null> {
+export async function initDesktop(): Promise<ActiveEndpoint | null> {
   if (!isDesktop()) return null;
   const call = invoke();
   if (!call) return null;
 
-  const stored = await call<DesktopEndpoint>("load_endpoint");
+  const stored = await call<ActiveEndpoint>("load_endpoint");
   if (stored.base_url) {
     setEndpoint({ baseUrl: stored.base_url, token: stored.token });
   }
-  rememberActive(stored.base_url);
+  rememberActive(stored.key);
   return stored;
 }
 
@@ -109,10 +139,22 @@ export async function localStack(): Promise<LocalStack | null> {
   const call = invoke();
   if (!call) return null;
   try {
-    return await call<LocalStack>("local_stack");
+    lastLocalStack = await call<LocalStack>("local_stack");
+    return lastLocalStack;
   } catch {
     return null;
   }
+}
+
+// The last answer, kept so callers that cannot await — the switcher's health
+// probe, which needs Local's ADDRESS while it only holds Local's key — can read
+// it synchronously. Startup awaits the stack before the app renders, so by the
+// time anything asks, this is populated.
+let lastLocalStack: LocalStack | null = null;
+
+/** The most recent local-stack state, or `null` before the first answer. */
+export function knownLocalStack(): LocalStack | null {
+  return lastLocalStack;
 }
 
 /**

@@ -21,7 +21,7 @@ import { DocsPage } from "./pages/Docs";
 import { FeedbackPage } from "./pages/Feedback";
 import { Login } from "./pages/Login";
 import { Connect } from "./pages/Connect";
-import { awaitLocalStack, checkForUpdate, initDesktop, installUpdate, isDesktop, setControlPlaneAccount, type AvailableUpdate } from "./desktop";
+import { awaitLocalStack, checkForUpdate, initDesktop, installUpdate, isDesktop, LOCAL_CONTROL_PLANE, setControlPlaneAccount, type AvailableUpdate } from "./desktop";
 import { installLinkHandler, registerNavigator } from "./links";
 import { NodeDetail, NodesPage } from "./pages/Nodes";
 import { Notebook } from "./pages/Notebook";
@@ -101,8 +101,10 @@ function AuthGate() {
   const [needsConnect, setNeedsConnect] = useState(false);
   /** The bundled control plane's own log, when it never became healthy. */
   const [localStackError, setLocalStackError] = useState<string | null>(null);
-  // The active server's URL (desktop only) — prefills the Connect screen when a
+  // The active entry's KEY (desktop only) — prefills the Connect screen when a
   // token expires (AC-6) and names the entry whose account we backfill (AC-1).
+  // For a remote the key IS its URL; Local's is a reserved id, because the port
+  // it answers on is chosen fresh every launch (MAIN-399).
   const [activeUrl, setActiveUrl] = useState<string>("");
 
   // Checked once at startup and then hourly. Offered, never forced: an app
@@ -133,7 +135,7 @@ function AuthGate() {
       try {
         const stored = await initDesktop();
         if (cancelled) return;
-        setActiveUrl(stored?.base_url ?? "");
+        setActiveUrl(stored?.key ?? "");
         setNeedsConnect(!stored?.base_url);
       } catch {
         if (!cancelled) setNeedsConnect(true);
@@ -166,29 +168,47 @@ function AuthGate() {
   }, [me, activeUrl]);
 
   if (!endpointReady) return <Empty>Starting…</Empty>;
-  // The bundled control plane died AND there is no other one stored, so this
-  // window has nothing to talk to. Show the child's log — that is AC-3's whole
-  // bar, and the alternative is the blank window it exists to prevent. A user
-  // who HAS a stored control plane is not trapped here: they fall through to it.
-  if (localStackError && needsConnect) return <LocalStackFailed log={localStackError} />;
-  if (needsConnect)
+  // Nothing to talk to. On Local that means the bundled control plane never came
+  // up, so show the child's log — that is MAIN-396 AC-3's whole bar, and the
+  // alternative is the blank window it exists to prevent. Asking "which server?"
+  // here would be the wrong question put to someone who never chose one
+  // (MAIN-399 AC-2). A user who HAS a stored control plane is not trapped
+  // either way: an active remote always has an address, so they never get here.
+  if (needsConnect) {
+    if (localStackError || activeUrl === LOCAL_CONTROL_PLANE)
+      return (
+        <LocalStackFailed
+          log={
+            localStackError ??
+            "The local control plane has not started, and reported no reason."
+          }
+        />
+      );
     return <Connect onDone={() => { setNeedsConnect(false); refetch(); }} />;
+  }
   if (isLoading) return <Empty>Connecting…</Empty>;
   // A desktop client with a rejected token needs its endpoint fixed, not a
   // sign-in form it cannot use — there is no cookie session to establish. The
   // server's URL is prefilled and the reason named, so a successful sign-in
   // replaces that entry's token and continues into the app (AC-6).
+  //
+  // Local is the exception, and it is the whole point of MAIN-399: there is no
+  // address to re-enter and nothing expired. Not being signed in to the
+  // instance on this computer is a question about WHO, so it goes to the
+  // ordinary sign-in screen — never to "which server?", which a first-time user
+  // cannot answer and should not be asked (AC-2).
   if (isError || !me)
-    return isDesktop() ? (
+    return isDesktop() && activeUrl !== LOCAL_CONTROL_PLANE ? (
       <Connect
         prefillUrl={activeUrl}
         notice="Your sign-in for this control plane expired. Sign in again to continue."
         onDone={() => refetch()}
       />
     ) : (
-      // Signed out in the browser. The invite landing renders WITHOUT auth so an
-      // invitee sees who invited them and a sign-in that carries the token back
-      // (MAIN-97); every other path still lands on the login screen.
+      // Signed out in the browser, or on the local instance. The invite landing
+      // renders WITHOUT auth so an invitee sees who invited them and a sign-in
+      // that carries the token back (MAIN-97); every other path still lands on
+      // the login screen.
       <Routes>
         <Route path="/accept" element={<AcceptInvitePage />} />
         <Route path="*" element={<Login />} />

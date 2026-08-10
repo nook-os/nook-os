@@ -9,6 +9,8 @@ import { useQuery, type QueryClient } from "@tanstack/react-query";
 import { askText } from "./dialogs";
 import {
   forgetControlPlane,
+  isLocalPlane,
+  knownLocalStack,
   listControlPlanes,
   probeControlPlane,
   renameControlPlane,
@@ -25,6 +27,33 @@ export function hostOf(url: string): string {
   }
 }
 
+/** What a row is called. Local has no host to fall back to and does not want
+ *  one — it is a process this app owns, not an address (MAIN-399 AC-4). */
+export function displayName(cp: ControlPlane): string {
+  if (isLocalPlane(cp)) return "Local";
+  return cp.label || hostOf(cp.base_url);
+}
+
+/** The line under the name, and the row's tooltip. For Local this is the
+ *  ABSENCE of a host stated plainly, never `127.0.0.1:<this launch's port>` —
+ *  that number is machinery, and showing it invites treating it as an address
+ *  to edit. */
+export function subtitleOf(cp: ControlPlane): string {
+  return isLocalPlane(cp) ? "runs on this computer" : hostOf(cp.base_url);
+}
+
+/**
+ * Where a row is actually reachable, which is not always the key it is filed
+ * under: Local's address is whichever port the bundled stack took this launch.
+ *
+ * Empty when there is no local stack to reach — it failed, or this build has no
+ * bundled one — which reads as unreachable rather than as a fetch to `local/`.
+ */
+export function probeTarget(cp: ControlPlane): string {
+  if (!isLocalPlane(cp)) return cp.base_url;
+  return knownLocalStack()?.base_url ?? "";
+}
+
 // Reachability is cached ~30s and shared across BOTH surfaces (module-level), so
 // the pill opening and the strip's interval do not each re-probe — one probe
 // serves both within the window.
@@ -33,16 +62,24 @@ export const healthCache = new Map<string, { ok: boolean; at: number }>();
 
 export type Health = "checking" | "up" | "down";
 
-export async function probeCached(url: string): Promise<boolean> {
-  const hit = healthCache.get(url);
+/** Probe `target`, caching the answer under `key` — the two differ for Local,
+ *  whose key is stable and whose address is not. */
+export async function probeCached(key: string, target = key): Promise<boolean> {
+  const hit = healthCache.get(key);
   if (hit && Date.now() - hit.at < HEALTH_TTL) return hit.ok;
+  // Nowhere to probe is unreachable, and asking would fetch a relative path off
+  // `tauri://localhost` rather than a control plane.
+  if (!target) {
+    healthCache.set(key, { ok: false, at: Date.now() });
+    return false;
+  }
   // Resolve within ~1s: an unreachable host would otherwise hang on the
   // browser's default fetch timeout and leave the dot spinning.
   const ok = await Promise.race([
-    probeControlPlane(url).then((r) => r.ok),
+    probeControlPlane(target).then((r) => r.ok),
     new Promise<boolean>((res) => setTimeout(() => res(false), 1000)),
   ]);
-  healthCache.set(url, { ok, at: Date.now() });
+  healthCache.set(key, { ok, at: Date.now() });
   return ok;
 }
 
@@ -67,7 +104,7 @@ export function probeInto(
       continue;
     }
     setHealth((h) => ({ ...h, [cp.base_url]: "checking" }));
-    void probeCached(cp.base_url).then((ok) => {
+    void probeCached(cp.base_url, probeTarget(cp)).then((ok) => {
       if (alive()) setHealth((h) => ({ ...h, [cp.base_url]: ok ? "up" : "down" }));
     });
   }
