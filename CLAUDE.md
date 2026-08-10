@@ -112,6 +112,19 @@ strip existing comments: leave them unless you are changing that code.
   `IN (…)`), and `crates/nook-control/tests/sqlite_scaffold.rs` proves an empty
   SQLite database still builds from them. Boot wiring and the both-engines
   divergence guard are MAIN-196's, not here.
+- **A number is claimed on BOTH tracks at once: the next one free is the highest
+  either set uses, plus one.** Counting from Postgres alone is what breaks.
+  MAIN-502 took the next free Postgres number (0056) for both halves, exactly as
+  the rule above reads, and died on `UNIQUE constraint failed:
+  _sqlx_migrations.version` — SQLite's 0056 was already taken. When one engine
+  needs a **solo** migration the other **skips** that number rather than
+  shifting its own twins: that is what 0038 did (`settings_null_equating_unique`
+  is SQLite-only and there is no Postgres 0038), and why 0039–0054 are still
+  paired number-for-number. 0055 departed from it — a SQLite-only change took
+  0055 on its own track while the shared twin landed at pg-0055 / sqlite-0056 —
+  which is the one-number offset MAIN-502 hit. Nothing already applied is ever
+  renumbered to correct it; lockstep returns as soon as a paired migration takes
+  the same free-on-both number again, which is **0057** as of 2026-08-10.
 - **A timestamp on the SQLite track has ONE form, and it is not
   `CURRENT_TIMESTAMP` (MAIN-442).** A `timestamptz` is TEXT there, so text
   comparison IS the comparison: `CURRENT_TIMESTAMP`'s
