@@ -7,6 +7,20 @@
 //! atomic, multi-instance-safe conditional UPDATE in
 //! [`jobs::reap_stale_executors`], so every control-plane replica may run this
 //! harmlessly — a job is failed by exactly one of them.
+//!
+//! It also ends jobs that never got that far (MAIN-496). The reap above needs
+//! an `executor_node_id`, which a `queued` job does not have, so a job nothing
+//! could place had no exit at all: one scan cancels a queued job whose card has
+//! been closed under it, the other escalates one whose `queued_reason` has not
+//! moved in `job_starve_secs`. Both live here rather than in a fourth loop —
+//! same cadence, same atomic-UPDATE property, same loops-off gate.
+//!
+//! Those two are asked PER TENANT — `any_enabled` then `enabled`, the pair
+//! `loops`' own module doc prescribes — while the reap above stays global. The
+//! difference is what they write: a reap changes job state, but these mutate a
+//! board a human reads (a `blocked` label, a comment, a notification), and
+//! doing that to a tenant with loops OFF because a DIFFERENT tenant has them on
+//! would break MAIN-239's promise that such a job simply waits for the switch.
 
 use std::time::Duration;
 
@@ -22,13 +36,17 @@ const SCAN_INTERVAL: Duration = Duration::from_secs(30);
 /// exits on shutdown, taking the task with it.
 pub fn start(state: AppState) {
     tokio::spawn(async move {
-        let grace = state.cfg.job_reap_grace_secs;
-        tracing::info!(grace_secs = grace, "loop-job reaper started");
-        run(state, grace).await;
+        let (grace, starve) = (state.cfg.job_reap_grace_secs, state.cfg.job_starve_secs);
+        tracing::info!(
+            grace_secs = grace,
+            starve_secs = starve,
+            "loop-job reaper started"
+        );
+        run(state, grace, starve).await;
     });
 }
 
-async fn run(state: AppState, grace_secs: u64) {
+async fn run(state: AppState, grace_secs: u64, starve_secs: u64) {
     let mut switch = loops::SwitchLog::default();
     loop {
         tokio::time::sleep(SCAN_INTERVAL).await;
@@ -40,6 +58,25 @@ async fn run(state: AppState, grace_secs: u64) {
             Ok(0) => {}
             Ok(n) => tracing::warn!(reaped = n, "reaped loop jobs whose executor went offline"),
             Err(e) => tracing::warn!(error = %e, "loop-job reaper scan failed"),
+        }
+        for tenant in loops::enabled_tenants(&*state.settings).await {
+            // Doomed before starved: a job whose card just closed is canceled on
+            // the card's evidence, so it never reaches the escalation that would
+            // comment on a card nobody is working any more.
+            match jobs::cancel_queued_on_finished_cards(&state, tenant).await {
+                Ok(0) => {}
+                Ok(n) => {
+                    tracing::warn!(%tenant, canceled = n, "canceled queued jobs whose card is finished")
+                }
+                Err(e) => tracing::warn!(%tenant, error = %e, "finished-card queued scan failed"),
+            }
+            match jobs::escalate_starved_queued(&state, tenant, starve_secs).await {
+                Ok(0) => {}
+                Ok(n) => {
+                    tracing::warn!(%tenant, escalated = n, "starved queued jobs escalated to a human")
+                }
+                Err(e) => tracing::warn!(%tenant, error = %e, "starved-job scan failed"),
+            }
         }
     }
 }

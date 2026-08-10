@@ -55,6 +55,24 @@ pub async fn any_enabled(settings: &dyn crate::repo::admin::SettingRepository) -
         .any(|v| truthy(Some(v)))
 }
 
+/// Every tenant with loops ON — the second question a cross-tenant consumer
+/// asks, when what it does next must be scoped to the tenants it is about to
+/// touch rather than merely gated on somebody being on.
+///
+/// Fails **closed**, like [`enabled`]: a database error yields no tenants.
+pub async fn enabled_tenants(
+    settings: &dyn crate::repo::admin::SettingRepository,
+) -> Vec<TenantId> {
+    settings
+        .tenants_with_value(KEY)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, v)| truthy(Some(v)))
+        .map(|(tenant, _)| tenant)
+        .collect()
+}
+
 /// Turn loops on or off for a tenant. Returns the value now stored.
 pub async fn set(
     settings: &dyn crate::repo::admin::SettingRepository,

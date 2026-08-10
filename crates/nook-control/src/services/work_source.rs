@@ -148,41 +148,45 @@ pub struct BuildWork<'a> {
     pub rejected_heads: std::collections::HashMap<i64, String>,
 }
 
+/// The pick contract as code (MAIN-458 AC-1a / NG-1): `agent-ready` is the
+/// human approval gate and the converger NEVER reads a card without it;
+/// `blocked`, assigned, still-blocked, backlog, done and epic cards are excluded
+/// exactly as `nook tasks`' server-side filters exclude them (MAIN-80,
+/// MAIN-464) — the filtering is the query's, not re-implemented here, which is
+/// what stops the two drifting.
+///
+/// A named constructor rather than a literal inside `fresh_items`, so a test
+/// proving what the fresh pick excludes runs THESE parameters instead of a copy
+/// that would keep passing after the real ones changed (MAIN-496).
+pub fn fresh_pick_params(workspace: Option<WorkspaceId>) -> crate::repo::tasks::PickParams {
+    crate::repo::tasks::PickParams {
+        board: None,
+        workspace: workspace.map(|w| w.0),
+        column_type: None,
+        priority: None,
+        unassigned_only: true,
+        assignee: None,
+        labels: vec!["agent-ready".into()],
+        not_labels: vec!["blocked".into()],
+        is_blocked: Some(false),
+        created_after: None,
+        limit: 200,
+        archived: false,
+        q: None,
+        types: vec!["task".into(), "bug".into(), "story".into(), "chore".into()],
+        parent: None,
+        backlog: false,
+        done: false,
+        visibility: vec![],
+        node: None,
+    }
+}
+
 impl BuildWork<'_> {
-    /// The pick contract as code (MAIN-458 AC-1a / NG-1): `agent-ready` is the
-    /// human approval gate and the converger NEVER reads a card without it;
-    /// `blocked`, assigned, still-blocked, backlog, done and epic cards are
-    /// excluded exactly as `nook tasks`' server-side filters exclude them
-    /// (MAIN-80, MAIN-464) — the filtering is the query's, not re-implemented
-    /// here, which is what stops the two drifting.
     async fn fresh_items(&self, workspace: WorkspaceId) -> Option<Vec<WorkItem>> {
         let rows = self
             .tasks
-            .pick_tasks(
-                self.tenant,
-                self.viewer,
-                crate::repo::tasks::PickParams {
-                    board: None,
-                    workspace: Some(workspace.0),
-                    column_type: None,
-                    priority: None,
-                    unassigned_only: true,
-                    assignee: None,
-                    labels: vec!["agent-ready".into()],
-                    not_labels: vec!["blocked".into()],
-                    is_blocked: Some(false),
-                    created_after: None,
-                    limit: 200,
-                    archived: false,
-                    q: None,
-                    types: vec!["task".into(), "bug".into(), "story".into(), "chore".into()],
-                    parent: None,
-                    backlog: false,
-                    done: false,
-                    visibility: vec![],
-                    node: None,
-                },
-            )
+            .pick_tasks(self.tenant, self.viewer, fresh_pick_params(Some(workspace)))
             .await
             .ok()?;
         Some(
