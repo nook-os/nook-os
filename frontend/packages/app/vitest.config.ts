@@ -9,6 +9,8 @@ export default defineConfig({
     // `.tsx` too: the assembly test (Operator.test.tsx) renders components, so
     // it needs JSX. Additive — the existing `.test.ts` suites still match.
     include: ["src/**/*.test.{ts,tsx}"],
+    // The gaps in jsdom that would otherwise read as component bugs.
+    setupFiles: ["src/testSetup.ts"],
     // Mock hygiene, on for every file (MAIN-303).
     //
     // A test set `api.GET.mockImplementation(...)` on the `vi.mock("@nookos/api")`
