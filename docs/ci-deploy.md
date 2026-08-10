@@ -109,6 +109,22 @@ proof that says "verified" without anything having been verified.
 **Never** run `docker compose down -v` against a deployment. That is the
 bootstrap loop from `CLAUDE.md`, and it destroys real data.
 
+### Which modes can serve tunnels
+
+`nook tunnel` publishes a port at `<label>.<TUNNEL_DOMAIN>`, and a tunnel is a
+hostname something has to route — so it works only where a reverse proxy sits in
+front of the control plane. Direct Compose, `docker run`, systemd + native
+binary and the desktop app have no proxy at all, so tunnels cannot work on them
+until you put one there. Compose behind Traefik and the Helm chart do have one,
+but **neither ships the wildcard router or ingress rule**, and neither sets
+`TUNNEL_DOMAIN` — on those two the proxy exists and the rule is still yours to
+add. No mode serves tunnels out of the box.
+
+[`tunnel-proxy.md`](tunnel-proxy.md) is the contract to configure a proxy to —
+whole path space to the control plane, `Host` preserved, upgrades forwarded —
+with worked nginx, Caddy and Traefik examples, and the DNS and certificate
+prerequisites no proxy config can supply.
+
 ## The agent port
 
 Nodes do not connect through the reverse proxy that serves the API. TLS for
