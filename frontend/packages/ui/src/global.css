@@ -2298,6 +2298,49 @@ table.nook-table tr.clickable { cursor: pointer; }
 
 .policy-actions { display: flex; gap: 8px; }
 
+/* A labelled region of the editor, and the same shell around the projection
+   and the shortfall (MAIN-500). A `fieldset` for the editor's three so the
+   legend is the region's accessible name rather than a nearby div. */
+.policy-region {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--nook-border);
+  border-radius: var(--nook-radius);
+  padding: 8px 10px 10px;
+  margin: 0;
+  min-width: 0;
+}
+.policy-region-title {
+  color: var(--nook-fg-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0 4px;
+}
+
+/* One node per line: the name in a fixed column so a column of rows scans as a
+   column, and its grounds beside it however many there are. */
+.policy-node-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 4px;
+  min-width: 0;
+}
+.policy-node-name { min-width: 120px; }
+.policy-node-reasons { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.policy-reason { display: inline-flex; align-items: center; gap: 6px; }
+
+.policy-preview-group { display: flex; flex-direction: column; gap: 2px; }
+
+/* The panel body has no padding of its own — the summary and the editor each
+   supply theirs, so the strip below the summary supplies its own too. */
+.policy-shortfall { margin: 0 10px 10px; }
+
+/* A projection whose answer is behind the draft says so by fading, as well as
+   in words — a stale number that looks live is the one failure mode here. */
+.policy-preview.is-stale { opacity: 0.55; }
+
 /* ── Runtime picker ─────────────────────────────────────────────────────── */
 
 .runtime-chip {
