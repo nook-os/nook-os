@@ -33,6 +33,11 @@ pub use dialect::{
     AtomicClaim, CiMatch, EventBus, Json, PgEventBus, Postgres, Sqlite, TimeMath, TypeMapping,
 };
 
+/// The SQLite track's one timestamp form (MAIN-442): what `now()` writes, what
+/// a column default writes, and what a bound instant encodes as — so text
+/// comparison on a TEXT timestamp column means what it says.
+pub mod sqlite_time;
+
 /// The engine-dispatching pool + parameter model (MAIN-205). Introduced
 /// alongside the `DbPool` alias; it becomes the pool type at the call-site flip.
 pub mod pool;

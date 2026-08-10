@@ -31,8 +31,12 @@
 # Measured on two full runs of `cargo test --workspace --no-fail-fast` under
 # sqlite://, which produced identical failure sets — nothing here is flaky.
 #
-# 103 test binaries: 61 COVERED, 41 pending below, 1 deliberately Postgres-only —
+# 137 test binaries: 116 COVERED, 20 pending below, 1 deliberately Postgres-only —
 # the numbers check-sqlite-ci.sh itself reports, not arithmetic on this file.
+# (Re-read from a real run by MAIN-442, which deleted `task_workspace`. The line
+# below said 103/61/41 while the file held 21 entries: cards deleted their lines
+# and left this count behind, which is what a hand-maintained tally does. It is
+# a note, not a check — the guard's own output is the number that matters.)
 # (93/50/42 before MAIN-355. The suite gained binaries and MAIN-288's
 # conversions landed; MAIN-355 itself added no line and removed none — it made
 # `claim_lease` pass rather than excusing it.)
@@ -64,7 +68,6 @@ task_checkout_ids          # raw sqlx / bed.pool in the test itself (MAIN-268)
 
 # ── production still emits Postgres SQL (MAIN-423, the dialect-sweep residue) ──
 node_owner                 # production still emits Postgres SQL on this path (MAIN-423)
-task_workspace             # MEASURED (MAIN-440): NOT a dialect slip. A bound timestamp never compares equal to what CURRENT_TIMESTAMP wrote, so the optimistic-concurrency guard `updated_at = $11` matches 0 rows and every guarded edit conflicts (MAIN-442)
 
 # ── still production Postgres SQL, re-tagged by MAIN-293 ──
 #
@@ -84,9 +87,16 @@ task_workspace             # MEASURED (MAIN-440): NOT a dialect slip. A bound ti
 # ledgers), and its tests take a private bed on the SQLite arm. `auth_search_path`
 # and `migrations` passed outright and their lines are deleted.
 #
-# What is left in this binary is a DIFFERENT defect, measured after that landed:
-# chat's repositories hard-code `public.`-qualified table names in ~15 places and
-# call `GREATEST`, so the queries fail with `no such table: public.users` and
-# `unrecognized token: ":"`. That is production emitting Postgres SQL, which is
-# the dialect sweep's — and MAIN-294 NG-3 put it explicitly out of scope.
-nook_chat:main             # chat's repos emit `public.`-qualified SQL and GREATEST (MAIN-423)
+# The `public.`-qualified SQL and `GREATEST` this line used to name are gone —
+# they only ever appeared in nook-chat's COMMENTS, as MAIN-439 measured when it
+# re-instrumented the RepoError conversion that was discarding the DbError.
+#
+# Re-measured on 2026-08-09, after MAIN-442 landed the one timestamp form: SIX
+# failures, all one card's, none of them this one's. `DISTINCT ON` (repo/dms.rs
+# `people_in_my_orgs` and `participants`) is `near "ON": syntax error`, and
+# `bool_or` (repo/messages.rs `reactions_for`) is `no such function`. MAIN-439
+# owns both and has them written; it was BLOCKED on the seventh failure,
+# `channels::tests::unread_boundary_is_strict`, which MAIN-442 fixed — with
+# MAIN-439's two replacements applied on top of it this binary is 58/58, which
+# is why this line waits for that card and not another measurement.
+nook_chat:main             # `DISTINCT ON` and `bool_or` in chat's repos (MAIN-439)

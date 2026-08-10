@@ -158,6 +158,110 @@ async fn the_booted_schema_has_the_mapped_types() {
     assert!(applied >= 1, "the SQLite track recorded itself");
 }
 
+/// Every timestamp default in the booted schema is the ONE canonical form
+/// (MAIN-442, AC-5).
+///
+/// The form is stated once, in `nook_db::sqlite_time`, and this is what stops a
+/// second statement of it appearing. `0055` rewrote the 80 declarations the
+/// frozen `0001` and its deltas carried; a table added tomorrow with
+/// `DEFAULT CURRENT_TIMESTAMP` out of habit would reintroduce the whole defect
+/// — second resolution, and a form no bound instant encodes as — and nothing
+/// else in the suite would notice, because everything still DECODES.
+///
+/// Read from the migrated database rather than from the files: what a column
+/// actually defaults to is the only thing that governs a write, and `0055`
+/// changes that without changing any file that declared it.
+#[tokio::test]
+async fn every_timestamp_default_is_the_canonical_form() {
+    let file = ScratchDb::new("defaults");
+    let db = boot(&file).await;
+
+    let tables: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master
+          WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name <> '_sqlx_migrations'",
+    )
+    .fetch_all(db.sqlite())
+    .await
+    .expect("list tables");
+
+    let mut canonical = 0;
+    for t in &tables {
+        let defaults: Vec<(String, Option<String>)> = sqlx::query_as(&format!(
+            "SELECT name, dflt_value FROM pragma_table_info('{t}')"
+        ))
+        .fetch_all(db.sqlite())
+        .await
+        .expect("column defaults");
+        for (col, dflt) in defaults {
+            let Some(dflt) = dflt else { continue };
+            if !dflt.contains("CURRENT_TIMESTAMP") && !dflt.contains("strftime") {
+                continue;
+            }
+            // `dflt_value` is the expression with the parentheses an expression
+            // default is declared in stripped, which is exactly `NOW_SQL`.
+            assert_eq!(
+                dflt,
+                nook_db::sqlite_time::NOW_SQL,
+                "{t}.{col} writes a timestamp in a form nothing else in this \
+                 database uses; the one form is nook_db::sqlite_time's"
+            );
+            canonical += 1;
+        }
+    }
+    // A guard that found nothing to check would pass forever.
+    assert!(
+        canonical > 50,
+        "expected the whole schema's timestamp defaults, saw {canonical}"
+    );
+}
+
+/// AC-1 and AC-2 on the REAL schema, through the real repository: the
+/// optimistic-concurrency guard is the test that matters, and it is the one
+/// that was failing.
+///
+/// `sqlite_time`'s own tests prove the form round-trips on a table they
+/// declare. This proves it on `tasks` as `0055` left it — the difference being
+/// that nothing here chose the column's default.
+#[tokio::test]
+async fn a_stamped_row_is_found_by_its_own_timestamp() {
+    use nook_db::Db;
+
+    let file = ScratchDb::new("guard");
+    let db = boot(&file).await;
+    let cfg = nook_control::Config::for_test();
+    nook_control::seed::run(&db, &cfg).await.expect("seed");
+
+    // The seeded rows were stamped by the column default, which is the writer
+    // the binder never agreed with.
+    let (id, stamped): (uuid::Uuid, chrono::DateTime<chrono::Utc>) = db
+        .query_one("SELECT id, created_at FROM tenants LIMIT 1", vec![])
+        .await
+        .expect("a seeded tenant");
+    let found: i64 = db
+        .query_scalar(
+            "SELECT count(*) FROM tenants WHERE id = $1 AND created_at = $2",
+            nook_db::params![id, stamped],
+        )
+        .await
+        .expect("compare");
+    assert_eq!(found, 1, "a guarded update's precondition can match");
+
+    // And the stamp has sub-second resolution, so two writes in one second are
+    // still ordered.
+    let raw: String = db
+        .query_scalar(
+            "SELECT created_at FROM tenants WHERE id = $1",
+            nook_db::params![id],
+        )
+        .await
+        .expect("the raw text");
+    assert_eq!(
+        raw.len(),
+        "2026-08-06 13:28:36.411".len(),
+        "the stamp carries milliseconds, got {raw:?}"
+    );
+}
+
 /// Booting twice over the same file must be a no-op, not a re-apply — the
 /// ordinary case of restarting a single-machine deployment.
 #[tokio::test]

@@ -214,7 +214,13 @@ fn sqlite_args(
             DbValue::Text(x) => a.add(x).map_err(add_err)?,
             DbValue::Bytes(x) => a.add(x).map_err(add_err)?,
             DbValue::Uuid(x) => a.add(x).map_err(add_err)?,
-            DbValue::Timestamptz(x) => a.add(x).map_err(add_err)?,
+            // NOT sqlx's own `DateTime` encoder (MAIN-442). That emits RFC 3339
+            // — `2026-08-06T13:28:36.411979+00:00` — which no SQL side of this
+            // database ever writes, so on a TEXT column the bound value was
+            // never equal to and never ordered against the stored one. Both
+            // halves render `crate::sqlite_time`'s form instead. NULL stays
+            // NULL: `map` does not reach a missing instant.
+            DbValue::Timestamptz(x) => a.add(x.map(crate::sqlite_time::render)).map_err(add_err)?,
             DbValue::Json(x) => a.add(x).map_err(add_err)?,
             DbValue::TextList(_) | DbValue::UuidList(_) | DbValue::I64List(_) => {
                 unreachable!("expand_lists flattens every list parameter")
