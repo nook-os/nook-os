@@ -67,6 +67,30 @@ async fn node_seen(bed: &TestBed, tenant: TenantId, secs_ago: i64) -> NodeId {
     id
 }
 
+/// Age a job's `updated_at`, so a scan measuring silence has something to see.
+async fn last_touched(bed: &TestBed, id: JobId, secs_ago: i64) {
+    bed.db()
+        .exec(
+            "UPDATE loop_jobs SET updated_at = now() - ($2::bigint * interval '1 second')
+              WHERE id = $1",
+            params![id, secs_ago],
+        )
+        .await
+        .expect("age the job");
+}
+
+/// One transcript entry `secs_ago` seconds old — a run showing a sign of life.
+async fn entry(bed: &TestBed, id: JobId, secs_ago: i64) {
+    bed.db()
+        .exec(
+            "INSERT INTO loop_job_transcript (id, job_id, source, content, at)
+             VALUES ($1,$2,'agent','· Bash', now() - ($3::bigint * interval '1 second'))",
+            params![JobTranscriptId::new(), id, secs_ago],
+        )
+        .await
+        .expect("transcript entry");
+}
+
 /// A job on `target`, executed by `node`, in the given lifecycle state.
 async fn job(
     bed: &TestBed,
@@ -232,6 +256,151 @@ async fn a_reaped_job_can_be_re_run() {
         .expect("a reaped job re-runs");
     assert_eq!(fresh.job.state, "queued");
     assert_eq!(fresh.job.predecessor_job_id, Some(original));
+
+    bed.teardown().await;
+}
+
+// ── Orphaned runs on a HEALTHY node (MAIN-506) ──────────────────────────────
+//
+// The shape an agent restart leaves behind: the node reconnected and is
+// heartbeating, so nothing above it can see anything wrong, while the run
+// itself has not produced a line since the restart.
+
+#[tokio::test]
+async fn a_run_orphaned_by_an_agent_restart_does_not_stay_running_forever() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("stall").await;
+    let (user, _p) = bed.user(tenant, "owner").await;
+    let target = target_task(&bed, tenant, user).await;
+    // The node is FINE — it restarted, reconnected, and heartbeat just now.
+    let healthy = node_seen(&bed, tenant, 0).await;
+    let orphan = job(&bed, tenant, user, target, healthy, "running").await;
+    // It spoke two hours ago, and has said nothing since.
+    entry(&bed, orphan, 7_200).await;
+    last_touched(&bed, orphan, 7_200).await;
+    let state = bed.app_state().await;
+
+    // The liveness reaper is structurally blind to this: the node is healthy,
+    // so the cutoff never trips however long the job has been silent (AC-1).
+    assert_eq!(
+        jobs::reap_stale_executors(&state, 180).await.expect("reap"),
+        0,
+        "node liveness cannot see an orphan on a live node"
+    );
+    assert_eq!(job_state(&bed, orphan).await, "running");
+
+    let reaped = jobs::reap_stalled_jobs(&state, 3_600)
+        .await
+        .expect("stall reap");
+    assert_eq!(reaped, 1, "job-level progress does see it");
+    assert_eq!(job_state(&bed, orphan).await, "failed", "AC-6");
+    let t = transcript_text(&bed, orphan).await;
+    assert!(
+        t.contains("no progress since") && t.contains("reaped after 3600s"),
+        "the transcript names the cause: {t:?}"
+    );
+
+    // AC-2: terminal, and the card's work can be picked up again — warm,
+    // because the fresh run resumes the same pinned agent session.
+    let fresh = jobs::rerun(&state, tenant, user, orphan)
+        .await
+        .expect("an orphaned job re-runs");
+    assert_eq!(fresh.job.state, "queued");
+    assert_eq!(fresh.job.predecessor_job_id, Some(orphan));
+
+    bed.teardown().await;
+}
+
+#[tokio::test]
+async fn a_run_still_writing_transcript_is_never_stall_reaped() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("stall").await;
+    let (user, _p) = bed.user(tenant, "owner").await;
+    let target = target_task(&bed, tenant, user).await;
+    let healthy = node_seen(&bed, tenant, 0).await;
+
+    // A long-running job — claimed hours ago, so `updated_at` alone would
+    // condemn it — that is plainly alive: it wrote a line a minute ago.
+    let working = job(&bed, tenant, user, target, healthy, "running").await;
+    last_touched(&bed, working, 7_200).await;
+    entry(&bed, working, 7_200).await;
+    entry(&bed, working, 60).await;
+
+    // And one that has never written a line, but was claimed just now — the
+    // gap between claim and the agent's first output must not read as silence.
+    let starting = job(&bed, tenant, user, target, healthy, "claimed").await;
+
+    let state = bed.app_state().await;
+    let reaped = jobs::reap_stalled_jobs(&state, 3_600)
+        .await
+        .expect("stall reap");
+    assert_eq!(reaped, 0, "progress within the window is progress");
+    assert_eq!(job_state(&bed, working).await, "running");
+    assert_eq!(job_state(&bed, starting).await, "claimed");
+
+    bed.teardown().await;
+}
+
+#[tokio::test]
+async fn a_paused_run_is_never_stall_reaped() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("stall").await;
+    let (user, _p) = bed.user(tenant, "owner").await;
+    let target = target_task(&bed, tenant, user).await;
+    let healthy = node_seen(&bed, tenant, 0).await;
+    // Waiting on a human is silence BY DESIGN, for as long as it takes.
+    let paused = job(&bed, tenant, user, target, healthy, "waiting_on_human").await;
+    last_touched(&bed, paused, 7_200).await;
+    let state = bed.app_state().await;
+
+    // Even with a zero window, where everything is "silent".
+    let reaped = jobs::reap_stalled_jobs(&state, 0)
+        .await
+        .expect("stall reap");
+    assert_eq!(reaped, 0);
+    assert_eq!(job_state(&bed, paused).await, "waiting_on_human");
+
+    bed.teardown().await;
+}
+
+#[tokio::test]
+async fn the_stall_reap_is_atomic_and_fails_a_job_once() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("stall").await;
+    let (user, _p) = bed.user(tenant, "owner").await;
+    let target = target_task(&bed, tenant, user).await;
+    let healthy = node_seen(&bed, tenant, 0).await;
+    let state = bed.app_state().await;
+
+    // A job that finished between scan and update falls out of the guard set.
+    let finished = job(&bed, tenant, user, target, healthy, "running").await;
+    last_touched(&bed, finished, 7_200).await;
+    jobs::transition(&state, tenant, finished, "completed")
+        .await
+        .expect("complete");
+
+    let silent = job(&bed, tenant, user, target, healthy, "running").await;
+    last_touched(&bed, silent, 7_200).await;
+
+    let first = jobs::reap_stalled_jobs(&state, 3_600)
+        .await
+        .expect("scan 1");
+    assert_eq!(first, 1, "only the genuinely silent running job is reaped");
+    let second = jobs::reap_stalled_jobs(&state, 3_600)
+        .await
+        .expect("scan 2");
+    assert_eq!(second, 0, "a second replica double-fails nothing");
+
+    assert_eq!(job_state(&bed, finished).await, "completed", "untouched");
+    assert_eq!(job_state(&bed, silent).await, "failed");
 
     bed.teardown().await;
 }

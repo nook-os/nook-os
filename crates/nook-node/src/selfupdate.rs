@@ -95,9 +95,17 @@ pub async fn run(reason: &str) -> Result<()> {
     tracing::info!(reason, "updating this agent");
     crate::update_binary().await?;
 
-    // tmux is the buffer of record and outlives this process, so sessions
-    // survive the restart. That is why KillMode=process matters in the unit,
-    // and why this is safe to do under someone's running work.
+    // tmux is the buffer of record and outlives this process, so TERMINAL
+    // sessions survive the restart. That is why KillMode=process matters in the
+    // unit, and why this is safe to do under someone's running terminal.
+    //
+    // It is NOT safe under a streaming loop job, and reading it as though it
+    // were is what hid MAIN-506 for a release. MAIN-240's adapter never touches
+    // tmux: this process is the sole reader of the agent's stdout, so a restart
+    // orphans the run whatever the unit does. The child now dies with us
+    // (`job_adapter::die_with_parent`) and the control plane's stall reaper
+    // gives the card back — recovery, not preservation. Not triggering this in
+    // the first place is MAIN-505's cordon.
     tracing::info!("update installed — exiting so the service manager restarts us");
     std::process::exit(0);
 }

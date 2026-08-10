@@ -162,6 +162,43 @@ async fn a_job_that_finished_before_the_sweep_is_left_alone() {
     );
 }
 
+#[tokio::test]
+async fn a_silent_run_is_reaped_on_its_own_progress_however_healthy_its_node() {
+    let repo = FakeLoopJobRepository::new();
+    let t = tenant();
+    let node = NodeId::new();
+    // The MAIN-506 shape: the node restarted, reconnected, and is heartbeating.
+    repo.set_node_last_seen(node, chrono::Utc::now());
+    let long_ago = chrono::Utc::now() - chrono::Duration::hours(2);
+
+    let orphan = queued(&repo, t, TaskId::new()).await;
+    repo.claim_for_executor(orphan, node).await.unwrap();
+    repo.force_updated_at(orphan, long_ago);
+
+    let working = queued(&repo, t, TaskId::new()).await;
+    repo.claim_for_executor(working, node).await.unwrap();
+    repo.force_updated_at(working, long_ago);
+    // The one difference between them: this one is still writing.
+    repo.append_transcript(working, "agent", "· Bash")
+        .await
+        .unwrap();
+
+    assert!(
+        repo.reap_stale_executors(600).await.unwrap().is_empty(),
+        "node liveness is exactly what cannot see this"
+    );
+    let stalled = repo.reap_stalled_jobs(3_600).await.unwrap();
+    assert_eq!(stalled.len(), 1);
+    assert_eq!(stalled[0].id, orphan);
+    assert_eq!(repo.state_of(orphan).as_deref(), Some("failed"));
+    assert_eq!(repo.state_of(working).as_deref(), Some("claimed"));
+
+    assert!(
+        repo.reap_stalled_jobs(3_600).await.unwrap().is_empty(),
+        "and a second reaper cannot double-fail it"
+    );
+}
+
 // ── scoping ─────────────────────────────────────────────────────────────────
 
 #[tokio::test]
