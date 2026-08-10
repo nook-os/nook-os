@@ -234,6 +234,14 @@ pub struct Config {
     /// before the reaper fails a job it was running (MAIN-164), so a dead
     /// operator container cannot strand work forever. Default 180.
     pub job_reap_grace_secs: u64,
+    /// How many seconds a job may sit `queued` with an UNCHANGED
+    /// `queued_reason` before the reaper cancels it and escalates to a human
+    /// (MAIN-496). Measured from the last time the reason changed, not from
+    /// creation: a job whose reason keeps moving is making progress toward
+    /// placement and is never escalated. Default 1800 (30 minutes) — long
+    /// enough to outlast a node restart or an operator upgrade, short enough
+    /// that a starved card surfaces within the hour instead of never.
+    pub job_starve_secs: u64,
 
     // ── Board-card claim leases (MAIN-229) ──────────────────────────────
     /// How many seconds a card's bound session's node may be unseen before the
@@ -410,6 +418,9 @@ impl Config {
             job_reap_grace_secs: env_opt("NOOK_JOB_REAP_GRACE_SECS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(180),
+            job_starve_secs: env_opt("NOOK_JOB_STARVE_SECS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1_800),
 
             claim_session_grace_secs: env_opt("NOOK_CLAIM_SESSION_GRACE_SECS")
                 .and_then(|v| v.parse().ok())
@@ -577,6 +588,7 @@ impl Config {
             tunnel_domain: None,
             tunnel_idle_secs: 1800,
             job_reap_grace_secs: 180,
+            job_starve_secs: 1_800,
             claim_session_grace_secs: 120,
             max_claim_secs: 14_400,
             claim_reap_scan_secs: 30,

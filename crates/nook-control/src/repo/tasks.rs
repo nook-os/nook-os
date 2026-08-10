@@ -266,6 +266,14 @@ pub trait TaskRepository: Send + Sync {
 
     /// This workspace's cards that carry a recorded PR — `(id, number, pr_url)`
     /// — the candidate set for REPAIR items (MAIN-458 AC-1b).
+    ///
+    /// Narrowed by the same two exclusions `pick_tasks` applies to the FRESH
+    /// side, because they are properties of the card rather than of how the
+    /// work was sourced (MAIN-496 AC-3): a card in a `completed`/`canceled`
+    /// column is finished, and a `blocked` card is one a human has been asked
+    /// about. Without them the two queued-job endings feed themselves — the
+    /// reaper cancels a repair run, this query hands the same item straight
+    /// back, and the cycle repeats forever on a card nobody is being helped by.
     async fn tasks_with_pr(
         &self,
         tenant: TenantId,
@@ -983,9 +991,14 @@ impl TaskRepository for DbTaskRepository {
         let rows: Vec<(Uuid, i32, String)> = self
             .db
             .query_all(
-                "SELECT id, number, pr_url FROM tasks
-                  WHERE tenant_id = $1 AND workspace_id = $2
-                    AND pr_url IS NOT NULL AND archived_at IS NULL",
+                "SELECT t.id, t.number, t.pr_url FROM tasks t
+                   JOIN board_columns c ON c.id = t.column_id
+                  WHERE t.tenant_id = $1 AND t.workspace_id = $2
+                    AND t.pr_url IS NOT NULL AND t.archived_at IS NULL
+                    AND c.type NOT IN ('completed', 'canceled')
+                    AND NOT EXISTS (
+                        SELECT 1 FROM task_labels tl JOIN labels l ON l.id = tl.label_id
+                         WHERE tl.task_id = t.id AND l.name = 'blocked')",
                 params![tenant, workspace.0],
             )
             .await?;
@@ -2967,6 +2980,11 @@ impl TaskRepository for FakeTaskRepository {
                     && t.workspace_id == Some(workspace)
                     && t.pr_url.is_some()
                     && t.archived_at.is_none()
+                    && in_flight(&st, t)
+                    && !st
+                        .task_labels
+                        .iter()
+                        .any(|(task, name)| *task == t.id.0 && name == "blocked")
             })
             .filter_map(|t| Some((t.id, i64::from(t.number?), t.pr_url.clone()?)))
             .collect())

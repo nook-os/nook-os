@@ -18,6 +18,11 @@
 //! (AC-3) rather than dead-lettering. The re-enqueue stops naturally once the
 //! job leaves `queued` (claimed, canceled): `select_executor` returns a
 //! non-queued state and the loop acks without re-enqueuing.
+//!
+//! "Canceled" was an assumption with nothing behind it until MAIN-496: a job
+//! nothing could place was re-enqueued here forever, because the only thing
+//! that ever canceled one was a human. The two queued-job endings in
+//! [`crate::services::job_reaper`] are what make this sentence true.
 
 use std::time::Duration;
 

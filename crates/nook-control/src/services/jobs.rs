@@ -2105,6 +2105,183 @@ pub async fn reap_stale_executors(state: &AppState, grace_secs: u64) -> ApiResul
     Ok(reaped.len() as u64)
 }
 
+// The two ways a `queued` job ends without ever running (MAIN-496). Until this,
+// `queued` had exactly one forward exit — `queued -> claimed` — so a job nothing
+// could place churned forever: `reap_stale_executors` sees only jobs with an
+// executor, and the claim reaper needs a lease a never-claimed card does not
+// have.
+//
+// Both endings are `canceled`, never a new `queued -> failed` (AC-4). The run
+// never happened; `failed` means it ran and lost, which is what the build
+// failure ladder and outcome reporting read. `cancel` is already legal from
+// every non-terminal state, so the transition table is untouched.
+//
+// Both are one guarded `UPDATE … WHERE state = 'queued' … RETURNING`, the same
+// atomic pattern as the executor claim — so every replica may scan and a job is
+// ended by exactly one of them, and a job claimed between scan and update falls
+// out of the guard.
+
+/// A queued job whose target card reached a terminal column is pointless: cancel
+/// it (AC-1). No threshold and no heuristic — the closed card is the evidence.
+///
+/// No label change is needed here, unlike [`escalate_starved_queued`], because
+/// both build work sources already exclude a finished card: `fresh_items`
+/// passes `done: false` to the pick query (MAIN-464), and `tasks_with_pr`
+/// excludes a terminal column too. That second half was NOT true when this
+/// landed — the repair query had no column filter, so an AC-1 cancel handed the
+/// same card straight back and the pair cycled forever. It is a property of the
+/// card, so it belongs in the query rather than as a strip here.
+pub async fn cancel_queued_on_finished_cards(state: &AppState, tenant: TenantId) -> ApiResult<u64> {
+    let ended = state.jobs.cancel_queued_on_finished_cards(tenant).await?;
+    for job in &ended {
+        append_transcript(
+            state,
+            job.id,
+            "system",
+            &format!(
+                "target card reached a terminal column after {} queued — canceled, \
+                 the run has nothing left to do{}",
+                waited(job.queued_since),
+                job.queued_reason
+                    .as_deref()
+                    .map(|r| format!(" (last reason: {r})"))
+                    .unwrap_or_default()
+            ),
+        )
+        .await
+        .ok();
+        announce_queued_ending(state, job).await;
+    }
+    Ok(ended.len() as u64)
+}
+
+/// A queued job whose reason has stood unchanged past `starve_secs` is starved:
+/// cancel it, take the card out of the loop's reach, and say so on it
+/// (AC-2/AC-3).
+///
+/// Stopping re-selection is the load-bearing half — a bare cancel on a
+/// still-open card produces cancel -> enqueue -> cancel forever, worse than the
+/// silence it replaces — and it takes BOTH labels, because the two build work
+/// sources gate on different things. `fresh_items` reads `agent-ready` cards,
+/// so the strip removes the card from that set. `repair_items` never consults
+/// `agent-ready` at all: it selects from cards with a recorded PR, and what
+/// removes a card from THAT set is `blocked` (`tasks_with_pr`). Stripping alone
+/// would have left a repair run cycling indefinitely, one comment and one
+/// notification per threshold.
+///
+/// The escalation shape is the claim reaper's cap path, not a second vocabulary:
+/// an activity event, a comment on the card, and a warning notification that
+/// links it without naming a private card's title. `blocked` is likewise the
+/// label `record_build_outcome`'s own handback already uses for "the loop
+/// cannot proceed; a human decides" — not a third name for the same state.
+pub async fn escalate_starved_queued(
+    state: &AppState,
+    tenant: TenantId,
+    starve_secs: u64,
+) -> ApiResult<u64> {
+    let ended = state
+        .jobs
+        .cancel_starved_queued(tenant, starve_secs as i64)
+        .await?;
+    for job in &ended {
+        let reason = job.queued_reason.as_deref().unwrap_or("no reason recorded");
+        // The wait quoted is the UNCHANGED-REASON wait, which is what the
+        // threshold actually measured — `created_at`'s span would read as a
+        // claim about the whole time queued that this rule never checked.
+        let body = format!(
+            "loop run starved — this reason stood unchanged for {}, so the run was canceled \
+             and the card marked `blocked` (and `agent-ready` removed) to keep the loop from \
+             re-raising it until a human looks: {reason}",
+            waited(job.reason_since)
+        );
+        append_transcript(state, job.id, "system", &body).await.ok();
+        announce_queued_ending(state, job).await;
+
+        // A `review` run has no card: the job transcript and the event above are
+        // the whole record, and there is no label to set.
+        let Some(task) = job.target_task_id else {
+            continue;
+        };
+        if let Err(e) = state.tasks.set_agent_ready(job.tenant, task, false).await {
+            tracing::warn!(job = %job.id, task = %task.0, error = %e, "could not strip agent-ready from a starved card");
+        }
+        if let Err(e) = state.tasks.attach_label(job.tenant, task, "blocked").await {
+            tracing::warn!(job = %job.id, task = %task.0, error = %e, "could not mark a starved card blocked");
+        }
+        let _ = state
+            .tasks
+            .create_comment(crate::repo::tasks::NewComment {
+                tenant: job.tenant,
+                task,
+                author_type: "system".into(),
+                author_id: None,
+                author_name: "Loop-job reaper".into(),
+                body_md: body.clone(),
+            })
+            .await;
+        raise_starved(state, job.tenant, task, &body).await;
+        state.registry.publish(
+            job.tenant,
+            nook_proto::UiEvent::TaskChanged { task_id: task },
+        );
+    }
+    Ok(ended.len() as u64)
+}
+
+/// The `job.state_changed` event any transition would have emitted — the atomic
+/// UPDATE already made the change, this is only its announcement (and the live
+/// nudge the job surfaces listen for).
+async fn announce_queued_ending(state: &AppState, job: &crate::repo::jobs::EndedQueuedJob) {
+    if let Ok(row) = load(state, job.tenant, job.id).await {
+        let private = target_is_private(state, job.tenant, row.target_task_id).await;
+        record_job_event(state, job.tenant, "job.state_changed", &row, private).await;
+    }
+    state.registry.publish(
+        job.tenant,
+        nook_proto::UiEvent::JobChanged {
+            task_id: job.target_task_id,
+        },
+    );
+}
+
+/// A warning notification linking the starved card. A private card's title never
+/// reaches the tenant-wide bell (MAIN-76), so only the key and the link go out —
+/// the same rule the claim reaper's escalation follows.
+async fn raise_starved(state: &AppState, tenant: TenantId, task: TaskId, body: &str) {
+    let key = state
+        .tasks
+        .key_of(tenant, task)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| task.0.to_string());
+    let base = state.cfg.public_base_url.trim_end_matches('/');
+    crate::services::notify::raise(
+        state,
+        tenant,
+        crate::services::notify::Draft::new(format!("Loop run starved: {key}"))
+            .level("warning")
+            .kind("job.starved")
+            .body(body.to_string())
+            .link(format!("{base}/board?task={task}"))
+            .payload(json!({ "task_id": task, "key": key })),
+    )
+    .await;
+}
+
+/// How long a job has been waiting, for a human to read. Coarse on purpose: the
+/// escalation is about hours and minutes, and a seconds-exact figure in a card
+/// comment reads as precision nobody asked for.
+fn waited(since: chrono::DateTime<chrono::Utc>) -> String {
+    let mins = (chrono::Utc::now() - since).num_minutes().max(0);
+    match (mins / 60, mins % 60) {
+        (0, 0) => "under a minute".to_string(),
+        (0, m) => format!("{m}m"),
+        (h, 0) => format!("{h}h"),
+        (h, m) => format!("{h}h{m}m"),
+    }
+}
+
 /// Is `node` the executor the job was placed on? The gate for accepting a node's
 /// streamed transcript / finish (MAIN-161 security): a node token is scoped to
 /// its OWN runs, so it must not be able to inject into or terminate another

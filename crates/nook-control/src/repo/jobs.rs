@@ -102,6 +102,58 @@ pub struct ReapedJob {
     pub node_last_seen_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// A job the reaper ended while it was still `queued` (MAIN-496), with what it
+/// was waiting on. `queued_reason` is preserved rather than overwritten — it is
+/// the record of why the run never placed (AC-5).
+///
+/// The two timestamps are two different questions and the wrong one reads as a
+/// claim the rule never checked: `queued_since` is the whole wait, and
+/// `reason_since` is how long the reason has stood unchanged, which is what the
+/// starvation threshold actually measures.
+#[derive(Debug, Clone)]
+pub struct EndedQueuedJob {
+    pub id: JobId,
+    pub tenant: TenantId,
+    /// `None` for a `review` job — it has no ticket to escalate onto.
+    pub target_task_id: Option<TaskId>,
+    pub queued_reason: Option<String>,
+    pub queued_since: chrono::DateTime<chrono::Utc>,
+    pub reason_since: chrono::DateTime<chrono::Utc>,
+}
+
+/// One row a scan is about to end, read BEFORE the cancel — which is the only
+/// way to see the `updated_at` that is the reason's clock rather than the moment
+/// of cancellation.
+///
+/// Read separately rather than as a `RETURNING` over `UPDATE … FROM`, which is
+/// where this started: SQLite's `RETURNING` cannot name the target by alias nor
+/// reach a FROM-joined table, so that shape parsed on Postgres and died on the
+/// other engine (`no such column: j.id`). The separation costs nothing that
+/// matters, because the READ was never what made an ending exactly-once — the
+/// guard on the UPDATE is, and it is unchanged.
+#[derive(nook_db::FromDbRow)]
+struct QueuedCandidate {
+    id: JobId,
+    tenant_id: TenantId,
+    target_task_id: Option<TaskId>,
+    queued_reason: Option<String>,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl QueuedCandidate {
+    fn into_ended(self) -> EndedQueuedJob {
+        EndedQueuedJob {
+            id: self.id,
+            tenant: self.tenant_id,
+            target_task_id: self.target_task_id,
+            queued_reason: self.queued_reason,
+            queued_since: self.created_at,
+            reason_since: self.updated_at,
+        }
+    }
+}
+
 /// A new interaction: a running job asking a human something.
 #[derive(Debug, Clone)]
 pub struct NewInteraction {
@@ -227,7 +279,10 @@ pub trait LoopJobRepository: Send + Sync {
     async fn claim_for_executor(&self, id: JobId, node: NodeId) -> ApiResult<Option<LoopJob>>;
 
     /// Explain why a job is still queued. Guarded on `queued` so a job that got
-    /// placed in the meantime is not annotated with a stale excuse.
+    /// placed in the meantime is not annotated with a stale excuse, and on the
+    /// reason actually CHANGING — re-writing the same sentence every dispatch
+    /// cycle is not news, and the starvation rule (MAIN-496) reads
+    /// `updated_at` as the moment the reason last moved.
     async fn set_queued_reason(&self, id: JobId, reason: &str) -> ApiResult<u64>;
 
     /// Reload unscoped, for the paths that have just written by id.
@@ -260,6 +315,30 @@ pub trait LoopJobRepository: Send + Sync {
     /// reapers cannot double-fail a job and a job that resumed between scan and
     /// update falls out of the guard untouched.
     async fn reap_stale_executors(&self, grace_secs: i64) -> ApiResult<Vec<ReapedJob>>;
+
+    /// Cancel `tenant`'s `queued` jobs whose target card has reached a terminal
+    /// column (MAIN-496 AC-1). A closed card is unambiguous evidence the run is
+    /// pointless, so there is no threshold here — the rule is the column.
+    ///
+    /// Tenant-scoped, unlike [`Self::reap_stale_executors`], because the caller
+    /// must ask `loops::enabled` of the tenant whose board it is about to
+    /// write: cancelling a loops-OFF tenant's job because a DIFFERENT tenant
+    /// has loops on would break MAIN-239's promise that such a job simply waits.
+    async fn cancel_queued_on_finished_cards(
+        &self,
+        tenant: TenantId,
+    ) -> ApiResult<Vec<EndedQueuedJob>>;
+
+    /// Cancel `tenant`'s `queued` jobs whose `queued_reason` has stood unchanged
+    /// for more than `starve_secs` (MAIN-496 AC-2). A job with NO reason yet has
+    /// never been through dispatch — loops may simply be off — and is left
+    /// alone; a job whose reason keeps moving is progressing toward placement
+    /// and its `updated_at` keeps moving with it.
+    async fn cancel_starved_queued(
+        &self,
+        tenant: TenantId,
+        starve_secs: i64,
+    ) -> ApiResult<Vec<EndedQueuedJob>>;
 
     // ── transcript ──────────────────────────────────────────────────────────
 
@@ -304,9 +383,36 @@ pub struct DbLoopJobRepository {
     db: DbPool,
 }
 
+/// The candidate read both queued-job endings start from, up to the `AND …`
+/// each one appends. `$1` is the tenant (MAIN-496: these two write a board a
+/// human reads, so they run only for a tenant whose loops are on).
+const QUEUED_CANDIDATE_COLS: &str = "SELECT id, tenant_id, target_task_id, queued_reason,
+            created_at, updated_at
+       FROM loop_jobs
+      WHERE tenant_id = $1 AND state = 'queued'";
+
 impl DbLoopJobRepository {
     pub fn new(db: DbPool) -> Self {
         Self { db }
+    }
+
+    /// Cancel ONE candidate, re-asserting the predicate that made it one.
+    /// `true` when this caller is the one that ended it — the same
+    /// exactly-once property the executor claim has, so every replica may scan.
+    /// `binds[0]` is the job id (`$1`); a guard needing more starts at `$2`.
+    async fn claim_ending(&self, guard: &str, binds: Vec<nook_db::DbValue>) -> ApiResult<bool> {
+        Ok(self
+            .db
+            .exec(
+                &format!(
+                    "UPDATE loop_jobs SET state = 'canceled', updated_at = {now}
+                      WHERE id = $1 AND state = 'queued' AND {guard}",
+                    now = type_mapping(self.db.engine()).now()
+                ),
+                binds,
+            )
+            .await?
+            > 0)
     }
 }
 
@@ -827,12 +933,16 @@ impl LoopJobRepository for DbLoopJobRepository {
     }
 
     async fn set_queued_reason(&self, id: JobId, reason: &str) -> ApiResult<u64> {
+        // `queued_reason IS NULL OR <> $2` rather than `IS DISTINCT FROM`,
+        // which SQLite only learned in 3.39 — the parameter is never NULL, so
+        // the two are the same test here.
         Ok(self
             .db
             .exec(
                 &format!(
                     "UPDATE loop_jobs SET queued_reason = $2, updated_at = {}
-                     WHERE id = $1 AND state = 'queued'",
+                     WHERE id = $1 AND state = 'queued'
+                       AND (queued_reason IS NULL OR queued_reason <> $2)",
                     type_mapping(self.db.engine()).now()
                 ),
                 params![id, reason],
@@ -936,6 +1046,74 @@ impl LoopJobRepository for DbLoopJobRepository {
                 },
             )
             .collect())
+    }
+
+    async fn cancel_queued_on_finished_cards(
+        &self,
+        tenant: TenantId,
+    ) -> ApiResult<Vec<EndedQueuedJob>> {
+        const FINISHED: &str = "target_task_id IN (
+             SELECT t.id FROM tasks t JOIN board_columns c ON c.id = t.column_id
+              WHERE c.type IN ('completed', 'canceled'))";
+        let candidates: Vec<QueuedCandidate> = self
+            .db
+            .query_all(
+                &format!("{QUEUED_CANDIDATE_COLS} AND {FINISHED}"),
+                params![tenant],
+            )
+            .await?;
+        let mut ended = Vec::new();
+        for c in candidates {
+            // The SAME predicate again, as the guard: two statements end a job
+            // exactly as often as one did, because only the caller whose UPDATE
+            // matches a still-queued, still-doomed row gets it back.
+            if self.claim_ending(FINISHED, params![c.id]).await? {
+                ended.push(c.into_ended());
+            }
+        }
+        Ok(ended)
+    }
+
+    async fn cancel_starved_queued(
+        &self,
+        tenant: TenantId,
+        starve_secs: i64,
+    ) -> ApiResult<Vec<EndedQueuedJob>> {
+        let cutoff = |placeholder: &str| {
+            time_math(self.db.engine()).now_minus_scaled(
+                &type_mapping(self.db.engine()).cast(placeholder, "bigint"),
+                "1 second",
+            )
+        };
+        let candidates: Vec<QueuedCandidate> = self
+            .db
+            .query_all(
+                &format!(
+                    "{QUEUED_CANDIDATE_COLS}
+                       AND queued_reason IS NOT NULL AND updated_at < {}",
+                    cutoff("$2")
+                ),
+                params![tenant, starve_secs],
+            )
+            .await?;
+        let mut ended = Vec::new();
+        for c in candidates {
+            // Re-asserted, not assumed: a job whose reason moved between the
+            // read and the write has its `updated_at` at now, falls out of this
+            // guard, and keeps waiting — which is AC-6's negative holding even
+            // in the gap between the two statements.
+            let guard = format!(
+                "queued_reason IS NOT NULL AND updated_at < {}",
+                cutoff("$2")
+            );
+            if self
+                .claim_ending(&guard, params![c.id, starve_secs])
+                .await?
+            {
+                ended.push(c.into_ended());
+            }
+        }
+        Ok(ended)
     }
 
     async fn transcript(&self, id: JobId) -> ApiResult<Vec<LoopJobTranscriptEntry>> {
@@ -1092,7 +1270,34 @@ struct FakeJobState {
     /// node → last_seen_at, so the reaper's staleness window can be tested
     /// without a `nodes` table.
     node_last_seen: Vec<(NodeId, chrono::DateTime<chrono::Utc>)>,
+    /// Cards the fake should treat as sitting in a terminal column — the real
+    /// query's `tasks`/`board_columns` join, which this repository cannot see.
+    finished_cards: Vec<TaskId>,
     seq: i64,
+}
+
+/// The shared body of both queued-job endings: cancel every `queued` job the
+/// predicate picks, reporting what was ended. Mirrors the real guarded
+/// `UPDATE … WHERE state = 'queued' … RETURNING`.
+fn cancel_queued(jobs: &mut [LoopJob], pick: impl Fn(&LoopJob) -> bool) -> Vec<EndedQueuedJob> {
+    let mut out = Vec::new();
+    for j in jobs.iter_mut() {
+        if j.state != "queued" || !pick(j) {
+            continue;
+        }
+        out.push(EndedQueuedJob {
+            id: j.id,
+            tenant: j.tenant_id,
+            target_task_id: j.target_task_id,
+            queued_reason: j.queued_reason.clone(),
+            queued_since: j.created_at,
+            // Read before the cancel's own write, as the real query's CTE does.
+            reason_since: j.updated_at,
+        });
+        j.state = "canceled".into();
+        j.updated_at = chrono::Utc::now();
+    }
+    out
 }
 
 #[derive(Default)]
@@ -1111,6 +1316,15 @@ impl FakeLoopJobRepository {
         let mut s = self.inner.lock().unwrap();
         s.node_last_seen.retain(|(n, _)| *n != node);
         s.node_last_seen.push((node, at));
+    }
+
+    /// Tell the fake a card has reached a terminal column — the board join
+    /// AC-1's cancel makes, which this repository has no tables for.
+    pub fn set_card_finished(&self, task: TaskId) {
+        let mut s = self.inner.lock().unwrap();
+        if !s.finished_cards.contains(&task) {
+            s.finished_cards.push(task);
+        }
     }
 
     pub fn state_of(&self, id: JobId) -> Option<String> {
@@ -1508,11 +1722,9 @@ impl LoopJobRepository for FakeLoopJobRepository {
     async fn set_queued_reason(&self, id: JobId, reason: &str) -> ApiResult<u64> {
         let mut s = self.inner.lock().unwrap();
         Ok(
-            match s
-                .jobs
-                .iter_mut()
-                .find(|j| j.id == id && j.state == "queued")
-            {
+            match s.jobs.iter_mut().find(|j| {
+                j.id == id && j.state == "queued" && j.queued_reason.as_deref() != Some(reason)
+            }) {
                 Some(j) => {
                     j.queued_reason = Some(reason.to_string());
                     j.updated_at = chrono::Utc::now();
@@ -1623,6 +1835,29 @@ impl LoopJobRepository for FakeLoopJobRepository {
             });
         }
         Ok(out)
+    }
+
+    async fn cancel_queued_on_finished_cards(
+        &self,
+        tenant: TenantId,
+    ) -> ApiResult<Vec<EndedQueuedJob>> {
+        let mut s = self.inner.lock().unwrap();
+        let finished = s.finished_cards.clone();
+        Ok(cancel_queued(&mut s.jobs, |j| {
+            j.tenant_id == tenant && j.target_task_id.is_some_and(|t| finished.contains(&t))
+        }))
+    }
+
+    async fn cancel_starved_queued(
+        &self,
+        tenant: TenantId,
+        starve_secs: i64,
+    ) -> ApiResult<Vec<EndedQueuedJob>> {
+        let mut s = self.inner.lock().unwrap();
+        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(starve_secs);
+        Ok(cancel_queued(&mut s.jobs, |j| {
+            j.tenant_id == tenant && j.queued_reason.is_some() && j.updated_at < cutoff
+        }))
     }
 
     async fn transcript(&self, id: JobId) -> ApiResult<Vec<LoopJobTranscriptEntry>> {
