@@ -7,13 +7,14 @@ import React, { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Plus } from "lucide-react";
 import { ContextMenuRegion } from "./contextMenu";
-import { isDesktop } from "./desktop";
+import { isDesktop, isLocalPlane } from "./desktop";
 import {
+  displayName,
   forgetControlPlaneAndReconcile,
   healthDot,
-  hostOf,
   probeInto,
   renameControlPlaneWithDialog,
+  subtitleOf,
   switchToControlPlane,
   useControlPlanes,
   type Health,
@@ -66,7 +67,29 @@ function Tabs() {
       {servers.map((cp) => {
         const isActive = cp.base_url === activeUrl;
         const { cls, title } = healthDot(health[cp.base_url]);
-        return (
+        const tab = (
+          <button
+            role="tab"
+            aria-selected={isActive}
+            className={`cp-tab${isActive ? " active" : ""}`}
+            // The host rides in the tooltip so a renamed tab still says which
+            // machine it points at, without a second line in this dense strip.
+            // Local has none, and says so rather than showing a port.
+            title={subtitleOf(cp)}
+            onClick={() => switchToControlPlane(cp.base_url, activeUrl)}
+          >
+            <span className={`cp-dot ${cls}`} title={title} />
+            <span className="cp-tab-body">
+              <span className="cp-tab-name">{displayName(cp)}</span>
+              {cp.account && <span className="cp-tab-account">{cp.account}</span>}
+            </span>
+          </button>
+        );
+        // No manage menu on Local — see ControlPlanePill: neither a rename nor a
+        // forget means anything for a control plane with no address (AC-4).
+        return isLocalPlane(cp) ? (
+          <React.Fragment key={cp.base_url}>{tab}</React.Fragment>
+        ) : (
           // Right-click a tab → rename/forget, via the shared menu (MAIN-168).
           <ContextMenuRegion
             key={cp.base_url}
@@ -83,21 +106,7 @@ function Tabs() {
               },
             ]}
           >
-            <button
-              role="tab"
-              aria-selected={isActive}
-              className={`cp-tab${isActive ? " active" : ""}`}
-              // The host rides in the tooltip so a renamed tab still says which
-              // machine it points at, without a second line in this dense strip.
-              title={hostOf(cp.base_url)}
-              onClick={() => switchToControlPlane(cp.base_url, activeUrl)}
-            >
-              <span className={`cp-dot ${cls}`} title={title} />
-              <span className="cp-tab-body">
-                <span className="cp-tab-name">{cp.label || hostOf(cp.base_url)}</span>
-                {cp.account && <span className="cp-tab-account">{cp.account}</span>}
-              </span>
-            </button>
+            {tab}
           </ContextMenuRegion>
         );
       })}
