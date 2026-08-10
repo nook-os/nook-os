@@ -71,6 +71,7 @@ pub async fn tenant_slug(
 }
 
 pub mod activity_queries;
+pub mod build_handback;
 pub mod claim_reaper;
 pub mod discovery;
 pub mod forge;

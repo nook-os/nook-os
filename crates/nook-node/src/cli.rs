@@ -3832,6 +3832,10 @@ mod tests {
 /// `nook builds enqueue <KEY>` (MAIN-458 AC-4) — build one card now, through
 /// the same convergence the reconciler runs: the CP claims the card, raises a
 /// directed run, and dedupes against anything already live for it.
+///
+/// Naming a card also overrules `blocked` on it (MAIN-489 AC-5) — this is the
+/// nudge that brings back a card the loop escalated after three runs concluded
+/// nothing, without anybody editing its labels.
 pub async fn builds_enqueue(task: &str) -> Result<()> {
     let client = Client::from_config()?;
     let r = client
@@ -3846,7 +3850,8 @@ pub async fn builds_enqueue(task: &str) -> Result<()> {
     } else {
         println!(
             "nothing raised — the card is not currently owed a run \
-             (not agent-ready, blocked, assigned, or already built at this content)"
+             (not agent-ready, assigned, held by a recent failed attempt, or \
+              already built at this content)"
         );
     }
     Ok(())

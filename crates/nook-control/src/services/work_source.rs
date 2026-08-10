@@ -146,6 +146,11 @@ pub struct BuildWork<'a> {
     /// the repair's own push moves: that fingerprint would clear its own
     /// answer and raise a second repair before any reviewer looked.
     pub rejected_heads: std::collections::HashMap<i64, String>,
+    /// A card the manual trigger named AND the loop itself escalated — the one
+    /// case where the `blocked` exclusion stands down, see
+    /// [`BuildWork::fresh_items`]. `None` on the reconciler's own passes, and
+    /// for a card a human blocked for their own reason.
+    pub unblock_task: Option<TaskId>,
 }
 
 /// The pick contract as code (MAIN-458 AC-1a / NG-1): `agent-ready` is the
@@ -183,10 +188,22 @@ pub fn fresh_pick_params(workspace: Option<WorkspaceId>) -> crate::repo::tasks::
 }
 
 impl BuildWork<'_> {
+    /// Exactly one rule stands down, for the manual trigger (MAIN-489 AC-5): a
+    /// human naming a card the LOOP blocked after three concluded-nothing runs
+    /// is overruling the loop's own escalation, the way a forced re-review
+    /// overrules an already-verdicted head (MAIN-473) — which is how such a
+    /// card is nudged back without anybody editing its labels. The caller
+    /// decides that (the strike count is the permission) and narrows the result
+    /// to the one named card; everything else still comes from
+    /// [`fresh_pick_params`], so there is still one definition of the contract.
     async fn fresh_items(&self, workspace: WorkspaceId) -> Option<Vec<WorkItem>> {
+        let mut params = fresh_pick_params(Some(workspace));
+        if self.unblock_task.is_some() {
+            params.not_labels.clear();
+        }
         let rows = self
             .tasks
-            .pick_tasks(self.tenant, self.viewer, fresh_pick_params(Some(workspace)))
+            .pick_tasks(self.tenant, self.viewer, params)
             .await
             .ok()?;
         Some(
