@@ -312,6 +312,24 @@ pub trait LoopJobRepository: Send + Sync {
     /// Jobs still believed to be running on a node — what a disconnect strands.
     async fn in_flight_on_node(&self, node: NodeId) -> ApiResult<Vec<JobId>>;
 
+    /// `tenant`'s `queued` jobs, worthiest first — the order a freed executor
+    /// is offered to them (MAIN-509).
+    ///
+    /// **The rule is card priority, then how long the job has waited**, and it
+    /// is expressed here as a query precisely so every replica applies the same
+    /// one. Placement used to be whichever work item happened to be in the
+    /// durable queue when an executor freed, which systematically favoured the
+    /// NEWEST job: an unplaceable one is re-armed after a delay while a freshly
+    /// raised one is delivered at once. Accidental LIFO, and `!!` jobs waited
+    /// hours behind a `↑` one.
+    ///
+    /// Priority sorts the board's way (`1` urgent … `4` low, `0` unset LAST),
+    /// so this cannot invert what a human set. A job with no card — a review
+    /// run — is unset by the same reading, and sorts with the other unset ones
+    /// rather than being invented a rank. `created_at` then `id` breaks every
+    /// remaining tie, so the order is total and identical everywhere.
+    async fn queued_in_dispatch_order(&self, tenant: TenantId) -> ApiResult<Vec<JobId>>;
+
     /// The live build run already on a card, if any (MAIN-383 AC-4) — what the
     /// create path names in its refusal. The 0050 partial unique index is the
     /// atomic version of the same rule.
@@ -999,6 +1017,23 @@ impl LoopJobRepository for DbLoopJobRepository {
                 "SELECT id FROM loop_jobs
                  WHERE executor_node_id = $1 AND state IN ('claimed', 'running')",
                 params![node],
+            )
+            .await?)
+    }
+
+    async fn queued_in_dispatch_order(&self, tenant: TenantId) -> ApiResult<Vec<JobId>> {
+        Ok(self
+            .db
+            .query_scalar_all(
+                // `LEFT JOIN`, because a review run targets a workspace and has
+                // no card to read a priority from.
+                "SELECT j.id FROM loop_jobs j
+                 LEFT JOIN tasks t ON t.id = j.target_task_id
+                 WHERE j.tenant_id = $1 AND j.state = 'queued'
+                 ORDER BY CASE WHEN COALESCE(t.priority, 0) = 0 THEN 5
+                               ELSE t.priority END,
+                          j.created_at, j.id",
+                params![tenant],
             )
             .await?)
     }
@@ -1792,6 +1827,20 @@ impl LoopJobRepository for FakeLoopJobRepository {
             })
             .map(|j| j.id)
             .collect())
+    }
+
+    async fn queued_in_dispatch_order(&self, tenant: TenantId) -> ApiResult<Vec<JobId>> {
+        // No tasks table here, so every job reads as unset priority — the age
+        // half of the rule is what the fake preserves. Tests about priority
+        // drive the real repository.
+        let s = self.inner.lock().unwrap();
+        let mut queued: Vec<&LoopJob> = s
+            .jobs
+            .iter()
+            .filter(|j| j.tenant_id == tenant && j.state == "queued")
+            .collect();
+        queued.sort_by_key(|j| (j.created_at, j.id.0));
+        Ok(queued.into_iter().map(|j| j.id).collect())
     }
 
     async fn active_build_for(&self, tenant: TenantId, task: TaskId) -> ApiResult<Option<JobId>> {

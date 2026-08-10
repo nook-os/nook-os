@@ -1707,6 +1707,51 @@ pub async fn select_executor(
     }
 }
 
+/// How many of a tenant's queued jobs one pass will try to place.
+///
+/// Not a fairness rule — the order already is one. It bounds the work a single
+/// pass does on a board with a very long queue, and it can only ever skip jobs
+/// that already have [`DISPATCH_PASS_LIMIT`] worthier ones ahead of them.
+///
+/// **The window advances only when the head of the order is SLOW, not when it
+/// is UNPLACEABLE.** A job rises into the window as the ones above it are
+/// placed — but if a tenant queues more than this many and the top of the order
+/// is refused for a stable reason (a workspace at its build ceiling, a kind no
+/// online node accepts), then the job below the window is never tried, even
+/// with an executor standing free, and nothing lifts it. MAIN-496's starvation
+/// cancel is what eventually clears such a head; this cap does not. Do not
+/// raise it, or drop it, on the belief that the window always drains.
+pub const DISPATCH_PASS_LIMIT: usize = 32;
+
+/// Offer this tenant's free executor capacity to its queued jobs, worthiest
+/// first, and return the jobs that were placed (MAIN-509).
+///
+/// This — not the arrival of a work item — is what decides WHICH queued job
+/// gets a freed executor. The order comes from
+/// [`crate::repo::jobs::LoopJobRepository::queued_in_dispatch_order`]: card
+/// priority, then how long the job has waited. The pass runs down that order
+/// and does not stop at the first refusal, because a job can be unplaceable for
+/// a reason of its own — a worktree pin on a dark node, a label nothing wears —
+/// and the jobs behind it must not inherit that wait. Each attempt re-reads the
+/// node's in-flight count, so capacity still stops the pass exactly where it
+/// should.
+pub async fn place_queued_in_order(state: &AppState, tenant: TenantId) -> ApiResult<Vec<LoopJob>> {
+    let queued = state.jobs.queued_in_dispatch_order(tenant).await?;
+    let mut placed = Vec::new();
+    for job_id in queued.into_iter().take(DISPATCH_PASS_LIMIT) {
+        match select_executor(state, tenant, job_id).await {
+            Ok(job) if job.state == "claimed" => placed.push(job),
+            Ok(_) => {}
+            // One job's transient failure is not the pass's: the jobs behind it
+            // are still owed their turn at the free executor.
+            Err(e) => {
+                tracing::warn!(job = %job_id.0, error = %e, "executor selection failed")
+            }
+        }
+    }
+    Ok(placed)
+}
+
 /// The node a job is pinned to, if its card already has a worktree somewhere
 /// (MAIN-480 AC-5).
 ///
