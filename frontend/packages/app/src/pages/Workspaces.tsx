@@ -13,8 +13,7 @@ import { fetchCredentials } from "../GitCredentials";
 import { PORT_CAP_SENTENCE, PortSafetyNotice } from "../PortSafetyNotice";
 import { hasPortDeclaration } from "../portSafety";
 import { SessionPolicy } from "../SessionPolicy";
-import { WorkspaceReviews } from "../WorkspaceReviews";
-import { WorkspaceBuilds } from "../WorkspaceBuilds";
+import { RUNS_SECTION, useLegacyRunsSectionRedirect, WorkspaceRuns } from "../WorkspaceRuns";
 import { WorkspaceLocations } from "../WorkspaceLocations";
 import { WorkspacePorts } from "../WorkspacePorts";
 import { WorkspaceScale } from "../WorkspaceScale";
@@ -516,6 +515,7 @@ const PLACEHOLDER = [
 export function WorkspaceDetail() {
   const { id } = useParams<{ id: string }>();
   const showNewWork = useNewWork((s) => s.show);
+  useLegacyRunsSectionRedirect();
   const { data: me } = useQuery({
     queryKey: ["me"],
     queryFn: async () => (await api.GET("/api/v1/auth/me")).data ?? null,
@@ -712,18 +712,17 @@ export function WorkspaceDetail() {
       ),
     },
     {
-      id: "reviews",
-      title: "Reviews",
+      // One section for both kinds (MAIN-488). The keywords keep the finder
+      // answering "reviews" and "builds" — the words are still what somebody
+      // types, it is the surfaces that stopped being two.
+      id: RUNS_SECTION,
+      title: "Runs",
       group: "Work",
-      keywords: ["review", "loop", "pr", "pull request", "transcript", "verdict", "agent"],
-      render: () => (id ? <WorkspaceReviews workspaceId={id} workspaceName={ws.name} /> : null),
-    },
-    {
-      id: "builds",
-      title: "Builds",
-      group: "Work",
-      keywords: ["build", "loop", "card", "ticket", "transcript", "outcome", "agent"],
-      render: () => (id ? <WorkspaceBuilds workspaceId={id} workspaceName={ws.name} /> : null),
+      keywords: [
+        "runs", "review", "reviews", "build", "builds", "loop", "pr", "pull request",
+        "card", "ticket", "transcript", "verdict", "outcome", "agent",
+      ],
+      render: () => (id ? <WorkspaceRuns workspaceId={id} workspaceName={ws.name} /> : null),
     },
     {
       id: "policy",
