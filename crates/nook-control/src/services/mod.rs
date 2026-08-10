@@ -99,6 +99,7 @@ pub mod runtime_auth;
 pub mod runtime_auth_flow;
 pub mod schedule;
 pub mod secrets;
+pub mod session_chat;
 pub mod session_queries;
 pub mod session_reaper;
 pub mod session_reconcile;

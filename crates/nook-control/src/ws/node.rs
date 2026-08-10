@@ -621,7 +621,16 @@ async fn handle_message(
         } => {
             state
                 .nodes
-                .mark_session_running(session_id, node_id, &tmux_session)
+                // An EMPTY name is a chat session saying it has no tmux
+                // (MAIN-502), not a tmux called "". Normalised here, at the
+                // boundary, so nothing downstream has to know the difference
+                // between "none" and "not reported yet" — they are the same
+                // thing and now they are the same value.
+                .mark_session_running(
+                    session_id,
+                    node_id,
+                    Some(tmux_session.as_str()).filter(|s| !s.is_empty()),
+                )
                 .await?;
             state.registry.publish(
                 tenant,
@@ -648,6 +657,37 @@ async fn handle_message(
                 session_id,
                 nook_proto::AttachServerMessage::Output { data_b64 },
             );
+        }
+        // A chat session's agent said something (MAIN-502). Persisted rather
+        // than fanned out live, because the conversation has to survive the
+        // reader not being there — see `services::session_chat`.
+        NodeToControl::ChatMessage {
+            session_id,
+            role,
+            body,
+        } => {
+            crate::services::session_chat::message_from_node(
+                state, tenant, node_id, session_id, &role, &body,
+            )
+            .await?;
+        }
+        // …and is now blocked on one, until a human answers (AC-6).
+        NodeToControl::ChatPermission {
+            session_id,
+            request_id,
+            tool_name,
+            description,
+        } => {
+            crate::services::session_chat::permission_from_node(
+                state,
+                tenant,
+                node_id,
+                session_id,
+                &request_id,
+                &tool_name,
+                &description,
+            )
+            .await?;
         }
         NodeToControl::SessionExited {
             session_id,
@@ -818,6 +858,8 @@ async fn handle_message(
                     // the same slice of it (MAIN-446).
                     managed_purpose: session.managed.then_some(session.managed_purpose),
                     shard: crate::services::session_queries::shard_of(&session),
+                    // …and through the same surface (MAIN-502).
+                    interface: session.interface,
                 },
             );
         }

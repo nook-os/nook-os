@@ -67,6 +67,16 @@ pub fn detect_runtimes() -> Vec<String> {
 pub fn detect() -> Capabilities {
     let mut sys = System::new_all();
     sys.refresh_all();
+    // Probed ONCE and filtered below: two independent PATH sweeps could answer
+    // differently within a single register, and a runtime in `chat_runtimes`
+    // but not `runtimes` is a combination the picker would offer and the node
+    // would then refuse.
+    let runtimes = detect_runtimes();
+    let chat_runtimes = runtimes
+        .iter()
+        .filter(|r| nook_types::runtime_supports_chat(r))
+        .cloned()
+        .collect();
     Capabilities {
         hostname: System::host_name().unwrap_or_else(|| "unknown".into()),
         platform: std::env::consts::OS.to_string(),
@@ -78,7 +88,12 @@ pub fn detect() -> Capabilities {
         tmux: detect_tmux().is_some(),
         agent_version: Some(env!("CARGO_PKG_VERSION").to_string()),
         git: detect_git(),
-        runtimes: detect_runtimes(),
+        runtimes,
+        // Which of them can be driven as a conversation (MAIN-502). Derived
+        // from the SAME predicate the chat driver gates on, filtered by what
+        // is actually installed here — so the picker can only ever offer a
+        // combination this machine would accept.
+        chat_runtimes,
         ssh_public_key: crate::ssh::public_key_for(
             crate::config::NodeConfig::load()
                 .ok()

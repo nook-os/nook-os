@@ -556,6 +556,12 @@ pub async fn restart(
             // recomputed: a reviewer that came back as shard 0 when it had been
             // shard 2 would double-review one sibling's PRs and abandon its own.
             shard: session_queries::shard_of(&session),
+            // …and through the same surface (MAIN-502). Off the row for the
+            // same reason: a chat session restarted as a terminal would open a
+            // tmux under a page rendering a conversation, and its history —
+            // which is still in the database — would have nothing writing to
+            // it any more.
+            interface: session.interface,
         },
     );
     if !sent {
@@ -686,4 +692,82 @@ pub async fn agent_states(
         })
         .collect();
     Ok(Json(items))
+}
+
+/// `GET /api/v1/sessions/{id}/messages` — a chat session's whole conversation
+/// (MAIN-502 AC-5).
+///
+/// The reason a chat survives a reload: the history is server-side, so this is
+/// what every device renders and none of them holds the only copy.
+#[utoipa::path(get, path = "/api/v1/sessions/{id}/messages",
+    operation_id = "list_session_messages",
+    params(("id" = String, Path,)),
+    responses((status = 200, body = [SessionMessage]), (status = 403), (status = 404)))]
+pub async fn messages(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<SessionId>,
+) -> ApiResult<Json<Vec<SessionMessage>>> {
+    // The same gate every other session-content route goes through: reading a
+    // conversation is reading what is on that terminal.
+    let session = session_for_content(&state, &auth, id).await?;
+    Ok(Json(
+        crate::services::session_chat::messages(&state, session.id).await?,
+    ))
+}
+
+/// `POST /api/v1/sessions/{id}/messages` — say something to a chat session's
+/// agent.
+///
+/// Answers with the row that was WRITTEN, not an echo of the request: the
+/// sender renders the server's copy, which is the same one every other device
+/// will fetch, so nobody is looking at an optimistic message the server never
+/// took.
+#[utoipa::path(post, path = "/api/v1/sessions/{id}/messages",
+    operation_id = "post_session_message",
+    params(("id" = String, Path,)),
+    request_body = CreateSessionMessageRequest,
+    responses((status = 200, body = SessionMessage), (status = 400), (status = 403)))]
+pub async fn post_message(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<SessionId>,
+    Json(req): Json<CreateSessionMessageRequest>,
+) -> ApiResult<Json<SessionMessage>> {
+    let session = session_for_content(&state, &auth, id).await?;
+    let msg = crate::services::session_chat::post_message(&state, &session, &req.body).await?;
+    Ok(Json(msg))
+}
+
+/// `POST /api/v1/sessions/{id}/permissions/{request_id}` — allow or deny the
+/// tool a chat session's agent is blocked on (MAIN-502 AC-6).
+///
+/// `409` means somebody already answered it — the other device, or a second
+/// click. That is a real answer to give: the request is settled, and the page
+/// refetches to find out how.
+#[utoipa::path(post, path = "/api/v1/sessions/{id}/permissions/{request_id}",
+    operation_id = "decide_session_permission",
+    params(("id" = String, Path,), ("request_id" = String, Path,)),
+    request_body = SessionPermissionDecisionRequest,
+    responses((status = 204), (status = 400), (status = 403), (status = 409)))]
+pub async fn decide_permission(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path((id, request_id)): Path<(SessionId, String)>,
+    Json(req): Json<SessionPermissionDecisionRequest>,
+) -> ApiResult<axum::http::StatusCode> {
+    let session = session_for_content(&state, &auth, id).await?;
+    crate::services::session_chat::decide_permission(&state, &session, &request_id, req.allow)
+        .await?;
+    events::record(
+        &state,
+        session.tenant_id,
+        EventDraft::new("session.permission")
+            .actor("user", auth.user_id.0)
+            .session(id)
+            .node(session.node_id)
+            .payload(serde_json::json!({ "allow": req.allow })),
+    )
+    .await;
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }

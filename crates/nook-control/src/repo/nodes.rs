@@ -436,11 +436,15 @@ pub trait NodeRepository: Send + Sync {
     /// row, and the reconciler started another sixty seconds later — forever.
     /// `node_id` is the stronger guard anyway: a node may report on the
     /// sessions it is running and on nothing else.
+    /// The node reports a session is up. `tmux_session` is `None` for a CHAT
+    /// session (MAIN-502), which has no tmux at all — stored NULL, which is
+    /// what "there is none" already means to every reader, rather than an empty
+    /// string claiming the tmux is named "".
     async fn mark_session_running(
         &self,
         session: SessionId,
         node: NodeId,
-        tmux_session: &str,
+        tmux_session: Option<&str>,
     ) -> ApiResult<u64>;
 
     async fn mark_session_exited(&self, session: SessionId, node: NodeId) -> ApiResult<u64>;
@@ -1324,7 +1328,7 @@ impl NodeRepository for DbNodeRepository {
         &self,
         session: SessionId,
         node: NodeId,
-        tmux_session: &str,
+        tmux_session: Option<&str>,
     ) -> ApiResult<u64> {
         Ok(self
             .db
@@ -1334,7 +1338,7 @@ impl NodeRepository for DbNodeRepository {
                      WHERE id = $1 AND node_id = $3",
                     now = type_mapping(self.db.engine()).now()
                 ),
-                params![session, tmux_session, node],
+                params![session, tmux_session.map(str::to_string), node],
             )
             .await?)
     }
@@ -2500,7 +2504,7 @@ impl NodeRepository for FakeNodeRepository {
         &self,
         session: SessionId,
         node: NodeId,
-        tmux_session: &str,
+        tmux_session: Option<&str>,
     ) -> ApiResult<u64> {
         let mut s = self.inner.lock().unwrap();
         Ok(
@@ -2511,7 +2515,7 @@ impl NodeRepository for FakeNodeRepository {
             {
                 Some(x) => {
                     x.status = "running".into();
-                    x.tmux_session = Some(tmux_session.to_string());
+                    x.tmux_session = tmux_session.map(str::to_string);
                     1
                 }
                 None => 0,

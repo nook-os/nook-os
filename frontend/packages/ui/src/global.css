@@ -6367,6 +6367,19 @@ button.chat-tool-line:hover { color: var(--nook-fg-dim); }
 }
 .lw-quiet { padding: 8px 2px; }
 
+/* A chat SESSION's conversation, filling the session panel the way the
+   terminal does (MAIN-502). `.chat-view` is `flex: 1` and needs a flex column
+   with a real height to grow into; the panel body is a plain scroll box, so
+   without this the log sizes to its content and ChatView's own scrolling —
+   the whole reason a phone can use it — never engages. */
+.session-chat {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  height: 100%;
+}
+
 /* An ask's choices, sitting with the composer they are an alternative to. */
 .lw-ask-choices {
   display: flex;

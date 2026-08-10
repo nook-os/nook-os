@@ -76,6 +76,7 @@ async fn declared_shard(
             managed_purpose: purpose,
             managed_shard: shard,
             managed_shards: shards,
+            interface: SessionInterface::Terminal,
         })
         .await?
         .id)

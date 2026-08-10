@@ -62,6 +62,11 @@ pub struct NewSession {
     /// the same partition; not part of the index, because two sessions with one
     /// index and two divisors are one slot described twice.
     pub managed_shards: i32,
+    /// Terminal or chat (MAIN-502), fixed at creation. On the INSERT because
+    /// there is no moment at which the row exists and this is unknown: the
+    /// start instruction that goes to the node carries it, and a session that
+    /// had to be updated into being a chat would have already started a tmux.
+    pub interface: SessionInterface,
 }
 
 /// One managed session, as the reconciler sees it.
@@ -238,6 +243,64 @@ pub trait SessionRepository: Send + Sync {
     /// was authorized as that node's owner, so letting the session id alone
     /// decide would have let one machine's owner free a port on another's.
     async fn release_leases(&self, node: NodeId, id: SessionId) -> ApiResult<u64>;
+
+    // ── chat messages (MAIN-502) ────────────────────────────────────────────
+
+    /// A chat session's whole conversation, oldest first.
+    ///
+    /// Unpaged deliberately, for now: a session's history is what a reader
+    /// opens the page to see, and `ChatView` already owns the scrolling.
+    /// Paging is what MAIN-502's NG-4 defers along with history GC — the two
+    /// are the same question about how big a conversation is allowed to get.
+    async fn messages(&self, session: SessionId) -> ApiResult<Vec<SessionMessage>>;
+
+    /// Append one line and hand back the row that was written.
+    ///
+    /// Returning the row rather than the id is what lets the REST call answer
+    /// with the message it created — the client shows what the server stored,
+    /// not its own optimistic copy of it.
+    async fn append_message(&self, new: NewSessionMessage) -> ApiResult<SessionMessage>;
+
+    /// Answer an outstanding permission request, and say whether anything was
+    /// still outstanding to answer.
+    ///
+    /// Guarded on `decision IS NULL`, so the SECOND answer — the other device,
+    /// the double-click, the reload that re-posts — writes nothing and reports
+    /// `false`. The caller uses that to decide whether to bother the node,
+    /// which is what stops one request being answered twice with two different
+    /// verdicts.
+    async fn decide_permission(
+        &self,
+        session: SessionId,
+        request_id: &str,
+        allow: bool,
+    ) -> ApiResult<bool>;
+}
+
+/// One line to append to a chat session's conversation.
+#[derive(Debug, Clone)]
+pub struct NewSessionMessage {
+    pub session: SessionId,
+    /// `human` | `agent` | `system` | `permission`.
+    pub role: String,
+    pub body: String,
+    /// Set together on a `permission` row and on no other: the id an answer is
+    /// addressed to, and the tool being asked about.
+    pub permission_request_id: Option<String>,
+    pub tool_name: Option<String>,
+}
+
+impl NewSessionMessage {
+    /// An ordinary line — from a person, the agent, or the node itself.
+    pub fn line(session: SessionId, role: &str, body: impl Into<String>) -> Self {
+        Self {
+            session,
+            role: role.to_string(),
+            body: body.into(),
+            permission_request_id: None,
+            tool_name: None,
+        }
+    }
 }
 
 /// A lease to record.
@@ -317,8 +380,8 @@ impl SessionRepository for DbSessionRepository {
                 "INSERT INTO sessions
                    (id, tenant_id, workspace_id, node_id, name, runtime, status,
                     created_by, checkout_id, managed, managed_purpose,
-                    managed_shard, managed_shards)
-                 VALUES ($1, $2, $3, $4, $5, $6, 'starting', $7, $8, $9, $10, $11, $12)
+                    managed_shard, managed_shards, interface)
+                 VALUES ($1, $2, $3, $4, $5, $6, 'starting', $7, $8, $9, $10, $11, $12, $13)
                  RETURNING *",
                 params![
                     SessionId::new(),
@@ -332,7 +395,8 @@ impl SessionRepository for DbSessionRepository {
                     new.managed,
                     new.managed_purpose,
                     new.managed_shard,
-                    new.managed_shards
+                    new.managed_shards,
+                    new.interface
                 ],
             )
             .await?)
@@ -680,6 +744,62 @@ impl SessionRepository for DbSessionRepository {
             )
             .await?)
     }
+
+    async fn messages(&self, session: SessionId) -> ApiResult<Vec<SessionMessage>> {
+        // By the v7 id, which is time-ordered: `at` has a coarser resolution
+        // than a burst of streamed lines arrives at, so ordering by it would
+        // let two lines of one turn come back swapped.
+        Ok(self
+            .db
+            .query_all(
+                "SELECT * FROM session_messages WHERE session_id = $1 ORDER BY id",
+                params![session],
+            )
+            .await?)
+    }
+
+    async fn append_message(&self, new: NewSessionMessage) -> ApiResult<SessionMessage> {
+        Ok(self
+            .db
+            .query_one(
+                "INSERT INTO session_messages
+                   (id, session_id, role, body, permission_request_id, tool_name)
+                 VALUES ($1, $2, $3, $4, $5, $6)
+                 RETURNING *",
+                params![
+                    SessionMessageId::new(),
+                    new.session,
+                    new.role,
+                    new.body,
+                    new.permission_request_id,
+                    new.tool_name
+                ],
+            )
+            .await?)
+    }
+
+    async fn decide_permission(
+        &self,
+        session: SessionId,
+        request_id: &str,
+        allow: bool,
+    ) -> ApiResult<bool> {
+        let n = self
+            .db
+            .exec(
+                "UPDATE session_messages SET decision = $4
+                 WHERE session_id = $1 AND permission_request_id = $2
+                   AND decision IS NULL AND role = $3",
+                params![
+                    session,
+                    request_id,
+                    "permission",
+                    if allow { "allow" } else { "deny" }
+                ],
+            )
+            .await?;
+        Ok(n > 0)
+    }
 }
 
 /// One row of the fake's lease table.
@@ -707,6 +827,9 @@ pub struct FakeSessionRepository {
     /// beside `sessions` — so the fake can enforce the same two unique indexes
     /// in the same critical section as the write.
     leases: Mutex<Vec<FakeLease>>,
+    /// Chat conversations (MAIN-502), in insertion order — which is the v7-id
+    /// order the real query returns, since the fake mints its ids the same way.
+    messages: Mutex<Vec<SessionMessage>>,
 }
 
 impl FakeSessionRepository {
@@ -828,6 +951,7 @@ impl SessionRepository for FakeSessionRepository {
             managed_purpose: new.managed_purpose,
             managed_shard: new.managed_shard,
             managed_shards: new.managed_shards,
+            interface: new.interface,
             checkout: None,
             node_online: None,
             leased_ports: Vec::new(),
@@ -1143,5 +1267,54 @@ impl SessionRepository for FakeSessionRepository {
         let before = leases.len();
         leases.retain(|l| !(l.session == id && l.node == node));
         Ok((before - leases.len()) as u64)
+    }
+
+    async fn messages(&self, session: SessionId) -> ApiResult<Vec<SessionMessage>> {
+        Ok(self
+            .messages
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m.session_id == session)
+            .cloned()
+            .collect())
+    }
+
+    async fn append_message(&self, new: NewSessionMessage) -> ApiResult<SessionMessage> {
+        let msg = SessionMessage {
+            id: SessionMessageId::new(),
+            session_id: new.session,
+            role: new.role,
+            body: new.body,
+            permission_request_id: new.permission_request_id,
+            tool_name: new.tool_name,
+            decision: None,
+            at: chrono::Utc::now(),
+        };
+        self.messages.lock().unwrap().push(msg.clone());
+        Ok(msg)
+    }
+
+    async fn decide_permission(
+        &self,
+        session: SessionId,
+        request_id: &str,
+        allow: bool,
+    ) -> ApiResult<bool> {
+        // The real UPDATE's `decision IS NULL` guard, kept here because the
+        // whole point of the return value is that a second answer changes
+        // nothing — a fake that answered twice would let a caller test pass
+        // against behaviour the database does not have.
+        let mut msgs = self.messages.lock().unwrap();
+        let Some(m) = msgs.iter_mut().find(|m| {
+            m.session_id == session
+                && m.permission_request_id.as_deref() == Some(request_id)
+                && m.role == "permission"
+                && m.decision.is_none()
+        }) else {
+            return Ok(false);
+        };
+        m.decision = Some(if allow { "allow" } else { "deny" }.into());
+        Ok(true)
     }
 }

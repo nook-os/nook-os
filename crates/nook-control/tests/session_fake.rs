@@ -43,6 +43,7 @@ async fn start(
         managed_purpose: ManagedPurpose::Access,
         managed_shard: 0,
         managed_shards: 1,
+        interface: SessionInterface::Terminal,
     })
     .await
     .unwrap()
@@ -276,6 +277,7 @@ async fn a_sessions_checkout_summary_is_filled_from_its_binding() {
             managed_purpose: ManagedPurpose::Access,
             managed_shard: 0,
             managed_shards: 1,
+            interface: SessionInterface::Terminal,
         })
         .await
         .unwrap();

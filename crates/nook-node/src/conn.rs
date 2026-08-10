@@ -283,7 +283,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
     // Register: idempotent full resync on every connect.
     ctl_tx
         .send(NodeToControl::Register {
-            capabilities: capabilities::detect(),
+            capabilities: Box::new(capabilities::detect()),
             live_tmux_sessions: tmux::list_nook_sessions(),
         })
         .await
@@ -485,6 +485,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 // different because of them (MAIN-455).
                 managed_purpose: _,
                 shard: _,
+                interface,
             } => {
                 // THE authoritative check (MAIN-301 follow-on). Everything
                 // upstream of here is a belief: the range is a promise that
@@ -523,17 +524,37 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                     } else {
                         workspace_path
                     };
-                    let _ = session_tx.send(sessions::Cmd::Start {
-                        workspace_id: workspace_id.map(|w| w.0.to_string()),
-                        tenant_id: tenant_id.map(|t| t.0.to_string()),
-                        session_id,
-                        runtime,
-                        cwd,
-                        cols,
-                        rows,
-                        ports,
-                        unsatisfied,
-                    });
+                    // Terminal or chat (MAIN-502). The whole fork is here: the
+                    // ports, the checkout and the ids are resolved identically
+                    // either way, and only the machinery that runs in that
+                    // directory differs. `cols`/`rows` are a PTY's, so a chat
+                    // simply has none.
+                    let _ = match interface {
+                        nook_types::SessionInterface::Chat => {
+                            session_tx.send(sessions::Cmd::StartChat {
+                                workspace_id: workspace_id.map(|w| w.0.to_string()),
+                                tenant_id: tenant_id.map(|t| t.0.to_string()),
+                                session_id,
+                                runtime,
+                                cwd,
+                                ports,
+                                unsatisfied,
+                            })
+                        }
+                        nook_types::SessionInterface::Terminal => {
+                            session_tx.send(sessions::Cmd::Start {
+                                workspace_id: workspace_id.map(|w| w.0.to_string()),
+                                tenant_id: tenant_id.map(|t| t.0.to_string()),
+                                session_id,
+                                runtime,
+                                cwd,
+                                cols,
+                                rows,
+                                ports,
+                                unsatisfied,
+                            })
+                        }
+                    };
                 }
             }
             ControlToNode::StartAuthSession {
@@ -579,6 +600,20 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                     session_id,
                     cols,
                     rows,
+                });
+            }
+            ControlToNode::ChatMessage { session_id, text } => {
+                let _ = session_tx.send(sessions::Cmd::ChatMessage { session_id, text });
+            }
+            ControlToNode::ChatPermissionDecision {
+                session_id,
+                request_id,
+                allow,
+            } => {
+                let _ = session_tx.send(sessions::Cmd::ChatPermission {
+                    session_id,
+                    request_id,
+                    allow,
                 });
             }
             ControlToNode::KillSession { session_id } => {

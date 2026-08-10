@@ -206,6 +206,15 @@ export function startLive(queryClient: QueryClient) {
       queryClient.invalidateQueries({ queryKey: ["workspace-builds"] });
       // Two keys, one panel since MAIN-488: the Runs panel reads both listings
       // and merges them, so both prefixes still have to be nudged.
+    } else if (event.type === "session_message") {
+      // A chat session's conversation grew, or a permission was answered
+      // (MAIN-502). Same "what you have is stale" contract as `job_changed`:
+      // the page refetches the conversation rather than being handed a message
+      // to splice in, so a device that missed part of the stream converges on
+      // the same history instead of a half-one.
+      queryClient.invalidateQueries({
+        queryKey: ["session-messages", event.data.session_id],
+      });
     } else if (event.type === "job_turn") {
       // A loop job's agent started or stopped a turn (MAIN-240 AC-2). Unlike
       // every neighbour in this switch, this does NOT invalidate a query: a turn

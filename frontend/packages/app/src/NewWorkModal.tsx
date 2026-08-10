@@ -55,6 +55,9 @@ function NewWorkModal() {
   const [nodeId, setNodeId] = useState(seed.nodeId ?? AUTO);
   // Empty until the chosen node reports what it has; the effect below picks.
   const [runtime, setRuntime] = useState("");
+  // Terminal or chat (MAIN-502). Terminal is the default, so the flow behaves
+  // exactly as it did for anyone who does not touch this.
+  const [iface, setIface] = useState<"terminal" | "chat">("terminal");
   const [envText, setEnvText] = useState("");
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
@@ -158,6 +161,23 @@ function NewWorkModal() {
         set.add(r);
     return set.size ? [...set] : ["bash"];
   }, [nodes]);
+  // Which runtimes the chosen machine says it can drive as a CHAT (MAIN-502).
+  // Reported by the node, never decided here: the node owns how it runs an
+  // agent, and a picker that offered Chat for a runtime the node would refuse
+  // creates a session that fails on arrival. Absent — a node that predates the
+  // field — reads as an empty list, so Chat is offered nowhere rather than
+  // everywhere.
+  const chatRuntimes =
+    ((effectiveNode?.capabilities as Record<string, unknown>)
+      ?.chat_runtimes as string[]) ?? [];
+  const chatAvailable = chatRuntimes.includes(runtime);
+  // A runtime change must not leave Chat selected for a runtime that cannot be
+  // one: the server refuses that combination (AC-2), so silently keeping it
+  // would turn a runtime click into a failed create.
+  useEffect(() => {
+    if (!chatAvailable) setIface("terminal");
+  }, [chatAvailable]);
+
   // "repo replicas": how many NODES hold a clone. Within each, every checkout
   // (clone + worktrees) gets a session — the per-worktree half of the model.
   const [replicaMode, setReplicaMode] = useState<"single" | "all" | "count">("all");
@@ -253,7 +273,13 @@ function NewWorkModal() {
   const startSession = async (ws: string, node: string, path?: string) => {
     if (path) await waitForLocation(ws, path);
     const { data, error } = await api.POST("/api/v1/sessions", {
-      body: { workspace_id: ws, node_id: node, runtime, path: path ?? null },
+      body: {
+        workspace_id: ws,
+        node_id: node,
+        runtime,
+        path: path ?? null,
+        interface: iface,
+      },
     });
     if (error) throw new Error(JSON.stringify(error));
     queryClient.invalidateQueries();
@@ -619,6 +645,49 @@ function NewWorkModal() {
             <label>Runtime — a session runs an AI agent or a shell, your pick</label>
             <RuntimePicker available={pickerRuntimes} value={runtime} onChange={setRuntime} />
           </div>
+
+          {/* Terminal or chat (MAIN-502). Only on the path that actually
+              creates a session here — the declarative deploy writes a session
+              SPEC and start-work goes through its own endpoint, neither of
+              which takes an interface yet, and a control that silently does
+              nothing is worse than no control. */}
+          {!declarative && !taskId && (
+            <div className="field">
+              <label>
+                Interface — a terminal to type in, or a conversation
+              </label>
+              <div className="mode-tabs" style={{ marginTop: 2 }}>
+                <button
+                  className={`mode-tab${iface === "terminal" ? " active" : ""}`}
+                  onClick={() => setIface("terminal")}
+                >
+                  Terminal
+                </button>
+                {/* Disabled with the reason shown, never hidden (AC-2): a
+                    missing option reads as "this product has no chat", which
+                    sends people looking for a setting that does not exist. */}
+                <button
+                  className={`mode-tab${iface === "chat" ? " active" : ""}`}
+                  disabled={!chatAvailable}
+                  title={
+                    chatAvailable
+                      ? "run the agent as a conversation"
+                      : `${runtime || "this runtime"} cannot run as a chat`
+                  }
+                  onClick={() => chatAvailable && setIface("chat")}
+                >
+                  Chat
+                </button>
+              </div>
+              {!chatAvailable && (
+                <div className="faint small" style={{ marginTop: 4 }}>
+                  Chat needs a runtime that streams its work —{" "}
+                  <span className="mono">{runtime || "this runtime"}</span> does
+                  not, so it runs as a terminal.
+                </div>
+              )}
+            </div>
+          )}
 
           {declarative && (
             <>

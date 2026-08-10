@@ -43,6 +43,9 @@ export type LoopJob = Schemas["LoopJob"];
 export type LoopJobDetail = Schemas["LoopJobDetail"];
 export type LoopJobTranscriptEntry = Schemas["LoopJobTranscriptEntry"];
 export type CreateLoopJobRequest = Schemas["CreateLoopJobRequest"];
+// A chat session's persisted conversation (MAIN-502) — the same shape a loop
+// run's transcript has, for a session rather than a run.
+export type SessionMessage = Schemas["SessionMessage"];
 export type TaskDetail = Schemas["TaskDetail"];
 export type TaskLabel = Schemas["Label"];
 export type TaskComment = Schemas["TaskComment"];

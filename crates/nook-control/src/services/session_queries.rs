@@ -117,6 +117,20 @@ pub async fn create_session(
             "that workspace has no checkout on that node".into(),
         ));
     };
+    // A chat session is the runtime driven through its structured streaming
+    // protocol, so a runtime that does not speak one cannot be one (MAIN-502
+    // AC-2). Refused HERE rather than left to the node: a session created and
+    // then failed by the machine looks to the reader like a crash, and the
+    // answer — pick a different runtime — is known before anything is written.
+    // The predicate is the node's own (`runtime_supports_chat`), so the two
+    // ends cannot disagree about which runtimes qualify.
+    if req.interface == SessionInterface::Chat && !runtime_supports_chat(&req.runtime) {
+        return Err(ApiError::BadRequest(format!(
+            "'{}' cannot run as a chat — it does not speak a streaming protocol. \
+             Start it as a terminal instead.",
+            req.runtime
+        )));
+    }
     create_session_at(
         state,
         tenant,
@@ -132,6 +146,7 @@ pub async fn create_session(
         ManagedPurpose::Access,
         // A person's terminal is not a slice of anything.
         ShardAssignment::SOLO,
+        req.interface,
     )
     .await
 }
@@ -160,6 +175,10 @@ pub async fn create_session_at(
     // than defaulted for the reason `PortSafety` is: the caller that forgot
     // would silently place a second reviewer on top of the first one's shard.
     shard: ShardAssignment,
+    // Terminal or chat (MAIN-502). Passed rather than defaulted for the same
+    // reason: it decides which machinery the node starts, and a caller that
+    // forgot would silently open a tmux for a conversation.
+    interface: SessionInterface,
 ) -> ApiResult<Session> {
     use crate::error::ApiError;
 
@@ -196,6 +215,7 @@ pub async fn create_session_at(
             managed_purpose,
             managed_shard: shard.index as i32,
             managed_shards: shard.of.max(1) as i32,
+            interface,
         })
         .await?;
 
@@ -243,6 +263,7 @@ pub async fn create_session_at(
             // is the whole of it, and saying so on the wire would only give the
             // node an env pair meaning "no partition" (MAIN-446).
             shard: (shard.of > 1).then_some(shard),
+            interface,
         },
     );
     if !sent {
@@ -296,6 +317,10 @@ pub async fn create_ad_hoc_session(
             managed_purpose: ManagedPurpose::Access,
             managed_shard: ShardAssignment::SOLO.index as i32,
             managed_shards: ShardAssignment::SOLO.of as i32,
+            // An ad-hoc terminal is a terminal (MAIN-502 NG-6), and so is a
+            // login flow — its whole job is to render a device code a person
+            // reads off a screen.
+            interface: SessionInterface::Terminal,
         })
         .await?;
 
@@ -335,6 +360,7 @@ pub async fn create_ad_hoc_session(
             // one either.
             managed_purpose: None,
             shard: None,
+            interface: SessionInterface::Terminal,
         },
     );
     if !sent {
@@ -390,6 +416,10 @@ pub async fn create_auth_session(
             managed_purpose: ManagedPurpose::Access,
             managed_shard: ShardAssignment::SOLO.index as i32,
             managed_shards: ShardAssignment::SOLO.of as i32,
+            // An ad-hoc terminal is a terminal (MAIN-502 NG-6), and so is a
+            // login flow — its whole job is to render a device code a person
+            // reads off a screen.
+            interface: SessionInterface::Terminal,
         })
         .await?;
 

@@ -4953,6 +4953,93 @@
         }
       }
     },
+    "/api/v1/sessions/{id}/messages": {
+      "get": {
+        "tags": [
+          "crate::routes::sessions"
+        ],
+        "summary": "`GET /api/v1/sessions/{id}/messages` — a chat session's whole conversation\n(MAIN-502 AC-5).",
+        "description": "The reason a chat survives a reload: the history is server-side, so this is\nwhat every device renders and none of them holds the only copy.",
+        "operationId": "list_session_messages",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SessionMessage"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::routes::sessions"
+        ],
+        "summary": "`POST /api/v1/sessions/{id}/messages` — say something to a chat session's\nagent.",
+        "description": "Answers with the row that was WRITTEN, not an echo of the request: the\nsender renders the server's copy, which is the same one every other device\nwill fetch, so nobody is looking at an optimistic message the server never\ntook.",
+        "operationId": "post_session_message",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSessionMessageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionMessage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/sessions/{id}/output": {
       "post": {
         "tags": [
@@ -4995,6 +5082,58 @@
             "description": ""
           },
           "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{id}/permissions/{request_id}": {
+      "post": {
+        "tags": [
+          "crate::routes::sessions"
+        ],
+        "summary": "`POST /api/v1/sessions/{id}/permissions/{request_id}` — allow or deny the\ntool a chat session's agent is blocked on (MAIN-502 AC-6).",
+        "description": "`409` means somebody already answered it — the other device, or a second\nclick. That is a real answer to give: the request is settled, and the page\nrefetches to find out how.",
+        "operationId": "decide_session_permission",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionPermissionDecisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "400": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "409": {
             "description": ""
           }
         }
@@ -9412,6 +9551,13 @@
           "architecture": {
             "type": "string"
           },
+          "chat_runtimes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Which of `runtimes` this node can drive as a CHAT rather than a terminal\n(MAIN-502) — the ones that speak a structured streaming protocol.\n\nReported rather than inferred at the other end, so exactly one place in\nthe fleet decides it: the node owns how it runs an agent, the same rule\n`loop_kinds` and the auth probes follow. A UI offering Chat for a\nruntime the node would refuse is the failure this prevents. Empty from\na node that predates the field, which reads as \"no chat here\" — the\nsafe answer, since such a node has no chat driver either."
+          },
           "cpus": {
             "type": "integer",
             "format": "int32",
@@ -10516,6 +10662,18 @@
           }
         }
       },
+      "CreateSessionMessageRequest": {
+        "type": "object",
+        "description": "Say something to a chat session's agent (MAIN-502).",
+        "required": [
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "type": "string"
+          }
+        }
+      },
       "CreateSessionRequest": {
         "type": "object",
         "required": [
@@ -10524,6 +10682,10 @@
           "runtime"
         ],
         "properties": {
+          "interface": {
+            "$ref": "#/components/schemas/SessionInterface",
+            "description": "Terminal or chat (MAIN-502). Absent is [`SessionInterface::Terminal`],\nso a client written before this field gets byte-for-byte what it got\nbefore — which is the whole of AC-1."
+          },
           "name": {
             "type": [
               "string",
@@ -14946,6 +15108,10 @@
           "id": {
             "$ref": "#/components/schemas/SessionId"
           },
+          "interface": {
+            "$ref": "#/components/schemas/SessionInterface",
+            "description": "Terminal or chat (MAIN-502) — which surface this session is driven\nthrough, chosen at creation. Every row that predates the column reads\n`terminal`, which is what it was."
+          },
           "leased_ports": {
             "type": "array",
             "items": {
@@ -15039,6 +15205,69 @@
           }
         }
       },
+      "SessionInterface": {
+        "type": "string",
+        "description": "How a session is DRIVEN — the surface a person talks to it through\n(MAIN-502).\n\nNot a rendering preference. A terminal session is a tmux TUI streamed as a\nPTY; a chat session is the runtime run headless through the streaming\nadapter, with the conversation persisted as messages. The two share nothing\nbut the row, which is why this is decided at creation and stored rather than\nderived from the runtime: `claude` can be either.",
+        "enum": [
+          "terminal",
+          "chat"
+        ]
+      },
+      "SessionMessage": {
+        "type": "object",
+        "description": "One line of a chat session's conversation (MAIN-502), persisted server-side\nso it survives a reload, a reconnect, and being opened on another device.\n\nDeliberately its own table rather than the loop's `loop_job_transcript`:\nthat one hangs off a JOB, which is a run with an end, and a session is a\nconversation that outlives any single turn. What they share is the shape a\nreader needs, so both map onto the same `ChatView` at the other end.",
+        "required": [
+          "id",
+          "session_id",
+          "role",
+          "body",
+          "at"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "body": {
+            "type": "string"
+          },
+          "decision": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`allow` | `deny` once answered; `None` while the agent is still\nblocked. This is what makes the buttons disappear on the second device\nrather than offering an answer that has already been given."
+          },
+          "id": {
+            "$ref": "#/components/schemas/SessionMessageId"
+          },
+          "permission_request_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The runtime's own id for an outstanding permission request, present\nonly on a `permission` row. It is what an answer is addressed to, and\nwhat the node matches against the agent it is blocking."
+          },
+          "role": {
+            "type": "string",
+            "description": "`human` (someone typed it), `agent` (the runtime said it), `system`\n(the node's own lifecycle notes), or `permission` (a tool the agent is\nblocked on — see `permission_request_id`)."
+          },
+          "session_id": {
+            "$ref": "#/components/schemas/SessionId"
+          },
+          "tool_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The tool the agent wants to use, on a `permission` row — `Bash`,\n`Write`, … Shown beside the request so the reader knows what they are\nbeing asked about before they read the detail."
+          }
+        }
+      },
+      "SessionMessageId": {
+        "type": "string",
+        "format": "uuid"
+      },
       "SessionOutputRequest": {
         "type": "object",
         "description": "How much of a session's screen to read back.",
@@ -15073,6 +15302,19 @@
           },
           "text": {
             "type": "string"
+          }
+        }
+      },
+      "SessionPermissionDecisionRequest": {
+        "type": "object",
+        "description": "Answer a chat session's outstanding permission request (MAIN-502).",
+        "required": [
+          "allow"
+        ],
+        "properties": {
+          "allow": {
+            "type": "boolean",
+            "description": "`true` runs the tool, `false` refuses it and tells the agent so."
           }
         }
       },
@@ -16820,6 +17062,34 @@
                 "type": "string",
                 "enum": [
                   "job_turn"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A chat session's conversation grew (MAIN-502) — a message arrived, or a\npermission request was answered.\n\nCarries only the session id, the same \"what you have is stale, refetch\"\ncontract as `TaskChanged`. Visibility is enforced on the refetch, so\nthe nudge itself leaks nothing; and because it is a nudge rather than\nthe message, a second device that was offline for a while converges on\nthe same conversation instead of replaying a stream it half-missed.",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "A chat session's conversation grew (MAIN-502) — a message arrived, or a\npermission request was answered.\n\nCarries only the session id, the same \"what you have is stale, refetch\"\ncontract as `TaskChanged`. Visibility is enforced on the refetch, so\nthe nudge itself leaks nothing; and because it is a nudge rather than\nthe message, a second device that was offline for a while converges on\nthe same conversation instead of replaying a stream it half-missed.",
+                "required": [
+                  "session_id"
+                ],
+                "properties": {
+                  "session_id": {
+                    "$ref": "#/components/schemas/SessionId"
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "session_message"
                 ]
               }
             }

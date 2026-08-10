@@ -183,6 +183,21 @@ export function looksLikeMarkdown(content: string): boolean {
  *  recover. */
 export type FoldedTranscriptEntry = LoopJobTranscriptEntry & { steps?: string[] };
 
+/** The minimum the fold and the chat mapping actually read.
+ *
+ *  A loop run's transcript entry satisfies it, and so does a CHAT SESSION's
+ *  message (MAIN-502) — which is the point: a session and a run produce the
+ *  same `· Bash` markers and the same prose, so they must fold and render the
+ *  same way. Naming the shape rather than the DTO is what lets the second
+ *  consumer reuse this instead of growing a second copy that drifts. */
+export interface TranscriptLine {
+  id: string;
+  /** `system` | `agent` | `human` — the author, and the grouping key. */
+  source: string;
+  content: string;
+  at: string;
+}
+
 /**
  * Fold a run of consecutive agent tool-markers (`· Bash`, `· Read`, …) into ONE
  * activity entry, and drop the empty tool-result placeholders between them — so
@@ -191,16 +206,16 @@ export type FoldedTranscriptEntry = LoopJobTranscriptEntry & { steps?: string[] 
  * single working line rather than printing one per call. Substantive turns — the
  * agent's prose, a human message, a system note — pass through untouched.
  */
-export function foldToolActivity(
-  transcript: LoopJobTranscriptEntry[],
-): FoldedTranscriptEntry[] {
-  const isMarker = (e: LoopJobTranscriptEntry) =>
+export function foldToolActivity<T extends TranscriptLine>(
+  transcript: T[],
+): (T & { steps?: string[] })[] {
+  const isMarker = (e: T) =>
     e.source === "agent" && /^·\s+\S/.test(stripAnsi(e.content));
-  const isBlank = (e: LoopJobTranscriptEntry) => stripAnsi(e.content).trim() === "";
-  const out: FoldedTranscriptEntry[] = [];
+  const isBlank = (e: T) => stripAnsi(e.content).trim() === "";
+  const out: (T & { steps?: string[] })[] = [];
   // `steps` are the marker lines themselves — the record the label summarises;
   // `tools` are just their first words, which is all the label needs.
-  let run: { first: LoopJobTranscriptEntry; tools: string[]; steps: string[] } | null = null;
+  let run: { first: T; tools: string[]; steps: string[] } | null = null;
   const flush = () => {
     if (!run) return;
     const counts = new Map<string, number>();

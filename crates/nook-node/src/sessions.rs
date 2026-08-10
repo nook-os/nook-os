@@ -59,6 +59,31 @@ pub enum Cmd {
         /// cross-tenant placement, which is the case it exists for.
         tenant_id: Option<String>,
     },
+    /// Start a session as a CHAT (MAIN-502): the runtime driven through the
+    /// streaming adapter, with no tmux anywhere. Its own command rather than a
+    /// flag on `Start`, because the two share no step after "which directory"
+    /// — and because a chat that fell through to the tmux path by accident
+    /// would look like it worked.
+    StartChat {
+        session_id: SessionId,
+        runtime: String,
+        cwd: String,
+        ports: Vec<nook_types::LeasedPort>,
+        unsatisfied: Vec<String>,
+        workspace_id: Option<String>,
+        tenant_id: Option<String>,
+    },
+    /// A human turn for a chat session's agent.
+    ChatMessage {
+        session_id: SessionId,
+        text: String,
+    },
+    /// A human's verdict on a permission that agent is blocked on.
+    ChatPermission {
+        session_id: SessionId,
+        request_id: String,
+        allow: bool,
+    },
     StartAuth {
         session_id: SessionId,
         runtime: String,
@@ -110,6 +135,11 @@ pub struct Manager {
     /// anyone noticing — which is exactly why it gets its own queue.
     frames: Sender<NodeToControl>,
     sessions: HashMap<SessionId, SessionHandle>,
+    /// Live CHAT agents (MAIN-502), beside the tmux handles rather than in
+    /// their own manager: a session is one of the two, never both, and one
+    /// command queue is what keeps "start it, then send it a message" in that
+    /// order. `Kill` looks in both maps for the same reason.
+    chats: HashMap<SessionId, crate::chat::ChatHandle>,
 }
 
 impl Manager {
@@ -118,6 +148,7 @@ impl Manager {
             ctl,
             frames,
             sessions: HashMap::new(),
+            chats: HashMap::new(),
         }
     }
 
@@ -136,6 +167,37 @@ impl Manager {
             }
         });
         tx
+    }
+
+    /// The connection ended, taking this manager with it. A tmux session
+    /// outlives that by design — it is detached, and the next connection finds
+    /// it again by name — but a chat agent is a plain child of this process
+    /// with nothing left holding it (MAIN-502).
+    ///
+    /// Leaving it alive orphans it for good. `Register` on the very next
+    /// connect force-exits the row, because a chat's `tmux_session` is
+    /// permanently NULL and `expire_sessions_missing_from_tmux` ends every live
+    /// session that is not in the node's tmux list; the orphan sweep beside it
+    /// only recognises `nook_` tmux names, so nothing ever reaps the process.
+    /// It would keep the checkout busy and stay bound to leased ports that the
+    /// allocator, seeing a non-live session, is now free to hand to somebody
+    /// else — one stray agent per reconnect, per chat session.
+    ///
+    /// So the agents die with the connection and the exited row is TRUE. A
+    /// reconnect starts a fresh agent, which is NG-2's model anyway: a chat's
+    /// durable history is the control plane's rows, not the process.
+    ///
+    /// Reached through `Drop` rather than a call at the end of the command
+    /// loop, so that a panic inside `handle` — which unwinds straight past any
+    /// such call — cannot orphan them either.
+    fn kill_live_chats(&mut self) {
+        for (session_id, handle) in self.chats.drain() {
+            tracing::info!(
+                session = %session_id.0,
+                "connection ended — killing the chat agent so the session's exit is real"
+            );
+            handle.kill();
+        }
     }
 
     fn handle(&mut self, cmd: Cmd) {
@@ -161,6 +223,29 @@ impl Manager {
                 workspace_id.as_deref(),
                 tenant_id.as_deref(),
             ),
+            Cmd::StartChat {
+                session_id,
+                runtime,
+                cwd,
+                ports,
+                unsatisfied,
+                workspace_id,
+                tenant_id,
+            } => self.start_chat(
+                session_id,
+                &runtime,
+                &cwd,
+                &ports,
+                &unsatisfied,
+                workspace_id.as_deref(),
+                tenant_id.as_deref(),
+            ),
+            Cmd::ChatMessage { session_id, text } => self.chat_message(session_id, &text),
+            Cmd::ChatPermission {
+                session_id,
+                request_id,
+                allow,
+            } => self.chat_permission(session_id, &request_id, allow),
             Cmd::StartAuth {
                 session_id,
                 runtime,
@@ -271,6 +356,152 @@ impl Manager {
             }
             Err(e) => self.session_failed(session_id, e.to_string()),
         }
+    }
+
+    /// Start a session as a CHAT (MAIN-502): the runtime driven through the
+    /// streaming adapter, no tmux, no PTY.
+    ///
+    /// The environment is assembled to the same recipe `tmux::new_session`
+    /// exports — the leased ports under the names the WORKSPACE declared, the
+    /// unsatisfied list, the session/workspace/tenant ids, the git-ssh shim and
+    /// its id, the fleet's `GH_TOKEN`. An agent must not be able to tell which
+    /// surface it is being driven through, or a skill that works in a terminal
+    /// quietly fails in a chat.
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_chat(
+        &mut self,
+        session_id: SessionId,
+        runtime: &str,
+        cwd: &str,
+        ports: &[nook_types::LeasedPort],
+        unsatisfied: &[String],
+        workspace_id: Option<&str>,
+        tenant_id: Option<&str>,
+    ) {
+        // The same allowlist a terminal session goes through: the runtime
+        // string is an executable to launch, and the wire never chooses one.
+        if !crate::capabilities::KNOWN_RUNTIMES.contains(&runtime) {
+            return self.session_failed(session_id, format!("unknown runtime '{runtime}'"));
+        }
+        // …plus the one this surface adds. A runtime with no streaming adapter
+        // handed `--input-format stream-json` does not fail cleanly; it fails
+        // as a shell that swallowed a flag and then sat there. The control
+        // plane refuses this too (AC-2) — this is the machine's own answer,
+        // for a request that reached it anyway.
+        if !nook_types::runtime_supports_chat(runtime) {
+            return self.session_failed(
+                session_id,
+                format!(
+                    "'{runtime}' cannot run as a chat — it does not speak a streaming protocol"
+                ),
+            );
+        }
+        if !std::path::Path::new(cwd).is_dir() {
+            return self.session_failed(
+                session_id,
+                format!("checkout {cwd} does not exist on this node"),
+            );
+        }
+        // Restart of an ended chat: drop the old agent before starting another,
+        // or the previous process keeps a stdin nobody writes to and a stdout
+        // still appending to this session's conversation.
+        if let Some(old) = self.chats.remove(&session_id) {
+            old.kill();
+        }
+
+        let sid = session_id.0.to_string();
+        let port_s: Vec<(String, String)> = ports
+            .iter()
+            .map(|p| (p.env.clone(), p.port.to_string()))
+            .collect();
+        let skipped = unsatisfied.join(",");
+        let mut env: Vec<(&str, &str)> = vec![
+            ("NOOK_SESSION_ID", sid.as_str()),
+            ("LANG", "C.UTF-8"),
+            ("LC_ALL", "C.UTF-8"),
+        ];
+        for (k, v) in &port_s {
+            env.push((k.as_str(), v.as_str()));
+        }
+        if !skipped.is_empty() {
+            env.push(("NOOK_PORTS_UNSATISFIED", skipped.as_str()));
+        }
+        let gh;
+        if let Some(t) = crate::config::fleet_gh_token() {
+            gh = t;
+            env.push(("GH_TOKEN", gh.as_str()));
+        }
+        if let Some(w) = workspace_id {
+            env.push(("NOOK_WORKSPACE_ID", w));
+            // The other half of MAIN-367's mechanism — the shim is useless
+            // without the id, and the id feeds nothing without the shim. The
+            // two travel together in every session constructor, which is what
+            // `tmux.rs`'s guard test is about.
+            env.push(("GIT_SSH_COMMAND", "nook get workspace git-ssh"));
+        }
+        if let Some(t) = tenant_id {
+            env.push(("NOOK_TENANT_ID", t));
+        }
+
+        match crate::chat::start(
+            &self.ctl,
+            session_id,
+            runtime,
+            std::path::Path::new(cwd),
+            &env,
+        ) {
+            Ok(handle) => {
+                self.chats.insert(session_id, handle);
+                // A chat session has no tmux name — that is the point — so the
+                // field it would go in is empty. The control plane stores it as
+                // NULL, which is already what it does for a session whose node
+                // has not reported one, and nothing attaches a PTY to a chat.
+                let _ = self.ctl.blocking_send(NodeToControl::SessionStarted {
+                    session_id,
+                    tmux_session: String::new(),
+                });
+            }
+            Err(e) => self.session_failed(session_id, e),
+        }
+    }
+
+    /// Deliver a human turn to a chat session's agent.
+    fn chat_message(&mut self, session_id: SessionId, text: &str) {
+        let Some(handle) = self.chats.get(&session_id) else {
+            // The agent is not on this node — most often because the node
+            // restarted since the session started. Said out loud rather than
+            // dropped: a message that vanished silently is the one failure a
+            // conversation may not have.
+            return self.chat_note(
+                session_id,
+                "this session's agent is not running on this machine any more — restart it",
+            );
+        };
+        if let Err(e) = handle.send(text) {
+            self.chat_note(session_id, format!("could not reach the agent: {e}"));
+        }
+    }
+
+    /// Answer a permission the agent is blocked on.
+    fn chat_permission(&mut self, session_id: SessionId, request_id: &str, allow: bool) {
+        let Some(handle) = self.chats.get(&session_id) else {
+            return self.chat_note(
+                session_id,
+                "this session's agent is not running on this machine any more — restart it",
+            );
+        };
+        if let Err(e) = handle.decide(request_id, allow) {
+            self.chat_note(session_id, format!("could not answer the agent: {e}"));
+        }
+    }
+
+    /// Put a line in the conversation on the node's own behalf.
+    fn chat_note(&self, session_id: SessionId, body: impl Into<String>) {
+        let _ = self.ctl.blocking_send(NodeToControl::ChatMessage {
+            session_id,
+            role: "system".into(),
+            body: body.into(),
+        });
     }
 
     /// Start a runtime's LOGIN flow in a session (MAIN-126). Like `start`, but
@@ -518,6 +749,13 @@ impl Manager {
     }
 
     pub fn kill(&mut self, session_id: SessionId) {
+        // A chat session has no tmux to kill and no PTY to see EOF on — the
+        // agent process IS the session — so it is ended here and its reader
+        // thread reports the exit as it would for any other death.
+        if let Some(handle) = self.chats.remove(&session_id) {
+            handle.kill();
+            return;
+        }
         if let Some(handle) = self.sessions.remove(&session_id) {
             let _ = tmux::kill_session(&handle.tmux_name);
             // Reader thread sees EOF and reports SessionExited.
@@ -534,6 +772,12 @@ impl Manager {
             session_id,
             exit_code: None,
         });
+    }
+}
+
+impl Drop for Manager {
+    fn drop(&mut self) {
+        self.kill_live_chats();
     }
 }
 
@@ -562,5 +806,110 @@ mod tests {
                 "`{banned}` is back — a managed session must never type into an agent"
             );
         }
+    }
+
+    /// MAIN-502. The connection ending must take the chat agents with it.
+    ///
+    /// A chat session's `tmux_session` is permanently NULL, so `Register`'s
+    /// reconcile on the very next connect force-exits the row — and the orphan
+    /// sweep beside it only knows `nook_` tmux names. An agent left running
+    /// there is unreachable forever: still in the checkout, still holding ports
+    /// the allocator has already re-let, one more per reconnect. So the row
+    /// saying `exited` has to be TRUE, and that is what this asserts.
+    ///
+    /// A stand-in binary rather than `claude`: the argv is fixed and the point
+    /// is the lifecycle, so the script ignores its arguments and refuses to die
+    /// on its own — if the manager does not kill it, nothing will and the test
+    /// fails on its timeout rather than passing quietly.
+    ///
+    /// The agent is started through `chat::start` rather than `Cmd::StartChat`
+    /// because `start_chat`'s allowlist only launches a name from
+    /// `KNOWN_RUNTIMES` — a real guard, and putting a fake `claude` on `PATH`
+    /// to get around it would mutate the whole test binary's environment. The
+    /// ending is the real one either way: dropping the manager is exactly what
+    /// its thread does when the connection goes.
+    #[tokio::test]
+    async fn ending_the_connection_kills_the_chat_agents() {
+        use nook_proto::NodeToControl;
+        use nook_types::SessionId;
+        use std::io::Write;
+
+        let dir = std::env::temp_dir().join(format!("nook-chat-kill-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).expect("a scratch checkout");
+        let runtime = dir.join("agent.sh");
+        let mut f = std::fs::File::create(&runtime).expect("the stand-in agent");
+        // Never exits on its own, and holds stdout open so the reader thread
+        // can only ever see EOF because the process was killed.
+        f.write_all(b"#!/bin/sh\nwhile :; do sleep 30; done\n")
+            .expect("write the stand-in");
+        drop(f);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755))
+                .expect("make it executable");
+        }
+
+        let (frames_tx, _frames_rx) = tokio::sync::mpsc::channel(32);
+        let (ctl_tx, mut ctl_rx) = tokio::sync::mpsc::channel(32);
+        let mut manager = super::Manager::new(frames_tx, ctl_tx.clone());
+
+        let session_id = SessionId::new();
+        let handle = crate::chat::start(&ctl_tx, session_id, &runtime.to_string_lossy(), &dir, &[])
+            .expect("the stand-in agent starts");
+        manager.chats.insert(session_id, handle);
+
+        // The connection goes away: the control plane redeployed, or the link
+        // blipped. No Kill is sent, which is the whole point — on this path
+        // nobody is left to send one. Dropping the manager is exactly what the
+        // end of its thread does, panic or not.
+        drop(manager);
+
+        let mut exited = false;
+        while let Ok(Some(msg)) =
+            tokio::time::timeout(std::time::Duration::from_secs(10), ctl_rx.recv()).await
+        {
+            if let NodeToControl::SessionExited { session_id: id, .. } = msg {
+                assert_eq!(id, session_id, "the session that exited is ours");
+                exited = true;
+                break;
+            }
+        }
+        assert!(
+            exited,
+            "the agent outlived its connection — it is orphaned now, holding \
+             this session's leased ports with nothing left that could reap it"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The other half of the test above: it has to be reached by DROPPING the
+    /// manager, not by a call at the end of the command loop.
+    ///
+    /// The distinction is the panic. A call sited after the loop is skipped
+    /// entirely when `handle` unwinds, which strands exactly the agents this
+    /// exists to reap — and that path leaves no trace anyone would connect to a
+    /// stray `claude` days later.
+    #[test]
+    fn the_chat_agents_are_killed_by_dropping_the_manager() {
+        let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/sessions.rs"))
+            .expect("this file must be readable");
+        let code = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("code precedes tests");
+        let (_, after_impl) = code
+            .split_once("impl Drop for Manager")
+            .expect("the manager still reaps its chat agents on drop");
+        assert!(
+            after_impl
+                .split_once('}')
+                .expect("the drop body closes")
+                .0
+                .contains("kill_live_chats()"),
+            "Drop no longer kills the live chat agents — every reconnect now \
+             strands one agent per chat session"
+        );
     }
 }

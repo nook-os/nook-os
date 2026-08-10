@@ -67,7 +67,14 @@ pub struct DiscoveredWorkspace {
 pub enum NodeToControl {
     /// Idempotent full resync: sent on every (re)connect.
     Register {
-        capabilities: Capabilities,
+        /// Boxed, and it matters for the channel rather than for this message:
+        /// `Capabilities` is by far the largest thing on this enum, so inline
+        /// it set the size of EVERY variant — including `SessionOutput`, which
+        /// is sent thousands of times a second while a terminal is busy. One
+        /// allocation on the rarest message keeps the common ones small.
+        /// Serialises identically to the unboxed field, so the wire is
+        /// unchanged.
+        capabilities: Box<Capabilities>,
         /// tmux sessions (names) that are still alive on this node, so the
         /// control plane can reconcile session state after restarts.
         live_tmux_sessions: Vec<String>,
@@ -118,6 +125,36 @@ pub enum NodeToControl {
     SessionExited {
         session_id: SessionId,
         exit_code: Option<i32>,
+    },
+    /// A line of a CHAT session's conversation (MAIN-502), appended to the
+    /// session's messages verbatim.
+    ///
+    /// `JobTranscript`'s counterpart for a session rather than a run, and the
+    /// same contract: recorded, never interpreted. `role` is `agent` for what
+    /// the runtime said and `system` for the node's own lifecycle notes — a
+    /// human turn is recorded by the control plane when it accepts it, never
+    /// on the echo, for the reason `drive_streaming` spells out.
+    ChatMessage {
+        session_id: SessionId,
+        role: String,
+        body: String,
+    },
+    /// A chat session's agent is blocked on a permission (MAIN-502).
+    ///
+    /// The agent stays blocked until a `ChatPermissionDecision` comes back —
+    /// that is the runtime's own contract for this exchange, not a timeout we
+    /// impose. A node that dies holding one leaves an answered-never request,
+    /// which the session's next start supersedes.
+    ChatPermission {
+        session_id: SessionId,
+        /// The runtime's id for the request, to address the answer to.
+        request_id: String,
+        /// The tool being asked about — `Bash`, `Write`, …
+        tool_name: String,
+        /// The runtime's own one-line summary of what it wants to do, when it
+        /// offers one (a command line, a file path). Empty when it does not.
+        #[serde(default)]
+        description: String,
     },
     /// Freshly re-probed runtime authorization (MAIN-126). The node re-runs its
     /// probes when an authorize login flow ends and pushes the new set, so the
@@ -459,6 +496,35 @@ pub enum ControlToNode {
         /// fields on a wire can arrive disagreeing.
         #[serde(default)]
         shard: Option<nook_types::ShardAssignment>,
+        /// Terminal or chat (MAIN-502). Absent — every node and every control
+        /// plane that predates the field — is `terminal`, which is the tmux
+        /// path this message has always meant.
+        #[serde(default)]
+        interface: nook_types::SessionInterface,
+    },
+    /// A human turn for a CHAT session's agent (MAIN-502).
+    ///
+    /// `SessionInput`'s counterpart, and deliberately not `SessionInput`
+    /// itself: that carries keystrokes for a PTY, base64 because a terminal
+    /// is a byte stream. This carries one whole message, because the streaming
+    /// protocol's unit is a turn — which is also why a pasted multi-line brief
+    /// survives here and never did through `send-keys`.
+    ChatMessage {
+        session_id: SessionId,
+        text: String,
+    },
+    /// A human's answer to a chat session's outstanding permission request
+    /// (MAIN-502). The agent is blocked on this and resumes the moment it
+    /// arrives; a denial is reported to the agent as a refusal, not as a
+    /// silent failure.
+    ChatPermissionDecision {
+        session_id: SessionId,
+        /// The runtime's own id for the request, echoed back untouched. The
+        /// node matches it against what it is holding; a stale id — already
+        /// answered, or from a previous process — is dropped, which is what
+        /// makes answering from two devices harmless.
+        request_id: String,
+        allow: bool,
     },
     /// Install a runtime credential this node did not obtain (MAIN-283).
     ///
@@ -914,6 +980,17 @@ pub enum UiEvent {
         task_id: nook_types::TaskId,
         job_id: nook_types::JobId,
         active: bool,
+    },
+    /// A chat session's conversation grew (MAIN-502) — a message arrived, or a
+    /// permission request was answered.
+    ///
+    /// Carries only the session id, the same "what you have is stale, refetch"
+    /// contract as `TaskChanged`. Visibility is enforced on the refetch, so
+    /// the nudge itself leaks nothing; and because it is a nudge rather than
+    /// the message, a second device that was offline for a while converges on
+    /// the same conversation instead of replaying a stream it half-missed.
+    SessionMessage {
+        session_id: SessionId,
     },
 }
 
