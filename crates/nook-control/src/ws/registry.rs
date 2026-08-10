@@ -35,6 +35,27 @@ pub struct GitStatusPayload {
     pub diff: String,
 }
 
+/// A live tunnel: what one `<label>.<TUNNEL_DOMAIN>` host resolves to.
+///
+/// The node's NAME is carried rather than looked up, because the pages that
+/// need it are the failure ones — "nothing is listening on port 3000 on node
+/// `beelink`" — and reaching the database to render a 502 is a query made at
+/// the worst possible moment.
+#[derive(Clone, Debug)]
+pub struct Tunnel {
+    pub label: String,
+    /// Whose tunnel it is. Membership of THIS tenant is the entire access
+    /// policy (MAIN-9 NG-6), so it is the field the surface authorises against.
+    pub tenant_id: TenantId,
+    pub node_id: NodeId,
+    pub node_name: String,
+    /// The port on the node's own loopback.
+    pub port: u16,
+    /// The session the tunnel was opened from, when there is one. MAIN-404
+    /// tears a tunnel down with its session; nothing here reads it.
+    pub session_id: Option<SessionId>,
+}
+
 /// Completion of a long-running node operation.
 pub struct OpPayload {
     pub ok: bool,
@@ -93,6 +114,16 @@ pub struct Registry {
     /// frames back to. Unlike its single-shot siblings this entry outlives many
     /// frames and is removed on the terminal one.
     remote_pending_tunnels: DashMap<Uuid, Uuid>,
+    /// label → what that tunnel host resolves to (MAIN-403). Live state, held
+    /// like the rest of it: a restart drops every tunnel (MAIN-9 NG-8).
+    ///
+    /// Local to this replica. Nothing publishes an entry here yet — creating a
+    /// tunnel is MAIN-404's — so the cross-replica question lands with the code
+    /// that creates them, alongside list and stop.
+    tunnel_routes: DashMap<String, Tunnel>,
+    /// Grant ids already exchanged for a tunnel cookie, so the second exchange
+    /// of one fails. See [`Registry::spend_grant`].
+    spent_grants: DashMap<Uuid, Instant>,
     /// Other instances with live viewers for sessions our nodes own.
     remote_viewers: DashMap<SessionId, HashSet<Uuid>>,
     bus_tx: OnceLock<mpsc::UnboundedSender<Outbound>>,
@@ -154,6 +185,8 @@ impl Registry {
             remote_pending_git: DashMap::new(),
             pending_tunnels: DashMap::new(),
             remote_pending_tunnels: DashMap::new(),
+            tunnel_routes: DashMap::new(),
+            spent_grants: DashMap::new(),
             remote_viewers: DashMap::new(),
             bus_tx: OnceLock::new(),
             bus_ready: watch::channel(false).0,
@@ -560,6 +593,46 @@ impl Registry {
         if terminal {
             self.close_tunnel(request_id);
         }
+    }
+
+    // ── Tunnel routes (MAIN-403) ───────────────────────────────────────────
+
+    /// What `<label>.<TUNNEL_DOMAIN>` currently points at, or `None` — which the
+    /// surface answers with its 404 page rather than the SPA.
+    pub fn tunnel_route(&self, label: &str) -> Option<Tunnel> {
+        self.tunnel_routes.get(label).map(|t| t.clone())
+    }
+
+    /// Publish a tunnel at its label, replacing any tunnel already there.
+    ///
+    /// The lifecycle around this — who may create one, the idle sweep, teardown
+    /// on session exit — is MAIN-404's; this is only the table the HTTP surface
+    /// resolves against, so 9b is testable and 9c has one place to write.
+    pub fn put_tunnel_route(&self, tunnel: Tunnel) {
+        self.tunnel_routes.insert(tunnel.label.clone(), tunnel);
+    }
+
+    /// Forget a tunnel. Returns what was there, so a caller can report it.
+    pub fn take_tunnel_route(&self, label: &str) -> Option<Tunnel> {
+        self.tunnel_routes.remove(label).map(|(_, t)| t)
+    }
+
+    /// Redeem a grant id, returning `false` if it has already been used.
+    ///
+    /// This is what makes the cross-subdomain grant SINGLE-use (MAIN-403 AC-2):
+    /// the token itself is signed and short-lived, and this ledger is what stops
+    /// a second exchange of the one that just landed in a browser's history, a
+    /// referrer header, or a proxy log.
+    ///
+    /// In memory, so it is per-replica: a grant is minted and redeemed within
+    /// seconds by one browser, and the token's own expiry bounds anything the
+    /// ledger cannot see. Entries are pruned when the map grows rather than on a
+    /// timer — nothing here is worth a background task.
+    pub fn spend_grant(&self, jti: Uuid, ttl: Duration) -> bool {
+        if self.spent_grants.len() > 4096 {
+            self.spent_grants.retain(|_, at| at.elapsed() < ttl);
+        }
+        self.spent_grants.insert(jti, Instant::now()).is_none()
     }
 
     // ── Terminal attachments ───────────────────────────────────────────────
