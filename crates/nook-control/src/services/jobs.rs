@@ -556,48 +556,8 @@ pub async fn converge_builds(
                 // with nothing working it — and, released but left in the
                 // started column, would read as unheld work in progress.
                 if let Some(task) = claimed {
-                    if let Err(e) = state.tasks.release_assignment(task, tenant).await {
-                        tracing::warn!(%workspace, error = %e, "could not release a compensated claim");
-                    }
-                    let back = async {
-                        let row = state
-                            .tasks
-                            .get_row(tenant, task)
-                            .await?
-                            .ok_or(crate::error::ApiError::NotFound)?;
-                        let todo = crate::services::tasks::column_of_type(
-                            state.tasks.as_ref(),
-                            row.board_id,
-                            "unstarted",
-                        )
-                        .await?;
-                        state
-                            .tasks
-                            .update_fields(
-                                tenant,
-                                task,
-                                crate::repo::tasks::TaskEdit {
-                                    title: None,
-                                    description: None,
-                                    column_id: Some(todo.0),
-                                    position: None,
-                                    assignee_user_id: None,
-                                    priority: None,
-                                    set_workspace: false,
-                                    workspace_id: None,
-                                    expected_updated_at: None,
-                                    type_: None,
-                                    visibility: None,
-                                    set_parent: false,
-                                    parent_task_id: None,
-                                },
-                            )
-                            .await?;
-                        Ok::<(), crate::error::ApiError>(())
-                    }
-                    .await;
-                    if let Err(e) = back {
-                        tracing::warn!(%workspace, error = ?e, "could not move a compensated card back");
+                    if let Err(e) = give_card_back(state, tenant, task).await {
+                        tracing::warn!(%workspace, error = ?e, "could not give a compensated card back");
                     }
                 }
             }
@@ -609,6 +569,63 @@ pub async fn converge_builds(
         withheld,
         live,
     })
+}
+
+/// Give a card the loop holds back to the board: release the claim, and return
+/// it to the unstarted column.
+///
+/// One definition, because the two callers must not drift. The claim and the
+/// column are a pair: released but left in the started column reads as unheld
+/// work in progress, and moved back while still assigned is out of every
+/// future pick with nothing working it. Used to compensate a run that never
+/// materialized, and (MAIN-482 AC-6) to undo the claim of one the node refused
+/// to launch — refusals never reach the outcome handler, which is otherwise
+/// the only thing that releases a claim.
+///
+/// A failed release is logged and the move still attempted, which is the
+/// compensation path's own behaviour: the two writes fail independently, and
+/// abandoning the column move because the release failed would leave the card
+/// in the started column as well as assigned — strictly worse than half of the
+/// pair landing.
+pub(crate) async fn give_card_back(
+    state: &AppState,
+    tenant: TenantId,
+    task: TaskId,
+) -> ApiResult<()> {
+    if let Err(e) = state.tasks.release_assignment(task, tenant).await {
+        tracing::warn!(task = %task.0, error = %e, "could not release a claim");
+    }
+    let row = state
+        .tasks
+        .get_row(tenant, task)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let todo =
+        crate::services::tasks::column_of_type(state.tasks.as_ref(), row.board_id, "unstarted")
+            .await?;
+    state
+        .tasks
+        .update_fields(
+            tenant,
+            task,
+            crate::repo::tasks::TaskEdit {
+                title: None,
+                description: None,
+                column_id: Some(todo.0),
+                position: None,
+                assignee_user_id: None,
+                priority: None,
+                set_workspace: false,
+                workspace_id: None,
+                expected_updated_at: None,
+                type_: None,
+                visibility: None,
+                set_parent: false,
+                parent_task_id: None,
+            },
+        )
+        .await?;
+    Ok(())
 }
 
 /// The `Closes KEY` line — the reviewer's only join from a PR to its contract,
@@ -1928,6 +1945,83 @@ pub async fn finish(
     // as a successful one's.
     revoke_job_token(state, tenant, id).await;
     Ok(())
+}
+
+/// Record a run the node REFUSED to launch, and give its card back (MAIN-482
+/// AC-6).
+///
+/// A refusal terminates a run before its agent ever started, so nothing will
+/// report an outcome for it — and [`record_build_outcome`] is the only thing
+/// that releases the loop's claim. Left to `finish` alone, a refused build
+/// would sit claimed-in-progress in the started column with nothing running,
+/// which is exactly the dishonest board the guards exist to prevent. So the
+/// refusal itself explains the card, releases the claim and returns it to the
+/// unstarted column, leaving it pickable by the next converge pass.
+///
+/// A REPAIR run's card was never claimed by the loop and may be held by a
+/// human — its comment lands but the claim is left alone, mirroring the
+/// outcome handler's rule.
+pub async fn refuse(state: &AppState, tenant: TenantId, id: JobId, reason: &str) -> ApiResult<()> {
+    let reason = reason.trim();
+    let job = load(state, tenant, id).await?;
+    append_transcript(state, id, "system", reason).await.ok();
+
+    if let Some(task) = job.target_task_id {
+        let is_repair = job
+            .build_fingerprint
+            .as_deref()
+            .is_some_and(|f| f.starts_with("repair:"));
+        // The comment first, then the release — the order a human reads: the
+        // card explains why it came back before it reappears in the queue.
+        if let Err(e) = state
+            .tasks
+            .create_comment(crate::repo::tasks::NewComment {
+                tenant,
+                task,
+                author_type: "system".into(),
+                author_id: None,
+                author_name: "nook-build loop".into(),
+                body_md: reason.to_string(),
+            })
+            .await
+        {
+            tracing::warn!(job = %id, task = %task.0, error = ?e, "could not comment a refusal");
+        }
+        if !is_repair {
+            if let Err(e) = give_card_back(state, tenant, task).await {
+                // Loud: the run is over either way, and a card left claimed
+                // with nothing running is the state this exists to remove.
+                tracing::error!(
+                    job = %id, task = %task.0, error = ?e,
+                    "a refused build run could not give its card back — release it by hand"
+                );
+            }
+        }
+        state
+            .registry
+            .publish(tenant, nook_proto::UiEvent::TaskChanged { task_id: task });
+    }
+
+    let _ = transition(state, tenant, id, "failed").await;
+    revoke_job_token(state, tenant, id).await;
+    Ok(())
+}
+
+/// Apply a node's `JobRefused` — ONLY for a job that node is actually
+/// executing, so a node token cannot terminate another executor's run or hand
+/// back a card it has nothing to do with (MAIN-161 security).
+pub async fn refuse_from_node(
+    state: &AppState,
+    tenant: TenantId,
+    node: NodeId,
+    id: JobId,
+    reason: &str,
+) -> ApiResult<()> {
+    if !is_executor(state, tenant, id, node).await? {
+        tracing::warn!(job = %id.0, node = %node.0, "node refused a job it does not execute — dropped");
+        return Ok(());
+    }
+    refuse(state, tenant, id, reason).await
 }
 
 /// Fail every job a node was executing when it disconnected (AC-4): the session
