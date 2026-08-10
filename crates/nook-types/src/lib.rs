@@ -706,8 +706,52 @@ pub struct Node {
     #[serde(default)]
     #[db(skip)]
     pub loop_capacity: Option<NodeCapacity>,
+    /// A [`NodeCordon`] when this node is refusing NEW loop work while it waits
+    /// to restart into a new agent (MAIN-505); `None` — the ordinary case —
+    /// means it takes work.
+    ///
+    /// Not the same thing as `max_loop_jobs = 0`, which is an OPERATOR saying
+    /// "stop claiming" and stays until they say otherwise. This is the NODE
+    /// reporting a condition it raised and will clear itself, re-asserted on
+    /// every connect like `resources`, and it cannot outlive the process that
+    /// raised it. Held as JSON for the reason every other node blob is — the
+    /// row mapper reads `serde_json::Value`, and the shape is the wire type's.
+    #[serde(default)]
+    pub cordon: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Why a node is refusing new loop work (MAIN-505).
+///
+/// One cause today: the control plane expects a different agent version, and
+/// installing it ends this process — which for a streaming loop job means
+/// killing the agent that IS the run's buffer (`job_adapter`'s piped stdio),
+/// not a tmux session that outlives the restart. So the node stops taking work
+/// and waits for what it holds to finish.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct NodeCordon {
+    /// Why new work is refused here, in words worth showing an operator —
+    /// composed by the node so every surface says the same sentence.
+    pub reason: String,
+    /// Loop jobs still running here: what the cordon is waiting to reach zero.
+    pub jobs_in_flight: u32,
+    /// When work stopped being accepted, so a surface can age it.
+    pub since: DateTime<Utc>,
+    /// Past the drain deadline and STILL holding jobs (AC-4). The node stays
+    /// cordoned rather than updating under a live run — this flag is the
+    /// escalation, not a countdown to one.
+    #[serde(default)]
+    pub overdue: bool,
+    /// The wait is over and the install is running; the node expects to exit.
+    ///
+    /// Still cordoned, deliberately: a job accepted between "the last run
+    /// ended" and "the process exits" would be orphaned by that exit, which is
+    /// the whole failure this cordon exists to prevent. `jobs_in_flight` is 0
+    /// here, so the two together say "nothing is running and nothing may
+    /// start", which no single flag does.
+    #[serde(default)]
+    pub installing: bool,
 }
 
 /// How many loop jobs a node runs at once, and who decided (MAIN-508).

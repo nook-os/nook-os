@@ -12454,6 +12454,9 @@
         ],
         "properties": {
           "capabilities": {},
+          "cordon": {
+            "description": "A [`NodeCordon`] when this node is refusing NEW loop work while it waits\nto restart into a new agent (MAIN-505); `None` — the ordinary case —\nmeans it takes work.\n\nNot the same thing as `max_loop_jobs = 0`, which is an OPERATOR saying\n\"stop claiming\" and stays until they say otherwise. This is the NODE\nreporting a condition it raised and will clear itself, re-asserted on\nevery connect like `resources`, and it cannot outlive the process that\nraised it. Held as JSON for the reason every other node blob is — the\nrow mapper reads `serde_json::Value`, and the shape is the wire type's."
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"
@@ -13786,6 +13789,9 @@
               ],
               "properties": {
                 "capabilities": {},
+                "cordon": {
+                  "description": "A [`NodeCordon`] when this node is refusing NEW loop work while it waits\nto restart into a new agent (MAIN-505); `None` — the ordinary case —\nmeans it takes work.\n\nNot the same thing as `max_loop_jobs = 0`, which is an OPERATOR saying\n\"stop claiming\" and stays until they say otherwise. This is the NODE\nreporting a condition it raised and will clear itself, re-asserted on\nevery connect like `resources`, and it cannot outlive the process that\nraised it. Held as JSON for the reason every other node blob is — the\nrow mapper reads `serde_json::Value`, and the shape is the wire type's."
+                },
                 "created_at": {
                   "type": "string",
                   "format": "date-time"

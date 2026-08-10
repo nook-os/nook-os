@@ -922,6 +922,7 @@ mod tests {
             port_range_end: None,
             port_exclusions: None,
             max_loop_jobs: None,
+            cordon: None,
             loop_capacity: None,
             updated_at: chrono::Utc::now(),
         }

@@ -5421,6 +5421,19 @@ export interface components {
         /** @description Status values: `online` | `offline`. */
         Node: {
             capabilities: unknown;
+            /**
+             * @description A [`NodeCordon`] when this node is refusing NEW loop work while it waits
+             *     to restart into a new agent (MAIN-505); `None` — the ordinary case —
+             *     means it takes work.
+             *
+             *     Not the same thing as `max_loop_jobs = 0`, which is an OPERATOR saying
+             *     "stop claiming" and stays until they say otherwise. This is the NODE
+             *     reporting a condition it raised and will clear itself, re-asserted on
+             *     every connect like `resources`, and it cannot outlive the process that
+             *     raised it. Held as JSON for the reason every other node blob is — the
+             *     row mapper reads `serde_json::Value`, and the shape is the wire type's.
+             */
+            cordon?: unknown;
             /** Format: date-time */
             created_at: string;
             /**
@@ -6035,6 +6048,19 @@ export interface components {
             next_cursor?: string | null;
             rows: {
                 capabilities: unknown;
+                /**
+                 * @description A [`NodeCordon`] when this node is refusing NEW loop work while it waits
+                 *     to restart into a new agent (MAIN-505); `None` — the ordinary case —
+                 *     means it takes work.
+                 *
+                 *     Not the same thing as `max_loop_jobs = 0`, which is an OPERATOR saying
+                 *     "stop claiming" and stays until they say otherwise. This is the NODE
+                 *     reporting a condition it raised and will clear itself, re-asserted on
+                 *     every connect like `resources`, and it cannot outlive the process that
+                 *     raised it. Held as JSON for the reason every other node blob is — the
+                 *     row mapper reads `serde_json::Value`, and the shape is the wire type's.
+                 */
+                cordon?: unknown;
                 /** Format: date-time */
                 created_at: string;
                 /**

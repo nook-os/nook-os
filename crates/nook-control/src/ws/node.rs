@@ -1039,6 +1039,32 @@ async fn handle_message(
             let _ = crate::services::stack_reaper::sweep_stacks_on_node(state, node_id, &projects)
                 .await;
         }
+        // Whether this node is taking new loop work (MAIN-505). Asserted on
+        // every connect, so the clear arrives the same way the raise does and a
+        // cordon cannot outlive the process that raised it.
+        NodeToControl::CordonChanged { cordon } => {
+            if let Some(c) = &cordon {
+                tracing::warn!(node = %name, reason = %c.reason, jobs = c.jobs_in_flight, "node cordoned");
+            }
+            // Never silently: a lost write leaves this side placing work on a
+            // draining node, and the node's own `JobRefused` catches only the
+            // consequence. The surfaces disagreeing with the machine is worth a
+            // line in the log.
+            if let Err(e) = state.nodes.set_cordon(node_id, cordon.as_ref()).await {
+                tracing::warn!(node = %name, error = ?e, "could not record this node's cordon");
+            }
+            // The node stays online; this is the "refetch this node" nudge the
+            // Nodes queries already listen for, exactly as `RuntimeAuthStatus`
+            // uses it.
+            state.registry.publish(
+                tenant,
+                UiEvent::NodeStatus {
+                    node_id,
+                    name: name.to_string(),
+                    status: "online".into(),
+                },
+            );
+        }
         NodeToControl::Pong => {}
     }
     Ok(())

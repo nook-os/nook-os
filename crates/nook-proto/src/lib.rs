@@ -294,6 +294,16 @@ pub enum NodeToControl {
     BuildStacksHeld {
         projects: Vec<String>,
     },
+    /// Whether this node is taking new loop work, and why not (MAIN-505).
+    ///
+    /// Sent right after `Register` on EVERY connect — including the clear
+    /// `None` — and again whenever it changes. Asserting it unconditionally is
+    /// what stops a cordon outliving the process that raised it: a node that
+    /// restarted into the new agent holds nothing and says so, where a node
+    /// that only ever spoke up when cordoned would leave the last one standing.
+    CordonChanged {
+        cordon: Option<nook_types::NodeCordon>,
+    },
     Pong,
     /// The head of a tunnel response: status and headers, before any body.
     ///

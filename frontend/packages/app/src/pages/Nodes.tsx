@@ -131,7 +131,7 @@ function NodeActions({
               error ? "Not updated" : "Updating",
               error
                 ? `${node.name} could not be asked to update.`
-                : `${node.name} is fetching the new agent. It will drop off for a moment and come back — sessions survive, because tmux outlives the agent.`,
+                : `${node.name} is fetching the new agent. It will drop off for a moment and come back — terminal sessions survive, because tmux outlives the agent. A loop job running here does not: it is streamed through the agent itself.`,
             );
           }}
         />
@@ -166,8 +166,26 @@ function NodeActions({
 /** The shared/operator pills, everywhere a node is titled. */
 function NodeBadges({ node }: { node: NodeInfo }) {
   const caps = node.capabilities as Record<string, unknown>;
+  const cordon = node.cordon as {
+    reason?: string;
+    overdue?: boolean;
+    installing?: boolean;
+  } | null;
   return (
     <>
+      {/* Draining before an agent restart (MAIN-505). Online and taking
+          nothing looks exactly like idle otherwise, which is what made "why
+          did nothing get placed on azul" a log dive. The reason is the node's
+          own sentence — never re-worded here, so every surface says one thing. */}
+      {cordon && (
+        <Pill tone={cordon.overdue ? "err" : "warn"} title={cordon.reason}>
+          {cordon.installing
+            ? "updating"
+            : cordon.overdue
+              ? "cordoned (overdue)"
+              : "cordoned"}
+        </Pill>
+      )}
       {node.shared && (
         <Pill
           tone="accent"
