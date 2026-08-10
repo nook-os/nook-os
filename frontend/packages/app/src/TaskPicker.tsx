@@ -105,6 +105,11 @@ export function TaskPicker({
             type: typeKey.split(","),
             // Never offer to link something somebody archived.
             archived: false,
+            // Finished cards ARE findable here (MAIN-464): the pick query hides
+            // Done and Canceled because they are not work, but linking a
+            // dependency to a ticket that already shipped is ordinary — which
+            // is what `doneNote` exists to label.
+            done: true,
             limit,
             ...(board ? { board } : {}),
           },

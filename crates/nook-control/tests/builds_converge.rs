@@ -179,6 +179,48 @@ async fn the_pick_contract_gates_the_converger() {
     bed.teardown().await;
 }
 
+/// The other end of the contract (MAIN-464): a card that finished with
+/// `agent-ready` still on it raises nothing. The label is the human's to
+/// remove (NG-1), so the column has to be what decides — and it does here only
+/// because `BuildWork` asks the pick query rather than filtering items itself.
+#[tokio::test]
+async fn a_finished_card_raises_nothing_even_with_agent_ready() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("bdone").await;
+    let (user, _) = bed.user(tenant, "member").await;
+    let ws = bed.workspace(tenant).await;
+    let state = bed.app_state().await;
+    let board = board_fixture(&bed.db(), tenant).await;
+
+    let done_col = ColumnId(Uuid::now_v7());
+    bed.db()
+        .exec(
+            "INSERT INTO board_columns (id, board_id, name, position, type)
+             VALUES ($1, $2, 'Done', 3, 'completed')",
+            params![done_col, board],
+        )
+        .await
+        .expect("done column");
+
+    let card = approved_card(&bed.db(), tenant, board, ws, user, "already shipped").await;
+    bed.db()
+        .exec(
+            "UPDATE tasks SET column_id = $1 WHERE id = $2",
+            params![done_col, card.id],
+        )
+        .await
+        .expect("move to Done");
+
+    let c = jobs::converge_builds(&state, tenant, user, ws, None)
+        .await
+        .expect("converge");
+    assert_eq!(c.raised, 0, "a shipped card is not work to raise a run for");
+
+    bed.teardown().await;
+}
+
 #[tokio::test]
 async fn outcomes_mirror_to_the_board_and_consume_the_card() {
     let Some(mut bed) = TestBed::new().await else {

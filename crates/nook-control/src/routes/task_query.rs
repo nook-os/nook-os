@@ -72,6 +72,11 @@ pub struct TaskFilter {
     /// them: the backlog is a human refinement space the loop never draws from
     /// (MAIN-80). Set `backlog=true` to see them. Independent of labels.
     pub backlog: Option<bool>,
+    /// Include tasks in a `completed`- or `canceled`-type column. Default
+    /// (absent/false) excludes them: finished work is not work (MAIN-464). Set
+    /// `done=true` to see them. Independent of labels, and lifted by `parent=`
+    /// or by `column_type=completed|canceled`.
+    pub done: Option<bool>,
     pub limit: Option<i64>,
     /// Opaque: the `created_at` of the last row of the previous page.
     pub cursor: Option<chrono::DateTime<chrono::Utc>>,
@@ -135,6 +140,7 @@ impl TaskFilter {
                 "is_blocked" => f.is_blocked = Some(flag(&k, &v)?),
                 "archived" => f.archived = Some(flag(&k, &v)?),
                 "backlog" => f.backlog = Some(flag(&k, &v)?),
+                "done" => f.done = Some(flag(&k, &v)?),
                 "workspace" => {
                     f.workspace = Some(v.parse().map_err(|_| {
                         ApiError::BadRequest(format!("workspace must be a uuid, got {v:?}"))
@@ -300,6 +306,7 @@ pub async fn query_rows(
                 types,
                 parent: parent_id,
                 backlog: f.backlog.unwrap_or(false),
+                done: f.done.unwrap_or(false),
                 visibility: f.visibility.clone(),
                 node: node_id,
             },
@@ -393,6 +400,22 @@ pub async fn claim_inner(
         return Err(ApiError::BadRequest(
             "epics are containers and cannot be claimed".into(),
         ));
+    }
+    // The other end of the board (MAIN-464). The pick no longer offers these,
+    // but a claim by key comes from a stale list, a bookmark or a skill that
+    // remembered a card — and taking one silently re-opens finished work.
+    match column_kind.as_deref() {
+        Some("completed") => {
+            return Err(ApiError::BadRequest(
+                "this card is done — nothing to build".into(),
+            ))
+        }
+        Some("canceled") => {
+            return Err(ApiError::BadRequest(
+                "this card was canceled — nothing to build".into(),
+            ))
+        }
+        _ => {}
     }
 
     // Resolving the target column is a separate read, but it cannot race: a
@@ -820,9 +843,13 @@ mod db_tests {
         )
         .await
         .unwrap();
+        // A LIVE column. This fixture used to say `Done`/`completed`, which was
+        // incidental — the subject is archiving — until MAIN-464 made a
+        // completed column its own reason to be excluded and the "live task is
+        // picked" assertion started failing for a reason it does not test.
         db.exec(
             "INSERT INTO board_columns (id, board_id, name, type, position)
-             VALUES ($1, $2, 'Done', 'completed', 0)",
+             VALUES ($1, $2, 'Todo', 'unstarted', 0)",
             params![col, board],
         )
         .await

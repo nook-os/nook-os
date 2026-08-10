@@ -11927,6 +11927,13 @@ export interface operations {
                  *     (MAIN-80). Set `backlog=true` to see them. Independent of labels.
                  */
                 backlog?: boolean;
+                /**
+                 * @description Include tasks in a `completed`- or `canceled`-type column. Default
+                 *     (absent/false) excludes them: finished work is not work (MAIN-464). Set
+                 *     `done=true` to see them. Independent of labels, and lifted by `parent=`
+                 *     or by `column_type=completed|canceled`.
+                 */
+                done?: boolean;
                 limit?: number;
                 /** @description Opaque: the `created_at` of the last row of the previous page. */
                 cursor?: string;

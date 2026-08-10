@@ -151,8 +151,10 @@ pub struct BuildWork<'a> {
 impl BuildWork<'_> {
     /// The pick contract as code (MAIN-458 AC-1a / NG-1): `agent-ready` is the
     /// human approval gate and the converger NEVER reads a card without it;
-    /// `blocked`, assigned, still-blocked, backlog and epic cards are excluded
-    /// exactly as `nook tasks`' server-side filters exclude them (MAIN-80).
+    /// `blocked`, assigned, still-blocked, backlog, done and epic cards are
+    /// excluded exactly as `nook tasks`' server-side filters exclude them
+    /// (MAIN-80, MAIN-464) — the filtering is the query's, not re-implemented
+    /// here, which is what stops the two drifting.
     async fn fresh_items(&self, workspace: WorkspaceId) -> Option<Vec<WorkItem>> {
         let rows = self
             .tasks
@@ -176,6 +178,7 @@ impl BuildWork<'_> {
                     types: vec!["task".into(), "bug".into(), "story".into(), "chore".into()],
                     parent: None,
                     backlog: false,
+                    done: false,
                     visibility: vec![],
                     node: None,
                 },

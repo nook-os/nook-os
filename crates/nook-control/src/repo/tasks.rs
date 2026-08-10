@@ -151,6 +151,9 @@ pub struct PickParams {
     pub types: Vec<String>,
     pub parent: Option<Uuid>,
     pub backlog: bool,
+    /// Include tasks in a `completed`/`canceled` column (MAIN-464). Off by
+    /// default for the same reason `backlog` is: a finished card is not work.
+    pub done: bool,
     pub visibility: Vec<String>,
     /// The node asking. A card DISPATCHED to a machine is that machine's to
     /// take; an undispatched card is anybody's. `None` disables the clause, so
@@ -1780,6 +1783,23 @@ impl TaskRepository for DbTaskRepository {
           -- backlog and board — $17 present) LIFTS this exclusion, so listing an
           -- epic's tickets never silently drops the ones still in triage.
           AND ({backlog_bool} OR {parent} IS NOT NULL OR c.type <> 'backlog')
+          -- finished-work exclusion (MAIN-464): a card in a `completed` or
+          -- `canceled` column is over, and the pick is a question about work
+          -- that remains. MAIN-80 excluded the backlog end of the board and
+          -- stopped there, so `agent-ready` left on a merged card fed it back
+          -- to the next builder — twice in the wild (MAIN-441, MAIN-302).
+          -- Labels have no bearing, exactly as with the backlog.
+          --
+          -- Two lifts, both because the caller has already said it wants the
+          -- finished end: `parent=` (an epic's tickets, whose done/total is the
+          -- point of listing them — the same lift MAIN-80 AC-3 gives backlog)
+          -- and naming one of the two types in `column_type` ($4). Without the
+          -- second, `column_type=completed` would answer "none", which is the
+          -- same silent lie in the other direction.
+          AND ({done_bool}
+               OR {parent} IS NOT NULL
+               OR {col_text} IN ('completed', 'canceled')
+               OR c.type NOT IN ('completed', 'canceled'))
         -- priority 0 means "unset", which sorts last rather than first
         ORDER BY CASE WHEN t.priority = 0 THEN 5 ELSE t.priority END, t.created_at
         LIMIT $12
@@ -1805,6 +1825,7 @@ impl TaskRepository for DbTaskRepository {
                         "$14"
                     ),
                     backlog_bool = type_mapping(self.db.engine()).cast("$18", "bool"),
+                    done_bool = type_mapping(self.db.engine()).cast("$25", "bool"),
                     visible = crate::services::tasks::visible_sql("t", "$16"),
                 ),
                 params![
@@ -1831,7 +1852,8 @@ impl TaskRepository for DbTaskRepository {
                     labels_len,
                     types_len,
                     vis_len,
-                    board_id
+                    board_id,
+                    p.done
                 ],
             )
             .await?)
@@ -3502,6 +3524,17 @@ impl TaskRepository for FakeTaskRepository {
             })
             // The backlog exclusion, lifted by a parent filter.
             .filter(|t| p.backlog || p.parent.is_some() || col_type(t.column_id) != "backlog")
+            // The finished-work exclusion (MAIN-464), lifted by a parent filter
+            // or by naming one of the two types outright.
+            .filter(|t| {
+                p.done
+                    || p.parent.is_some()
+                    || matches!(
+                        p.column_type.as_deref(),
+                        Some("completed") | Some("canceled")
+                    )
+                    || !matches!(col_type(t.column_id).as_str(), "completed" | "canceled")
+            })
             .cloned()
             .collect();
         // Priority 0 means "unset", which sorts last rather than first.

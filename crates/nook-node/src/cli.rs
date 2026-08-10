@@ -2274,6 +2274,7 @@ fn build_tasks_query(
     unblocked: bool,
     this_node: Option<&str>,
     backlog: bool,
+    done: bool,
 ) -> Vec<String> {
     let mut q: Vec<String> = Vec::new();
     if let Some(b) = board {
@@ -2317,6 +2318,10 @@ fn build_tasks_query(
     if backlog {
         q.push("backlog=true".into());
     }
+    // So is finished work (MAIN-464), at the other end of the board.
+    if done {
+        q.push("done=true".into());
+    }
     q
 }
 
@@ -2336,6 +2341,7 @@ pub async fn tasks(
     workspace: Option<&str>,
     all_workspaces: bool,
     backlog: bool,
+    done: bool,
     json: bool,
 ) -> Result<()> {
     let client = Client::from_config()?;
@@ -2384,6 +2390,7 @@ pub async fn tasks(
         unblocked,
         node_id.as_deref(),
         backlog,
+        done,
     );
     let path = if q.is_empty() {
         "/api/v1/tasks".to_string()
@@ -3483,6 +3490,7 @@ mod task_verb_tests {
             true,
             Some("node-9"),
             true,
+            true,
         );
         assert!(
             q.contains(&"node=node-9".to_string()),
@@ -3498,6 +3506,7 @@ mod task_verb_tests {
         assert!(q.contains(&"assignee=none".to_string()));
         assert!(q.contains(&"is_blocked=false".to_string()));
         assert!(q.contains(&"backlog=true".to_string()));
+        assert!(q.contains(&"done=true".to_string()));
     }
 
     #[test]
@@ -3515,6 +3524,7 @@ mod task_verb_tests {
             None,
             false,
             None,
+            false,
             false,
         );
         assert!(q.is_empty(), "an unfiltered query is empty: {q:?}");
