@@ -340,20 +340,32 @@ fn fetch_refused_by(err: &str, worktree: &Path) -> bool {
 /// section, and an older node reading a newer file keeps working.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 #[serde(default)]
-struct WorktreeSeed {
+struct WorktreeSettings {
     /// Opt a repo out entirely. Default on: a build worktree with no `.env` is
     /// the failure this exists to prevent.
     copy_ignored: bool,
     /// Gitignore-style patterns carved OUT of the copy — the vendor directory
     /// too big to be worth it, the log nobody wants.
     exclude: Vec<String>,
+    /// Directories deleted when a build run CONCLUDES (MAIN-493 AC-1) — the
+    /// compiler's output, which the next pass regenerates and no reader ever
+    /// wants again. Repo-root-relative paths, not gitignore patterns: this
+    /// names directories to delete, so an accidental `*` must not be able to
+    /// mean "most of the tree".
+    ///
+    /// Defaults to cargo's `target`, the directory that actually filled the
+    /// machine. A repo that builds elsewhere names its own; `reclaim = []`
+    /// opts out. Either way `reclaim_build_output` deletes nothing git does
+    /// not IGNORE, so a wrong entry costs a no-op rather than the source.
+    reclaim: Vec<String>,
 }
 
-impl Default for WorktreeSeed {
+impl Default for WorktreeSettings {
     fn default() -> Self {
         Self {
             copy_ignored: true,
             exclude: Vec::new(),
+            reclaim: vec!["target".into()],
         }
     }
 }
@@ -361,15 +373,15 @@ impl Default for WorktreeSeed {
 #[derive(Debug, Default, serde::Deserialize)]
 struct RepoSettingsFile {
     #[serde(default)]
-    worktree: WorktreeSeed,
+    worktree: WorktreeSettings,
 }
 
 /// Parse a repo's `.nook.toml`. A missing, unreadable or malformed file is the
 /// DEFAULT, never an error: seeding is an optimisation, and a typo in a settings
 /// file must not fail a build run.
-fn seed_settings(worktree: &Path) -> WorktreeSeed {
+fn worktree_settings(worktree: &Path) -> WorktreeSettings {
     let Ok(text) = std::fs::read_to_string(worktree.join(".nook.toml")) else {
-        return WorktreeSeed::default();
+        return WorktreeSettings::default();
     };
     toml::from_str::<RepoSettingsFile>(&text)
         .map(|f| f.worktree)
@@ -555,7 +567,7 @@ fn copy_into(src: &Path, dest: &Path) -> std::io::Result<()> {
 /// files are the one class both tickets always preserve.
 ///
 /// Returns how many entries were copied, or the reason nothing was.
-fn seed_worktree(source: &Path, dest: &Path, settings: &WorktreeSeed) -> Result<usize, String> {
+fn seed_worktree(source: &Path, dest: &Path, settings: &WorktreeSettings) -> Result<usize, String> {
     if !settings.copy_ignored {
         return Ok(0);
     }
@@ -594,6 +606,203 @@ fn seed_worktree(source: &Path, dest: &Path, settings: &WorktreeSeed) -> Result<
         ));
     }
     Ok(copied)
+}
+
+/// What a concluded build run gave back to the disk (MAIN-493).
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Reclaimed {
+    /// Declared paths that are gone, as the repo spelled them.
+    removed: Vec<String>,
+    /// Freed bytes, counted before the delete — and on a partial delete, the
+    /// difference, so a directory half of which is root-owned still reports
+    /// what it actually gave back.
+    bytes: u64,
+    /// Declared paths that could not be reclaimed, each with its reason. Never
+    /// fatal: the run has already concluded, and disk is not worth a red pass.
+    refused: Vec<String>,
+}
+
+/// Delete a concluded BUILD run's build output, keeping the worktree, its
+/// branch and its git state (MAIN-493 AC-1).
+///
+/// MAIN-480 keeps a build worktree until the card's work merges, which is right
+/// for the source and the branch and very wrong for `target/`: cargo names an
+/// artifact for its unit CONFIGURATION, never its content, so every
+/// differently-configured build adds a whole artifact set and removes nothing.
+/// One worktree reached 120 GB and filled the machine on 2026-08-09. Nothing in
+/// there is ever read again — the next pass rebuilds what it needs — so the
+/// output goes and the tree stays. `docs/build-artifact-growth.md` has the
+/// measurements, and why unifying the builds at the source saves nothing.
+///
+/// Two guards, and both are the point. A declared path must resolve INSIDE the
+/// worktree, and git must IGNORE it: a `reclaim` entry naming tracked source is
+/// then a no-op rather than the thing that deletes the branch's only copy of an
+/// hour's work.
+fn reclaim_build_output(worktree: &Path, settings: &WorktreeSettings) -> Reclaimed {
+    let mut out = Reclaimed::default();
+    let wanted: Vec<String> = settings
+        .reclaim
+        .iter()
+        .filter_map(|r| normalized_reclaim_entry(r))
+        .collect();
+    if wanted.is_empty() {
+        return out;
+    }
+    // Asked once, of git, for the whole list — and only of paths that exist, so
+    // a tree that never built does not shell out at all (AC-4).
+    let present: Vec<(String, PathBuf)> = wanted
+        .into_iter()
+        .filter_map(|rel| reclaimable_dir(worktree, &rel).map(|dir| (rel, dir)))
+        .collect();
+    if present.is_empty() {
+        return out;
+    }
+    let names: Vec<String> = present.iter().map(|(rel, _)| rel.clone()).collect();
+    let ignored = ignored_by_repo(worktree, &names);
+    for (rel, dir) in present {
+        if !ignored.contains(&rel) {
+            out.refused.push(format!(
+                "{rel} (this repo does not ignore it — reclaim names build output, never source)"
+            ));
+            continue;
+        }
+        let before = dir_bytes(&dir);
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {
+                out.removed.push(rel);
+                out.bytes += before;
+            }
+            Err(e) => {
+                // A container writes some of these as root, so a partial delete
+                // is the expected failure rather than an exotic one. Count what
+                // did go and name what did not.
+                out.bytes += before.saturating_sub(dir_bytes(&dir));
+                out.refused.push(format!("{rel} ({e})"));
+            }
+        }
+    }
+    out
+}
+
+/// A `reclaim` entry as a plain relative directory path, or `None` when it is
+/// not one this may act on at all.
+///
+/// A leading `/` is the repo root, exactly as the neighbouring `exclude`
+/// patterns spell it — never the machine's root, which is what `Path::join`
+/// would otherwise make of it. `..` has no such second reading and is dropped:
+/// an entry that climbs out of the tree is a mistake, not an instruction.
+fn normalized_reclaim_entry(raw: &str) -> Option<String> {
+    let rel = raw
+        .trim()
+        .trim_start_matches("./")
+        .trim_matches('/')
+        .to_string();
+    if rel.is_empty() {
+        return None;
+    }
+    Path::new(&rel)
+        .components()
+        .all(|c| matches!(c, std::path::Component::Normal(_)))
+        .then_some(rel)
+}
+
+/// The directory a normalized entry names, if it is a real directory inside
+/// this worktree.
+///
+/// `symlink_metadata` and a canonicalized containment check, together: a
+/// `target` symlinked to a shared cache elsewhere on the node would otherwise
+/// hand `remove_dir_all` a path outside the tree entirely.
+fn reclaimable_dir(worktree: &Path, rel: &str) -> Option<PathBuf> {
+    let dir = worktree.join(rel);
+    if !std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
+        return None;
+    }
+    let root = std::fs::canonicalize(worktree).ok()?;
+    std::fs::canonicalize(&dir)
+        .ok()?
+        .starts_with(&root)
+        .then_some(dir)
+}
+
+/// Which of `rels` this repository's own ignore rules cover.
+///
+/// Without `--no-index`, git answers "not ignored" for anything TRACKED, which
+/// is exactly the protection wanted: a directory whose contents are in the
+/// index is source, whatever it is called.
+///
+/// `core.excludesFile=/dev/null` for the same reason `excluded_by` sets it — an
+/// operator's global ignore file must not decide what a repo deletes.
+fn ignored_by_repo(worktree: &Path, rels: &[String]) -> HashSet<String> {
+    let mut args: Vec<&str> = vec!["-c", "core.excludesFile=/dev/null", "check-ignore", "--"];
+    args.extend(rels.iter().map(String::as_str));
+    // An error is an EMPTY set, never everything: `check-ignore` exits 1 when
+    // nothing matched, and a git that failed for any other reason must reclaim
+    // nothing rather than guess.
+    crate::gitops::run_git(&args, Some(worktree), None)
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Bytes held by a directory tree, links counted as links rather than followed.
+fn dir_bytes(dir: &Path) -> u64 {
+    walkdir::WalkDir::new(dir)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter_map(|e| e.metadata().ok())
+        .filter(|m| m.is_file())
+        .map(|m| m.len())
+        .sum()
+}
+
+/// The transcript line for a reclaim, or `None` when there is nothing to say —
+/// a tree that never built is the common case and deserves silence.
+fn reclaim_note(r: &Reclaimed) -> Option<String> {
+    let mut parts = Vec::new();
+    if !r.removed.is_empty() {
+        parts.push(format!(
+            "reclaimed {} of build output ({})",
+            human_bytes(r.bytes),
+            r.removed.join(", ")
+        ));
+    }
+    if !r.refused.is_empty() {
+        parts.push(format!("could not reclaim {}", r.refused.join(", ")));
+    }
+    (!parts.is_empty()).then(|| parts.join("; "))
+}
+
+/// Reclaim a concluded build run's output and say what happened, at every place
+/// a build run can end (MAIN-493 AC-1/AC-2).
+///
+/// Keyed on the conclusion of THIS run, on THIS run's own worktree, and never
+/// on a timer or a scan of the worktree directory: a tree was observed being
+/// created mid-sweep on 2026-08-09 (MAIN-210), so "delete what is not on my
+/// list" is the one shape that can race a live build. A run holds its own tree
+/// exclusively, so this cannot.
+fn reclaim_and_note(out: &Sender<NodeToControl>, job_id: &str, worktree: &Path) {
+    let reclaimed = reclaim_build_output(worktree, &worktree_settings(worktree));
+    if let Some(msg) = reclaim_note(&reclaimed) {
+        note(out, job_id, msg);
+    }
+}
+
+fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut v = n as f64;
+    let mut unit = 0;
+    while v >= 1024.0 && unit + 1 < UNITS.len() {
+        v /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.1} {}", UNITS[unit])
+    }
 }
 
 /// Is this a BUILD run's worktree directory? Only those outlive their run
@@ -1271,7 +1480,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
     // Never fatal. A missing checkout or a failed copy costs a cold build; it
     // must not cost the run, so both are said out loud and the pass continues.
     if keeps_tree && !adopted {
-        let settings = seed_settings(&worktree);
+        let settings = worktree_settings(&worktree);
         // Checked BEFORE the scan: `primary_checkout_for` walks every workspace
         // root and shells out to git per candidate, which is pure waste for a
         // repo that has opted out.
@@ -1350,6 +1559,11 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
     // "succeeds" having produced no ticket — the exact silent no-op this card
     // exists to remove. Refuse before launching anything.
     if !crate::wizard::skills::is_installed(skill) {
+        // A conclusion is a conclusion whatever the outcome (MAIN-493 AC-1), and
+        // this one leaves a build tree behind holding the previous pass's output.
+        if keeps_tree {
+            reclaim_and_note(&out, &job_id, &worktree);
+        }
         finished(
             &out,
             &job_id,
@@ -1417,10 +1631,14 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
     // session pointed at a directory that no longer existed. Removal is the
     // control plane's call now — `prune-worktree`, or the orphan sweep on
     // reconnect. Every other kind is cleaned up exactly as before (NG-2).
-    if !keeps_tree {
-        if let Err(e) = remove_job_worktree(&cache, &worktree) {
-            note(&out, &job_id, format!("worktree cleanup: {e}"));
-        }
+    //
+    // What the tree does NOT keep is its build output (MAIN-493). The source
+    // and the branch are what MAIN-480 was protecting; `target/` rode along
+    // with them and reached 120 GB.
+    if keeps_tree {
+        reclaim_and_note(&out, &job_id, &worktree);
+    } else if let Err(e) = remove_job_worktree(&cache, &worktree) {
+        note(&out, &job_id, format!("worktree cleanup: {e}"));
     }
     unregister(&dirname);
     finished(&out, &job_id, ok, message);
@@ -2063,7 +2281,7 @@ mod tests {
         checkout_with_every_class(&source);
         std::fs::create_dir_all(&dest).unwrap();
 
-        let copied = seed_worktree(&source, &dest, &WorktreeSeed::default()).expect("seed");
+        let copied = seed_worktree(&source, &dest, &WorktreeSettings::default()).expect("seed");
 
         assert!(dest.join(".env").exists(), "the config a run needs");
         assert!(
@@ -2098,9 +2316,10 @@ mod tests {
         checkout_with_every_class(&source);
         std::fs::create_dir_all(&dest).unwrap();
 
-        let settings = WorktreeSeed {
+        let settings = WorktreeSettings {
             copy_ignored: true,
             exclude: vec!["*.log".into(), "vendor/".into()],
+            ..WorktreeSettings::default()
         };
         seed_worktree(&source, &dest, &settings).expect("seed");
 
@@ -2124,9 +2343,10 @@ mod tests {
         checkout_with_every_class(&source);
         std::fs::create_dir_all(&dest).unwrap();
 
-        let settings = WorktreeSeed {
+        let settings = WorktreeSettings {
             copy_ignored: false,
             exclude: vec![],
+            ..WorktreeSettings::default()
         };
         assert_eq!(seed_worktree(&source, &dest, &settings).expect("seed"), 0);
         assert!(!dest.join(".env").exists());
@@ -2149,7 +2369,7 @@ mod tests {
         std::fs::create_dir_all(&dest).unwrap();
         std::fs::write(dest.join(".env"), "MINE=1\n").unwrap();
 
-        seed_worktree(&source, &dest, &WorktreeSeed::default()).expect("seed");
+        seed_worktree(&source, &dest, &WorktreeSettings::default()).expect("seed");
 
         assert_eq!(
             std::fs::read_to_string(dest.join(".env")).unwrap(),
@@ -2168,8 +2388,8 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
 
         assert_eq!(
-            seed_settings(&tmp),
-            WorktreeSeed::default(),
+            worktree_settings(&tmp),
+            WorktreeSettings::default(),
             "no file at all is the default, not a refusal"
         );
 
@@ -2179,18 +2399,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            seed_settings(&tmp),
-            WorktreeSeed {
+            worktree_settings(&tmp),
+            WorktreeSettings {
                 copy_ignored: false,
-                exclude: vec!["a".into()]
+                exclude: vec!["a".into()],
+                reclaim: vec!["target".into()],
             },
-            "an unknown key and an unrelated section are both tolerated"
+            "an unknown key and an unrelated section are both tolerated, and a \
+             key this file does not mention keeps its default"
         );
+
+        // MAIN-493: naming the key is how a repo opts out, and an empty list has
+        // to mean "nothing", not "the default" — which is what a bare
+        // `unwrap_or_default` on the field would have made it.
+        std::fs::write(tmp.join(".nook.toml"), "[worktree]\nreclaim = []\n").unwrap();
+        assert_eq!(worktree_settings(&tmp).reclaim, Vec::<String>::new());
 
         std::fs::write(tmp.join(".nook.toml"), "this is not toml {{{").unwrap();
         assert_eq!(
-            seed_settings(&tmp),
-            WorktreeSeed::default(),
+            worktree_settings(&tmp),
+            WorktreeSettings::default(),
             "a broken settings file costs the seed, never the run"
         );
         let _ = std::fs::remove_dir_all(&tmp);
@@ -2238,7 +2466,7 @@ mod tests {
         }
         std::fs::create_dir_all(&dest).unwrap();
 
-        let copied = seed_worktree(&source, &dest, &WorktreeSeed::default())
+        let copied = seed_worktree(&source, &dest, &WorktreeSettings::default())
             .expect("a symlink farm must not fail the seed");
         assert!(copied > 0);
 
@@ -2616,6 +2844,248 @@ mod tests {
             "what it keeps, it reports — the control plane decides if it is still wanted"
         );
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── MAIN-493: reclaiming a concluded run's build output ─────────────────
+
+    /// Give a build tree the shape the reclaim has to tell apart: ignored build
+    /// output, ignored config that is NOT output, and tracked source.
+    fn build_tree_with_output(wt: &Path) {
+        std::fs::write(wt.join(".gitignore"), "/target\n/.cache/\n.env\n").unwrap();
+        commit_all(wt, "ignore the build output");
+        for dir in ["target/debug/.fingerprint", ".cache/cargo-target/debug"] {
+            std::fs::create_dir_all(wt.join(dir)).unwrap();
+            std::fs::write(wt.join(dir).join("artifact.rlib"), vec![7u8; 4096]).unwrap();
+        }
+        std::fs::write(wt.join(".env"), "SECRET=1\n").unwrap();
+    }
+
+    /// MAIN-493 AC-1: the output goes, and everything MAIN-480 was actually
+    /// protecting — the branch, the commits, the tracked source, the warm
+    /// `.env` — stays exactly where it was.
+    #[test]
+    fn a_concluded_run_loses_its_build_output_and_keeps_its_git_state() {
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let tmp =
+            std::env::temp_dir().join(format!("nook-493-drop-{}", uuid::Uuid::now_v7().simple()));
+        let (_cache, wt, branch) = build_tree_after_a_pass(&tmp, "MAIN-42", true);
+        build_tree_with_output(&wt);
+        let head = git_in(&wt, &["rev-parse", "HEAD"]);
+
+        let settings = WorktreeSettings {
+            reclaim: vec!["target".into(), ".cache/cargo-target".into()],
+            ..WorktreeSettings::default()
+        };
+        let got = reclaim_build_output(&wt, &settings);
+
+        assert_eq!(got.refused, Vec::<String>::new());
+        assert_eq!(got.removed, vec!["target", ".cache/cargo-target"]);
+        assert_eq!(got.bytes, 8192, "what it freed, counted before it went");
+        assert!(!wt.join("target").exists());
+        assert!(!wt.join(".cache/cargo-target").exists());
+
+        assert!(
+            wt.join("feature.rs").exists(),
+            "tracked source is untouched"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt.join(".env")).unwrap(),
+            "SECRET=1\n",
+            "an ignored file that is not build output is not build output"
+        );
+        assert_eq!(
+            git_in(&wt, &["rev-parse", "HEAD"]),
+            head,
+            "the commit stays"
+        );
+        assert_eq!(
+            git_in(&wt, &["symbolic-ref", "--short", "HEAD"]),
+            branch,
+            "and so does the branch — MAIN-480 is not being reversed (NG-1)"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// MAIN-493 AC-2, the one that must not regress: concluding one run leaves
+    /// every OTHER card's worktree, and its in-progress `target/`, alone.
+    ///
+    /// This is what keys the cleanup on a conclusion rather than a sweep. A
+    /// pass that listed the worktrees directory and deleted the output of the
+    /// ones with no running job would race a build that started between the
+    /// listing and the delete — one was observed being created mid-cleanup on
+    /// 2026-08-09 (MAIN-210).
+    #[test]
+    fn concluding_one_run_never_touches_another_cards_worktree() {
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let tmp =
+            std::env::temp_dir().join(format!("nook-493-two-{}", uuid::Uuid::now_v7().simple()));
+        let (_c1, mine, _b1) = build_tree_after_a_pass(&tmp.join("a"), "MAIN-47", false);
+        let (_c2, theirs, _b2) = build_tree_after_a_pass(&tmp.join("b"), "MAIN-48", false);
+        build_tree_with_output(&mine);
+        build_tree_with_output(&theirs);
+
+        reclaim_build_output(&mine, &WorktreeSettings::default());
+
+        assert!(!mine.join("target").exists(), "this run's output goes");
+        assert!(
+            theirs
+                .join("target/debug/.fingerprint/artifact.rlib")
+                .exists(),
+            "a build running next door keeps every byte of its target/"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// MAIN-493 AC-1: the guard that makes a wrong entry cost nothing. A path
+    /// this repo does not IGNORE is source — whatever it is called — and the
+    /// refusal is named rather than silent.
+    #[test]
+    fn reclaim_refuses_a_path_the_repo_does_not_ignore() {
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let tmp =
+            std::env::temp_dir().join(format!("nook-493-src-{}", uuid::Uuid::now_v7().simple()));
+        let (_cache, wt, _b) = build_tree_after_a_pass(&tmp, "MAIN-43", false);
+        build_tree_with_output(&wt);
+        std::fs::create_dir_all(wt.join("src")).unwrap();
+        std::fs::write(wt.join("src/main.rs"), "fn main() {}\n").unwrap();
+        commit_all(
+            &wt,
+            "tracked source in a directory somebody named in reclaim",
+        );
+
+        let settings = WorktreeSettings {
+            reclaim: vec!["src".into(), "target".into()],
+            ..WorktreeSettings::default()
+        };
+        let got = reclaim_build_output(&wt, &settings);
+
+        assert!(wt.join("src/main.rs").exists(), "source survives a typo");
+        assert_eq!(got.removed, vec!["target"], "the real entry still runs");
+        assert_eq!(got.refused.len(), 1);
+        assert!(
+            got.refused[0].starts_with("src ("),
+            "and says which and why"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// MAIN-493 AC-1: a declared path may not leave the worktree, by `..` or by
+    /// a symlink — `target` pointed at a shared cache would otherwise hand
+    /// `remove_dir_all` the whole of it.
+    #[test]
+    fn reclaim_cannot_escape_the_worktree() {
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let tmp =
+            std::env::temp_dir().join(format!("nook-493-esc-{}", uuid::Uuid::now_v7().simple()));
+        let (_cache, wt, _b) = build_tree_after_a_pass(&tmp, "MAIN-44", false);
+        build_tree_with_output(&wt);
+        let outside = tmp.join("shared-cache");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("everyone-elses.rlib"), vec![1u8; 16]).unwrap();
+
+        assert_eq!(normalized_reclaim_entry("../shared-cache"), None);
+        assert_eq!(normalized_reclaim_entry("/etc"), Some("etc".into()));
+        assert_eq!(
+            normalized_reclaim_entry("  ./target/ "),
+            Some("target".into())
+        );
+
+        #[cfg(unix)]
+        {
+            std::fs::remove_dir_all(wt.join("target")).unwrap();
+            std::os::unix::fs::symlink(&outside, wt.join("target")).unwrap();
+            let settings = WorktreeSettings {
+                reclaim: vec!["../shared-cache".into(), "target".into()],
+                ..WorktreeSettings::default()
+            };
+            assert_eq!(reclaim_build_output(&wt, &settings), Reclaimed::default());
+            assert!(
+                outside.join("everyone-elses.rlib").exists(),
+                "a symlinked target is not this tree's to delete"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// MAIN-493 AC-4: every absence is a no-op — a worktree that is gone, a
+    /// tree that never built, and a second reclaim of the first one's work.
+    #[test]
+    fn reclaiming_twice_or_nothing_is_never_an_error() {
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let tmp =
+            std::env::temp_dir().join(format!("nook-493-idem-{}", uuid::Uuid::now_v7().simple()));
+        let (_cache, wt, _b) = build_tree_after_a_pass(&tmp, "MAIN-46", false);
+        build_tree_with_output(&wt);
+        let settings = WorktreeSettings {
+            reclaim: vec!["target".into()],
+            ..WorktreeSettings::default()
+        };
+
+        assert!(!reclaim_build_output(&wt, &settings).removed.is_empty());
+        assert_eq!(
+            reclaim_build_output(&wt, &settings),
+            Reclaimed::default(),
+            "the second pass over an already-reclaimed tree finds nothing to do"
+        );
+        assert_eq!(
+            reclaim_build_output(&tmp.join("never-existed"), &settings),
+            Reclaimed::default(),
+            "and a worktree that is gone is not an error either"
+        );
+        assert_eq!(
+            reclaim_note(&Reclaimed::default()),
+            None,
+            "and says nothing"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// MAIN-493: a repo opts out by declaring an empty list, and that must not
+    /// shell out to git at all — an empty `reclaim` is the answer, not a query.
+    #[test]
+    fn an_empty_reclaim_list_reclaims_nothing() {
+        let settings = WorktreeSettings {
+            reclaim: vec![],
+            ..WorktreeSettings::default()
+        };
+        assert_eq!(
+            reclaim_build_output(Path::new("/nonexistent-worktree"), &settings),
+            Reclaimed::default()
+        );
+    }
+
+    /// The transcript line is the operator's only view of what a pass gave
+    /// back, so both halves of a partial reclaim have to reach it.
+    #[test]
+    fn the_reclaim_note_reports_what_went_and_what_did_not() {
+        let note = reclaim_note(&Reclaimed {
+            removed: vec!["target".into()],
+            bytes: 3 * 1024 * 1024 * 1024,
+            refused: vec![".cache/cargo-target (Permission denied)".into()],
+        })
+        .expect("something happened");
+        assert_eq!(
+            note,
+            "reclaimed 3.0 GiB of build output (target); could not reclaim \
+             .cache/cargo-target (Permission denied)"
+        );
+        assert_eq!(human_bytes(999), "999 B");
+        assert_eq!(human_bytes(1536), "1.5 KiB");
     }
 
     /// MAIN-465 AC-2: the delivered API URL wins; absent or blank falls back
