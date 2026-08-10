@@ -1,10 +1,9 @@
 import React, { useEffect, useRef, useState } from "react";
 import { NotificationBell } from "./Notifications";
 import { PendingInteractions } from "./Interactions";
-import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
+import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Activity,
   Boxes,
   ChevronDown,
   Eye,
@@ -12,6 +11,7 @@ import {
   FolderGit2,
   KanbanSquare,
   LayoutDashboard,
+  ListChecks,
   LogOut,
   Radar,
   Mic,
@@ -30,6 +30,7 @@ import { useLive } from "./live";
 import { TenantSwitcher } from "./TenantSwitcher";
 import { useControlPlaneVersion } from "./NodeFacts";
 import { useWorkspaceContext } from "./context";
+import { RUNS_SECTION } from "./WorkspaceRuns";
 import { NewWorkHost } from "./NewWorkModal";
 import { ControlPlanePill } from "./ControlPlanePill";
 import { ControlPlaneTabs } from "./ControlPlaneTabs";
@@ -71,8 +72,14 @@ const ADMIN_SECTION = {
 
 const COMING_SOON = [{ label: "Standup", icon: Mic }];
 
-/** Workspace-context tabs shown in the top bar once a workspace is chosen. */
-function ContextTabs() {
+/** Workspace-context tabs shown in the top bar once a workspace is chosen.
+ *
+ *  THREE tabs, and every one of them is about the chosen workspace (MAIN-488).
+ *  Board and Activity were here too and neither was scoped: Board went to the
+ *  global board the left rail already links, and Activity jumped clean out of
+ *  the workspace to the admin feed. A context strip whose entries leave the
+ *  context is not a context strip. */
+export function ContextTabs() {
   const { selectedWorkspaceId } = useWorkspaceContext();
   const location = useLocation();
   if (!selectedWorkspaceId) {
@@ -83,8 +90,12 @@ function ContextTabs() {
     );
   }
   const overviewPath = `/workspaces/${selectedWorkspaceId}`;
+  const onWorkspace = location.pathname === overviewPath;
+  const section = new URLSearchParams(location.search).get("section");
   const tabs = [
-    { to: overviewPath, label: "Overview", icon: Eye, active: location.pathname === overviewPath },
+    // Overview owns every section of the page except Runs, which has its own
+    // tab: two tabs over one route, told apart by `?section=`.
+    { to: overviewPath, label: "Overview", icon: Eye, active: onWorkspace && section !== RUNS_SECTION },
     // Prefix, not equality: `/sessions` redirects to a session now (MAIN-321),
     // so an exact match would mean this tab is never the active one.
     {
@@ -93,21 +104,29 @@ function ContextTabs() {
       icon: SquareTerminal,
       active: location.pathname.startsWith("/sessions"),
     },
-    { to: "/board", label: "Board", icon: KanbanSquare, active: location.pathname === "/board" },
     {
-      to: "/admin?section=activity",
-      label: "Activity",
-      icon: Activity,
-      active: location.pathname === "/admin" && location.search.includes("section=activity"),
+      to: `${overviewPath}?section=${RUNS_SECTION}`,
+      label: "Runs",
+      icon: ListChecks,
+      active: onWorkspace && section === RUNS_SECTION,
     },
   ];
   return (
     <>
       {tabs.map((t) => (
-        <NavLink key={t.label} to={t.to} className={`nook-tab${t.active ? " active" : ""}`}>
+        // `Link`, not `NavLink`: these tabs are told apart by `?section=`, which
+        // NavLink's own matching ignores — it would light Overview up on the
+        // Runs section as well, since both are the same path. The `active`
+        // computed above is the only answer.
+        <Link
+          key={t.label}
+          to={t.to}
+          className={`nook-tab${t.active ? " active" : ""}`}
+          aria-current={t.active ? "page" : undefined}
+        >
           <t.icon size={14} />
           {t.label}
-        </NavLink>
+        </Link>
       ))}
     </>
   );

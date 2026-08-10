@@ -6840,6 +6840,19 @@ tr:hover .row-action,
   font: inherit;
   font-size: 12px;
 }
+/* A row carries its kind as well as its state now (MAIN-488), which is one
+   pill more than this ~200px column fits on a line. The identity truncates and
+   the annotation wraps, rather than every pill compressing to nothing. */
+.reviews-run {
+  flex-wrap: wrap;
+}
+.reviews-run .run-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .reviews-run:hover {
   background: var(--nook-bg-raised);
   color: var(--nook-fg);

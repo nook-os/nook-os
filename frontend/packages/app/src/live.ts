@@ -202,8 +202,10 @@ export function startLive(queryClient: QueryClient) {
       queryClient.invalidateQueries({ queryKey: ["workspace-reviews"] });
       // Builds ride the same nudge (MAIN-461 AC-3): a build HAS a task id, so
       // the ticketed branch above already repaints its card — this repaints
-      // the workspace's Builds panel rows.
+      // the workspace's build rows.
       queryClient.invalidateQueries({ queryKey: ["workspace-builds"] });
+      // Two keys, one panel since MAIN-488: the Runs panel reads both listings
+      // and merges them, so both prefixes still have to be nudged.
     } else if (event.type === "job_turn") {
       // A loop job's agent started or stopped a turn (MAIN-240 AC-2). Unlike
       // every neighbour in this switch, this does NOT invalidate a query: a turn
