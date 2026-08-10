@@ -4,6 +4,11 @@
 // The declaration is MAIN-315's `SessionSpec`; the numbers come from MAIN-316's
 // planner through `/reconcile-status`, so what is on screen is what the loop is
 // acting on rather than a second opinion about it.
+//
+// MAIN-500 adds the third tense: the editor asks `/reconcile-preview` what the
+// UNSAVED draft would do, through that same planner. So the panel says what is
+// declared, what happened, and what would happen — and the last of those is
+// labelled as a projection everywhere it appears.
 import React, { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, X } from "lucide-react";
@@ -41,26 +46,73 @@ function pairsOf(o: Record<string, string>): Pair[] {
   return Object.entries(o).map(([k, v]) => ({ k, v }));
 }
 
-/// A blocker, in the words a person can act on (MAIN-431: the reason is
-/// structural now, so the pill can say WHY instead of just naming the node).
-function blockerText(b: Schemas["NodeBlocker"]): string {
+/** A blocker in two parts: the ground it failed on, and what makes that ground
+ *  actionable (MAIN-431 made the reason structural; MAIN-500 stops flattening
+ *  it back into prose).
+ *
+ *  Exported because the split IS the contract: a reader scanning a column of
+ *  rows reads the grounds, and only then the detail of the one that surprises
+ *  them. A single sentence per node makes that scan impossible. */
+export function blockerParts(b: Schemas["NodeBlocker"]): {
+  ground: string;
+  detail: string;
+} {
   switch (b.kind) {
     case "offline":
-      return "offline";
+      return { ground: "offline", detail: "not connected" };
     case "runtime_unavailable":
-      return `no ${b.wanted} runtime (has ${b.available.join(", ") || "none"})`;
+      return {
+        ground: `no ${b.wanted} runtime`,
+        detail: b.available.length
+          ? `has ${b.available.join(", ")}`
+          : "reported no runtimes",
+      };
     case "selector_mismatch":
-      return `${b.key}=${b.wanted} wanted, ${
-        b.actual == null ? `no ${b.key} label` : `has ${b.actual}`
-      }`;
+      return {
+        ground: `${b.key} mismatch`,
+        detail: `wants ${b.wanted}, ${
+          b.actual == null ? `has no ${b.key} label` : `has ${b.actual}`
+        }`,
+      };
     case "untolerated_taint":
-      return `tainted ${b.key}:${b.effect}`;
+      return {
+        ground: "untolerated taint",
+        detail: `${b.key}:${b.effect} is not tolerated`,
+      };
     case "needs_clone":
-      return "waiting on a clone";
+      return { ground: "needs a clone", detail: "eligible once the checkout lands" };
   }
 }
 
-/// The status line, in the one sentence a person actually wants.
+/// One node and every ground it failed on, on its OWN row (MAIN-500 AC-5) —
+/// the same shape whether it came from the saved status or from a preview.
+function BlockedRow({
+  name,
+  reasons,
+}: {
+  name: string;
+  reasons: Schemas["NodeBlocker"][];
+}) {
+  return (
+    <div className="policy-node-row" data-testid="policy-blocked-row">
+      <span className="policy-node-name mono">{name}</span>
+      <span className="policy-node-reasons">
+        {reasons.map((r, i) => {
+          const { ground, detail } = blockerParts(r);
+          return (
+            <span key={i} className="policy-reason" data-blocker={r.kind}>
+              <Pill tone="warn">{ground}</Pill>
+              <span className="faint">{detail}</span>
+            </span>
+          );
+        })}
+      </span>
+    </div>
+  );
+}
+
+/// The status line, in the one sentence a person actually wants. The nodes it
+/// is short BY are rows in the body, not a comma-joined tail here.
 function StatusLine({
   status,
 }: {
@@ -87,22 +139,44 @@ function StatusLine({
           fix belongs. */}
       {!status.enabled && <ReconcileSwitch />}
       {status.shortfall > 0 && (
-        <span className="faint small">
+        <span className="faint small" data-testid="policy-shortfall">
           {status.shortfall} short
-          {status.blocked.length > 0 && (
-            <>
-              {" — "}
-              {status.blocked
-                .map(
-                  (b) =>
-                    `${b.node_name || b.node_id}: ${blockerText(b.reason)}`,
-                )
-                .join(", ")}
-            </>
-          )}
         </span>
       )}
     </span>
+  );
+}
+
+/// Desired versus actual, below the declaration it is the outcome of.
+function ShortfallDetail({ status }: { status: Schemas["ReconcileStatus"] }) {
+  if (!status.managed || status.shortfall === 0) return null;
+  return (
+    <div className="policy-region policy-shortfall" data-testid="policy-shortfall-detail">
+      <div className="policy-region-title small">
+        short by {status.shortfall}
+        <span className="faint"> · {status.running}/{status.desired} running</span>
+      </div>
+      {status.blocked.length > 0 ? (
+        status.blocked.map((b) => (
+          <BlockedRow
+            key={b.node_id}
+            name={b.node_name || b.node_id}
+            reasons={[b.reason]}
+          />
+        ))
+      ) : (
+        <div className="faint small">
+          {/* Short with nothing blocked is the fleet being too small, not a
+              node refusing — so it answers with the count that IS the limit
+              rather than naming nodes it has none of. */}
+          {status.port_capped
+            ? "this repo declares no ports, so it is held to one session per node"
+            : status.eligible === 0
+              ? "no node matches this policy"
+              : `${status.eligible} node${status.eligible === 1 ? "" : "s"} match — fewer than this policy asks for`}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -150,6 +224,148 @@ function ReconcileSwitch() {
   );
 }
 
+/** The spec the PUT would carry, from the editor's live state.
+ *
+ *  One function for both callers (MAIN-500 AC-1): the preview has to ask about
+ *  the bytes save would send, and a second assembly here is how a preview ends
+ *  up answering for a spec nobody can save — the blank-row drop below is
+ *  exactly the kind of difference that would go unnoticed. */
+export function draftSpec(draft: Spec, selector: Pair[], tolerations: Pair[]): Spec {
+  return {
+    ...draft,
+    // Blank rows are dropped rather than sent: a half-typed key is a UI state,
+    // not a declaration, and the server would (correctly) reject it.
+    node_selector: Object.fromEntries(
+      selector.filter((p) => p.k.trim() && p.v.trim()).map((p) => [p.k.trim(), p.v.trim()]),
+    ),
+    tolerations: tolerations
+      .filter((p) => p.k.trim())
+      .map((p) => ({ key: p.k.trim(), effect: p.v.trim() || "NoSchedule" })),
+  };
+}
+
+/** What saving the draft would do — asked of the reconciler's own planner
+ *  (MAIN-431's endpoint), which writes nothing.
+ *
+ *  Every line here is in the conditional, and the panel says so twice: in its
+ *  title and in the tone of every count. A projection that reads as a result is
+ *  worse than no projection, because it is trusted (AC-2).
+ *
+ *  `stale` is passed in rather than derived: the query is keyed on the
+ *  DEBOUNCED spec, so react-query is perfectly happy — idle, with data — during
+ *  the window where that data answers for a spec the editor has already moved
+ *  past. Nothing inside the query can see that gap. */
+function PolicyPreview({
+  preview,
+  isError,
+  stale,
+}: {
+  preview: Schemas["ReconcilePreview"] | null | undefined;
+  isError: boolean;
+  stale: boolean;
+}) {
+  if (isError) {
+    // Never a gate (AC-3). The panel loses its projection; the editor keeps
+    // every one of its powers.
+    return (
+      <div className="policy-region" data-testid="policy-preview-unavailable">
+        <div className="policy-region-title small">projection unavailable</div>
+        <div className="faint small">
+          The control plane did not answer the preview. Saving still works —
+          this is an aid, not a gate.
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div
+      className={`policy-region policy-preview${stale ? " is-stale" : ""}`}
+      data-testid="policy-preview"
+      data-stale={stale ? "true" : "false"}
+      aria-busy={stale}
+    >
+      <div className="policy-region-title small">
+        if you save this
+        <span className="faint"> · projection, nothing has changed yet</span>
+        {stale && (
+          <span className="faint" data-testid="policy-preview-stale">
+            {" "}
+            · recalculating…
+          </span>
+        )}
+      </div>
+      {!preview ? (
+        <div className="faint small">working out what this would do…</div>
+      ) : (
+        <>
+          <div className="small" data-testid="policy-preview-counts">
+            {/* "would run", not "would start": `placed` counts the sessions the
+                plan wants running, which includes any that already are. */}
+            <Pill tone={preview.shortfall > 0 ? "warn" : "ok"}>
+              {preview.placed}/{preview.desired} sessions
+            </Pill>{" "}
+            <span className="faint">
+              would run
+              {preview.shortfall > 0 && ` · ${preview.shortfall} short`}
+              {preview.capped &&
+                " · this repo declares no ports, so it is held to one session per node"}
+            </span>
+          </div>
+
+          <div className="policy-preview-group small">
+            <span className="policy-region-title">on</span>
+            {preview.matched.length === 0 ? (
+              <div className="faint">no node both matches and holds a checkout</div>
+            ) : (
+              preview.matched.map((n) => (
+                <div
+                  key={n.node_id}
+                  className="policy-node-row"
+                  data-testid="policy-preview-node"
+                >
+                  <span className="policy-node-name mono">
+                    {n.node_name || n.node_id}
+                  </span>
+                </div>
+              ))
+            )}
+          </div>
+
+          {preview.needs_clone.length > 0 && (
+            <div className="policy-preview-group small">
+              <span className="policy-region-title">waiting</span>
+              {preview.needs_clone.map((b) => (
+                <BlockedRow
+                  key={b.node_id}
+                  name={b.node_name || b.node_id}
+                  reasons={[b.reason]}
+                />
+              ))}
+            </div>
+          )}
+
+          {preview.ineligible.length > 0 && (
+            <div className="policy-preview-group small">
+              <span className="policy-region-title">excluded</span>
+              {preview.ineligible.map((n) => (
+                <BlockedRow
+                  key={n.node_id}
+                  name={n.node_name || n.node_id}
+                  reasons={n.reasons}
+                />
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/// How long the editor waits after the last keystroke before asking. A request
+/// per character would be a storm against a planner that reads four tables.
+const PREVIEW_DEBOUNCE_MS = 300;
+
 export function SessionPolicy({ workspaceId }: { workspaceId: string }) {
   const queryClient = useQueryClient();
   const [editing, setEditing] = useState(false);
@@ -180,14 +396,58 @@ export function SessionPolicy({ workspaceId }: { workspaceId: string }) {
     refetchInterval: 10000,
   });
 
+  // The spec as it stands, and the same spec as the preview last asked about.
+  // Serialized because the query key and the staleness test both want value
+  // equality, and every object here is rebuilt on each keystroke.
+  const wanted = JSON.stringify(draftSpec(draft, selector, tolerations));
+  const [asked, setAsked] = useState(wanted);
+
   // Seed the editor from what is stored, each time it opens.
   useEffect(() => {
     if (!editing) return;
     const s = (spec as Spec | null) ?? EMPTY;
+    const sel = pairsOf(s.node_selector ?? {});
+    const tol = (s.tolerations ?? []).map((t) => ({ k: t.key, v: t.effect }));
     setDraft(s);
-    setSelector(pairsOf(s.node_selector ?? {}));
-    setTolerations((s.tolerations ?? []).map((t) => ({ k: t.key, v: t.effect })));
+    setSelector(sel);
+    setTolerations(tol);
+    // The opening preview asks about the SEEDED draft in the same commit the
+    // editor is seeded in. Left to the debounce, the query would fire once for
+    // the placeholder the closed panel was holding, and show that answer for
+    // the length of the window.
+    setAsked(JSON.stringify(draftSpec(s, sel, tol)));
   }, [editing, spec]);
+  useEffect(() => {
+    const t = setTimeout(() => setAsked(wanted), PREVIEW_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [wanted]);
+
+  const preview = useQuery({
+    queryKey: ["reconcile-preview", workspaceId, asked],
+    // Only while the editor is open: this is a question about a draft, and
+    // there is no draft when nothing is being edited.
+    enabled: editing,
+    // A projection is worth exactly one attempt — retrying holds the panel in
+    // "recalculating" for seconds on a control plane that is plainly down,
+    // when the honest answer (AC-3) is that it is unavailable.
+    retry: false,
+    queryFn: async () => {
+      const { data, error } = await api.POST(
+        "/api/v1/workspaces/{id}/reconcile-preview",
+        {
+          params: { path: { id: workspaceId } },
+          body: { spec: JSON.parse(asked) },
+        },
+      );
+      // Thrown, not returned: a refused preview is the error state, and the
+      // panel distinguishes it from "not answered yet".
+      if (error || !data) throw new Error("preview unavailable");
+      return data as Schemas["ReconcilePreview"];
+    },
+  });
+  // Answering for a spec the editor has moved past — the debounce window, and
+  // the request after it.
+  const previewStale = editing && (wanted !== asked || preview.isFetching);
 
   const save = async (next: Spec | null) => {
     setBusy(true);
@@ -207,18 +467,7 @@ export function SessionPolicy({ workspaceId }: { workspaceId: string }) {
     queryClient.invalidateQueries({ queryKey: ["reconcile-status", workspaceId] });
   };
 
-  const submit = () =>
-    save({
-      ...draft,
-      // Blank rows are dropped rather than sent: a half-typed key is a UI state,
-      // not a declaration, and the server would (correctly) reject it.
-      node_selector: Object.fromEntries(
-        selector.filter((p) => p.k.trim() && p.v.trim()).map((p) => [p.k.trim(), p.v.trim()]),
-      ),
-      tolerations: tolerations
-        .filter((p) => p.k.trim())
-        .map((p) => ({ key: p.k.trim(), effect: p.v.trim() || "NoSchedule" })),
-    });
+  const submit = () => save(draftSpec(draft, selector, tolerations));
 
   const pairEditor = (
     rows: Pair[],
@@ -276,27 +525,30 @@ export function SessionPolicy({ workspaceId }: { workspaceId: string }) {
     >
       {!editing ? (
         spec ? (
-          <div className="policy-summary small mono">
-            <div>
-              runtime <b>{(spec as Spec).runtime}</b> ·{" "}
-              {(spec as Spec).replicas.kind === "count"
-                ? `${((spec as Spec).replicas as { count: number }).count} replicas`
-                : (spec as Spec).replicas.kind === "all"
-                  ? "one per matching node"
-                  : "exactly one"}
+          <>
+            <div className="policy-summary small mono">
+              <div>
+                runtime <b>{(spec as Spec).runtime}</b> ·{" "}
+                {(spec as Spec).replicas.kind === "count"
+                  ? `${((spec as Spec).replicas as { count: number }).count} replicas`
+                  : (spec as Spec).replicas.kind === "all"
+                    ? "one per matching node"
+                    : "exactly one"}
+              </div>
+              <div className="faint">
+                {Object.keys((spec as Spec).node_selector ?? {}).length === 0
+                  ? "any node"
+                  : Object.entries((spec as Spec).node_selector)
+                      .map(([k, v]) => `${k}=${v}`)
+                      .join(", ")}
+                {((spec as Spec).tolerations ?? []).length > 0 &&
+                  ` · tolerates ${(spec as Spec).tolerations
+                    .map((t) => `${t.key}:${t.effect}`)
+                    .join(", ")}`}
+              </div>
             </div>
-            <div className="faint">
-              {Object.keys((spec as Spec).node_selector ?? {}).length === 0
-                ? "any node"
-                : Object.entries((spec as Spec).node_selector)
-                    .map(([k, v]) => `${k}=${v}`)
-                    .join(", ")}
-              {((spec as Spec).tolerations ?? []).length > 0 &&
-                ` · tolerates ${(spec as Spec).tolerations
-                  .map((t) => `${t.key}:${t.effect}`)
-                  .join(", ")}`}
-            </div>
-          </div>
+            {status && <ShortfallDetail status={status} />}
+          </>
         ) : (
           <Empty>
             This workspace runs no declared sessions. Declare a policy and the
@@ -305,67 +557,86 @@ export function SessionPolicy({ workspaceId }: { workspaceId: string }) {
         )
       ) : (
         <div className="policy-editor">
-          <label className="small">
-            runtime
-            <input
-              className="input small"
-              value={draft.runtime}
-              onChange={(e) => setDraft({ ...draft, runtime: e.target.value })}
-              placeholder="claude"
-            />
-          </label>
-
-          <label className="small">
-            replicas
-            <select
-              className="input small"
-              value={draft.replicas.kind}
-              onChange={(e) => {
-                const kind = e.target.value as Replicas["kind"];
-                setDraft({
-                  ...draft,
-                  replicas:
-                    kind === "count" ? { kind: "count", count: 1 } : { kind },
-                });
-              }}
-            >
-              <option value="single">exactly one</option>
-              <option value="count">a fixed number</option>
-              <option value="all">one per matching node</option>
-            </select>
-          </label>
-          {draft.replicas.kind === "count" && (
+          {/* Three questions, three regions (AC-4). The replica mode and the
+              count it governs are ONE decision, and the flat column said so
+              nowhere: the count appeared and disappeared four rows down from
+              the select that decides whether it exists. */}
+          <fieldset className="policy-region" data-testid="policy-region-what">
+            <legend className="policy-region-title small">what runs</legend>
             <label className="small">
-              how many
+              runtime
               <input
                 className="input small"
-                type="number"
-                min={0}
-                value={draft.replicas.count}
-                onChange={(e) =>
-                  setDraft({
-                    ...draft,
-                    replicas: {
-                      kind: "count",
-                      // 0 is legal and means "managed, wanting none" — a real
-                      // declaration, distinct from having no policy at all.
-                      count: Math.max(0, Number(e.target.value) || 0),
-                    },
-                  })
-                }
+                value={draft.runtime}
+                onChange={(e) => setDraft({ ...draft, runtime: e.target.value })}
+                placeholder="claude"
               />
             </label>
-          )}
+          </fieldset>
 
-          <div className="small">
-            node selector <span className="faint">(empty matches every node)</span>
-            {pairEditor(selector, setSelector, "os", "linux")}
-          </div>
+          <fieldset className="policy-region" data-testid="policy-region-how-many">
+            <legend className="policy-region-title small">how many</legend>
+            <label className="small">
+              replicas
+              <select
+                className="input small"
+                value={draft.replicas.kind}
+                onChange={(e) => {
+                  const kind = e.target.value as Replicas["kind"];
+                  setDraft({
+                    ...draft,
+                    replicas:
+                      kind === "count" ? { kind: "count", count: 1 } : { kind },
+                  });
+                }}
+              >
+                <option value="single">exactly one</option>
+                <option value="count">a fixed number</option>
+                <option value="all">one per matching node</option>
+              </select>
+            </label>
+            {draft.replicas.kind === "count" && (
+              <label className="small">
+                how many
+                <input
+                  className="input small"
+                  type="number"
+                  min={0}
+                  value={draft.replicas.count}
+                  onChange={(e) =>
+                    setDraft({
+                      ...draft,
+                      replicas: {
+                        kind: "count",
+                        // 0 is legal and means "managed, wanting none" — a real
+                        // declaration, distinct from having no policy at all.
+                        count: Math.max(0, Number(e.target.value) || 0),
+                      },
+                    })
+                  }
+                />
+              </label>
+            )}
+          </fieldset>
 
-          <div className="small">
-            tolerations <span className="faint">(taints this work accepts)</span>
-            {pairEditor(tolerations, setTolerations, "key", "NoSchedule")}
-          </div>
+          <fieldset className="policy-region" data-testid="policy-region-where">
+            <legend className="policy-region-title small">where</legend>
+            <div className="small">
+              node selector <span className="faint">(empty matches every node)</span>
+              {pairEditor(selector, setSelector, "os", "linux")}
+            </div>
+
+            <div className="small">
+              tolerations <span className="faint">(taints this work accepts)</span>
+              {pairEditor(tolerations, setTolerations, "key", "NoSchedule")}
+            </div>
+          </fieldset>
+
+          <PolicyPreview
+            preview={preview.data}
+            isError={preview.isError}
+            stale={previewStale}
+          />
 
           <div className="policy-actions">
             <button className="btn primary small" disabled={busy} onClick={submit}>
