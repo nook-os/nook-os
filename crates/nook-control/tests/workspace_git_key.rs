@@ -25,7 +25,7 @@
 use axum::extract::{Path, State};
 use nook_control::auth::{AuthCtx, Principal};
 use nook_control::routes::workspaces::git_key;
-use nook_db::dialect::time_math;
+use nook_db::dialect::{time_math, type_mapping};
 use nook_db::{params, Db, DbPool};
 use nook_testkit::TestBed;
 use nook_types::*;
@@ -211,18 +211,21 @@ async fn a_recently_missing_checkout_still_yields_its_key() {
     let node = bed.node(tenant, person).await;
     let workspace = bed.workspace(tenant).await;
     add_checkout(&bed.db(), tenant, node, workspace).await;
-    // `CURRENT_TIMESTAMP`, not `now()`: this test asserts engine-independent
-    // behaviour and must run on both legs, but `now()` is Postgres-only and the
-    // sqlite leg answers "no such function". Standard SQL is the version both
-    // engines take (docs/db-dialect-audit.md).
-    bed.db()
-        .exec(
-            "UPDATE node_workspaces SET missing_at = CURRENT_TIMESTAMP
+    // Through the SEAM, like its long-dead twin below. `CURRENT_TIMESTAMP` was
+    // the engine-independent spelling before MAIN-442; it still runs on both,
+    // but on SQLite it writes a second-resolution form that nothing else in
+    // that database uses, and this row is compared against `now()`.
+    let db = bed.db();
+    db.exec(
+        &format!(
+            "UPDATE node_workspaces SET missing_at = {}
              WHERE node_id = $1 AND workspace_id = $2",
-            params![node, workspace],
-        )
-        .await
-        .expect("flag missing");
+            type_mapping(db.engine()).now()
+        ),
+        params![node, workspace],
+    )
+    .await
+    .expect("flag missing");
 
     let res = git_key(
         State(state.clone()),
@@ -261,13 +264,14 @@ async fn a_long_dead_checkout_is_refused_its_key() {
     let node = bed.node(tenant, person).await;
     let workspace = bed.workspace(tenant).await;
     add_checkout(&bed.db(), tenant, node, workspace).await;
-    // Through the SEAM, not a bound `chrono` value. Binding one wrote an
-    // RFC3339 string (`2026-08-03T09:00:00+00:00`) while production writes
-    // `type_mapping(engine).now()`, which on SQLite is `CURRENT_TIMESTAMP` —
-    // `2026-08-03 09:00:00`. The repo compares them as TEXT there, and `T`
+    // Through the SEAM, which is how production writes it. Before MAIN-442 a
+    // bound `chrono` value wrote an RFC3339 string
+    // (`2026-08-03T09:00:00+00:00`) while `type_mapping(engine).now()` wrote
+    // `2026-08-03 09:00:00`; the repo compares them as TEXT on SQLite, and `T`
     // sorts above the space, so an hour-old tombstone read as NEWER than the
-    // cutoff: green on Postgres, red on SQLite. Writing the way production
-    // writes is what makes the comparison mean the same thing on both.
+    // cutoff — green on Postgres, red on SQLite. Both halves render one form
+    // now, but writing the way production writes is still what makes this
+    // assert the production comparison.
     let db = bed.db();
     db.exec(
         &format!(

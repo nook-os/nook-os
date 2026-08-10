@@ -98,7 +98,7 @@ pub trait TypeMapping {
     /// A cast expression. Postgres: `{expr}::{ty}`; SQLite: `CAST({expr} AS {ty})`.
     fn cast(&self, expr: &str, ty: &str) -> String;
     /// The current-timestamp expression. Postgres: `now()`; SQLite:
-    /// `CURRENT_TIMESTAMP`.
+    /// [`crate::sqlite_time::NOW_SQL`].
     fn now(&self) -> &'static str;
     /// The larger of two scalar expressions (MAIN-352). Postgres spells it
     /// `GREATEST`; SQLite's two-argument `MAX` is the same function under
@@ -127,7 +127,7 @@ pub trait TypeMapping {
 /// `now() ± interval …` arithmetic (audit (d): INTERVAL arithmetic, MAIN-204).
 /// The WHOLE expression is abstracted, not just the interval literal, because a
 /// second engine expresses it entirely differently — SQLite has no `+ interval`
-/// operator and would emit `datetime('now', '+14 days')`. Postgres delegates to
+/// operator and instead applies a `'+14 days'` modifier. Postgres delegates to
 /// `now() ± interval '…'`. The `spec`/`unit` strings are **static**,
 /// code-controlled interval literals (e.g. `"14 days"`), never user input —
 /// spliced like [`Json::get_text`]'s key; bind a parameter for any variable
@@ -312,7 +312,11 @@ impl TypeMapping for Sqlite {
         format!("CAST({expr} AS {ty})")
     }
     fn now(&self) -> &'static str {
-        "CURRENT_TIMESTAMP"
+        // NOT `CURRENT_TIMESTAMP` (MAIN-442): it renders seconds only, and in a
+        // shape no bound `DateTime<Utc>` encodes as, so a TEXT timestamp column
+        // written by it neither compared equal nor ordered against one written
+        // from Rust. `crate::sqlite_time` states the form both halves use.
+        crate::sqlite_time::NOW_SQL
     }
     fn greatest(&self, a: &str, b: &str) -> String {
         // SQLite's scalar `max(a, b)` — distinct from the aggregate `max(x)`,
@@ -328,14 +332,20 @@ impl TypeMapping for Sqlite {
 }
 
 impl TimeMath for Sqlite {
-    // `datetime('now', ±spec)` is SQLite's interval arithmetic. Postgres spells
-    // an interval `'10 years'`; SQLite wants `'+10 years'` / `'-10 years'`, so
-    // the sign is prefixed here rather than pushed onto every call site.
+    // A modifier on `'now'` is SQLite's interval arithmetic. Postgres spells an
+    // interval `'10 years'`; SQLite wants `'+10 years'` / `'-10 years'`, so the
+    // sign is prefixed here rather than pushed onto every call site.
+    //
+    // The rendering is `sqlite_time`'s, NOT `datetime()` (MAIN-442). These
+    // expressions are compared against stored timestamps — a lease expiry
+    // against `now()`, a cutoff against `created_at` — and on a TEXT column
+    // that comparison is bytes: `datetime()`'s second-resolution form sorts
+    // wrongly against the millisecond form everything else writes.
     fn now_plus(&self, spec: &str) -> String {
-        format!("datetime('now', '+{spec}')")
+        crate::sqlite_time::now_shifted_sql(&format!("'+{spec}'"))
     }
     fn now_minus(&self, spec: &str) -> String {
-        format!("datetime('now', '-{spec}')")
+        crate::sqlite_time::now_shifted_sql(&format!("'-{spec}'"))
     }
     fn now_minus_scaled(&self, count: &str, unit: &str) -> String {
         // The modifier has to be built at runtime because the count is a bind
@@ -345,18 +355,18 @@ impl TimeMath for Sqlite {
         // takes a signed number, and a caller may legitimately pass a negative
         // count — `claim_lease` leases `-60` to mean "expired a minute ago".
         // Prepending gave `'+-60 seconds'`, which is not a modifier, and an
-        // unrecognised modifier makes `datetime()` return NULL SILENTLY rather
-        // than error (MAIN-355).
-        format!(
-            "datetime('now', printf('%s {}', -({count})))",
+        // unrecognised modifier makes the date function return NULL SILENTLY
+        // rather than error (MAIN-355).
+        crate::sqlite_time::now_shifted_sql(&format!(
+            "printf('%s {}', -({count}))",
             sqlite_modifier_unit(unit)
-        )
+        ))
     }
     fn now_plus_scaled(&self, count: &str, unit: &str) -> String {
-        format!(
-            "datetime('now', printf('%s {}', {count}))",
+        crate::sqlite_time::now_shifted_sql(&format!(
+            "printf('%s {}', {count})",
             sqlite_modifier_unit(unit)
-        )
+        ))
     }
 }
 
@@ -747,7 +757,7 @@ mod sqlite_dialect_tests {
     #[test]
     fn sqlite_speaks_its_own_now_and_cast() {
         let t = type_mapping(Engine::Sqlite);
-        assert_eq!(t.now(), "CURRENT_TIMESTAMP");
+        assert_eq!(t.now(), "strftime('%Y-%m-%d %H:%M:%f','now')");
         assert_eq!(t.cast("$1", "text"), "CAST($1 AS text)");
         // The three category-(c) column types collapse to TEXT, matching the
         // committed SQLite DDL.
@@ -771,8 +781,14 @@ mod sqlite_dialect_tests {
         let m = time_math(Engine::Sqlite);
         // Postgres spells the interval unsigned and adds; SQLite needs the sign
         // inside the modifier string.
-        assert_eq!(m.now_plus("10 years"), "datetime('now', '+10 years')");
-        assert_eq!(m.now_minus("7 days"), "datetime('now', '-7 days')");
+        assert_eq!(
+            m.now_plus("10 years"),
+            "strftime('%Y-%m-%d %H:%M:%f','now', '+10 years')"
+        );
+        assert_eq!(
+            m.now_minus("7 days"),
+            "strftime('%Y-%m-%d %H:%M:%f','now', '-7 days')"
+        );
         assert!(m.now_minus_scaled("$1", "second").contains("printf"));
     }
 
@@ -782,26 +798,26 @@ mod sqlite_dialect_tests {
         // (MAIN-355). Callers pass the POSTGRES interval literal `"1 second"`,
         // because the Postgres arm multiplies by it; pasting that through gave
         // `'+5 1 second'`, which SQLite does not recognise as a modifier at
-        // all. `datetime()` then returns NULL rather than erroring, so the
+        // all. The date function then returns NULL rather than erroring, so the
         // failure was a lease that never got written — not a query that blew
         // up. Asserting `contains("printf")` was what let it ship, so this
         // asserts the string.
         let m = time_math(Engine::Sqlite);
         assert_eq!(
             m.now_plus_scaled("$1", "1 second"),
-            "datetime('now', printf('%s seconds', $1))"
+            "strftime('%Y-%m-%d %H:%M:%f','now', printf('%s seconds', $1))"
         );
         // NEGATED, not prefixed with `-`. A caller may pass a negative count
         // (`claim_lease` leases `-60` for "expired a minute ago"), and `'+-60
         // seconds'` is not a modifier — it silently yields NULL.
         assert_eq!(
             m.now_minus_scaled("$1", "1 second"),
-            "datetime('now', printf('%s seconds', -($1)))"
+            "strftime('%Y-%m-%d %H:%M:%f','now', printf('%s seconds', -($1)))"
         );
         // Already plural, and already bare: both left exactly as written.
         assert_eq!(
             m.now_plus_scaled("$1", "hours"),
-            "datetime('now', printf('%s hours', $1))"
+            "strftime('%Y-%m-%d %H:%M:%f','now', printf('%s hours', $1))"
         );
     }
 }

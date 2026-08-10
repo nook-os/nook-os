@@ -18,7 +18,11 @@ Treat a finding as "look here", not "proven bug".
 - **(a) common-subset** — valid in SQLite too (`ON CONFLICT … DO UPDATE`,
   `RETURNING`); ships as-is, no change.
 - **(b) mechanical rewrite** — a local, semantics-preserving edit (`ILIKE` →
-  `LIKE … COLLATE NOCASE`, `now()` → `CURRENT_TIMESTAMP`, `::type` cast → `CAST`).
+  `LIKE … COLLATE NOCASE`, `now()` → `nook_db::sqlite_time::NOW_SQL`, `::type`
+  cast → `CAST`). *(That was `CURRENT_TIMESTAMP` when this audit was written.
+  MAIN-442 replaced it: a TEXT timestamp column is compared as text, and
+  `CURRENT_TIMESTAMP`'s second-resolution form matched neither what a bound
+  instant encoded as nor its own second neighbours.)*
 - **(c) mechanism trait** — hide behind one of MAIN-189 item 3's four traits, not
   rewritten inline: **atomic-claim** (`SKIP LOCKED`, advisory locks), **event-bus**
   (`LISTEN`/`NOTIFY`), **json** (`jsonb` + its operators), **type-mapping**

@@ -108,10 +108,22 @@ strip existing comments: leave them unless you are changing that code.
   hand-authored SQLite deltas**: a Postgres `00NN_x.sql` gets a `migrations_sqlite/
   00NN_x.sql` twin written by hand, in the same commit. The type map is
   `docs/db-dialect-audit.md`'s (uuid/timestamptz/jsonb → `TEXT`, `now()` →
-  `CURRENT_TIMESTAMP`, `::` casts stripped, `= ANY (ARRAY[…])` → `IN (…)`), and
-  `crates/nook-control/tests/sqlite_scaffold.rs` proves an empty SQLite database
-  still builds from them. Boot wiring and the both-engines divergence guard are
-  MAIN-196's, not here.
+  `nook_db::sqlite_time::NOW_SQL`, `::` casts stripped, `= ANY (ARRAY[…])` →
+  `IN (…)`), and `crates/nook-control/tests/sqlite_scaffold.rs` proves an empty
+  SQLite database still builds from them. Boot wiring and the both-engines
+  divergence guard are MAIN-196's, not here.
+- **A timestamp on the SQLite track has ONE form, and it is not
+  `CURRENT_TIMESTAMP` (MAIN-442).** A `timestamptz` is TEXT there, so text
+  comparison IS the comparison: `CURRENT_TIMESTAMP`'s
+  `2026-08-06 13:28:36` neither equalled nor ordered against the RFC 3339 a
+  bound `DateTime<Utc>` used to encode as, which made every optimistic-
+  concurrency guard match 0 rows and made two rows written in one second
+  indistinguishable. Both halves now render `nook_db::sqlite_time`'s
+  `strftime('%Y-%m-%d %H:%M:%f','now')`; `0055_sqlite_timestamp_form.sql` put it
+  on every column default, and `sqlite_boot.rs` fails the build if a new one
+  arrives spelled any other way. Milliseconds is SQLite's clock resolution, and
+  both halves must render the same width — so a bound instant is truncated to
+  ms on this engine, and only on this engine.
 - The dev reboot loop still works on a *local* database: `docker compose down -v` destroys everything, `./run.sh` recreates it (migrations + seeds). It is not available for prod.
 
 ## Panics are caught, logged, and never drop a connection (MAIN-273)
