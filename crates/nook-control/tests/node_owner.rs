@@ -206,10 +206,12 @@ async fn backfill_fills_ownerless_nodes_with_the_tenant_owner() {
     assert_eq!(owner_of(&bed.db(), node).await, None, "starts owner-less");
 
     // The 0016 backfill statement (still scoped to this node): resolves the
-    // tenant owner's person.
+    // tenant owner's person. `AS n` rather than a bare `n`, because SQLite's
+    // UPDATE grammar requires the keyword and Postgres accepts it either way —
+    // one spelling both engines read (MAIN-472).
     bed.db()
         .exec(
-            "UPDATE nodes n SET owner_person_id = (
+            "UPDATE nodes AS n SET owner_person_id = (
              SELECT u.person_id FROM users u
              WHERE u.tenant_id = n.tenant_id AND u.role = 'owner'
              ORDER BY u.created_at LIMIT 1)
