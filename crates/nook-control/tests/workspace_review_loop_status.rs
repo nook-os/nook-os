@@ -172,6 +172,7 @@ async fn running_counts_review_loops_and_not_a_persons_terminal() {
                     // not how a reviewer divides its PRs (MAIN-446).
                     managed_shard: 0,
                     managed_shards: 1,
+                    interface: SessionInterface::Terminal,
                 })
                 .await
                 .expect("create session");

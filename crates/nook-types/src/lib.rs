@@ -110,6 +110,7 @@ id_type!(
     JobId,
     JobTranscriptId,
     InteractionId,
+    SessionMessageId,
 );
 
 // ── Tenancy ──────────────────────────────────────────────────────────────────
@@ -517,6 +518,17 @@ pub struct Capabilities {
     /// Detected runtime executables: "claude", "hermes", "codex", "bash", ...
     #[serde(default)]
     pub runtimes: Vec<String>,
+    /// Which of `runtimes` this node can drive as a CHAT rather than a terminal
+    /// (MAIN-502) — the ones that speak a structured streaming protocol.
+    ///
+    /// Reported rather than inferred at the other end, so exactly one place in
+    /// the fleet decides it: the node owns how it runs an agent, the same rule
+    /// `loop_kinds` and the auth probes follow. A UI offering Chat for a
+    /// runtime the node would refuse is the failure this prevents. Empty from
+    /// a node that predates the field, which reads as "no chat here" — the
+    /// safe answer, since such a node has no chat driver either.
+    #[serde(default)]
+    pub chat_runtimes: Vec<String>,
     /// This node's SSH public key (generated locally; the private half never
     /// leaves the machine). Add it as a deploy key to clone private repos.
     #[serde(default)]
@@ -1515,6 +1527,87 @@ impl nook_db::FromDbColumn for ManagedPurpose {
     }
 }
 
+/// How a session is DRIVEN — the surface a person talks to it through
+/// (MAIN-502).
+///
+/// Not a rendering preference. A terminal session is a tmux TUI streamed as a
+/// PTY; a chat session is the runtime run headless through the streaming
+/// adapter, with the conversation persisted as messages. The two share nothing
+/// but the row, which is why this is decided at creation and stored rather than
+/// derived from the runtime: `claude` can be either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionInterface {
+    /// The historical path: tmux, a PTY, xterm.js. The default, so a client
+    /// that has never heard of this field gets exactly today's behaviour.
+    #[default]
+    Terminal,
+    /// A conversation: the runtime driven through its structured streaming
+    /// protocol, with no tmux anywhere.
+    Chat,
+}
+
+impl SessionInterface {
+    /// The stored form. A plain text column rather than an enum type, for the
+    /// reason [`ManagedPurpose`] gives: adding an interface is a code change,
+    /// not a migration.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Terminal => "terminal",
+            Self::Chat => "chat",
+        }
+    }
+
+    /// Decode a stored value, falling back to [`Terminal`](Self::Terminal).
+    ///
+    /// The fallback is the conservative one on purpose: a row written by a
+    /// newer build, read by an older one, renders as a terminal rather than
+    /// making the session vanish from every list.
+    fn from_stored(raw: &str) -> Self {
+        match raw {
+            "chat" => Self::Chat,
+            _ => Self::Terminal,
+        }
+    }
+}
+
+impl std::fmt::Display for SessionInterface {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Can this runtime be driven as a chat (MAIN-502)?
+///
+/// The one definition in the tree: the node's `job_adapter::adapter_for` reads
+/// it to pick the streaming adapter, the node reports the filtered set as
+/// `Capabilities::chat_runtimes`, and the control plane refuses a chat session
+/// for anything else. Two implementations that "must agree" would be a bug
+/// with a delay on it — a runtime one end offers and the other refuses is a
+/// session that is created and then immediately fails.
+///
+/// An allowlist, never a probe. A runtime handed `--input-format stream-json`
+/// it has never heard of does not fail cleanly; it fails as a shell that
+/// swallowed a flag.
+pub fn runtime_supports_chat(runtime: &str) -> bool {
+    matches!(runtime, "claude")
+}
+
+impl nook_db::IntoDbValue for SessionInterface {
+    fn into_db_value(self) -> nook_db::DbValue {
+        nook_db::DbValue::Text(Some(self.as_str().to_string()))
+    }
+}
+
+impl nook_db::FromDbColumn for SessionInterface {
+    fn from_db_column(row: &nook_db::DbRow, name: &str) -> Result<Self, nook_db::DbError> {
+        Ok(Self::from_stored(&row.get::<String>(name)?))
+    }
+    fn from_db_column_at(row: &nook_db::DbRow, index: usize) -> Result<Self, nook_db::DbError> {
+        Ok(Self::from_stored(&row.get_at::<String>(index)?))
+    }
+}
+
 /// Status values: `starting` | `running` | `detached` | `exited` | `error`.
 /// Runtime is an open string: "claude", "hermes", "codex", "bash", "zsh", ...
 #[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
@@ -1606,6 +1699,11 @@ pub struct Session {
     /// something a running agent discovers mid-review.
     #[serde(default = "one_shard")]
     pub managed_shards: i32,
+    /// Terminal or chat (MAIN-502) — which surface this session is driven
+    /// through, chosen at creation. Every row that predates the column reads
+    /// `terminal`, which is what it was.
+    #[serde(default)]
+    pub interface: SessionInterface,
 }
 
 /// The divisor of an unsharded session: one shard, which is every PR.
@@ -2849,6 +2947,58 @@ pub struct CreateSessionRequest {
     /// Pin the session to a specific checkout path (e.g. a worktree). When
     /// omitted, the workspace's first checkout on the node is used.
     pub path: Option<String>,
+    /// Terminal or chat (MAIN-502). Absent is [`SessionInterface::Terminal`],
+    /// so a client written before this field gets byte-for-byte what it got
+    /// before — which is the whole of AC-1.
+    #[serde(default)]
+    pub interface: SessionInterface,
+}
+
+/// One line of a chat session's conversation (MAIN-502), persisted server-side
+/// so it survives a reload, a reconnect, and being opened on another device.
+///
+/// Deliberately its own table rather than the loop's `loop_job_transcript`:
+/// that one hangs off a JOB, which is a run with an end, and a session is a
+/// conversation that outlives any single turn. What they share is the shape a
+/// reader needs, so both map onto the same `ChatView` at the other end.
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
+pub struct SessionMessage {
+    pub id: SessionMessageId,
+    pub session_id: SessionId,
+    /// `human` (someone typed it), `agent` (the runtime said it), `system`
+    /// (the node's own lifecycle notes), or `permission` (a tool the agent is
+    /// blocked on — see `permission_request_id`).
+    pub role: String,
+    pub body: String,
+    /// The runtime's own id for an outstanding permission request, present
+    /// only on a `permission` row. It is what an answer is addressed to, and
+    /// what the node matches against the agent it is blocking.
+    #[serde(default)]
+    pub permission_request_id: Option<String>,
+    /// The tool the agent wants to use, on a `permission` row — `Bash`,
+    /// `Write`, … Shown beside the request so the reader knows what they are
+    /// being asked about before they read the detail.
+    #[serde(default)]
+    pub tool_name: Option<String>,
+    /// `allow` | `deny` once answered; `None` while the agent is still
+    /// blocked. This is what makes the buttons disappear on the second device
+    /// rather than offering an answer that has already been given.
+    #[serde(default)]
+    pub decision: Option<String>,
+    pub at: DateTime<Utc>,
+}
+
+/// Say something to a chat session's agent (MAIN-502).
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct CreateSessionMessageRequest {
+    pub body: String,
+}
+
+/// Answer a chat session's outstanding permission request (MAIN-502).
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct SessionPermissionDecisionRequest {
+    /// `true` runs the tool, `false` refuses it and tells the agent so.
+    pub allow: bool,
 }
 
 /// Open an ad-hoc terminal on a machine — a shell with no workspace, running in

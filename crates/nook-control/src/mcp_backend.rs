@@ -170,6 +170,9 @@ impl NookBackend for McpBackend {
                 runtime,
                 name: None,
                 path: None,
+                // MCP opens terminals (MAIN-502 AC-7): the tool's contract is
+                // unchanged, and a chat has no MCP-facing surface yet.
+                interface: nook_types::SessionInterface::Terminal,
             },
         )
         .await?;

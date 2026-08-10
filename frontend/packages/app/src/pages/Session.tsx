@@ -47,6 +47,7 @@ import { SessionWindows, SplitButtons } from "../SessionWindows";
 import { SessionOwner } from "../sessionOwner";
 import { askConfirm, notify } from "../dialogs";
 import { recall, remember } from "../lastPlace";
+import { SessionChat } from "./SessionChat";
 
 const DIFF_PANEL_KEY = "nookos-diff-panel-open";
 
@@ -594,6 +595,10 @@ export function SessionPage() {
   // blank terminal + the `/windows` retry-storm behind it: there is nothing on
   // the other end to attach to or poll.
   const offline = !dead && session.node_online === false;
+  // A conversation, not a terminal (MAIN-502). Read off the row rather than
+  // guessed from the runtime: `claude` is either, depending on how it was
+  // started.
+  const isChat = session.interface === "chat";
 
   const restart = async () => {
     setLiveStatus("starting");
@@ -694,8 +699,12 @@ export function SessionPage() {
           <span
             style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
           >
-            {!dead && !offline && <SessionWindows sessionId={session.id} />}
+            {/* tmux windows and splits are terminal machinery: a chat session
+                has no tmux at all (MAIN-502), so these would poll a server
+                that isn't there and offer panes nothing can render. */}
+            {!dead && !offline && !isChat && <SessionWindows sessionId={session.id} />}
             <Pill tone="accent">{session.runtime}</Pill>
+            {isChat && <Pill tone="accent">chat</Pill>}
             <Pill tone={offline ? "err" : statusTone(status)}>
               {offline ? "node offline" : status}
             </Pill>
@@ -708,7 +717,7 @@ export function SessionPage() {
               <button className="btn small" onClick={restart} title="restart session">
                 <RotateCw size={12} /> restart
               </button>
-            ) : offline ? null : (
+            ) : offline || isChat ? null : (
               <SplitButtons sessionId={session.id} />
             )}
             {/* Nothing to diff — no workspace, or a checkout that is not a
@@ -783,6 +792,12 @@ export function SessionPage() {
                 <RotateCw size={13} /> check again
               </button>
             </div>
+          ) : session.interface === "chat" ? (
+            // A chat session has no PTY to attach to, so none of the terminal
+            // chrome around it applies: no context menu of terminal actions, no
+            // attach key, no status line. The conversation is the whole surface
+            // (MAIN-502 AC-4).
+            <SessionChat sessionId={session.id} />
           ) : (
             <ContextMenuRegion
               // `display: contents` keeps this wrapper out of the layout so the

@@ -317,6 +317,7 @@ async fn session_routes_refuse_a_non_owner() {
             runtime: "bash".into(),
             name: None,
             path: None,
+            interface: SessionInterface::Terminal,
         }),
     )
     .await;

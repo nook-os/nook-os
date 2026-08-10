@@ -477,6 +477,14 @@ pub fn build_router(state: AppState) -> Router {
         .route("/sessions/{id}/stop", post(sessions::stop))
         .route("/sessions/{id}/restart", post(sessions::restart))
         .route(
+            "/sessions/{id}/messages",
+            get(sessions::messages).post(sessions::post_message),
+        )
+        .route(
+            "/sessions/{id}/permissions/{request_id}",
+            post(sessions::decide_permission),
+        )
+        .route(
             "/ws/sessions/{id}/attach",
             get(crate::ws::attach::attach_ws),
         )

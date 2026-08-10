@@ -1,5 +1,6 @@
 mod capabilities;
 mod certs;
+mod chat;
 mod cli;
 mod config;
 mod conn;
@@ -2014,7 +2015,7 @@ async fn probe_connection(cfg: &NodeConfig) -> bool {
         return false;
     };
     let register = NodeToControl::Register {
-        capabilities: capabilities::detect(),
+        capabilities: Box::new(capabilities::detect()),
         live_tmux_sessions: tmux::list_nook_sessions(),
     };
     let Ok(json) = serde_json::to_string(&register) else {

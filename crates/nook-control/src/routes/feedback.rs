@@ -259,6 +259,10 @@ pub async fn submit(
                     runtime,
                     name: Some(SESSION_NAME.to_string()),
                     path: None,
+                    // The feedback agent is driven by typing into its terminal
+                    // (MAIN-256); making it a chat would break the mechanism
+                    // it is, not just how it looks.
+                    interface: SessionInterface::Terminal,
                 },
             )
             .await?;

@@ -62,6 +62,7 @@ async fn session_on(
             managed_purpose: ManagedPurpose::Access,
             managed_shard: 0,
             managed_shards: 1,
+            interface: SessionInterface::Terminal,
         })
         .await
         .expect("session")

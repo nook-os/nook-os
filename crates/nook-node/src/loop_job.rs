@@ -2136,6 +2136,25 @@ fn run_agent_once(
             // reading its stdout (see `close_stdin`).
             job_adapter::close_stdin(&stdin_for_close);
         }
+        // A headless run launches with `--dangerously-skip-permissions`, so
+        // this should never arrive (MAIN-502). If it does, DENY it: nobody is
+        // here to answer, and the runtime blocks until it gets a reply — so
+        // ignoring it would hang the job forever with no sign of why, which is
+        // the one outcome worse than a failed pass.
+        Event::PermissionRequest(req) => {
+            let _ = tx.blocking_send(NodeToControl::JobTranscript {
+                job_id: id.clone(),
+                source: "system".into(),
+                content: format!(
+                    "the agent asked permission for {} — denied: a loop run has nobody to ask",
+                    req.tool_name
+                ),
+            });
+            let _ = job_adapter::write_line(
+                &stdin_for_close,
+                &job_adapter::permission_response_line(&req, false),
+            );
+        }
         Event::Ignored => {}
     });
 

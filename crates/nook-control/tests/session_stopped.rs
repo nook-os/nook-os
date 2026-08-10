@@ -69,6 +69,7 @@ async fn managed_session(bed: &TestBed, f: &Fixture) -> SessionId {
             managed_purpose: ManagedPurpose::Access,
             managed_shard: 0,
             managed_shards: 1,
+            interface: SessionInterface::Terminal,
         })
         .await
         .expect("session")
@@ -338,6 +339,7 @@ async fn a_workspace_with_no_checkout_is_still_unsatisfied() {
             managed_purpose: ManagedPurpose::Access,
             managed_shard: 0,
             managed_shards: 1,
+            interface: SessionInterface::Terminal,
         })
         .await
         .expect("session")

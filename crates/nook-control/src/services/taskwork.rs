@@ -254,6 +254,9 @@ pub async fn start_work(
         false,
         ManagedPurpose::Access,
         nook_types::ShardAssignment::SOLO,
+        // Start-work opens the ticket's worktree as a terminal, exactly as it
+        // did (MAIN-502 AC-7). Choosing a chat there is a later card's.
+        nook_types::SessionInterface::Terminal,
     )
     .await?;
 

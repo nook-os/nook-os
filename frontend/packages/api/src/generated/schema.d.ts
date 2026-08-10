@@ -2220,6 +2220,36 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/{id}/messages": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/sessions/{id}/messages` — a chat session's whole conversation
+         *     (MAIN-502 AC-5).
+         * @description The reason a chat survives a reload: the history is server-side, so this is
+         *     what every device renders and none of them holds the only copy.
+         */
+        get: operations["list_session_messages"];
+        put?: never;
+        /**
+         * `POST /api/v1/sessions/{id}/messages` — say something to a chat session's
+         *     agent.
+         * @description Answers with the row that was WRITTEN, not an echo of the request: the
+         *     sender renders the server's copy, which is the same one every other device
+         *     will fetch, so nobody is looking at an optimistic message the server never
+         *     took.
+         */
+        post: operations["post_session_message"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions/{id}/output": {
         parameters: {
             query?: never;
@@ -2235,6 +2265,29 @@ export interface paths {
          *     look at what happened.
          */
         post: operations["read_session_output"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sessions/{id}/permissions/{request_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/sessions/{id}/permissions/{request_id}` — allow or deny the
+         *     tool a chat session's agent is blocked on (MAIN-502 AC-6).
+         * @description `409` means somebody already answered it — the other device, or a second
+         *     click. That is a real answer to give: the request is settled, and the page
+         *     refetches to find out how.
+         */
+        post: operations["decide_session_permission"];
         delete?: never;
         options?: never;
         head?: never;
@@ -4066,6 +4119,18 @@ export interface components {
              */
             agent_version?: string | null;
             architecture: string;
+            /**
+             * @description Which of `runtimes` this node can drive as a CHAT rather than a terminal
+             *     (MAIN-502) — the ones that speak a structured streaming protocol.
+             *
+             *     Reported rather than inferred at the other end, so exactly one place in
+             *     the fleet decides it: the node owns how it runs an agent, the same rule
+             *     `loop_kinds` and the auth probes follow. A UI offering Chat for a
+             *     runtime the node would refuse is the failure this prevents. Empty from
+             *     a node that predates the field, which reads as "no chat here" — the
+             *     safe answer, since such a node has no chat driver either.
+             */
+            chat_runtimes?: string[];
             /** Format: int32 */
             cpus: number;
             docker: boolean;
@@ -4601,7 +4666,17 @@ export interface components {
             /** @description The workspace to review, as a UUID or its name — resolved server-side. */
             workspace_id: string;
         };
+        /** @description Say something to a chat session's agent (MAIN-502). */
+        CreateSessionMessageRequest: {
+            body: string;
+        };
         CreateSessionRequest: {
+            /**
+             * @description Terminal or chat (MAIN-502). Absent is [`SessionInterface::Terminal`],
+             *     so a client written before this field gets byte-for-byte what it got
+             *     before — which is the whole of AC-1.
+             */
+            interface?: components["schemas"]["SessionInterface"];
             name?: string | null;
             node_id: components["schemas"]["NodeId"];
             /**
@@ -6693,6 +6768,12 @@ export interface components {
             error?: string | null;
             id: components["schemas"]["SessionId"];
             /**
+             * @description Terminal or chat (MAIN-502) — which surface this session is driven
+             *     through, chosen at creation. Every row that predates the column reads
+             *     `terminal`, which is what it was.
+             */
+            interface?: components["schemas"]["SessionInterface"];
+            /**
              * @description The ports leased to this session (MAIN-301), one per satisfied
              *     [`PortRequirement`], each delivered into the session as its own env
              *     var. Empty when the node offers no range or the workspace declares no
@@ -6783,6 +6864,60 @@ export interface components {
             enter?: boolean | null;
             text: string;
         };
+        /**
+         * @description How a session is DRIVEN — the surface a person talks to it through
+         *     (MAIN-502).
+         *
+         *     Not a rendering preference. A terminal session is a tmux TUI streamed as a
+         *     PTY; a chat session is the runtime run headless through the streaming
+         *     adapter, with the conversation persisted as messages. The two share nothing
+         *     but the row, which is why this is decided at creation and stored rather than
+         *     derived from the runtime: `claude` can be either.
+         * @enum {string}
+         */
+        SessionInterface: "terminal" | "chat";
+        /**
+         * @description One line of a chat session's conversation (MAIN-502), persisted server-side
+         *     so it survives a reload, a reconnect, and being opened on another device.
+         *
+         *     Deliberately its own table rather than the loop's `loop_job_transcript`:
+         *     that one hangs off a JOB, which is a run with an end, and a session is a
+         *     conversation that outlives any single turn. What they share is the shape a
+         *     reader needs, so both map onto the same `ChatView` at the other end.
+         */
+        SessionMessage: {
+            /** Format: date-time */
+            at: string;
+            body: string;
+            /**
+             * @description `allow` | `deny` once answered; `None` while the agent is still
+             *     blocked. This is what makes the buttons disappear on the second device
+             *     rather than offering an answer that has already been given.
+             */
+            decision?: string | null;
+            id: components["schemas"]["SessionMessageId"];
+            /**
+             * @description The runtime's own id for an outstanding permission request, present
+             *     only on a `permission` row. It is what an answer is addressed to, and
+             *     what the node matches against the agent it is blocking.
+             */
+            permission_request_id?: string | null;
+            /**
+             * @description `human` (someone typed it), `agent` (the runtime said it), `system`
+             *     (the node's own lifecycle notes), or `permission` (a tool the agent is
+             *     blocked on — see `permission_request_id`).
+             */
+            role: string;
+            session_id: components["schemas"]["SessionId"];
+            /**
+             * @description The tool the agent wants to use, on a `permission` row — `Bash`,
+             *     `Write`, … Shown beside the request so the reader knows what they are
+             *     being asked about before they read the detail.
+             */
+            tool_name?: string | null;
+        };
+        /** Format: uuid */
+        SessionMessageId: string;
         /** @description How much of a session's screen to read back. */
         SessionOutputRequest: {
             /**
@@ -6801,6 +6936,11 @@ export interface components {
             /** @description `starting` | `running` | `detached` | `exited` | `error`. */
             status: string;
             text: string;
+        };
+        /** @description Answer a chat session's outstanding permission request (MAIN-502). */
+        SessionPermissionDecisionRequest: {
+            /** @description `true` runs the tool, `false` refuses it and tells the agent so. */
+            allow: boolean;
         };
         /**
          * @description A workspace's declared desired session state (MAIN-315) — the Deployment
@@ -7585,6 +7725,22 @@ export interface components {
             };
             /** @enum {string} */
             type: "job_turn";
+        } | {
+            /**
+             * @description A chat session's conversation grew (MAIN-502) — a message arrived, or a
+             *     permission request was answered.
+             *
+             *     Carries only the session id, the same "what you have is stale, refetch"
+             *     contract as `TaskChanged`. Visibility is enforced on the refetch, so
+             *     the nudge itself leaks nothing; and because it is a nudge rather than
+             *     the message, a second device that was offline for a while converges on
+             *     the same conversation instead of replaying a stream it half-missed.
+             */
+            data: {
+                session_id: components["schemas"]["SessionId"];
+            };
+            /** @enum {string} */
+            type: "session_message";
         };
         /**
          * @description Unseal a note (MAIN-100): the client decrypted the sealed body locally and
@@ -11928,6 +12084,76 @@ export interface operations {
             };
         };
     };
+    list_session_messages: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionMessage"][];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    post_session_message: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateSessionMessageRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionMessage"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     read_session_output: {
         parameters: {
             query?: never;
@@ -11958,6 +12184,48 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    decide_session_permission: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                request_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SessionPermissionDecisionRequest"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
