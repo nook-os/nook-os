@@ -185,6 +185,19 @@ impl ArtifactStore for S3Store {
         }
     }
 
+    async fn delete(&self, key: &str) -> Result<()> {
+        // S3's DeleteObject is already idempotent — a key that is not there
+        // still answers 204 — so nothing here has to special-case absence.
+        self.client
+            .delete_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+            .with_context(|| format!("deleting {key} failed"))?;
+        Ok(())
+    }
+
     async fn presign(&self, key: &str, ttl: Duration) -> Result<Option<String>> {
         let config = PresigningConfig::expires_in(ttl)?;
         let req = self

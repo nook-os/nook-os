@@ -2360,6 +2360,34 @@ pub struct Notification {
     pub created_at: DateTime<Utc>,
 }
 
+/// One stored upload, as the API hands it back (MAIN-532).
+///
+/// Deliberately narrower than the row behind it: the tenant, the uploader and
+/// the storage key are how the server finds and authorizes the bytes, not
+/// facts a client needs, and the storage key in particular is the one field a
+/// caller could use to reason about the bucket. What is here is what a UI
+/// renders — a name, a type, a size, and the checksum that proves a download
+/// arrived intact.
+///
+/// It knows nothing about what the content is *attached to*, and that is the
+/// point: a ticket attachment and a chat attachment are two consumers of this
+/// one record, neither of which needs a column here.
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
+pub struct UserContent {
+    pub id: Uuid,
+    /// The name the uploader's file had. Echoed back verbatim; sanitizing
+    /// happens where it matters, in the `Content-Disposition` the serving route
+    /// writes.
+    pub filename: String,
+    /// What the uploader *said* it was. Never trusted for serving — the route
+    /// decides what content type actually goes on the wire.
+    pub content_type: String,
+    pub size_bytes: i64,
+    /// Lowercase hex of the stored bytes, computed by the server on upload.
+    pub sha256: String,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct NotificationPage {
     pub notifications: Vec<Notification>,

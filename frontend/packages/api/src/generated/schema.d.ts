@@ -3075,6 +3075,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/user-content": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Accept an upload and record it.
+         * @description The bytes are written to the store first and the row second, because the
+         *     failure that leaves an object with no row is recoverable by a human with a
+         *     bucket listing, while a row pointing at bytes that were never written is a
+         *     404 the UI cannot explain. When the row does fail the object is removed
+         *     again, best effort.
+         */
+        post: operations["upload_user_content"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/user-content/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Serve the bytes — streamed, or a 302 to the store when the deployment has
+         *     opted in and the store can sign.
+         */
+        get: operations["get_user_content"];
+        put?: never;
+        post?: never;
+        /**
+         * Remove the row and the bytes.
+         * @description The row goes first: a delete that removed the object and then failed would
+         *     leave a record pointing at nothing, which serves as a 500 rather than the
+         *     404 the caller asked for. An object left behind by a failure after this
+         *     point is invisible and harmless.
+         */
+        delete: operations["delete_user_content"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/vault/passkeys": {
         parameters: {
             query?: never;
@@ -7963,6 +8014,41 @@ export interface components {
             tenant_id: components["schemas"]["TenantId"];
             /** Format: date-time */
             updated_at: string;
+        };
+        /**
+         * @description One stored upload, as the API hands it back (MAIN-532).
+         *
+         *     Deliberately narrower than the row behind it: the tenant, the uploader and
+         *     the storage key are how the server finds and authorizes the bytes, not
+         *     facts a client needs, and the storage key in particular is the one field a
+         *     caller could use to reason about the bucket. What is here is what a UI
+         *     renders — a name, a type, a size, and the checksum that proves a download
+         *     arrived intact.
+         *
+         *     It knows nothing about what the content is *attached to*, and that is the
+         *     point: a ticket attachment and a chat attachment are two consumers of this
+         *     one record, neither of which needs a column here.
+         */
+        UserContent: {
+            /**
+             * @description What the uploader *said* it was. Never trusted for serving — the route
+             *     decides what content type actually goes on the wire.
+             */
+            content_type: string;
+            /** Format: date-time */
+            created_at: string;
+            /**
+             * @description The name the uploader's file had. Echoed back verbatim; sanitizing
+             *     happens where it matters, in the `Content-Disposition` the serving route
+             *     writes.
+             */
+            filename: string;
+            /** Format: uuid */
+            id: string;
+            /** @description Lowercase hex of the stored bytes, computed by the server on upload. */
+            sha256: string;
+            /** Format: int64 */
+            size_bytes: number;
         };
         /** Format: uuid */
         UserId: string;
@@ -13768,6 +13854,97 @@ export interface operations {
             header?: never;
             path: {
                 label: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    upload_user_content: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserContent"];
+                };
+            };
+            /** @description larger than the configured cap */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_user_content: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description the stored bytes */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description a short-lived presigned URL */
+            302: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description no such content in this tenant */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_user_content: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
             };
             cookie?: never;
         };

@@ -41,6 +41,13 @@ pub enum ApiError {
     /// just too many of them, and a client that retries later will succeed.
     #[error("{0}")]
     TooManyRequests(String),
+    /// The body was bigger than the route accepts. A 413, but carrying the
+    /// same `{"error": …}` body every other failure does — a raw 413 from the
+    /// server or a proxy is a wall of HTML the UI cannot render, and "your file
+    /// is too large" is exactly the kind of failure a person must be told about
+    /// in words (MAIN-532 AC-6).
+    #[error("{0}")]
+    PayloadTooLarge(String),
     /// The caller has to set something up before this can work — today, an app
     /// password before any secret can be stored. 428 rather than 400 so the UI
     /// can tell "you must do X first" apart from "you sent nonsense".
@@ -68,6 +75,7 @@ impl IntoResponse for ApiError {
             ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m.clone()),
             ApiError::Conflict(m) => (StatusCode::CONFLICT, m.clone()),
             ApiError::TooManyRequests(m) => (StatusCode::TOO_MANY_REQUESTS, m.clone()),
+            ApiError::PayloadTooLarge(m) => (StatusCode::PAYLOAD_TOO_LARGE, m.clone()),
             ApiError::SetupRequired(m) => (StatusCode::PRECONDITION_REQUIRED, m.clone()),
             ApiError::ServiceUnavailable(m) => (StatusCode::SERVICE_UNAVAILABLE, m.clone()),
             ApiError::Db(e) if e.is_row_not_found() => (StatusCode::NOT_FOUND, "not found".into()),
@@ -148,6 +156,11 @@ mod tests {
                 ApiError::TooManyRequests("slow".into()),
                 StatusCode::TOO_MANY_REQUESTS,
                 "slow",
+            ),
+            (
+                ApiError::PayloadTooLarge("too big".into()),
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "too big",
             ),
             (
                 ApiError::SetupRequired("set up".into()),

@@ -4,6 +4,9 @@
 
 use anyhow::{Context, Result};
 
+/// 25 MiB, the shipped upload cap (MAIN-532 AC-6).
+pub const DEFAULT_USER_CONTENT_MAX_BYTES: u64 = 25 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub app_env: String,
@@ -110,6 +113,18 @@ pub struct Config {
     /// to whoever is installing — off by default so one hostname serves
     /// everything.
     pub artifact_redirect: bool,
+
+    // ── User content ────────────────────────────────────────────────────
+    /// Key prefix for what PEOPLE upload, kept apart from the distributed
+    /// binaries so the two can never collide in one bucket (MAIN-532).
+    pub user_content_prefix: String,
+    /// `artifact_redirect`'s twin for user content, and deliberately its own
+    /// variable: binaries are fetched by a machine mid-install, uploads by a
+    /// signed-in browser, and a deployment can reasonably want redirection for
+    /// one and not the other.
+    pub user_content_redirect: bool,
+    /// Largest single upload accepted, in bytes. 25 MiB by default.
+    pub user_content_max_bytes: u64,
 
     pub s3_bucket: Option<String>,
     /// Unset for AWS; set for MinIO or GCS.
@@ -390,6 +405,16 @@ impl Config {
             artifact_redirect: env_opt("NOOK_ARTIFACT_REDIRECT")
                 .map(|v| v == "true" || v == "1")
                 .unwrap_or(false),
+            user_content_prefix: env_opt("NOOK_USER_CONTENT_PREFIX")
+                .unwrap_or_else(|| "nook/user-content".into()),
+            user_content_redirect: env_opt("NOOK_USER_CONTENT_REDIRECT")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false),
+            // A value that does not parse falls back to the default rather than
+            // to zero, which would refuse every upload.
+            user_content_max_bytes: env_opt("NOOK_USER_CONTENT_MAX_BYTES")
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .unwrap_or(DEFAULT_USER_CONTENT_MAX_BYTES),
             s3_bucket: env_opt("NOOK_S3_BUCKET"),
             s3_endpoint: env_opt("NOOK_S3_ENDPOINT"),
             s3_region: env_opt("NOOK_S3_REGION"),
@@ -609,6 +634,9 @@ impl Config {
             artifact_store: "disk".into(),
             artifact_prefix: "nook".into(),
             artifact_redirect: false,
+            user_content_prefix: "nook/user-content".into(),
+            user_content_redirect: false,
+            user_content_max_bytes: DEFAULT_USER_CONTENT_MAX_BYTES,
             s3_bucket: None,
             s3_endpoint: None,
             s3_region: None,

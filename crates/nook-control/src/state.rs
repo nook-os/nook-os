@@ -61,6 +61,9 @@ pub struct AppState {
     pub managed: Arc<dyn crate::repo::admin::ManagedContentRepository>,
     /// What a tenant has taught its fleet (MAIN-258).
     pub skills: Arc<dyn crate::repo::admin::SkillRepository>,
+    /// What people have uploaded (MAIN-532). Rows only — the bytes live in
+    /// `artifacts`, under a prefix of their own.
+    pub user_content: Arc<dyn crate::repo::user_content::UserContentRepository>,
     /// Tenant- and user-scoped settings rows (MAIN-258).
     pub settings: Arc<dyn crate::repo::admin::SettingRepository>,
     /// Org-visibility policy rows (MAIN-305).
@@ -167,6 +170,9 @@ impl AppState {
             join_tokens: Arc::new(crate::repo::nodes::DbJoinTokenRepository::new(db.clone())),
             tenant_cas: Arc::new(crate::repo::nodes::DbTenantCaRepository::new(db.clone())),
             notebook: Arc::new(crate::repo::notebook::DbNotebookRepository::new(db.clone())),
+            user_content: Arc::new(crate::repo::user_content::DbUserContentRepository::new(
+                db.clone(),
+            )),
             notifications: Arc::new(crate::repo::notifications::DbNotificationRepository::new(
                 db.clone(),
             )),

@@ -26,6 +26,12 @@
 //! install script cannot reach it, and a presigned URL to an unreachable host
 //! fails in a way that looks like the installer is broken. `artifact_redirect`
 //! turns redirection on where the store is genuinely public.
+//!
+//! Since MAIN-532 the same trait also backs **user content** — what a person
+//! uploads — under a prefix of its own (`user_content_key`). One trait, because
+//! the question is identical: where do bytes live, and does the caller reach
+//! the store directly. What differs is policy, and policy lives with each
+//! caller: its own prefix, its own redirect switch, its own size cap.
 
 use std::time::Duration;
 
@@ -56,6 +62,11 @@ pub trait ArtifactStore: Send + Sync {
     async fn put(&self, key: &str, bytes: Vec<u8>) -> Result<()>;
 
     async fn head(&self, key: &str) -> Result<Option<ObjectMeta>>;
+
+    /// Remove an object. Deleting what is not there succeeds: a caller whose
+    /// row and object have already diverged wants the row gone either way, and
+    /// a delete that fails on the second attempt would strand it.
+    async fn delete(&self, key: &str) -> Result<()>;
 
     /// A time-limited URL the caller can fetch directly, when the backend can
     /// mint one. `None` means "stream it through the control plane instead" —
@@ -109,6 +120,23 @@ pub fn artifact_key(prefix: &str, version: &str, name: &str) -> String {
     }
 }
 
+/// `<prefix>/<tenant>/<id>` — where a person's upload lives (MAIN-532).
+///
+/// Tenant-scoped so one tenant's objects are a subtree rather than mixed
+/// through the bucket, and under a prefix of its own so user content can never
+/// be mistaken for — or collide with — a distributed binary, which is
+/// `<artifact_prefix>/<version>/<name>`. The id, not the filename, is the last
+/// segment: two people uploading `report.pdf` must not overwrite each other,
+/// and a filename off the wire is not a path component we want to trust.
+pub fn user_content_key(prefix: &str, tenant: &str, id: &str) -> String {
+    let prefix = prefix.trim_matches('/');
+    if prefix.is_empty() {
+        format!("{tenant}/{id}")
+    } else {
+        format!("{prefix}/{tenant}/{id}")
+    }
+}
+
 /// The version segment of a key, for turning a listing back into versions.
 pub fn version_from_key(prefix: &str, key: &str) -> Option<String> {
     let rest = match prefix.trim_matches('/') {
@@ -137,6 +165,25 @@ mod tests {
         let k = artifact_key("", "0.2.0", "nook-darwin-aarch64");
         assert_eq!(k, "0.2.0/nook-darwin-aarch64");
         assert_eq!(version_from_key("", &k).as_deref(), Some("0.2.0"));
+    }
+
+    /// MAIN-532 AC-10: user content and node binaries share a store and must
+    /// never share a key. They are distinguished by the top-level prefix, not
+    /// by luck about what a version or a filename happens to be.
+    #[test]
+    fn user_content_never_collides_with_a_binary() {
+        let content = user_content_key(
+            "nook/user-content",
+            "0198ffff-0000-7000-8000-000000000001",
+            "0198ffff-0000-7000-8000-000000000002",
+        );
+        assert_eq!(
+            content,
+            "nook/user-content/0198ffff-0000-7000-8000-000000000001/0198ffff-0000-7000-8000-000000000002"
+        );
+        // Not readable as an artifact: the "version" segment would have to be
+        // the literal prefix segment, and the remainder is two levels deep.
+        assert_eq!(version_from_key("nook", &content), None);
     }
 
     #[test]

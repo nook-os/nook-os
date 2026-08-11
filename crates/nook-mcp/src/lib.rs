@@ -521,7 +521,7 @@ fn backend_err(e: anyhow::Error) -> McpError {
         ApiError::NotFound => McpError::resource_not_found(api.to_string(), None),
         // What the caller sent. A conflict is the caller's to resolve too —
         // re-sending the same thing will fail the same way.
-        ApiError::BadRequest(m) | ApiError::Conflict(m) => {
+        ApiError::BadRequest(m) | ApiError::Conflict(m) | ApiError::PayloadTooLarge(m) => {
             McpError::invalid_params(m.clone(), None)
         }
         ApiError::TooManyRequests(m) | ApiError::SetupRequired(m) => {
