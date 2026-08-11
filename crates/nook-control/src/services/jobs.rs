@@ -49,7 +49,7 @@ pub const LOOP_RUNTIME: &str = "claude";
 
 /// Terminal states have no outgoing transition — a job there is finished and
 /// can only be re-run as a fresh job (AC-5).
-fn is_terminal(state: &str) -> bool {
+pub fn is_terminal(state: &str) -> bool {
     matches!(state, "completed" | "failed" | "canceled")
 }
 

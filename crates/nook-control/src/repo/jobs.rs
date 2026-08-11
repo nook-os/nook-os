@@ -311,6 +311,23 @@ pub trait LoopJobRepository: Send + Sync {
         limit: i64,
     ) -> ApiResult<Vec<nook_types::WorkspaceBuildRun>>;
 
+    /// The MCP status surface's rows (MAIN-525 AC-1): a workspace's runs,
+    /// newest first, each already carrying its card's KEY and its executor's
+    /// NAME. `kind` `None` means every kind; `live_only` keeps the runs that
+    /// have not reached a terminal state. The key is VIEWER-GATED exactly as
+    /// [`LoopJobRepository::list_builds_for_workspace`]'s is — a run's
+    /// transcript can quote a private card, so its identity is withheld the
+    /// same way.
+    async fn list_runs_for_workspace(
+        &self,
+        tenant: TenantId,
+        viewer: nook_types::UserId,
+        workspace: WorkspaceId,
+        kind: Option<&str>,
+        live_only: bool,
+        limit: i64,
+    ) -> ApiResult<Vec<nook_types::LoopRunSummary>>;
+
     /// Record what a review run concluded. Guarded on a live review run — a
     /// verdict on a finished or foreign job is a caller bug, answered with 0.
     async fn set_review_verdict(&self, id: JobId, verdict: &str) -> ApiResult<u64>;
@@ -972,6 +989,48 @@ impl LoopJobRepository for DbLoopJobRepository {
                 params![tenant, workspace.0, limit, viewer],
             )
             .await?)
+    }
+
+    async fn list_runs_for_workspace(
+        &self,
+        tenant: TenantId,
+        viewer: nook_types::UserId,
+        workspace: WorkspaceId,
+        kind: Option<&str>,
+        live_only: bool,
+        limit: i64,
+    ) -> ApiResult<Vec<nook_types::LoopRunSummary>> {
+        // LEFT JOINs throughout: a run whose card was deleted, or which never
+        // had one (a review run), or which nothing has claimed yet, is still
+        // part of the history this lists. The filter is composed here so the
+        // placeholder numbering and the bind order cannot drift apart.
+        let mut sql = format!(
+            "SELECT j.id, j.kind, j.state,
+                    CASE WHEN {vis}
+                         THEN (b.key || '-' || CAST(t.number AS text))
+                    END AS task_key,
+                    n.name AS executor_node,
+                    j.created_at AS started_at,
+                    j.updated_at
+               FROM loop_jobs j
+               LEFT JOIN tasks t ON t.id = j.target_task_id
+               LEFT JOIN boards b ON b.id = t.board_id
+               LEFT JOIN nodes n ON n.id = j.executor_node_id
+              WHERE j.tenant_id = $1 AND j.workspace_id = $2",
+            vis = crate::services::tasks::visible_sql("t", "$4"),
+        );
+        if live_only {
+            sql.push_str(" AND j.state IN ('queued', 'claimed', 'running', 'waiting_on_human')");
+        }
+        if kind.is_some() {
+            sql.push_str(" AND j.kind = $5");
+        }
+        sql.push_str(" ORDER BY j.created_at DESC, j.id DESC LIMIT $3");
+        let mut binds = params![tenant, workspace.0, limit, viewer];
+        if let Some(k) = kind {
+            binds.extend(params![k]);
+        }
+        Ok(self.db.query_all(&sql, binds).await?)
     }
 
     async fn list_for_task(&self, tenant: TenantId, task: TaskId) -> ApiResult<Vec<LoopJob>> {
@@ -1708,6 +1767,47 @@ impl LoopJobRepository for FakeLoopJobRepository {
             })
             .collect();
         mine.sort_by_key(|r| std::cmp::Reverse(r.created_at));
+        mine.truncate(limit.max(0) as usize);
+        Ok(mine)
+    }
+
+    async fn list_runs_for_workspace(
+        &self,
+        tenant: TenantId,
+        _viewer: nook_types::UserId,
+        workspace: WorkspaceId,
+        kind: Option<&str>,
+        live_only: bool,
+        limit: i64,
+    ) -> ApiResult<Vec<nook_types::LoopRunSummary>> {
+        let s = self.inner.lock().unwrap();
+        let mut mine: Vec<nook_types::LoopRunSummary> = s
+            .jobs
+            .iter()
+            .filter(|j| j.tenant_id == tenant && j.workspace_id == Some(workspace))
+            .filter(|j| kind.is_none_or(|k| j.kind == k))
+            .filter(|j| {
+                !live_only
+                    || matches!(
+                        j.state.as_str(),
+                        "queued" | "claimed" | "running" | "waiting_on_human"
+                    )
+            })
+            .map(|j| nook_types::LoopRunSummary {
+                id: j.id,
+                kind: j.kind.clone(),
+                state: j.state.clone(),
+                // The fake holds neither boards nor nodes to join against, and
+                // both are legal `None`s on a real row (a review run, a job
+                // nothing has claimed).
+                task_key: None,
+                executor_node: None,
+                started_at: j.created_at,
+                updated_at: j.updated_at,
+                elapsed_seconds: 0,
+            })
+            .collect();
+        mine.sort_by_key(|r| std::cmp::Reverse(r.started_at));
         mine.truncate(limit.max(0) as usize);
         Ok(mine)
     }

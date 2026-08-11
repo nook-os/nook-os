@@ -20,9 +20,9 @@ use uuid::Uuid;
 
 use nook_errors::ApiError;
 use nook_types::{
-    CreateUserNote, CreateUserNoteFolder, Event, Node, Note, Session, TaskItem, TenantId,
-    UpdateUserNote, UpdateUserNoteFolder, UserId, UserNote, UserNoteFolder, UserNoteFolderId,
-    UserNoteId, UserNoteSummary, WorkspaceDetail,
+    CreateUserNote, CreateUserNoteFolder, Event, LoopRunLookup, LoopRunSummary, Node, Note,
+    Session, TaskItem, TenantId, UpdateUserNote, UpdateUserNoteFolder, UserId, UserNote,
+    UserNoteFolder, UserNoteFolderId, UserNoteId, UserNoteSummary, WorkspaceDetail,
 };
 
 /// The per-request MCP caller identity resolved from an OIDC bearer (MAIN-102).
@@ -162,6 +162,28 @@ pub trait NookBackend: Send + Sync + 'static {
         to: String,
         kind: String,
     ) -> anyhow::Result<serde_json::Value>;
+
+    // ── Build runs (MAIN-525) ───────────────────────────────────────────────
+    //
+    // The read half of the loop, and deliberately a POLLING shape: a question
+    // asked gets an answer returned, so it needs nothing stateful and works
+    // from any client. `read_session` is the precedent — this is the same
+    // observe move, pointed at a run instead of a terminal.
+    /// A workspace's loop runs, newest first.
+    async fn list_build_runs(
+        &self,
+        caller: McpCaller,
+        q: BuildRunQuery,
+    ) -> anyhow::Result<Vec<LoopRunSummary>>;
+    /// One run — by card key (its newest run) or by run id — with a transcript
+    /// tail bounded to `tail_lines`. A card nothing has run answers with an
+    /// empty lookup naming the card, never an error.
+    async fn get_build_run(
+        &self,
+        caller: McpCaller,
+        run: String,
+        tail_lines: u32,
+    ) -> anyhow::Result<LoopRunLookup>;
 
     // ── Notebook (person-scoped; MAIN-102) ──────────────────────────────────
     // Unlike every method above (pre-scoped to the instance's first tenant),
@@ -424,6 +446,31 @@ pub struct SubmitPrParams {
     pub pr_url: Option<String>,
 }
 
+/// The build-run list filter (MAIN-525 AC-1).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BuildRunQuery {
+    /// Workspace name, slug or id — the repo whose runs to list.
+    pub workspace: String,
+    /// Only runs still in flight (queued/claimed/running/waiting_on_human).
+    #[serde(default)]
+    pub live_only: bool,
+    /// "build" (the default), "review", "spec", "decompose", "epic-run", or
+    /// "any" for every kind of run this repo has had.
+    pub kind: Option<String>,
+    /// Newest-first page size. Default 20, capped at 100.
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetBuildRunParams {
+    /// A card key (`MAIN-42` — answers with that card's NEWEST run) or a run id.
+    pub run: String,
+    /// Transcript lines to return from the END of the run (default 100, max
+    /// 2000), mirroring read_session's `history_lines`. The response says what
+    /// it left out.
+    pub tail_lines: Option<u32>,
+}
+
 #[derive(Clone)]
 pub struct NookMcp {
     backend: Arc<dyn NookBackend>,
@@ -494,6 +541,10 @@ fn backend_err(e: anyhow::Error) -> McpError {
 /// REST's body exactly, so the two surfaces cannot drift into disagreeing about
 /// how much a client learns.
 const GENERIC: &str = "internal error";
+
+/// `read_session`'s `history_lines` default, applied to a run's transcript so
+/// the two observe tools answer at the same size (MAIN-525 AC-2).
+pub const DEFAULT_TAIL_LINES: u32 = 100;
 
 /// The notebook caller's person, or the explicit not-authenticated error every
 /// notebook tool returns for the static `MCP_TOKEN` path (which carries no
@@ -833,6 +884,51 @@ impl NookMcp {
             &self
                 .backend
                 .start_work(caller, p.task_id, p.runtime, p.node)
+                .await
+                .map_err(backend_err)?,
+        )
+    }
+
+    #[tool(
+        description = "List a repo's loop runs, newest first — builds by default. Reach for \
+                       this to answer \"what is this workspace building right now\": set \
+                       live_only to keep only runs still in flight, or kind=\"any\" to see \
+                       review and spec runs too. Each row names its card, state, executor \
+                       node and start. Use get_build_run for one run's transcript."
+    )]
+    async fn list_build_runs(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(q): Parameters<BuildRunQuery>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = require_caller(&parts)?;
+        to_result(
+            &self
+                .backend
+                .list_build_runs(caller, q)
+                .await
+                .map_err(backend_err)?,
+        )
+    }
+
+    #[tool(
+        description = "Status of ONE loop run: state, how long it has been going, its \
+                       executor node, the PR if one exists, and a bounded tail of its \
+                       transcript. Reach for this to answer \"how is MAIN-42's build \
+                       going\" — address it by card key (its newest run) or by run id. A \
+                       card nothing has built answers empty, not an error. Raise tail_lines \
+                       for more transcript; the reply states what it truncated."
+    )]
+    async fn get_build_run(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(p): Parameters<GetBuildRunParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = require_caller(&parts)?;
+        to_result(
+            &self
+                .backend
+                .get_build_run(caller, p.run, p.tail_lines.unwrap_or(DEFAULT_TAIL_LINES))
                 .await
                 .map_err(backend_err)?,
         )

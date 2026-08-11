@@ -135,8 +135,18 @@ documented in `.env.example`; on Kubernetes they go in the chart's
 endpoint:  http://localhost:8080/mcp   (streamable HTTP; 8080 is NOOK_CONTROL_PORT's default)
 auth:      Authorization: Bearer $MCP_TOKEN   (from .env)
 tools:     list_workspaces · list_nodes · list_sessions · start_session ·
-           send_to_session · get_activity · get_notes · append_note · create_task
+           send_to_session · get_activity · get_notes · append_note · create_task ·
+           list_build_runs · get_build_run
 ```
+
+Build runs are readable from the same surface: `list_build_runs` answers "what is
+this repo building right now" and `get_build_run` answers "how is MAIN-42's build
+going" — state, elapsed, executor, the PR, and a bounded tail of the transcript.
+Polling, not push: a question asked gets an answer returned, so it needs nothing
+stateful and works from any client. Both scope to the connected person's tenant
+rather than the instance's first one, so they need a per-user token — a run's
+transcript can quote source and credentials-adjacent output, and the static
+`MCP_TOKEN` carries no person to scope that to.
 
 Git and kanban management are fully drivable from MCP: clone, create project, add worktree, dispatch, start work, move, submit PR. Joining new machines stays human-only, deliberately.
 

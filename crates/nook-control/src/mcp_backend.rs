@@ -789,6 +789,95 @@ impl NookBackend for McpBackend {
         Ok(serde_json::to_value(row)?)
     }
 
+    // ── Build runs (MAIN-525) ───────────────────────────────────────────────
+    // Scoped by the CALLER's tenant, not the instance's first one: a run's
+    // transcript quotes source and credentials-adjacent output, so "which
+    // tenant is this" has to be answered by the authenticated identity rather
+    // than by a fallback (AC-5). Both tools refuse the static-token path
+    // before they get here — `require_caller` has nothing to hand them.
+
+    async fn list_build_runs(
+        &self,
+        caller: McpCaller,
+        q: nook_mcp::BuildRunQuery,
+    ) -> anyhow::Result<Vec<LoopRunSummary>> {
+        let tenant = caller.tenant_id;
+        let workspace = self.resolve_workspace(tenant, &q.workspace).await?;
+        let limit = q.limit.unwrap_or(RUNS_PAGE_DEFAULT).clamp(1, RUNS_PAGE_MAX);
+        // No `kind` means builds — the question this surface exists to answer.
+        // `any` is the deliberate widening to review and spec runs.
+        let kind = match q.kind.as_deref().map(str::trim) {
+            None | Some("") => Some(crate::services::jobs::BUILD_KIND),
+            Some("any") => None,
+            Some(k) => Some(k),
+        };
+        let mut runs = self
+            .state
+            .jobs
+            .list_runs_for_workspace(tenant, caller.user_id, workspace, kind, q.live_only, limit)
+            .await?;
+        for run in &mut runs {
+            run.elapsed_seconds = elapsed_seconds(run);
+        }
+        Ok(runs)
+    }
+
+    async fn get_build_run(
+        &self,
+        caller: McpCaller,
+        run: String,
+        tail_lines: u32,
+    ) -> anyhow::Result<LoopRunLookup> {
+        let tenant = caller.tenant_id;
+        let viewer = caller.user_id;
+
+        // A uuid is a RUN id first, because that is what the list hands back.
+        // Falling back to a card is not a guess: a uuid that is not a run may
+        // still be a card, and answering "nothing has run this yet" beats a
+        // not-found for a card that plainly exists.
+        if let Ok(id) = run.parse::<JobId>() {
+            if self.state.jobs.get(tenant, id).await?.is_some() {
+                let detail = crate::services::jobs::get(&self.state, tenant, viewer, id).await?;
+                let found = self.run_detail(tenant, detail, tail_lines).await?;
+                return Ok(LoopRunLookup {
+                    queried: run,
+                    task_key: found.run.task_key.clone(),
+                    summary: run_summary_line(&found),
+                    run: Some(found),
+                });
+            }
+        }
+
+        // Newest first (`list_for_task` orders by the time-ordered v7 id), so
+        // the card's latest run is the one a "how is it going" is asking about.
+        // It also carries the visibility gate: a card this viewer may not see
+        // is a not-found here, never an empty answer that admits it exists.
+        let task =
+            crate::services::tasks::resolve_id(self.state.tasks.as_ref(), tenant, &run).await?;
+        let runs = crate::services::jobs::list_for_task(&self.state, tenant, viewer, task).await?;
+        let key = self.state.tasks.key_of(tenant, task).await?;
+        let named = key.clone().unwrap_or_else(|| run.clone());
+
+        let Some(job) = runs.into_iter().next() else {
+            // AC-4: an ordinary empty answer naming the card. Nothing having
+            // built a card is a legitimate reply, and the common one.
+            return Ok(LoopRunLookup {
+                queried: run,
+                task_key: key,
+                run: None,
+                summary: format!("{named}: nothing has run this card yet"),
+            });
+        };
+        let detail = crate::services::jobs::get(&self.state, tenant, viewer, job.id).await?;
+        let found = self.run_detail(tenant, detail, tail_lines).await?;
+        Ok(LoopRunLookup {
+            queried: run,
+            task_key: key,
+            summary: run_summary_line(&found),
+            run: Some(found),
+        })
+    }
+
     // ── Notebook (person-scoped; MAIN-102) ──────────────────────────────────
     // These take the caller's own resolved `person` (never the first-user
     // fallback) and route through the notebook module's service paths, so
@@ -869,5 +958,192 @@ impl NookBackend for McpBackend {
         id: UserNoteFolderId,
     ) -> anyhow::Result<()> {
         Ok(crate::routes::notebook::delete_folder_for(&self.state, person, id).await?)
+    }
+}
+
+// ── The build-run status read model (MAIN-525) ───────────────────────────────
+
+/// Newest-first page size when the caller does not say, and the ceiling when
+/// they do. A repo that is built all day accumulates a run per card per push,
+/// and none of the older ones tell a chat client anything the newest does not.
+const RUNS_PAGE_DEFAULT: i64 = 20;
+const RUNS_PAGE_MAX: i64 = 100;
+
+/// Where "give me more transcript" stops (AC-3). The bound is the whole point:
+/// a run that narrates for an hour must not be able to return a payload that
+/// swamps the client that asked.
+const MAX_TAIL_LINES: u32 = 2_000;
+
+impl McpBackend {
+    /// A run plus the joins the wire shape needs: its card's key, its
+    /// executor's name, its repo, the PR, and a bounded transcript tail.
+    /// Visibility was decided upstream — `jobs::get` refuses a run whose card
+    /// the viewer may not see — so nothing here re-checks it.
+    async fn run_detail(
+        &self,
+        tenant: TenantId,
+        detail: LoopJobDetail,
+        tail_lines: u32,
+    ) -> anyhow::Result<LoopRunDetail> {
+        let job = detail.job;
+        let card = match job.target_task_id {
+            Some(t) => self.state.tasks.get_row(tenant, t).await?,
+            None => None,
+        };
+        let task_key = match job.target_task_id {
+            Some(t) => self.state.tasks.key_of(tenant, t).await?,
+            None => None,
+        };
+        let executor_node = match job.executor_node_id {
+            Some(n) => self.state.nodes.name_of(n).await?,
+            None => None,
+        };
+        let workspace = match job.workspace_id {
+            Some(w) => self.state.workspaces.get(tenant, w).await?,
+            None => None,
+        };
+        // A build run's PR is the one recorded on its card; a review run's is
+        // the one it was raised for, which lives on the job as a number and
+        // becomes a URL through the workspace's own remote.
+        let pr_url = card.as_ref().and_then(|c| c.pr_url.clone()).or_else(|| {
+            let pr = job.review_pr_number?;
+            let repo = workspace
+                .as_ref()?
+                .git_remote_url
+                .as_deref()
+                .and_then(crate::services::forge::github_repo)?;
+            Some(format!(
+                "https://github.com/{}/{}/pull/{pr}",
+                repo.owner, repo.name
+            ))
+        });
+
+        let mut run = LoopRunSummary {
+            id: job.id,
+            kind: job.kind,
+            state: job.state,
+            task_key,
+            executor_node,
+            started_at: job.created_at,
+            updated_at: job.updated_at,
+            elapsed_seconds: 0,
+        };
+        run.elapsed_seconds = elapsed_seconds(&run);
+        Ok(LoopRunDetail {
+            run,
+            workspace: workspace.map(|w| w.name),
+            pr_url,
+            outcome: job.build_outcome.or(job.review_verdict),
+            transcript: tail_transcript(detail.transcript, tail_lines),
+        })
+    }
+}
+
+/// How long a run has been going, or how long it took. A live run is measured
+/// against now; a finished one against its last lifecycle movement, which is
+/// when it finished.
+fn elapsed_seconds(run: &LoopRunSummary) -> i64 {
+    let end = if crate::services::jobs::is_terminal(&run.state) {
+        run.updated_at
+    } else {
+        chrono::Utc::now()
+    };
+    (end - run.started_at).num_seconds().max(0)
+}
+
+/// Lines one transcript entry occupies. An empty entry still occupies one — a
+/// budget that counted it as free could return unboundedly many of them.
+fn entry_lines(entry: &LoopJobTranscriptEntry) -> u32 {
+    entry.content.lines().count().max(1) as u32
+}
+
+/// The tail of a transcript within a LINE budget (AC-3), and the truth about
+/// what it left out.
+///
+/// Whole entries, newest first, while they fit: half an entry is a mangled
+/// answer, and the counts below say plainly that there was more. The one
+/// exception is a single entry larger than the entire budget, which is trimmed
+/// to its last lines rather than dropped — a noisy run must not answer "how is
+/// it going" with nothing at all.
+fn tail_transcript(
+    mut entries: Vec<LoopJobTranscriptEntry>,
+    tail_lines: u32,
+) -> LoopRunTranscriptTail {
+    let budget = tail_lines.clamp(1, MAX_TAIL_LINES);
+    let total_lines: u32 = entries.iter().map(entry_lines).sum();
+    let total = entries.len();
+
+    let mut first_kept = total;
+    let mut lines = 0u32;
+    while first_kept > 0 {
+        let n = entry_lines(&entries[first_kept - 1]);
+        if lines + n > budget {
+            break;
+        }
+        lines += n;
+        first_kept -= 1;
+    }
+
+    if total > 0 && first_kept == total {
+        entries.drain(..total - 1);
+        let content = std::mem::take(&mut entries[0].content);
+        let kept: Vec<&str> = content.lines().rev().take(budget as usize).collect();
+        entries[0].content = kept.into_iter().rev().collect::<Vec<_>>().join("\n");
+        lines = budget;
+    } else {
+        entries.drain(..first_kept);
+    }
+
+    let truncated = lines < total_lines;
+    LoopRunTranscriptTail {
+        entries,
+        lines,
+        total_lines,
+        truncated,
+        note: truncated.then(|| {
+            format!(
+                "showing the last {lines} of {total_lines} transcript lines — \
+                 ask again with a larger tail_lines for more"
+            )
+        }),
+    }
+}
+
+/// One sentence a model can relay instead of re-deriving it from the fields.
+fn run_summary_line(d: &LoopRunDetail) -> String {
+    let who = d
+        .run
+        .task_key
+        .clone()
+        .unwrap_or_else(|| d.run.id.to_string());
+    let node = d
+        .run
+        .executor_node
+        .as_deref()
+        .map(|n| format!(" on {n}"))
+        .unwrap_or_default();
+    let outcome = d
+        .outcome
+        .as_deref()
+        .map(|o| format!(", concluded {o}"))
+        .unwrap_or_default();
+    let pr = d
+        .pr_url
+        .as_deref()
+        .map(|u| format!(" — {u}"))
+        .unwrap_or_default();
+    format!(
+        "{who}: {} run {}{node}, {} elapsed{outcome}{pr}",
+        d.run.kind,
+        d.run.state,
+        human_elapsed(d.run.elapsed_seconds),
+    )
+}
+
+fn human_elapsed(secs: i64) -> String {
+    match (secs / 3600, (secs % 3600) / 60, secs % 60) {
+        (0, 0, s) => format!("{s}s"),
+        (0, m, s) => format!("{m}m {s}s"),
+        (h, m, _) => format!("{h}h {m}m"),
     }
 }
