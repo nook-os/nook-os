@@ -16,6 +16,14 @@
 //! nothing yet — so one workspace's forge reads all happen first, and a failure
 //! anywhere in them abandons the pass with the board untouched.
 //!
+//! **A merge queue changes nothing here (MAIN-541).** `main` requires one now,
+//! so the merge loops' `gh pr merge` only ENQUEUES and they can no longer move
+//! a card themselves — this sweep is what moves it, on the merge it observes.
+//! A queue merge is not a distinct shape (`merged: true`, as ever) and an
+//! ejected pull request is plain open, so the reads and the writes below are
+//! the same ones; `forge::tests::a_queue_merge_is_a_merge_and_an_ejection_is_merely_open`
+//! is the proof.
+//!
 //! **Safe on every replica (AC-8).** Two writes decide everything, and each is
 //! its own exactly-once fence: the guarded move
 //! (`taskwork::complete_in_flight_card`) and the label insert

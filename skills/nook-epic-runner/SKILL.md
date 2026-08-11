@@ -1,7 +1,7 @@
 ---
 name: nook-epic-runner
 description: "Merge-manage one named epic: consume the PRs and verdicts the build/review loops produce, merge what their evidence clears, and close the epic with a follow-up issue when everything is in. Runs NO builds and NO reviews itself — it fully depends on the loops running outside it. The loop's only merge authority; stops for humans on anything meaningful."
-version: 1.2.0
+version: 1.3.0
 author: NookOS
 license: MIT
 platforms: [linux, macos]
@@ -97,8 +97,10 @@ nook comment NOOK-7 "Epic run started: N queued for the loops (KEY…), M in fli
 Re-derive everything from the board and GitHub; never from memory.
 
 **Board flow, unattended.** Each stage's owner moves the card: the build loop
-moves it to In Progress on claim and In Review on submit; the runner moves it
-to **Done on merge**. Between the loops and the runner, a ticket flows
+moves it to In Progress on claim and In Review on submit; the runner hands the
+PR to `main`'s merge queue, and `merge_reconcile` moves the card to **Done when
+the queue actually merges it** (MAIN-541 — the runner cannot see that far).
+Between the loops, the runner and the control plane, a ticket flows
 Todo → In Progress → In Review → Done with no human touching the board.
 
 **Reconcile stragglers first.** Before looking at open PRs, find any child
@@ -111,7 +113,14 @@ Then, for each open PR closing one of this epic's children (oldest first),
 read its labels and its latest `Loop review of COMMIT_SHA` verdict, and act
 by state:
 
-- **`loop-approved`, verdict clean at the current head** → merge it (§3).
+- **`loop-approved`, verdict clean at the current head** → merge it (§3),
+  which since MAIN-541 means hand it to `main`'s merge queue.
+- **Already in the merge queue** → in flight, and enqueueing it twice is the
+  only way to make that worse. Leave it; report "queued, position N."
+- **Ejected by the merge queue** → report it by number with the forge's own
+  reason, verbatim. Leave it: repairing an ejected PR belongs to the loops on a
+  later card, and the runner never re-enqueues at the head that was ejected.
+  Not a stop condition — but never a silent drop either.
 - **No verdict yet, or verdict SHA ≠ current head** → the review loop hasn't
   caught up. Leave it; report "awaiting review."
 - **`loop-changes-requested`** → the build loop repairs it outside this run.
@@ -148,25 +157,69 @@ before merging:
 - `gh pr checks --required` all green; `mergeable` is clean.
 - No `needs-human-review` label on the PR.
 
-Then:
+First ask the forge where the PR stands with the queue — the same read
+`nook-yolo` uses, and for the same reason: a PR already queued must not be
+queued again, and one the queue ejected must be reported rather than re-fed to
+it.
+
+```bash
+gh api graphql -f query='
+query($o:String!,$r:String!,$n:Int!){
+  repository(owner:$o,name:$r){ pullRequest(number:$n){
+    merged headRefOid
+    mergeQueueEntry{ state position }
+    commits(last:1){ nodes{ commit{ oid committedDate } } }
+    timelineItems(last:20, itemTypes:[REMOVED_FROM_MERGE_QUEUE_EVENT]){
+      nodes{ ... on RemovedFromMergeQueueEvent { reason createdAt } } } } } }' \
+  -F o=OWNER -F r=REPO -F n=NUMBER
+```
+
+`mergeQueueEntry` non-null is "still queued". "Ejected" is the newest
+`RemovedFromMergeQueueEvent` whose `reason` is **anything but `merged`** —
+`failed_checks`, `manual`, whatever GitHub adds — with the head commit's
+`committedDate` **not** later than that event's `createdAt`, which is what says
+the branch has not been pushed since. Both are reports, not merges (§2).
+
+**Do not compare `beforeCommit` to `headRefOid`.** It is the base commit the
+merge group was built on, usually another pull request's, so that equality never
+holds; a rule built on it reads every ejection as "the head moved" and re-feeds
+the PR to the queue at the head it was just rejected at. And a removal event
+alone means nothing — a *successful* queue merge emits one too, with
+`reason: "merged"`. Where the timestamps cannot prove the head moved, treat it
+as ejected: a skipped fresh head costs one pass, a re-enqueued dead one repeats
+forever.
+
+Otherwise:
 
 ```bash
 gh pr merge NUMBER --squash --delete-branch
 ```
 
 Squash, matching the repository's one-commit-per-PR history. Never `--admin`,
-never force, never around branch protection — a refused merge is a stop
-condition, not an obstacle to route around.
+never force, never around branch protection — and `--admin` is now also the
+flag that skips the merge queue, so it is the one way the runner could land
+un-queue-built code on `main`. A refused merge is a stop condition, not an
+obstacle to route around.
 
-After the merge lands — immediately, same pass, so the ticket keeps flowing:
+**That command ENQUEUES; it does not merge (MAIN-541).** `main` requires a
+merge queue, so a zero exit says GitHub accepted the PR into the queue. The
+queue builds it against the entries ahead of it and merges it minutes later —
+or ejects it — long after this pass has ended. The runner never sees which.
 
-- Move the card to **Done** (`POST /tasks/KEY/move`, the completed column) —
-  the runner is the merging human's delegate, so this is the one context in
-  which the loop moves a card to Done. A move that fails is retried once and
-  otherwise left to the next pass's straggler reconciliation (§2) — the merge
-  is already real; the board must catch up, never the reverse.
-- Prune the task's worktree if one is recorded (`POST /tasks/KEY/prune-worktree`).
-- `nook comment KEY "Merged: <pr url> (epic run NOOK-7)."`
+So, immediately after, same pass:
+
+- `nook comment KEY "Queued: <pr url> (epic run NOOK-7)."` — **queued**, never
+  "merged".
+- **Do not move the card, do not prune the worktree, do not claim a merge.**
+  The card moves when the PR really merges, and `merge_reconcile` in the
+  control plane does it: always running, it asks the forge how each PR actually
+  ended and moves the card exactly once. This step used to be the runner's one
+  licence to move a card to Done; it now belongs to the component that can
+  actually observe the merge. §2's straggler reconciliation is unchanged and
+  still moves cards whose PR is **observed merged**, which is where an epic run
+  catches up.
+- **Do not wait for the queue** — no poll, no re-check, no sleep. The pass ends
+  here and the next one re-derives everything, the queue's verdict included.
 
 ## 4. Stop conditions — human required
 
@@ -210,7 +263,9 @@ and the default branch holds every merge:
 1. **Verify, don't assume**: re-list the children and confirm each merged PR
    is in the default branch's history
    (`gh pr view NUMBER --json state,mergeCommit`); confirm required checks on
-   the default branch tip are green. Any discrepancy is a stop condition.
+   the default branch tip are green. Any discrepancy is a stop condition. A PR
+   this run *queued* is not a PR that merged — it is still open, so the epic is
+   simply not closeable yet, and that is a plain report rather than a stop.
 2. Close the epic: move it to the completed column and comment the closing
    summary — issues merged (key → PR), decisions recorded, anything canceled.
 3. **File the follow-up issue** (the run's only write that isn't a merge or a
@@ -253,6 +308,10 @@ and the default branch holds every merge:
   entire authorization. Never touch another epic's tickets or PRs.
 - **Merge only on the loops' evidence** (§3's full checklist), only via
   squash, never with `--admin` or around branch protection.
+- **Never claim a merge the runner did not observe.** `gh pr merge` returning
+  zero means the PR entered `main`'s merge queue and nothing more. The word
+  "merged" belongs to a PR the forge reports as merged, and moving its card
+  belongs to `merge_reconcile`.
 - **Never apply `agent-ready`.** The runner merges the queue the human
   approved; it never grows that queue. The follow-up issue ships without it.
 - **Stop, don't guess** (§4). Security findings stop the run unconditionally.
