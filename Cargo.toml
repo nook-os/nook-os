@@ -110,5 +110,16 @@ cookie = { version = "0.18", features = ["key-expansion"] }
 # (a send is best-effort and one-shot).
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls-tls", "hostname"] }
 
+# A build worktree's `target/` reached 120 GB, 96% of it debuginfo inside test
+# binaries: each of the 119 integration tests links its own full-DWARF copy of
+# the same dependency debuginfo (MAIN-492). `line-tables-only` keeps the
+# file:line a failing test's backtrace prints and drops the type and variable
+# information nothing in this tree reads; `unpacked` leaves that DWARF in the
+# per-unit files the compiler already wrote instead of copying it into all 119
+# executables. Test and bench inherit dev, which is where the size is.
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+
 [profile.release]
 lto = "thin"
