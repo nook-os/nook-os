@@ -91,6 +91,31 @@ pub struct RecordedVerdict {
     pub review_verdict: String,
 }
 
+/// The value `review_verdict_source` carries for a verdict the CONTROL PLANE
+/// concluded from a merge conflict (MAIN-516). `NULL` is an agent's own
+/// judgement; this is the one thing that is not.
+pub const CONFLICT_VERDICT_SOURCE: &str = "conflict";
+
+/// A `changes_requested` nobody reviewed: the pull request conflicts with its
+/// base, so the control plane puts it back in the repair queue — which reads
+/// this ledger and not the PR's labels (MAIN-516).
+#[derive(Debug, Clone)]
+pub struct ConflictRejection {
+    pub id: JobId,
+    pub tenant: TenantId,
+    pub workspace: WorkspaceId,
+    /// Who the row is attributed to — the identity the hygiene pass already
+    /// comments and labels as.
+    pub requested_by: UserId,
+    pub pr: i64,
+    /// The head the conflict is AT, which is what the repair fingerprints on:
+    /// the rebase that answers it moves the head, and the fingerprint clears
+    /// itself.
+    pub head: String,
+    /// What a reader of the ledger sees this row was about.
+    pub seed: String,
+}
+
 /// A job the reaper found stranded on a node that stopped reporting, with the
 /// moment that node was last seen — the transcript line quotes it.
 #[derive(Debug, Clone)]
@@ -345,6 +370,23 @@ pub trait LoopJobRepository: Send + Sync {
     /// Record what a review run concluded. Guarded on a live review run — a
     /// verdict on a finished or foreign job is a caller bug, answered with 0.
     async fn set_review_verdict(&self, id: JobId, verdict: &str) -> ApiResult<u64>;
+
+    /// Record the `changes_requested` a CONFLICTING pull request earns, at the
+    /// head it conflicts at (MAIN-516). Answers whether it recorded one.
+    ///
+    /// `false` is the idempotent case, and it covers both shapes of "already
+    /// said": this head already carries a `changes_requested` — an agent's, or
+    /// an earlier pass's — or another replica inserted its row between our read
+    /// and our write, which 0060's partial unique index arbitrates.
+    ///
+    /// The row is the NEWEST verdict for that head once written, which matters
+    /// for the one overlap: a review run already live at this head records its
+    /// own verdict afterwards, and `recorded_review_verdicts` — newest wins —
+    /// keeps reporting the conflict's `changes_requested`. That is the honest
+    /// answer (the pull request does conflict, whatever the reviewer thought of
+    /// the code), and it does not stick: the rebase moves the head, and the
+    /// verdict recorded for the new one is nobody's but the reviewer's.
+    async fn record_conflict_rejection(&self, rejection: ConflictRejection) -> ApiResult<bool>;
 
     /// The live epic-run for this epic, if one is in flight (MAIN-144 AC-3) —
     /// the dedupe that keeps "one deliberate enqueue per pass" true.
@@ -774,6 +816,59 @@ impl LoopJobRepository for DbLoopJobRepository {
                 params![id.0, verdict],
             )
             .await?)
+    }
+
+    async fn record_conflict_rejection(&self, r: ConflictRejection) -> ApiResult<bool> {
+        // The idempotence covers an AGENT's rejection too, not only an earlier
+        // pass's: a head a reviewer already rejected is in the repair queue on
+        // its own account, and a second row saying the same thing would only
+        // compete to be the newest one read.
+        let already: Option<JobId> = self
+            .db
+            .query_scalar_opt(
+                "SELECT id FROM loop_jobs
+                  WHERE tenant_id = $1 AND workspace_id = $2 AND kind = 'review'
+                    AND review_pr_number = $3 AND review_head_sha = $4
+                    AND review_verdict = 'changes_requested'",
+                params![r.tenant, r.workspace.0, r.pr, r.head.clone()],
+            )
+            .await?;
+        if already.is_some() {
+            return Ok(false);
+        }
+        // `completed` with a verdict and no executor: a conclusion that nobody
+        // ran, stated as one. That state is also what keeps the review side off
+        // this head (it is a `done_head` to `review_run_heads`), so the REBASE
+        // is what gets reviewed and the conflict never is.
+        match self
+            .db
+            .exec(
+                &format!(
+                    "INSERT INTO loop_jobs
+                        (id, tenant_id, kind, workspace_id, requested_by, state, seed,
+                         review_pr_number, review_head_sha, review_verdict,
+                         review_verdict_source, created_at, updated_at)
+                     VALUES ($1, $2, 'review', $3, $4, 'completed', $5, $6, $7,
+                             'changes_requested', $8, {now}, {now})",
+                    now = type_mapping(self.db.engine()).now()
+                ),
+                params![
+                    r.id,
+                    r.tenant,
+                    r.workspace.0,
+                    r.requested_by,
+                    r.seed,
+                    r.pr,
+                    r.head,
+                    CONFLICT_VERDICT_SOURCE
+                ],
+            )
+            .await
+        {
+            Ok(n) => Ok(n > 0),
+            Err(e) if e.is_unique_violation() => Ok(false),
+            Err(e) => Err(e.into()),
+        }
     }
 
     async fn rejected_review_heads(
@@ -1704,6 +1799,45 @@ impl LoopJobRepository for FakeLoopJobRepository {
         Ok(1)
     }
 
+    async fn record_conflict_rejection(&self, r: ConflictRejection) -> ApiResult<bool> {
+        let mut s = self.inner.lock().unwrap();
+        if s.jobs.iter().any(|j| {
+            j.tenant_id == r.tenant
+                && j.workspace_id == Some(r.workspace)
+                && j.kind == "review"
+                && j.review_pr_number == Some(r.pr)
+                && j.review_head_sha.as_deref() == Some(r.head.as_str())
+                && j.review_verdict.as_deref() == Some("changes_requested")
+        }) {
+            return Ok(false);
+        }
+        let now = chrono::Utc::now();
+        s.jobs.push(LoopJob {
+            id: r.id,
+            tenant_id: r.tenant,
+            kind: "review".into(),
+            target_task_id: None,
+            workspace_id: Some(r.workspace),
+            requested_by: r.requested_by,
+            state: "completed".into(),
+            executor_node_id: None,
+            predecessor_job_id: None,
+            queued_reason: None,
+            queued_reason_kind: None,
+            seed: Some(r.seed),
+            created_at: now,
+            updated_at: now,
+            review_pr_number: Some(r.pr),
+            review_head_sha: Some(r.head),
+            review_verdict: Some("changes_requested".into()),
+            review_verdict_source: Some(CONFLICT_VERDICT_SOURCE.into()),
+            review_forced: false,
+            build_outcome: None,
+            build_fingerprint: None,
+        });
+        Ok(true)
+    }
+
     async fn rejected_review_heads(
         &self,
         tenant: TenantId,
@@ -2032,6 +2166,7 @@ impl LoopJobRepository for FakeLoopJobRepository {
             review_pr_number: None,
             review_head_sha: None,
             review_verdict: None,
+            review_verdict_source: None,
             review_forced: new.review_forced,
             build_outcome: None,
             build_fingerprint: None,

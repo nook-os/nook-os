@@ -1015,12 +1015,15 @@ pub async fn pass(state: &AppState, clones: &CloneThrottle) -> crate::error::Api
                     )
                     .await
                     {
-                        Ok(h) if h.restored > 0 || h.marked > 0 => tracing::info!(
-                            workspace = %ws.id,
-                            restored = h.restored,
-                            marked = h.marked,
-                            "pr hygiene healed stuck pull requests"
-                        ),
+                        Ok(h) if h.restored > 0 || h.marked > 0 || h.recorded > 0 => {
+                            tracing::info!(
+                                workspace = %ws.id,
+                                restored = h.restored,
+                                marked = h.marked,
+                                recorded = h.recorded,
+                                "pr hygiene healed stuck pull requests"
+                            )
+                        }
                         Ok(_) => {}
                         Err(e) => {
                             tracing::warn!(workspace = %ws.id, error = %e, "pr hygiene pass failed")

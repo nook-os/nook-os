@@ -3752,6 +3752,13 @@ pub struct LoopJob {
     /// exactly this run. Always false for routine runs.
     #[serde(default)]
     pub review_forced: bool,
+    /// WHO concluded the verdict (MAIN-516). `None` is an agent's own
+    /// judgement — every ordinary review. `conflict` is the control plane's:
+    /// the hygiene pass found the PR conflicting with its base and recorded the
+    /// `changes_requested` the repair queue reads, with no run, no agent and no
+    /// findings behind it. A verdict nobody reviewed must not read as one.
+    #[serde(default)]
+    pub review_verdict_source: Option<String>,
     /// What a `build` run CONCLUDED (MAIN-458): `pr_opened` | `blocked` |
     /// `nothing_to_do`. `None` means the run concluded nothing, however it
     /// exited — and such a run does not consume its card.

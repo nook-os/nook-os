@@ -64,6 +64,11 @@ type ReviewRun = {
   review_pr_number?: number | null;
   review_head_sha?: string | null;
   created_at: string;
+  // `loop_jobs.review_verdict_source` (MAIN-516): `conflict` is the control
+  // plane's own `changes_requested` for a PR that conflicts with its base — no
+  // run, no agent, no findings. The row is a real review row in every other
+  // respect, so without this it reads as a review that happened.
+  review_verdict_source?: string | null;
 };
 
 /** The loop's state tones, in the design system's words. */
@@ -117,13 +122,21 @@ export function buildRow(r: BuildRun): RunRow {
   };
 }
 
+/** The right-hand annotation for a review row: the head, and — for the one
+ *  verdict no agent produced — what it actually is (MAIN-516 AC-6). */
+export function reviewMeta(r: ReviewRun): string {
+  const head = shortHead(r.review_head_sha);
+  if (r.review_verdict_source !== "conflict") return head;
+  return head ? `${head} · conflict, not reviewed` : "conflict, not reviewed";
+}
+
 export function reviewRow(r: ReviewRun): RunRow {
   return {
     id: r.id,
     kind: "review",
     state: r.state,
     label: runLabel(r),
-    meta: shortHead(r.review_head_sha),
+    meta: reviewMeta(r),
     createdAt: r.created_at,
   };
 }

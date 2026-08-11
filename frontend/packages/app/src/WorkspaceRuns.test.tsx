@@ -33,6 +33,7 @@ import {
   parseKind,
   pillTone,
   queuedReason,
+  reviewMeta,
   runLabel,
   shortHead,
   useLegacyRunsSectionRedirect,
@@ -118,6 +119,15 @@ describe("row identity", () => {
   it("shortens the head, which is what tells two runs of one PR apart", () => {
     expect(shortHead("abcdef1234567890")).toBe("abcdef1");
     expect(shortHead(null)).toBe("");
+  });
+
+  it("says when a verdict was the conflict check rather than a review", () => {
+    // MAIN-516 records a `changes_requested` for a PR that conflicts with its
+    // base, so the repair queue can see it. Nobody reviewed that head, and the
+    // row must not read as if somebody had.
+    const conflicted = review({ review_verdict_source: "conflict" });
+    expect(reviewMeta(conflicted as never)).toBe("abcdef1 · conflict, not reviewed");
+    expect(reviewMeta(review() as never)).toBe("abcdef1");
   });
 
   it("maps the loop's muted onto the design system's dim", () => {
