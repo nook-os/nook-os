@@ -6,6 +6,7 @@ mod compose;
 mod config;
 mod conn;
 mod contexts;
+mod cordon;
 mod device_login;
 mod discovery;
 mod enroll;

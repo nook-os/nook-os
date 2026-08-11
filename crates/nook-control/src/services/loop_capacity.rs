@@ -122,6 +122,7 @@ mod tests {
             port_exclusions: None,
             max_loop_jobs: operator,
             loop_capacity: None,
+            cordon: None,
             created_at: now,
             updated_at: now,
         }

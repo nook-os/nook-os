@@ -14,6 +14,10 @@ use crate::config::NodeConfig;
 use crate::{capabilities, discovery, sessions, tmux};
 
 const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+/// How often a deferred agent update reconsiders whether the machine is quiet
+/// (MAIN-505). Frequent enough that a finished run is followed promptly by the
+/// restart it was blocking, cheap enough to be a lock and a set length.
+const DRAIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Can this machine actually take that port right now?
 ///
@@ -164,9 +168,19 @@ fn ensure_scan_root(cfg: &NodeConfig, root: &str) -> Vec<String> {
 /// belt-and-braces: `UpdateAgent` and `RegisterAck` can both fire within a
 /// reconnect, and two installers unpacking over the same binary is worse than
 /// either of them alone.
+///
+/// `deferred_ctl` is set only for a DEFERRED update (MAIN-505), and it is what
+/// keeps the cordon honest. This function is deliberately non-fatal — a failed
+/// download or an unwritable binary logs and leaves the process running — and a
+/// deferred update stays cordoned across the install, so that failure has to
+/// LIFT the cordon and say so. Nothing else would: the drain tick has no work
+/// left to do, and both other clear-paths ride a `RegisterAck` that only
+/// arrives on connect, so the node would take no loop work until the socket
+/// happened to drop.
 fn spawn_selfupdate(
     reason: &'static str,
     updating: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    deferred_ctl: Option<mpsc::Sender<NodeToControl>>,
 ) {
     use std::sync::atomic::Ordering;
     if updating.swap(true, Ordering::SeqCst) {
@@ -177,6 +191,18 @@ fn spawn_selfupdate(
     tokio::spawn(async move {
         if let Err(e) = crate::selfupdate::run(reason).await {
             tracing::warn!(error = %e, "cannot update this agent");
+            // Only reached when the install failed: on success this process is
+            // already gone.
+            if let Some(tx) = deferred_ctl {
+                if crate::cordon::install_failed() {
+                    tracing::warn!(
+                        "lifting the update cordon — the install failed and this node is still running"
+                    );
+                    tx.send(NodeToControl::CordonChanged { cordon: None })
+                        .await
+                        .ok();
+                }
+            }
         }
         updating.store(false, Ordering::SeqCst);
     });
@@ -288,6 +314,16 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
         })
         .await
         .ok();
+    // ...and, immediately after it, this node's cordon — including the clear
+    // `None` (MAIN-505). Unconditional because the ASSERTION is the point: a
+    // node that restarted into the new agent holds nothing, and only saying so
+    // clears the cordon its previous process left behind.
+    ctl_tx
+        .send(NodeToControl::CordonChanged {
+            cordon: crate::cordon::current(),
+        })
+        .await
+        .ok();
     {
         // Off the loop: a full scan is one `git status` per checkout, which on
         // a bind-mounted filesystem can take seconds.
@@ -335,6 +371,57 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 .is_err()
             {
                 break;
+            }
+        }
+    });
+
+    let updating = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    // A deferred agent update, reconsidered on a timer (MAIN-505). Per
+    // connection, and aborted with the rest below, so a reconnect replaces this
+    // watcher rather than adding a second one — the deferral itself is process
+    // state and survives both.
+    let drain_tx = ctl_tx.clone();
+    let drain_updating = updating.clone();
+    let drain = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(DRAIN_INTERVAL);
+        loop {
+            interval.tick().await;
+            match crate::cordon::tick(crate::loop_job::in_flight()) {
+                crate::cordon::Tick::Idle => {}
+                crate::cordon::Tick::Waiting { cordon, changed } => {
+                    if changed {
+                        if cordon.overdue {
+                            tracing::warn!(reason = %cordon.reason, "agent update still blocked");
+                        } else {
+                            tracing::info!(reason = %cordon.reason, "agent update deferred");
+                        }
+                        drain_tx
+                            .send(NodeToControl::CordonChanged {
+                                cordon: Some(cordon),
+                            })
+                            .await
+                            .ok();
+                    }
+                }
+                crate::cordon::Tick::Proceed { cordon } => {
+                    tracing::info!("loop jobs finished — installing the deferred agent update");
+                    // Reported before the install rather than after: the node
+                    // is still cordoned (nothing may start while the process is
+                    // about to exit), and this is what the surfaces show if the
+                    // install takes a while.
+                    drain_tx
+                        .send(NodeToControl::CordonChanged {
+                            cordon: Some(cordon),
+                        })
+                        .await
+                        .ok();
+                    spawn_selfupdate(
+                        "deferred update — loop jobs finished",
+                        &drain_updating,
+                        Some(drain_tx.clone()),
+                    );
+                }
             }
         }
     });
@@ -399,8 +486,6 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
     // between a keystroke arriving and it reaching the PTY.
     let session_tx = sessions::Manager::spawn(out_tx.clone(), ctl_tx.clone());
 
-    let updating = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-
     while let Some(msg) = stream.next().await {
         let msg = match msg {
             Ok(Message::Text(t)) => t,
@@ -418,7 +503,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
             ControlToNode::UpdateAgent => {
                 // Asked directly, so no version comparison: somebody pressed a
                 // button and meant it.
-                spawn_selfupdate("asked by the control plane", &updating);
+                spawn_selfupdate("asked by the control plane", &updating, None);
             }
             ControlToNode::Ping => {
                 ctl_tx.send(NodeToControl::Pong).await.ok();
@@ -447,13 +532,46 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 let expected = expected_agent_version.as_deref();
                 let behind = expected.is_some_and(|e| e != env!("CARGO_PKG_VERSION"));
 
+                // A deploy rolled back to what we already run: whatever we were
+                // holding work back for is no longer wanted (MAIN-505). Said
+                // here rather than left to the drain tick, because a deferral
+                // nothing ever cancels is a node that quietly goes dark.
+                if !behind && crate::cordon::current().is_some() {
+                    tracing::info!("control plane expects the version we run — lifting the cordon");
+                    crate::cordon::clear();
+                    ctl_tx
+                        .send(NodeToControl::CordonChanged { cordon: None })
+                        .await
+                        .ok();
+                }
+
                 if crate::selfupdate::should_update(expected, cfg) {
                     tracing::info!(
                         expected = %expected.unwrap_or_default(),
                         running = env!("CARGO_PKG_VERSION"),
                         "control plane expects a different agent version"
                     );
-                    spawn_selfupdate("version differs from the control plane", &updating);
+                    // Updating ends this process, and for a streaming loop job
+                    // this process IS the buffer (MAIN-505 / MAIN-240). So a
+                    // busy node cordons and waits instead; the drain tick above
+                    // installs it the moment the last run concludes.
+                    let in_flight = crate::loop_job::in_flight();
+                    if in_flight > 0 {
+                        let cordon =
+                            crate::cordon::defer_update(expected.unwrap_or_default(), in_flight);
+                        tracing::warn!(
+                            reason = %cordon.reason,
+                            "deferring the agent update — loop jobs are running here"
+                        );
+                        ctl_tx
+                            .send(NodeToControl::CordonChanged {
+                                cordon: Some(cordon),
+                            })
+                            .await
+                            .ok();
+                    } else {
+                        spawn_selfupdate("version differs from the control plane", &updating, None);
+                    }
                 } else if behind {
                     // Being behind and saying nothing is the worst of the three
                     // outcomes. Somebody deploys, watches the fleet stay on the
@@ -1233,6 +1351,24 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 branch,
                 seed,
             } => {
+                // The cordon is enforced HERE, not only where work is placed
+                // (MAIN-505 AC-2). The control plane's view of it is a push old,
+                // and a run that lands in that window is one more thing the
+                // deferral has to wait for — refused, the card goes straight
+                // back instead.
+                if let Some(cordon) = crate::cordon::current() {
+                    ctl_tx
+                        .send(NodeToControl::JobRefused {
+                            job_id,
+                            reason: format!(
+                                "node {} is cordoned: {}",
+                                cfg.node_name, cordon.reason
+                            ),
+                        })
+                        .await
+                        .ok();
+                    continue;
+                }
                 // git + tmux + PTY are all blocking, so the runner lives on a
                 // blocking thread with its own cloned sender and config —
                 // mirroring the git-op arms above.
@@ -1299,6 +1435,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
     writer.abort();
     cert_check.abort();
     heartbeat.abort();
+    drain.abort();
     discovery_task.abort();
     stacks_task.abort();
     Ok(())

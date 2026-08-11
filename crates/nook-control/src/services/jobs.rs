@@ -1643,15 +1643,31 @@ pub async fn select_executor(
     let label_filtered_all = had_candidates && candidates.is_empty();
 
     // The last gate is how much each candidate is already holding, which is a
-    // `loop_jobs` count rather than a node fact — so it is applied here.
+    // `loop_jobs` count rather than a node fact — so it is applied here. A
+    // cordon (MAIN-505) is read off the same row for the same reason: both are
+    // "not right now" rather than "not ever", and both need naming in the
+    // queued reason.
     let mut chosen: Option<NodeId> = None;
     let mut blocked_by_capacity = false;
+    let mut cordoned: Vec<String> = Vec::new();
     for node in candidates {
         // The capacity IN FORCE, not merely what the node advertises (MAIN-508):
         // read from the stored row on every attempt, so an operator's new number
         // lands at the next poll without the node agent restarting — the restart
         // being the thing that strands every in-flight build.
-        let cap = match state.nodes.by_id_any_tenant_or_none(node).await? {
+        let row = state.nodes.by_id_any_tenant_or_none(node).await?;
+        // A node draining before an agent restart takes nothing new (MAIN-505
+        // AC-2). Checked before capacity because it is the stronger statement:
+        // the machine has slots and is still refusing them.
+        if let Some(c) = row.as_ref().and_then(node_cordon) {
+            let name = row
+                .as_ref()
+                .map(|r| r.name.clone())
+                .unwrap_or_else(|| node.0.to_string());
+            cordoned.push(format!("{name} ({})", c.reason));
+            continue;
+        }
+        let cap = match row {
             Some(row) => crate::services::loop_capacity::of(&row).effective,
             None => CAPACITY_WHEN_UNREPORTED,
         };
@@ -1670,7 +1686,19 @@ pub async fn select_executor(
     }
 
     let Some(node) = chosen else {
-        let reason = if blocked_by_capacity {
+        let reason = if !cordoned.is_empty() {
+            // Named rather than lumped in with "no eligible executor" (AC-3):
+            // the machine IS eligible and IS online, it is draining, and this
+            // says so in the node's own words — which is the whole question
+            // "why did nothing get placed on azul" is asking. Capacity is
+            // added rather than replaced, so a mixed fleet is described and
+            // not summarised into a half-truth.
+            let mut r = format!("no eligible executor: cordoned — {}", cordoned.join("; "));
+            if blocked_by_capacity {
+                r.push_str("; the rest are at their loop-job capacity");
+            }
+            r
+        } else if blocked_by_capacity {
             "no eligible executor: every eligible node is at its loop-job capacity".to_string()
         } else if job.kind == BUILD_KIND && label_filtered_all {
             // Honest, and never a fallback (AC-3): eligible nodes exist but
@@ -1779,6 +1807,17 @@ async fn pinned_node(
             _ => None,
         },
     )
+}
+
+/// The cordon a node is reporting, if any (MAIN-505).
+///
+/// Stored as JSON like every other node blob, so this is the one place that
+/// knows how to read it back. A row written by a newer node than this control
+/// plane understands reads as "not cordoned" rather than failing placement —
+/// withholding every job over an unparseable field would be a worse outcome
+/// than placing one on a draining machine.
+fn node_cordon(node: &nook_types::Node) -> Option<nook_types::NodeCordon> {
+    serde_json::from_value(node.cordon.clone()?).ok()
 }
 
 /// Capacity assumed for a node that reports none — an agent old enough to

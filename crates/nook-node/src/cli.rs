@@ -1027,6 +1027,11 @@ fn columns(resource: &str, first: &Value) -> Vec<&'static str> {
             // machine, and it was previously answerable only by ssh-ing to it
             // and reading its unit file (MAIN-508).
             "capacity",
+            // And "why is NOTHING building on it" is the other half (MAIN-505):
+            // a node draining before an agent restart is online with free
+            // capacity and still takes no work, which every other column on
+            // this line renders as an idle machine.
+            "cordon",
             "capabilities.runtimes",
             "last_seen_at",
         ],
@@ -1098,6 +1103,9 @@ fn cell(row: &Value, key: &str) -> String {
             None => "-".into(),
         };
     }
+    if key == "cordon" {
+        return cordon_cell(row.get("cordon"));
+    }
     let mut node = row;
     for part in key.split('.') {
         match node.get(part) {
@@ -1106,6 +1114,32 @@ fn cell(row: &Value, key: &str) -> String {
         }
     }
     render_value(key, node)
+}
+
+/// A node's cordon as one narrow cell (MAIN-505): what it is waiting for and
+/// how many runs are left, with `!` when the wait is past its deadline.
+///
+/// The reason sentence itself is deliberately NOT here — it is a sentence, and
+/// it would be the widest column on the line. `nook get nodes --json` carries
+/// it whole, and so does the Nodes page.
+fn cordon_cell(v: Option<&Value>) -> String {
+    let Some(c) = v.filter(|v| !v.is_null()) else {
+        return "-".into();
+    };
+    let jobs = c.get("jobs_in_flight").and_then(Value::as_u64).unwrap_or(0);
+    let overdue = c.get("overdue").and_then(Value::as_bool).unwrap_or(false);
+    // "installing" and "waiting on 0 jobs" are different states and only the
+    // flag tells them apart — a count of zero is what BOTH would print.
+    let what = if c
+        .get("installing")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        "installing".to_string()
+    } else {
+        format!("updating {jobs} job{}", if jobs == 1 { "" } else { "s" })
+    };
+    format!("{what}{}", if overdue { " !" } else { "" })
 }
 
 /// An RFC-3339 timestamp as an age: `45m`, `12h`, `8d`. One unit, biggest that
@@ -3548,6 +3582,29 @@ mod table_tests {
                 "capabilities.runtimes"
             ),
             "-"
+        );
+    }
+
+    /// AC-3: a draining node has to be distinguishable from an idle one in the
+    /// table, and an overdue one from a draining one. A node taking work says
+    /// nothing at all, because most of them are.
+    #[test]
+    fn a_cordoned_node_reads_as_updating_and_an_overdue_one_is_marked() {
+        assert_eq!(cell(&json!({ "name": "azul" }), "cordon"), "-");
+        assert_eq!(cell(&json!({ "cordon": null }), "cordon"), "-");
+        assert_eq!(
+            cell(
+                &json!({ "cordon": { "jobs_in_flight": 2, "overdue": false } }),
+                "cordon"
+            ),
+            "updating 2 jobs"
+        );
+        assert_eq!(
+            cell(
+                &json!({ "cordon": { "jobs_in_flight": 1, "overdue": true } }),
+                "cordon"
+            ),
+            "updating 1 job !"
         );
     }
 

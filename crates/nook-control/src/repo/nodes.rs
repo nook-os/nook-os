@@ -319,6 +319,15 @@ pub trait NodeRepository: Send + Sync {
     /// `services::loop_capacity::of` for the number in force.
     async fn loop_profile(&self, id: NodeId) -> ApiResult<Option<(Vec<String>, Option<u32>)>>;
 
+    /// Record what a node just said about its own cordon (MAIN-505). `None`
+    /// clears it — a node asserts this on every connect, so the clear is as
+    /// much a report as the raise.
+    async fn set_cordon(
+        &self,
+        id: NodeId,
+        cordon: Option<&nook_types::NodeCordon>,
+    ) -> ApiResult<()>;
+
     /// How many of this person's nodes are online — the first half of phrasing
     /// *why* nothing could be placed.
     async fn owned_online_count(&self, tenant: TenantId, person: Uuid) -> ApiResult<i64>;
@@ -512,7 +521,7 @@ pub trait TenantCaRepository: Send + Sync {
 const NODE_COLUMNS: &str = "id, tenant_id, name, hostname, platform, capabilities, resources, \
      status, last_seen_at, owner_person_id, shared, created_at, updated_at, labels, taints, \
      port_range_start, port_range_end, port_exclusions, operator_authorize_optout, \
-     max_loop_jobs";
+     max_loop_jobs, cordon";
 
 /// The tenant node list's sort allowlist — the paged endpoint's contract half.
 pub const NODE_PAGE_SORTS: &[(&str, &str)] = &[
@@ -1066,6 +1075,24 @@ impl NodeRepository for DbNodeRepository {
                 .map(|n| n as u32);
             (kinds, cap)
         }))
+    }
+
+    async fn set_cordon(
+        &self,
+        id: NodeId,
+        cordon: Option<&nook_types::NodeCordon>,
+    ) -> ApiResult<()> {
+        let stored = cordon.map(|c| serde_json::to_value(c).unwrap_or(serde_json::Value::Null));
+        self.db
+            .exec(
+                &format!(
+                    "UPDATE nodes SET cordon = $2, updated_at = {now} WHERE id = $1",
+                    now = type_mapping(self.db.engine()).now()
+                ),
+                params![id, stored],
+            )
+            .await?;
+        Ok(())
     }
 
     async fn owned_online_count(&self, tenant: TenantId, person: Uuid) -> ApiResult<i64> {
@@ -1642,6 +1669,7 @@ impl FakeNodeRepository {
                 port_range_end: None,
                 port_exclusions: None,
                 max_loop_jobs: None,
+                cordon: None,
                 loop_capacity: None,
             },
             token_hash: String::new(),
@@ -2064,6 +2092,7 @@ impl NodeRepository for FakeNodeRepository {
                 port_range_end: None,
                 port_exclusions: None,
                 max_loop_jobs: None,
+                cordon: None,
                 loop_capacity: None,
                 created_at: now,
                 updated_at: now,
@@ -2264,6 +2293,19 @@ impl NodeRepository for FakeNodeRepository {
                     .map(|x| x as u32);
                 (kinds, cap)
             }))
+    }
+
+    async fn set_cordon(
+        &self,
+        id: NodeId,
+        cordon: Option<&nook_types::NodeCordon>,
+    ) -> ApiResult<()> {
+        let mut s = self.inner.lock().unwrap();
+        if let Some(n) = s.nodes.iter_mut().find(|n| n.node.id == id) {
+            n.node.cordon = cordon.map(|c| serde_json::to_value(c).unwrap_or_default());
+            n.node.updated_at = chrono::Utc::now();
+        }
+        Ok(())
     }
 
     async fn owned_online_count(&self, tenant: TenantId, person: Uuid) -> ApiResult<i64> {

@@ -77,6 +77,15 @@ fn running_jobs() -> &'static Mutex<HashSet<String>> {
     JOBS.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+/// How many loop jobs are running here right now (MAIN-505).
+///
+/// LOOP jobs only, which is the whole distinction the update cordon turns on: a
+/// terminal session is tmux's and outlives a restart, so it is not in this set
+/// and must never hold an update back (AC-5).
+pub fn in_flight() -> u32 {
+    running_jobs().lock().map(|s| s.len() as u32).unwrap_or(0)
+}
+
 fn note(out: &Sender<NodeToControl>, job_id: &str, content: impl Into<String>) {
     let _ = out.blocking_send(NodeToControl::JobTranscript {
         job_id: job_id.to_string(),
@@ -2396,6 +2405,20 @@ fn exit_is_ok(status: Option<i32>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// MAIN-505 AC-5: what gates an agent update is the LOOP-job registry and
+    /// nothing else. Terminal sessions are tmux's — they are never registered
+    /// here, so a machine full of them still reads zero and updates promptly.
+    #[test]
+    fn in_flight_counts_registered_loop_jobs_only() {
+        let key = "build-in-flight-probe";
+        assert!(!running_jobs().lock().unwrap().contains(key));
+        let before = in_flight();
+        running_jobs().lock().unwrap().insert(key.to_string());
+        assert_eq!(in_flight(), before + 1);
+        unregister(key);
+        assert_eq!(in_flight(), before);
+    }
 
     // ── MAIN-481: seeding a fresh build worktree ───────────────────────────
 

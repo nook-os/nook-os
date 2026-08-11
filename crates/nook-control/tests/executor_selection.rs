@@ -920,3 +920,136 @@ async fn a_spec_job_is_not_pinned_by_a_cards_worktree() {
     assert_eq!(placed.executor_node_id, Some(alive));
     bed.teardown().await;
 }
+
+/// Set the cordon a node reports about itself (MAIN-505).
+async fn cordon(bed: &TestBed, node: NodeId, reason: &str, jobs_in_flight: u32) {
+    bed.db()
+        .exec(
+            "UPDATE nodes SET cordon = $2 WHERE id = $1",
+            params![
+                node,
+                json!({
+                    "reason": reason,
+                    "jobs_in_flight": jobs_in_flight,
+                    "since": "2026-08-10T00:00:00Z",
+                    "overdue": false
+                })
+            ],
+        )
+        .await
+        .expect("cordon");
+}
+
+/// MAIN-505 AC-2: a node draining before an agent restart takes no new loop
+/// work. Without this the deferral never converges — fresh runs keep arriving
+/// and the quiet moment it is waiting for never comes.
+#[tokio::test]
+async fn a_cordoned_node_takes_no_new_loop_work() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, tenant, _user, person, job) = setup(&bed).await;
+    let draining = node(
+        &bed,
+        tenant,
+        Some(person),
+        "online",
+        caps("authorized", false),
+    )
+    .await;
+    cordon(&bed, draining, "deferring the agent update to 0.6.7", 1).await;
+
+    let placed = jobs::select_executor(&state, tenant, job)
+        .await
+        .expect("select");
+    assert_eq!(
+        placed.state, "queued",
+        "eligible, online, and still skipped"
+    );
+    assert!(placed.executor_node_id.is_none());
+    // AC-3: "why did nothing get placed on azul" is answered here, by name and
+    // in the node's own words, rather than blamed on auth that is in fact fine.
+    let reason = placed.queued_reason.expect("a reason is recorded");
+    assert!(reason.contains("cordoned"), "{reason}");
+    assert!(
+        reason.contains("0.6.7"),
+        "the node's own sentence: {reason}"
+    );
+
+    bed.teardown().await;
+}
+
+/// The cordon withholds work; it does not take the node out of the fleet. An
+/// uncordoned peer still gets the job.
+#[tokio::test]
+async fn work_goes_to_an_uncordoned_peer_instead() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, tenant, _user, person, job) = setup(&bed).await;
+    let draining = node(
+        &bed,
+        tenant,
+        Some(person),
+        "online",
+        caps("authorized", false),
+    )
+    .await;
+    cordon(&bed, draining, "deferring the agent update to 0.6.7", 1).await;
+    let free = node(
+        &bed,
+        tenant,
+        Some(person),
+        "online",
+        caps("authorized", false),
+    )
+    .await;
+
+    let placed = jobs::select_executor(&state, tenant, job)
+        .await
+        .expect("select");
+    assert_eq!(placed.state, "claimed");
+    assert_eq!(placed.executor_node_id, Some(free));
+
+    bed.teardown().await;
+}
+
+/// And it lifts: once the node reports no cordon it is an ordinary candidate
+/// again, with nothing else having to change. A cordon that never lifted would
+/// be worse than no cordon — the machine would go quietly dark.
+#[tokio::test]
+async fn a_lifted_cordon_makes_the_node_placeable_again() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, tenant, _user, person, job) = setup(&bed).await;
+    let n = node(
+        &bed,
+        tenant,
+        Some(person),
+        "online",
+        caps("authorized", false),
+    )
+    .await;
+    cordon(&bed, n, "deferring the agent update to 0.6.7", 1).await;
+    assert_eq!(
+        jobs::select_executor(&state, tenant, job)
+            .await
+            .expect("select")
+            .state,
+        "queued"
+    );
+
+    bed.db()
+        .exec("UPDATE nodes SET cordon = NULL WHERE id = $1", params![n])
+        .await
+        .expect("lift");
+
+    let placed = jobs::select_executor(&state, tenant, job)
+        .await
+        .expect("select again");
+    assert_eq!(placed.state, "claimed");
+    assert_eq!(placed.executor_node_id, Some(n));
+
+    bed.teardown().await;
+}
