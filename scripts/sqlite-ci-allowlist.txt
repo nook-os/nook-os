@@ -148,25 +148,3 @@ workspace_build_loop_status # `no such column: e`, with executor_selection (MAIN
 # gone; what remains here is the second, which is production emitting Postgres
 # SQL and belongs to the dialect sweep. `local_accounts` passed outright and its
 # line is deleted.
-
-# ── chat's production SQL is still Postgres, re-tagged by MAIN-294 ──
-#
-# This carried a MAIN-294 tag for "no MIGRATOR_SQLITE — EnginePool::pg() panics".
-# That defect is gone: chat now selects its pool and its migrator by URL scheme,
-# its tables ship in the control track's SQLite `0001` (one file cannot carry two
-# ledgers), and its tests take a private bed on the SQLite arm. `auth_search_path`
-# and `migrations` passed outright and their lines are deleted.
-#
-# The `public.`-qualified SQL and `GREATEST` this line used to name are gone —
-# they only ever appeared in nook-chat's COMMENTS, as MAIN-439 measured when it
-# re-instrumented the RepoError conversion that was discarding the DbError.
-#
-# Re-measured on 2026-08-09, after MAIN-442 landed the one timestamp form: SIX
-# failures, all one card's, none of them this one's. `DISTINCT ON` (repo/dms.rs
-# `people_in_my_orgs` and `participants`) is `near "ON": syntax error`, and
-# `bool_or` (repo/messages.rs `reactions_for`) is `no such function`. MAIN-439
-# owns both and has them written; it was BLOCKED on the seventh failure,
-# `channels::tests::unread_boundary_is_strict`, which MAIN-442 fixed — with
-# MAIN-439's two replacements applied on top of it this binary is 58/58, which
-# is why this line waits for that card and not another measurement.
-nook_chat:main             # `DISTINCT ON` and `bool_or` in chat's repos (MAIN-439)
