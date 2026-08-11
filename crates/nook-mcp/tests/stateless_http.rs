@@ -13,11 +13,11 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 use uuid::Uuid;
 
-use nook_mcp::{McpCaller, NookBackend, TaskQuery};
+use nook_mcp::{BuildRunQuery, McpCaller, NookBackend, TaskQuery};
 use nook_types::{
-    CreateUserNote, CreateUserNoteFolder, Event, Node, Note, Session, TaskItem, UpdateUserNote,
-    UpdateUserNoteFolder, UserNote, UserNoteFolder, UserNoteFolderId, UserNoteId, UserNoteSummary,
-    WorkspaceDetail,
+    CreateUserNote, CreateUserNoteFolder, Event, LoopRunLookup, LoopRunSummary, Node, Note,
+    Session, TaskItem, UpdateUserNote, UpdateUserNoteFolder, UserNote, UserNoteFolder,
+    UserNoteFolderId, UserNoteId, UserNoteSummary, WorkspaceDetail,
 };
 
 const HOST: &str = "nook.example.test";
@@ -68,6 +68,8 @@ never_called! {
     fn set_priority(String, i32) -> anyhow::Result<TaskItem>;
     fn set_task_parent(String, Option<String>) -> anyhow::Result<TaskItem>;
     fn link_tasks(String, String, String) -> anyhow::Result<Value>;
+    fn list_build_runs(McpCaller, BuildRunQuery) -> anyhow::Result<Vec<LoopRunSummary>>;
+    fn get_build_run(McpCaller, String, u32) -> anyhow::Result<LoopRunLookup>;
     fn notebook_list_notes(Uuid, Option<String>) -> anyhow::Result<Vec<UserNoteSummary>>;
     fn notebook_get_note(Uuid, UserNoteId) -> anyhow::Result<UserNote>;
     fn notebook_create_note(Uuid, CreateUserNote) -> anyhow::Result<UserNote>;
