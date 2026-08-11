@@ -118,6 +118,15 @@ impl ArtifactStore for DiskStore {
         }))
     }
 
+    async fn delete(&self, key: &str) -> Result<()> {
+        let path = self.path_for(key)?;
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e).with_context(|| format!("removing {}", path.display())),
+        }
+    }
+
     async fn presign(&self, _key: &str, _ttl: Duration) -> Result<Option<String>> {
         // Nothing to sign — a directory has no URL of its own. The control
         // plane streams these.
@@ -175,6 +184,15 @@ mod tests {
 
         // A missing key is None, not an error.
         assert!(store.head("0.1.0/nope").await.unwrap().is_none());
+
+        store.delete("0.1.0/nook-linux-x86_64").await.unwrap();
+        assert!(store
+            .head("0.1.0/nook-linux-x86_64")
+            .await
+            .unwrap()
+            .is_none());
+        // And deleting it again is not an error (MAIN-532).
+        store.delete("0.1.0/nook-linux-x86_64").await.unwrap();
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 }

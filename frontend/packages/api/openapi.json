@@ -7154,6 +7154,90 @@
         }
       }
     },
+    "/api/v1/user-content": {
+      "post": {
+        "tags": [
+          "crate::routes::user_content"
+        ],
+        "summary": "Accept an upload and record it.",
+        "description": "The bytes are written to the store first and the row second, because the\nfailure that leaves an object with no row is recoverable by a human with a\nbucket listing, while a row pointing at bytes that were never written is a\n404 the UI cannot explain. When the row does fail the object is removed\nagain, best effort.",
+        "operationId": "upload_user_content",
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserContent"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "larger than the configured cap"
+          }
+        }
+      }
+    },
+    "/api/v1/user-content/{id}": {
+      "get": {
+        "tags": [
+          "crate::routes::user_content"
+        ],
+        "summary": "Serve the bytes — streamed, or a 302 to the store when the deployment has\nopted in and the store can sign.",
+        "operationId": "get_user_content",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the stored bytes"
+          },
+          "302": {
+            "description": "a short-lived presigned URL"
+          },
+          "404": {
+            "description": "no such content in this tenant"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "crate::routes::user_content"
+        ],
+        "summary": "Remove the row and the bytes.",
+        "description": "The row goes first: a delete that removed the object and then failed would\nleave a record pointing at nothing, which serves as a 500 rather than the\n404 the caller asked for. An object left behind by a failure after this\npoint is invisible and harmless.",
+        "operationId": "delete_user_content",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/vault/passkeys": {
       "get": {
         "tags": [
@@ -17495,6 +17579,44 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "UserContent": {
+        "type": "object",
+        "description": "One stored upload, as the API hands it back (MAIN-532).\n\nDeliberately narrower than the row behind it: the tenant, the uploader and\nthe storage key are how the server finds and authorizes the bytes, not\nfacts a client needs, and the storage key in particular is the one field a\ncaller could use to reason about the bucket. What is here is what a UI\nrenders — a name, a type, a size, and the checksum that proves a download\narrived intact.\n\nIt knows nothing about what the content is *attached to*, and that is the\npoint: a ticket attachment and a chat attachment are two consumers of this\none record, neither of which needs a column here.",
+        "required": [
+          "id",
+          "filename",
+          "content_type",
+          "size_bytes",
+          "sha256",
+          "created_at"
+        ],
+        "properties": {
+          "content_type": {
+            "type": "string",
+            "description": "What the uploader *said* it was. Never trusted for serving — the route\ndecides what content type actually goes on the wire."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "filename": {
+            "type": "string",
+            "description": "The name the uploader's file had. Echoed back verbatim; sanitizing\nhappens where it matters, in the `Content-Disposition` the serving route\nwrites."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sha256": {
+            "type": "string",
+            "description": "Lowercase hex of the stored bytes, computed by the server on upload."
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64"
           }
         }
       },

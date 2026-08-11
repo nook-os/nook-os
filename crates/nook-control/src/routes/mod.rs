@@ -35,10 +35,12 @@ pub mod tenants;
 pub mod themes;
 pub mod tokens;
 pub mod tunnels;
+pub mod user_content;
 pub mod vault;
 pub mod verify_email;
 pub mod workspaces;
 
+use axum::extract::DefaultBodyLimit;
 use axum::response::IntoResponse;
 use axum::routing::{delete as delete_route, get, patch, post, put};
 use axum::{Json, Router};
@@ -264,6 +266,19 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/notifications",
             get(notifications::list).delete(notifications::clear),
+        )
+        // The upload route turns the global body limit off and enforces the
+        // configured cap itself, chunk by chunk (MAIN-532 AC-6). A static
+        // limit here could only ever be one number, and the one that matters
+        // is an operator's — while a request refused by the layer answers a
+        // bare 413 the UI cannot render.
+        .route(
+            "/user-content",
+            post(user_content::upload).layer(DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/user-content/{id}",
+            get(user_content::serve).delete(user_content::delete),
         )
         .route("/notifications/read", post(notifications::mark_read))
         .route(
