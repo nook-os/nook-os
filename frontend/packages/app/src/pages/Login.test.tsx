@@ -17,6 +17,9 @@ const state = vi.hoisted(() => ({
   /** Set the moment `/auth/providers` answers, so a test can wait for exactly
    *  that and not for something the first render already paints. */
   providersAnswered: false,
+  /** Make `/auth/local/status` FAIL the way the real client reports a 500 —
+   *  `{error}` and no data — rather than answer (MAIN-527). */
+  failLocal: false,
 }));
 
 vi.mock("@nookos/api", () => ({
@@ -28,6 +31,7 @@ vi.mock("@nookos/api", () => ({
       }
       if (path === "/api/v1/auth/local/status") {
         if (state.holdLocal) await state.holdLocal;
+        if (state.failLocal) return { error: { error: "boom" }, data: undefined };
         return { data: state.local };
       }
       if (path === "/api/v1/auth/dev-accounts") return { data: [] };
@@ -52,6 +56,7 @@ afterEach(() => {
   cleanup();
   state.holdLocal = null;
   state.providersAnswered = false;
+  state.failLocal = false;
 });
 
 describe("Login — OIDC degraded (MAIN-169)", () => {
@@ -172,6 +177,8 @@ describe("Login — first run with no identity provider (MAIN-397)", () => {
     await waitFor(() => expect(state.providersAnswered).toBe(true));
     await act(async () => {});
     expect(screen.queryByText(/No sign-in method is configured/i)).toBeNull();
+    // Nor the failure message (MAIN-527 AC-4): pending is not an error.
+    expect(screen.queryByText(/could not be loaded/i)).toBeNull();
 
     release();
     expect(await screen.findByText(/owns this instance/i)).toBeTruthy();
@@ -194,5 +201,38 @@ describe("Login — first run with no identity provider (MAIN-397)", () => {
     expect(screen.queryByText(/owns this instance/i)).toBeNull();
     expect(screen.queryByText("Confirm password")).toBeNull();
     expect(screen.queryByText(/No sign-in method is configured/i)).toBeNull();
+  });
+});
+
+// MAIN-527 AC-3: `local` is equally undefined when the status query FAILS, and
+// the screen used to render its title and nothing else — no form, no error, no
+// reason. The gate distinguishes the two states instead of treating both as
+// "no verdict yet".
+describe("Login — the local status endpoint failed (MAIN-527)", () => {
+  const NO_IDP = {
+    oidc: false,
+    oidc_degraded: false,
+    dev_login: false,
+    local: true,
+  };
+
+  it("says the sign-in options could not be loaded, rather than rendering an empty box", async () => {
+    state.providers = NO_IDP;
+    state.failLocal = true;
+    renderLogin();
+
+    expect(await screen.findByText(/could not be loaded/i)).toBeTruthy();
+    // And not the misdiagnosis: a failed request is not a missing OIDC config.
+    expect(screen.queryByText(/No sign-in method is configured/i)).toBeNull();
+  });
+
+  it("does not invent sign-in methods it could not confirm", async () => {
+    state.providers = NO_IDP;
+    state.failLocal = true;
+    renderLogin();
+
+    await screen.findByText(/could not be loaded/i);
+    expect(screen.queryByText("Username")).toBeNull();
+    expect(screen.queryByText(/owns this instance/i)).toBeNull();
   });
 });

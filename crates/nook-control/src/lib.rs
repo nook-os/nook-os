@@ -22,7 +22,7 @@ pub mod ws;
 // `crate::mailer` / `crate::queue` call site inside this crate resolves.
 pub use nook_infra::{cache, config, mailer, queue, storage};
 
-pub use nook_infra::Config;
+pub use nook_infra::{Config, OidcSetup};
 pub use state::AppState;
 
 // `sqlx::migrate!` embeds the migration set at COMPILE time, so adding a new

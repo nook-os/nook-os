@@ -4,7 +4,7 @@ use nook_db::dialect::type_mapping;
 use nook_db::{params, Db};
 use tracing_subscriber::EnvFilter;
 
-use nook_control::{routes, AppState, Config, MIGRATOR, SQUASH_MANIFEST};
+use nook_control::{routes, AppState, Config, OidcSetup, MIGRATOR, SQUASH_MANIFEST};
 
 #[derive(Parser)]
 #[command(name = "nook-control", about = "NookOS control plane")]
@@ -93,8 +93,8 @@ async fn serve(db: nook_db::DbPool, cfg: Config) -> Result<()> {
 
     // Discover the IdP once at startup. Failure is non-fatal so the stack
     // boots without the IdP reachable (dev-login still works).
-    let oidc = match cfg.oidc_issuer_url.as_deref() {
-        Some(issuer) if cfg.oidc_configured() => {
+    let oidc = match cfg.oidc_setup() {
+        OidcSetup::Configured { issuer } => {
             match nook_control::auth::OidcContext::discover(issuer).await {
                 Ok(ctx) => {
                     tracing::info!(issuer, "OIDC discovery complete");
@@ -106,11 +106,23 @@ async fn serve(db: nook_db::DbPool, cfg: Config) -> Result<()> {
                 }
             }
         }
-        _ => {
+        // An issuer with the set incomplete is an operator part-way through
+        // configuring a provider (MAIN-527 AC-1). Reporting it as the local
+        // case below would tell them the opposite of what they intended, at the
+        // level that says nothing is wrong.
+        OidcSetup::Partial { issuer, missing } => {
+            tracing::warn!(
+                issuer,
+                missing = %missing.join(", "),
+                "identity provider is partially configured — IdP login disabled until the missing settings are set"
+            );
+            None
+        }
+        OidcSetup::Absent => {
             // INFO, not WARN (MAIN-397 AC-3): on a local install there is no
             // identity provider by construction, so every launch would log a
             // warning about the expected state. A misconfigured IdP still warns
-            // — that is the arm above, where discovery was attempted and failed.
+            // — that is the arm above, and the one where discovery failed.
             tracing::info!("no identity provider configured — sign-in is local accounts");
             None
         }

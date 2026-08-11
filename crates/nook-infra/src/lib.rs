@@ -11,4 +11,4 @@ pub mod queue;
 pub mod redis_client;
 pub mod storage;
 
-pub use config::Config;
+pub use config::{Config, OidcSetup};

@@ -327,6 +327,24 @@ fn env_opt(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.trim().is_empty())
 }
 
+/// The three states an OIDC configuration can be in at boot, which is one more
+/// than [`Config::oidc_configured`] can express — and the missing one is the
+/// only state an operator can be in by mistake.
+#[derive(Debug, PartialEq, Eq)]
+pub enum OidcSetup<'a> {
+    /// Everything an authorization-code login needs is set: discover.
+    Configured { issuer: &'a str },
+    /// An issuer is set but the set is incomplete. Unfinished intent, not a
+    /// local install — startup WARNs and names `missing` (MAIN-527 AC-1).
+    Partial {
+        issuer: &'a str,
+        missing: Vec<&'static str>,
+    },
+    /// No issuer at all: the local install, where the absence is the expected
+    /// state and startup says so at INFO (MAIN-397 AC-3).
+    Absent,
+}
+
 impl Config {
     pub fn from_env() -> Result<Self> {
         let cfg = Self {
@@ -525,9 +543,31 @@ impl Config {
     }
 
     pub fn oidc_configured(&self) -> bool {
-        self.oidc_issuer_url.is_some()
-            && self.oidc_client_id.is_some()
-            && self.oidc_redirect_url.is_some()
+        matches!(self.oidc_setup(), OidcSetup::Configured { .. })
+    }
+
+    /// How complete this instance's identity-provider configuration is.
+    ///
+    /// The distinction that matters at boot is between an operator who set
+    /// nothing and one who set some of it: `oidc_configured()` collapses both
+    /// into "not configured", which is what made a half-configured provider
+    /// report as the deliberate local case (MAIN-527).
+    pub fn oidc_setup(&self) -> OidcSetup<'_> {
+        let Some(issuer) = self.oidc_issuer_url.as_deref() else {
+            return OidcSetup::Absent;
+        };
+        let missing: Vec<&'static str> = [
+            ("OIDC_CLIENT_ID", self.oidc_client_id.is_some()),
+            ("OIDC_REDIRECT_URL", self.oidc_redirect_url.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(name, present)| (!present).then_some(name))
+        .collect();
+        if missing.is_empty() {
+            OidcSetup::Configured { issuer }
+        } else {
+            OidcSetup::Partial { issuer, missing }
+        }
     }
 
     /// A Config with everything defaulted, for unit tests that need one without
@@ -656,5 +696,78 @@ mod queue_config_tests {
         // redis: a valid URL boots.
         assert!(check_redis_url(true, "NOOK_QUEUE_PROVIDER", Some("redis://redis:6379")).is_ok());
         assert!(check_redis_url(true, "NOOK_CACHE_PROVIDER", Some("redis://redis:6379")).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod oidc_setup_tests {
+    use super::{Config, OidcSetup};
+
+    fn cfg(issuer: Option<&str>, client_id: Option<&str>, redirect: Option<&str>) -> Config {
+        Config {
+            oidc_issuer_url: issuer.map(Into::into),
+            oidc_client_id: client_id.map(Into::into),
+            oidc_redirect_url: redirect.map(Into::into),
+            ..Config::for_test()
+        }
+    }
+
+    /// MAIN-527 AC-1: an issuer with the rest of the set incomplete is an
+    /// operator mid-configuration, so boot warns and names what is missing —
+    /// where it previously fell through to the local-install INFO.
+    #[test]
+    fn a_partly_configured_provider_is_partial_and_names_what_is_missing() {
+        assert_eq!(
+            cfg(Some("https://idp.example"), Some("id"), None).oidc_setup(),
+            OidcSetup::Partial {
+                issuer: "https://idp.example",
+                missing: vec!["OIDC_REDIRECT_URL"],
+            }
+        );
+        assert_eq!(
+            cfg(Some("https://idp.example"), None, Some("https://app/cb")).oidc_setup(),
+            OidcSetup::Partial {
+                issuer: "https://idp.example",
+                missing: vec!["OIDC_CLIENT_ID"],
+            }
+        );
+        assert_eq!(
+            cfg(Some("https://idp.example"), None, None).oidc_setup(),
+            OidcSetup::Partial {
+                issuer: "https://idp.example",
+                missing: vec!["OIDC_CLIENT_ID", "OIDC_REDIRECT_URL"],
+            }
+        );
+    }
+
+    /// MAIN-527 AC-2: no issuer at all stays the local case MAIN-397 made
+    /// quiet. Half the point of AC-1 is that it does not reach this.
+    #[test]
+    fn no_issuer_at_all_is_the_local_case() {
+        assert_eq!(cfg(None, None, None).oidc_setup(), OidcSetup::Absent);
+        // Stray settings without an issuer are still no provider: nothing can
+        // be discovered, and nobody misconfigures an issuer by omitting it.
+        assert_eq!(
+            cfg(None, Some("id"), Some("https://app/cb")).oidc_setup(),
+            OidcSetup::Absent
+        );
+    }
+
+    #[test]
+    fn a_complete_set_is_configured_and_carries_the_issuer() {
+        let full = cfg(
+            Some("https://idp.example"),
+            Some("id"),
+            Some("https://app/cb"),
+        );
+        assert_eq!(
+            full.oidc_setup(),
+            OidcSetup::Configured {
+                issuer: "https://idp.example"
+            }
+        );
+        assert!(full.oidc_configured());
+        assert!(!cfg(Some("https://idp.example"), Some("id"), None).oidc_configured());
+        assert!(!cfg(None, None, None).oidc_configured());
     }
 }

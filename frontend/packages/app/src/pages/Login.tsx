@@ -32,9 +32,20 @@ export function Login() {
   // Whether local sign-in is usable here, and whether anyone has claimed this
   // instance yet. An instance already committed to OIDC reports unavailable,
   // so the form is not offered where it could never work.
-  const { data: local } = useQuery({
+  const { data: local, isError: localFailed } = useQuery({
     queryKey: ["auth", "local", "status"],
-    queryFn: async () => (await api.GET("/api/v1/auth/local/status")).data,
+    queryFn: async () => {
+      const { data, error } = await api.GET("/api/v1/auth/local/status");
+      // A status that FAILED has to be distinguishable from one still in
+      // flight (MAIN-527 AC-3): the client reports a 500 as `{error}` with no
+      // data, which without this throw lands as a successful query holding
+      // undefined — the same shape as pending, and the screen renders its
+      // title and nothing else.
+      if (error || !data) {
+        throw new Error(messageOf(error, "status unavailable"));
+      }
+      return data;
+    },
   });
 
   const [username, setUsername] = useState("");
@@ -160,6 +171,10 @@ export function Login() {
   // tenant, so providers answers first — and a first-run local install would
   // paint "set OIDC_*" for that gap, about the one thing that is expected to be
   // absent there (MAIN-397 AC-3). `local` gates it: no verdict, no error.
+  //
+  // A FAILED status is a third state, not a quieter pending one (MAIN-527): it
+  // is reported below in its own words, because "we could not ask" and "there
+  // is nothing configured" send an operator to different places.
   const nothingAvailable =
     providers &&
     local &&
@@ -330,6 +345,17 @@ export function Login() {
                 sign in as new
               </button>
             </form>
+          </div>
+        )}
+
+        {localFailed && (
+          <div
+            className="small"
+            style={{ color: "var(--nook-err)" }}
+            role="alert"
+          >
+            Sign-in options could not be loaded — the control plane did not
+            answer. Reload once it is back.
           </div>
         )}
 
