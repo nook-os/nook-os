@@ -1577,7 +1577,13 @@ pub async fn select_executor(
     // the per-tenant user (MAIN-130).
     let person: Option<Uuid> = state.identity.person_id_of(job.requested_by).await?;
     let Some(person) = person else {
-        return set_queued_reason(state, job_id, "the requester has no person identity").await;
+        return set_queued_reason(
+            state,
+            job_id,
+            "the requester has no person identity",
+            Some(QueuedReason::NoPersonIdentity),
+        )
+        .await;
     };
 
     // Candidates in preference order: owned-and-online-and-authorized first,
@@ -1619,6 +1625,7 @@ pub async fn select_executor(
                     "waiting for node {name}, which holds this card's worktree — it is offline \
                      or not eligible right now. Prune the worktree from the card to release it."
                 ),
+                Some(QueuedReason::PinnedNodeUnavailable { node_name: name }),
             )
             .await;
         }
@@ -1696,30 +1703,52 @@ pub async fn select_executor(
     }
 
     let Some(node) = chosen else {
-        let reason = if !cordoned.is_empty() {
+        // Sentence and gate are decided in ONE expression (MAIN-494), so the
+        // two halves of a single write can never come from different branches.
+        let (reason, kind) = if !cordoned.is_empty() {
             // Named rather than lumped in with "no eligible executor" (AC-3):
             // the machine IS eligible and IS online, it is draining, and this
             // says so in the node's own words — which is the whole question
             // "why did nothing get placed on azul" is asking. Capacity is
             // added rather than replaced, so a mixed fleet is described and
             // not summarised into a half-truth.
+            //
+            // Untyped for the same reason it is phrased that way: this sentence
+            // can describe TWO gates at once, and `AtCapacity` alone would be
+            // the half-truth the wording exists to avoid. A cordon variant is
+            // outside MAIN-494's fixed list; NULL is the case AC-6 defines, and
+            // the sentence still renders.
             let mut r = format!("no eligible executor: cordoned — {}", cordoned.join("; "));
             if blocked_by_capacity {
                 r.push_str("; the rest are at their loop-job capacity");
             }
-            r
+            (r, None)
         } else if blocked_by_capacity {
-            "no eligible executor: every eligible node is at its loop-job capacity".to_string()
+            (
+                "no eligible executor: every eligible node is at its loop-job capacity".to_string(),
+                Some(QueuedReason::AtCapacity),
+            )
         } else if job.kind == BUILD_KIND && label_filtered_all {
             // Honest, and never a fallback (AC-3): eligible nodes exist but
             // none wears the label, and the reason says which label to set
             // rather than blaming auth or declarations that are in fact fine.
-            "no eligible executor: no online eligible node carries the role=build label              — set it on a node that may build (Nodes page edits labels)"
-                .to_string()
+            (
+                "no eligible executor: no online eligible node carries the role=build label              — set it on a node that may build (Nodes page edits labels)"
+                    .to_string(),
+                Some(QueuedReason::NoRoleLabel {
+                    label: build_label(),
+                }),
+            )
         } else {
-            no_executor_reason(state, tenant, person, &job.kind).await?
+            // No variant either: this phrasing describes the SHAPE of the
+            // fleet rather than a gate, and a sixth variant meaning "some
+            // other way" is a value no client could act on.
+            (
+                no_executor_reason(state, tenant, person, &job.kind).await?,
+                None,
+            )
         };
-        return set_queued_reason(state, job_id, &reason).await;
+        return set_queued_reason(state, job_id, &reason, kind).await;
     };
 
     // Re-asked at CLAIM, of the stored row, independent of the pick above
@@ -1728,7 +1757,15 @@ pub async fn select_executor(
     // query and the claim, or if a future caller reaches the claim by another
     // route.
     if let Some(refusal) = kind_wall_refusal(state, node, &job.kind).await? {
-        return set_queued_reason(state, job_id, &refusal).await;
+        return set_queued_reason(
+            state,
+            job_id,
+            &refusal,
+            Some(QueuedReason::KindWallRefusal {
+                kind: job.kind.clone(),
+            }),
+        )
+        .await;
     }
 
     // Atomic claim: only the caller that flips `queued` -> `claimed` wins.
@@ -1842,9 +1879,13 @@ pub const CAPACITY_WHEN_UNREPORTED: u32 = 2;
 /// of being online. Old-style `role=build` labels widen to this per-role key
 /// exactly as `role=loop` does (MAIN-463).
 fn build_selector() -> std::collections::BTreeMap<String, String> {
-    [("role/build".to_string(), "true".to_string())]
-        .into_iter()
-        .collect()
+    [(build_label(), "true".to_string())].into_iter().collect()
+}
+
+/// The selector key `role=build` widens to — named once, so the reason a job
+/// reports and the selector it was filtered by cannot disagree.
+fn build_label() -> String {
+    "role/build".to_string()
 }
 
 /// The placement selector a kind requires, if any — the single point dispatch
@@ -1962,8 +2003,13 @@ async fn no_executor_reason(
 /// Record why a job stays queued, without changing its state. A no-op guard on
 /// `state = 'queued'` so a concurrent claim is never clobbered by a stale
 /// reason write.
-async fn set_queued_reason(state: &AppState, job_id: JobId, reason: &str) -> ApiResult<LoopJob> {
-    state.jobs.set_queued_reason(job_id, reason).await?;
+async fn set_queued_reason(
+    state: &AppState,
+    job_id: JobId,
+    reason: &str,
+    kind: Option<QueuedReason>,
+) -> ApiResult<LoopJob> {
+    state.jobs.set_queued_reason(job_id, reason, kind).await?;
     // Return the current row (its state is still queued unless a claim raced in).
     state.jobs.reload(job_id).await
 }

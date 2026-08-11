@@ -33,6 +33,12 @@ export type RunRow = {
   label: string;
   /** The right-hand annotation: a short head sha, an outcome. */
   meta: string;
+  /** Why a `queued` run is still waiting (MAIN-494), in the sentence the
+   *  control plane wrote. Empty on a run that is not waiting. */
+  reason?: string;
+  /** The same gate typed — carried onto the row as an attribute, so a client
+   *  reading this list branches on a value rather than on the sentence. */
+  reasonKind?: string;
   /** When the run was raised. The list's only ordering, and the one field the
    *  two row shapes below have to agree on. */
   createdAt: string;
@@ -48,6 +54,8 @@ type BuildRun = {
   // up the moment the listing starts sending it; until then rows show
   // key + state.
   build_outcome?: string | null;
+  queued_reason?: string | null;
+  queued_reason_kind?: { kind: string } | null;
 };
 
 type ReviewRun = {
@@ -80,6 +88,22 @@ export function shortHead(sha?: string | null): string {
   return sha ? sha.slice(0, 7) : "";
 }
 
+/**
+ * The sentence a waiting run explains itself with (MAIN-494 AC-5/AC-6).
+ *
+ * The TEXT verbatim, whether or not a typed gate came with it — the control
+ * plane writes the two together and the sentence IS the rendering, so a row
+ * from before the typed column renders identically to one after it. Nothing
+ * here parses the sentence into a cause: a near-match would be a confident lie
+ * about why something waited.
+ *
+ * Only while `queued`. A claimed run's reason is cleared at the claim, and a
+ * stale one beside `running` would read as the run being stuck.
+ */
+export function queuedReason(state: string, reason?: string | null): string {
+  return state === "queued" && reason ? reason : "";
+}
+
 export function buildRow(r: BuildRun): RunRow {
   return {
     id: r.id,
@@ -87,6 +111,8 @@ export function buildRow(r: BuildRun): RunRow {
     state: r.state,
     label: r.task_key ?? "build",
     meta: r.build_outcome ?? "",
+    reason: queuedReason(r.state, r.queued_reason),
+    reasonKind: r.queued_reason_kind?.kind,
     createdAt: r.created_at,
   };
 }
@@ -288,6 +314,7 @@ export function WorkspaceRuns({
                     onClick={() => setOpenId(r.id)}
                     data-testid="run-row"
                     data-kind={r.kind}
+                    data-reason-kind={r.reasonKind}
                   >
                     {/* The kind is a WORD, not a colour: colour in this row is
                         already the state's, and a second palette next to it
@@ -296,6 +323,15 @@ export function WorkspaceRuns({
                     <span className="mono run-label">{r.label}</span>
                     <Pill tone={tone}>{r.state}</Pill>
                     <span className="faint small mono">{r.meta}</span>
+                    {/* A second line rather than the meta slot: the reason is a
+                        SENTENCE — it names a node, or the label to set — and
+                        squeezing it into a one-word annotation would truncate
+                        the half that says what to do about it. */}
+                    {r.reason ? (
+                      <span className="faint small run-reason" data-testid="run-reason">
+                        {r.reason}
+                      </span>
+                    ) : null}
                   </button>
                 </li>
               );

@@ -70,12 +70,16 @@ async fn placing_a_job_clears_the_reason_it_was_stuck() {
     let t = tenant();
     let job = queued(&repo, t, TaskId::new()).await;
 
-    repo.set_queued_reason(job, "no eligible executor")
+    repo.set_queued_reason(job, "no eligible executor", Some(QueuedReason::AtCapacity))
         .await
         .unwrap();
     assert_eq!(
         repo.queued_reason_of(job),
         Some(Some("no eligible executor".into()))
+    );
+    assert_eq!(
+        repo.queued_reason_kind_of(job),
+        Some(Some(QueuedReason::AtCapacity))
     );
 
     repo.claim_for_executor(job, NodeId::new()).await.unwrap();
@@ -83,6 +87,12 @@ async fn placing_a_job_clears_the_reason_it_was_stuck() {
         repo.queued_reason_of(job),
         Some(None),
         "a placed job must not still explain why it could not be placed"
+    );
+    assert_eq!(
+        repo.queued_reason_kind_of(job),
+        Some(None),
+        "the typed gate is cleared WITH the sentence (MAIN-494 AC-3) — left \
+         behind, it tells a client the run is waiting on something it is not"
     );
 }
 
@@ -94,7 +104,7 @@ async fn a_reason_is_not_written_onto_a_job_that_has_already_been_placed() {
     repo.claim_for_executor(job, NodeId::new()).await.unwrap();
 
     let wrote = repo
-        .set_queued_reason(job, "no eligible executor")
+        .set_queued_reason(job, "no eligible executor", Some(QueuedReason::AtCapacity))
         .await
         .unwrap();
     assert_eq!(

@@ -494,6 +494,11 @@ async fn a_node_at_capacity_is_skipped_and_the_job_waits() {
         reason.contains("capacity"),
         "the reason says it is busy, not ineligible: {reason}"
     );
+    assert_eq!(
+        placed.queued_reason_kind,
+        Some(QueuedReason::AtCapacity),
+        "MAIN-494: and says it as a value, so a client is not matching words"
+    );
 
     // The slot frees; the same job places without anything else changing.
     bed.db()
@@ -708,6 +713,14 @@ async fn a_build_job_waits_for_a_role_build_label_and_places_once_it_exists() {
         reason.contains("role=build"),
         "the reason names the missing label, not auth or kinds: {reason}"
     );
+    assert_eq!(
+        placed.queued_reason_kind,
+        Some(QueuedReason::NoRoleLabel {
+            label: "role/build".into()
+        }),
+        "MAIN-494: the gate names the SELECTOR key the label widens to, which \
+         is what a client would have to set, not the words in the sentence"
+    );
 
     bed.db()
         .exec(
@@ -769,6 +782,13 @@ async fn build_node(bed: &TestBed, tenant: TenantId, owner: Option<Uuid>, status
         .await
         .expect("label");
     id
+}
+
+async fn node_name(bed: &TestBed, id: NodeId) -> String {
+    bed.db()
+        .query_scalar("SELECT name FROM nodes WHERE id = $1", params![id])
+        .await
+        .expect("node name")
 }
 
 async fn record_worktree(bed: &TestBed, task: TaskId, node: NodeId, path: &str) {
@@ -835,6 +855,14 @@ async fn a_pinned_build_waits_for_its_node_and_says_which() {
         .expect("select");
     assert_eq!(held.state, "queued", "it waits rather than starting over");
     assert_eq!(held.executor_node_id, None);
+    assert_eq!(
+        held.queued_reason_kind,
+        Some(QueuedReason::PinnedNodeUnavailable {
+            node_name: node_name(&bed, dark).await
+        }),
+        "MAIN-494: the gate carries the node, so a client does not have to \
+         find the name inside the sentence"
+    );
     let reason = held.queued_reason.unwrap_or_default();
     assert!(
         reason.contains("holds this card's worktree"),

@@ -341,6 +341,7 @@ use utoipa::OpenApi;
         nook_types::BuildLoopDeclaration,
         nook_types::SetBuildLoopRequest,
         nook_types::WorkspaceBuildRun,
+        nook_types::QueuedReason,
         nook_types::SetReviewLoopRequest,
         nook_types::ReviewLoopStatus,
         nook_types::ReviewRaiseResult,

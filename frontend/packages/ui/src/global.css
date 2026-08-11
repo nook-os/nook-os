@@ -7095,6 +7095,14 @@ button.chat-tool-line:hover { color: var(--nook-fg-dim); }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Why a queued run is waiting (MAIN-494): its own line under the pills, in
+   full. The row already wraps, so `100%` is what claims the line rather than
+   sharing one with the pills and truncating the half that says what to do. */
+.reviews-run .run-reason {
+  flex: 1 0 100%;
+  line-height: 1.35;
+  white-space: normal;
+}
 .reviews-run:hover {
   background: var(--nook-bg-raised);
   color: var(--nook-fg);

@@ -151,6 +151,19 @@ fn driver_error_is_transient(e: &sqlx::Error) -> bool {
 }
 
 impl DbError {
+    /// A column held a value this type could not read (MAIN-494).
+    ///
+    /// Constructed here because building one means naming `sqlx::Error`, and
+    /// that is the adapter's privilege: a `FromDbColumn` impl for a domain type
+    /// lives in `nook-types`, where a sqlx type in scope would pin the crate to
+    /// one engine — exactly what `check-sqlx-signatures.sh` exists to stop.
+    pub fn decode(column: impl Into<String>, detail: impl std::fmt::Display) -> Self {
+        DbError::Query(sqlx::Error::ColumnDecode {
+            index: column.into(),
+            source: detail.to_string().into(),
+        })
+    }
+
     /// Did a write collide with a unique constraint?
     ///
     /// Callers branch on this to turn a duplicate into a 409 rather than a 500

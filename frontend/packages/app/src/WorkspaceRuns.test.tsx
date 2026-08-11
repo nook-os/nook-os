@@ -32,6 +32,7 @@ import {
   mergeRuns,
   parseKind,
   pillTone,
+  queuedReason,
   runLabel,
   shortHead,
   useLegacyRunsSectionRedirect,
@@ -267,6 +268,64 @@ describe("filtering", () => {
     fireEvent.change(screen.getByLabelText("filter by state"), { target: { value: "running" } });
     expect(screen.queryAllByTestId("run-row")).toHaveLength(0);
     expect(isVisible(await screen.findByText(/No run matches this filter/i))).toBe(true);
+  });
+});
+
+describe("why a queued run is waiting (MAIN-494)", () => {
+  const waiting = (over: Record<string, unknown> = {}) =>
+    build({
+      id: "job-q1",
+      state: "queued",
+      queued_reason:
+        "waiting for node builder-2, which holds this card's worktree. Prune the worktree from the card to release it.",
+      queued_reason_kind: { kind: "pinned_node_unavailable", node_name: "builder-2" },
+      ...over,
+    });
+
+  it("explains a queued run in the panel, so nobody needs a terminal", async () => {
+    state.builds = [waiting()];
+    renderRuns();
+    const reason = await screen.findByTestId("run-reason");
+    expect(isVisible(reason)).toBe(true);
+    expect(reason.textContent).toContain("builder-2");
+    expect(reason.textContent).toContain("Prune the worktree");
+  });
+
+  it("carries the gate as a value, so a client never matches on the sentence", async () => {
+    state.builds = [waiting()];
+    renderRuns();
+    const rows = await screen.findAllByTestId("run-row");
+    expect(rows[0].getAttribute("data-reason-kind")).toBe("pinned_node_unavailable");
+  });
+
+  it("says nothing on a run that is not waiting", async () => {
+    // The claim clears both columns; a reason still on screen beside `running`
+    // would read as the run being stuck.
+    state.builds = [build({ state: "running" })];
+    renderRuns();
+    await screen.findAllByTestId("run-row");
+    expect(screen.queryByTestId("run-reason")).toBeNull();
+  });
+
+  it("renders a legacy row's text verbatim, with no gate to go with it", async () => {
+    // A row written before the typed column: the sentence is all there is, and
+    // parsing it into a cause would be a guess (AC-6).
+    state.builds = [
+      waiting({
+        queued_reason: "no eligible executor: you have no node online",
+        queued_reason_kind: null,
+      }),
+    ];
+    renderRuns();
+    const reason = await screen.findByTestId("run-reason");
+    expect(reason.textContent).toBe("no eligible executor: you have no node online");
+    expect(screen.getAllByTestId("run-row")[0].getAttribute("data-reason-kind")).toBeNull();
+  });
+
+  it("shows a reason only while queued", () => {
+    expect(queuedReason("queued", "at capacity")).toBe("at capacity");
+    expect(queuedReason("running", "at capacity")).toBe("");
+    expect(queuedReason("queued", null)).toBe("");
   });
 });
 

@@ -1308,6 +1308,13 @@ pub struct WorkspaceBuildRun {
     pub state: String,
     /// The card's human key (`MAIN-42`); `None` if the card was deleted.
     pub task_key: Option<String>,
+    /// Why a `queued` run is still waiting, and the same gate typed
+    /// (MAIN-494). Both `None` on a run that got placed — the panel's whole
+    /// question is why one that did not is still here.
+    #[serde(default)]
+    pub queued_reason: Option<String>,
+    #[serde(default)]
+    pub queued_reason_kind: Option<QueuedReason>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -3515,6 +3522,79 @@ pub struct GitCredential {
 // and its lifecycle only; executor selection, node execution and interaction
 // bridging are later tickets in the chain.
 
+/// Which dispatch gate is holding a job `queued` (MAIN-494).
+///
+/// The sentence in `loop_jobs.queued_reason` stays the rendering; this is what
+/// a client BRANCHES on. Free text could only ever be matched against, and a
+/// near-match is a confident lie about why something waited.
+///
+/// Internally tagged like [`NodeBlocker`], whose shape this copies — and
+/// deliberately NOT the same enum (NG-1): dispatch and session reconcile are
+/// two subsystems, and one vocabulary for both would have to name gates
+/// neither half has.
+///
+/// Each variant holds what makes it ACTIONABLE. "Waiting on a pinned node" is
+/// not something a human can act on without the node's name.
+///
+/// Not every queued job has one: when nothing at all is eligible, the reason
+/// is a phrasing of the fleet's shape rather than a gate, and the column is
+/// left NULL rather than given a variant meaning "some other way".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum QueuedReason {
+    /// The requester has no person identity, so node ownership — which keys on
+    /// the person, not the per-tenant user — cannot be evaluated at all.
+    NoPersonIdentity,
+    /// The card's worktree lives on this node and the job may run nowhere else
+    /// (MAIN-480), but the node is offline or otherwise ineligible.
+    PinnedNodeUnavailable {
+        /// The node's name, falling back to its id when the row is gone.
+        node_name: String,
+    },
+    /// Every eligible node is already holding its `max_loop_jobs`, or has been
+    /// set to zero to stop it claiming.
+    AtCapacity,
+    /// Eligible nodes exist, but none carries the label this kind's placement
+    /// selector requires — the owner sets it on the Nodes page.
+    NoRoleLabel {
+        /// The selector key that matched nothing, e.g. `role/build`.
+        label: String,
+    },
+    /// The chosen node refused this kind at the claim (MAIN-142): a shared
+    /// operator asked to build, or a node that does not declare the kind.
+    KindWallRefusal {
+        /// Renamed on the wire only: `kind` is the internal tag, and a variant
+        /// field of that name would overwrite the discriminant a client reads.
+        #[serde(rename = "job_kind")]
+        kind: String,
+    },
+}
+
+impl nook_db::IntoDbValue for QueuedReason {
+    fn into_db_value(self) -> nook_db::DbValue {
+        // `.ok()` rather than a panic or a JSON `null`: this cannot fail for a
+        // shape whose only values are strings, and if it ever did, a NULL
+        // column is the case AC-6 already handles — the sentence still renders.
+        nook_db::DbValue::Json(serde_json::to_value(self).ok())
+    }
+}
+
+impl nook_db::FromDbColumn for QueuedReason {
+    fn from_db_column(row: &nook_db::DbRow, name: &str) -> Result<Self, nook_db::DbError> {
+        decode_queued_reason(row.get::<serde_json::Value>(name)?, name)
+    }
+    fn from_db_column_at(row: &nook_db::DbRow, index: usize) -> Result<Self, nook_db::DbError> {
+        decode_queued_reason(row.get_at::<serde_json::Value>(index)?, &index.to_string())
+    }
+}
+
+fn decode_queued_reason(
+    raw: serde_json::Value,
+    column: &str,
+) -> Result<QueuedReason, nook_db::DbError> {
+    serde_json::from_value(raw).map_err(|e| nook_db::DbError::decode(column, e))
+}
+
 /// A loop job's lifecycle position. `queued` on create; `completed`, `failed`,
 /// and `canceled` are terminal. The service layer enforces which transitions
 /// are legal — the wire type just carries the current value.
@@ -3544,6 +3624,12 @@ pub struct LoopJob {
     /// specific gate that failed while it waits `queued`. `None` once claimed.
     #[serde(default)]
     pub queued_reason: Option<String>,
+    /// The same gate, typed (MAIN-494) — the field a client branches on, where
+    /// `queued_reason` is the field it renders. `None` on a row written before
+    /// the column existed, and on the residual "nothing is eligible" reason,
+    /// which is not a gate.
+    #[serde(default)]
+    pub queued_reason_kind: Option<QueuedReason>,
     /// The general idea the run starts from (MAIN-231) — the human's opening
     /// brief, set at create time and carried into the executor's session.
     /// `None` when the job was opened with nothing but its ticket.
