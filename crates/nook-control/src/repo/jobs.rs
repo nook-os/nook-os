@@ -345,12 +345,22 @@ pub trait LoopJobRepository: Send + Sync {
     /// dispatchers exactly one wins and the loser sees `None`.
     async fn claim_for_executor(&self, id: JobId, node: NodeId) -> ApiResult<Option<LoopJob>>;
 
-    /// Explain why a job is still queued. Guarded on `queued` so a job that got
-    /// placed in the meantime is not annotated with a stale excuse, and on the
-    /// reason actually CHANGING — re-writing the same sentence every dispatch
-    /// cycle is not news, and the starvation rule (MAIN-496) reads
-    /// `updated_at` as the moment the reason last moved.
-    async fn set_queued_reason(&self, id: JobId, reason: &str) -> ApiResult<u64>;
+    /// Explain why a job is still queued, as the sentence a human reads AND the
+    /// gate a client branches on (MAIN-494) — one write, so the two can never
+    /// describe different waits. `kind` is `None` for the residual
+    /// no-eligible-executor reason, which is not a gate.
+    ///
+    /// Guarded on `queued` so a job that got placed in the meantime is not
+    /// annotated with a stale excuse, and on the reason actually CHANGING —
+    /// re-writing the same sentence every dispatch cycle is not news, and the
+    /// starvation rule (MAIN-496) reads `updated_at` as the moment the reason
+    /// last moved.
+    async fn set_queued_reason(
+        &self,
+        id: JobId,
+        reason: &str,
+        kind: Option<QueuedReason>,
+    ) -> ApiResult<u64>;
 
     /// Reload unscoped, for the paths that have just written by id.
     async fn reload(&self, id: JobId) -> ApiResult<LoopJob>;
@@ -978,6 +988,7 @@ impl LoopJobRepository for DbLoopJobRepository {
                         CASE WHEN {vis}
                              THEN (b.key || '-' || CAST(t.number AS text))
                         END AS task_key,
+                        j.queued_reason, j.queued_reason_kind,
                         j.created_at
                    FROM loop_jobs j
                    LEFT JOIN tasks t ON t.id = j.target_task_id
@@ -1065,7 +1076,7 @@ impl LoopJobRepository for DbLoopJobRepository {
                 &format!(
                     "UPDATE loop_jobs
                      SET executor_node_id = $2, state = 'claimed', queued_reason = NULL,
-                         updated_at = {}
+                         queued_reason_kind = NULL, updated_at = {}
                      WHERE id = $1 AND state = 'queued'
                      RETURNING *",
                     type_mapping(self.db.engine()).now()
@@ -1075,20 +1086,36 @@ impl LoopJobRepository for DbLoopJobRepository {
             .await?)
     }
 
-    async fn set_queued_reason(&self, id: JobId, reason: &str) -> ApiResult<u64> {
+    async fn set_queued_reason(
+        &self,
+        id: JobId,
+        reason: &str,
+        kind: Option<QueuedReason>,
+    ) -> ApiResult<u64> {
         // `queued_reason IS NULL OR <> $2` rather than `IS DISTINCT FROM`,
         // which SQLite only learned in 3.39 — the parameter is never NULL, so
         // the two are the same test here.
+        //
+        // The gate rides that same guard rather than widening it (MAIN-494):
+        // sentence and gate are decided in ONE branch of the dispatcher, so an
+        // unchanged sentence means an unchanged gate, and testing both would
+        // only re-stamp `updated_at` — the clock the starvation rule reads.
         Ok(self
             .db
             .exec(
                 &format!(
-                    "UPDATE loop_jobs SET queued_reason = $2, updated_at = {}
+                    "UPDATE loop_jobs SET queued_reason = $2, queued_reason_kind = $3,
+                            updated_at = {}
                      WHERE id = $1 AND state = 'queued'
                        AND (queued_reason IS NULL OR queued_reason <> $2)",
                     type_mapping(self.db.engine()).now()
                 ),
-                params![id, reason],
+                params![
+                    id,
+                    reason,
+                    kind.map(nook_db::IntoDbValue::into_db_value)
+                        .unwrap_or(nook_db::DbValue::Json(None))
+                ],
             )
             .await?)
     }
@@ -1565,6 +1592,16 @@ impl FakeLoopJobRepository {
             .map(|j| j.queued_reason.clone())
     }
 
+    pub fn queued_reason_kind_of(&self, id: JobId) -> Option<Option<QueuedReason>> {
+        self.inner
+            .lock()
+            .unwrap()
+            .jobs
+            .iter()
+            .find(|j| j.id == id)
+            .map(|j| j.queued_reason_kind.clone())
+    }
+
     /// Force a state directly, bypassing the guards — so a test can set up the
     /// very state a guard exists to protect.
     pub fn force_state(&self, id: JobId, state: &str) {
@@ -1763,6 +1800,8 @@ impl LoopJobRepository for FakeLoopJobRepository {
                 // The fake holds no boards to join; the key is the panel's
                 // concern, and `None` is a legal row (a deleted card's run).
                 task_key: None,
+                queued_reason: j.queued_reason.clone(),
+                queued_reason_kind: j.queued_reason_kind.clone(),
                 created_at: j.created_at,
             })
             .collect();
@@ -1933,6 +1972,7 @@ impl LoopJobRepository for FakeLoopJobRepository {
             executor_node_id: None,
             predecessor_job_id: new.predecessor_job_id,
             queued_reason: None,
+            queued_reason_kind: None,
             seed: new.seed,
             created_at: now,
             updated_at: now,
@@ -1982,12 +2022,18 @@ impl LoopJobRepository for FakeLoopJobRepository {
                 j.executor_node_id = Some(node);
                 j.state = "claimed".into();
                 j.queued_reason = None;
+                j.queued_reason_kind = None;
                 j.updated_at = chrono::Utc::now();
                 j.clone()
             }))
     }
 
-    async fn set_queued_reason(&self, id: JobId, reason: &str) -> ApiResult<u64> {
+    async fn set_queued_reason(
+        &self,
+        id: JobId,
+        reason: &str,
+        kind: Option<QueuedReason>,
+    ) -> ApiResult<u64> {
         let mut s = self.inner.lock().unwrap();
         Ok(
             match s.jobs.iter_mut().find(|j| {
@@ -1995,6 +2041,7 @@ impl LoopJobRepository for FakeLoopJobRepository {
             }) {
                 Some(j) => {
                     j.queued_reason = Some(reason.to_string());
+                    j.queued_reason_kind = kind;
                     j.updated_at = chrono::Utc::now();
                     1
                 }

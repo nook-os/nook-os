@@ -362,7 +362,13 @@ async fn a_queued_job_whose_reason_keeps_changing_is_not_escalated() {
     .await;
     state
         .jobs
-        .set_queued_reason(moving, "waiting for the node holding this card's worktree")
+        .set_queued_reason(
+            moving,
+            "waiting for the node holding this card's worktree",
+            Some(QueuedReason::PinnedNodeUnavailable {
+                node_name: "builder-2".into(),
+            }),
+        )
         .await
         .expect("progress");
     // And a re-write of the SAME sentence is not progress: it must not reset
@@ -370,7 +376,7 @@ async fn a_queued_job_whose_reason_keeps_changing_is_not_escalated() {
     assert_eq!(
         state
             .jobs
-            .set_queued_reason(stuck, "at capacity")
+            .set_queued_reason(stuck, "at capacity", Some(QueuedReason::AtCapacity))
             .await
             .expect("repeat"),
         0,

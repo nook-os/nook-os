@@ -12338,6 +12338,17 @@
             ],
             "description": "Why the job could not yet be placed on an executor (MAIN-160): the\nspecific gate that failed while it waits `queued`. `None` once claimed."
           },
+          "queued_reason_kind": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/QueuedReason",
+                "description": "The same gate, typed (MAIN-494) — the field a client branches on, where\n`queued_reason` is the field it renders. `None` on a row written before\nthe column existed, and on the residual \"nothing is eligible\" reason,\nwhich is not a gate."
+              }
+            ]
+          },
           "requested_by": {
             "$ref": "#/components/schemas/UserId"
           },
@@ -14547,6 +14558,101 @@
             "description": "The app password. Required, not optional: a `.env` moves between\nmachines, so it is sealed with something the server never stores\nbefore the app key wraps it. A database dump plus `SECRETS_KEY` must\nnever be enough to read one."
           }
         }
+      },
+      "QueuedReason": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "The requester has no person identity, so node ownership — which keys on\nthe person, not the per-tenant user — cannot be evaluated at all.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "no_person_identity"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The card's worktree lives on this node and the job may run nowhere else\n(MAIN-480), but the node is offline or otherwise ineligible.",
+            "required": [
+              "node_name",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "pinned_node_unavailable"
+                ]
+              },
+              "node_name": {
+                "type": "string",
+                "description": "The node's name, falling back to its id when the row is gone."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Every eligible node is already holding its `max_loop_jobs`, or has been\nset to zero to stop it claiming.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "at_capacity"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Eligible nodes exist, but none carries the label this kind's placement\nselector requires — the owner sets it on the Nodes page.",
+            "required": [
+              "label",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "no_role_label"
+                ]
+              },
+              "label": {
+                "type": "string",
+                "description": "The selector key that matched nothing, e.g. `role/build`."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The chosen node refused this kind at the claim (MAIN-142): a shared\noperator asked to build, or a node that does not declare the kind.",
+            "required": [
+              "job_kind",
+              "kind"
+            ],
+            "properties": {
+              "job_kind": {
+                "type": "string",
+                "description": "Renamed on the wire only: `kind` is the internal tag, and a variant\nfield of that name would overwrite the discriminant a client reads."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "kind_wall_refusal"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Which dispatch gate is holding a job `queued` (MAIN-494).\n\nThe sentence in `loop_jobs.queued_reason` stays the rendering; this is what\na client BRANCHES on. Free text could only ever be matched against, and a\nnear-match is a confident lie about why something waited.\n\nInternally tagged like [`NodeBlocker`], whose shape this copies — and\ndeliberately NOT the same enum (NG-1): dispatch and session reconcile are\ntwo subsystems, and one vocabulary for both would have to name gates\nneither half has.\n\nEach variant holds what makes it ACTIONABLE. \"Waiting on a pinned node\" is\nnot something a human can act on without the node's name.\n\nNot every queued job has one: when nothing at all is eligible, the reason\nis a phrasing of the fleet's shape rather than a gate, and the column is\nleft NULL rather than given a variant meaning \"some other way\"."
       },
       "ReconcileBlocker": {
         "type": "object",
@@ -18169,6 +18275,23 @@
           "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "queued_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why a `queued` run is still waiting, and the same gate typed\n(MAIN-494). Both `None` on a run that got placed — the panel's whole\nquestion is why one that did not is still here."
+          },
+          "queued_reason_kind": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/QueuedReason"
+              }
+            ]
           },
           "state": {
             "type": "string"

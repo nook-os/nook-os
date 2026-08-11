@@ -5374,6 +5374,7 @@ export interface components {
              *     specific gate that failed while it waits `queued`. `None` once claimed.
              */
             queued_reason?: string | null;
+            queued_reason_kind?: null | components["schemas"]["QueuedReason"];
             requested_by: components["schemas"]["UserId"];
             /**
              * @description A human forced this review run at an already-verdicted head
@@ -6496,6 +6497,50 @@ export interface components {
              *     never be enough to read one.
              */
             passphrase: string;
+        };
+        /**
+         * @description Which dispatch gate is holding a job `queued` (MAIN-494).
+         *
+         *     The sentence in `loop_jobs.queued_reason` stays the rendering; this is what
+         *     a client BRANCHES on. Free text could only ever be matched against, and a
+         *     near-match is a confident lie about why something waited.
+         *
+         *     Internally tagged like [`NodeBlocker`], whose shape this copies — and
+         *     deliberately NOT the same enum (NG-1): dispatch and session reconcile are
+         *     two subsystems, and one vocabulary for both would have to name gates
+         *     neither half has.
+         *
+         *     Each variant holds what makes it ACTIONABLE. "Waiting on a pinned node" is
+         *     not something a human can act on without the node's name.
+         *
+         *     Not every queued job has one: when nothing at all is eligible, the reason
+         *     is a phrasing of the fleet's shape rather than a gate, and the column is
+         *     left NULL rather than given a variant meaning "some other way".
+         */
+        QueuedReason: {
+            /** @enum {string} */
+            kind: "no_person_identity";
+        } | {
+            /** @enum {string} */
+            kind: "pinned_node_unavailable";
+            /** @description The node's name, falling back to its id when the row is gone. */
+            node_name: string;
+        } | {
+            /** @enum {string} */
+            kind: "at_capacity";
+        } | {
+            /** @enum {string} */
+            kind: "no_role_label";
+            /** @description The selector key that matched nothing, e.g. `role/build`. */
+            label: string;
+        } | {
+            /**
+             * @description Renamed on the wire only: `kind` is the internal tag, and a variant
+             *     field of that name would overwrite the discriminant a client reads.
+             */
+            job_kind: string;
+            /** @enum {string} */
+            kind: "kind_wall_refusal";
         };
         /** @description A node the reconciler cannot use yet, and why (MAIN-319). */
         ReconcileBlocker: {
@@ -8251,6 +8296,13 @@ export interface components {
             created_at: string;
             /** Format: uuid */
             id: string;
+            /**
+             * @description Why a `queued` run is still waiting, and the same gate typed
+             *     (MAIN-494). Both `None` on a run that got placed — the panel's whole
+             *     question is why one that did not is still here.
+             */
+            queued_reason?: string | null;
+            queued_reason_kind?: null | components["schemas"]["QueuedReason"];
             state: string;
             /** @description The card's human key (`MAIN-42`); `None` if the card was deleted. */
             task_key?: string | null;
