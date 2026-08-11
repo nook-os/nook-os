@@ -3576,6 +3576,87 @@ pub struct LoopJobDetail {
     pub transcript: Vec<LoopJobTranscriptEntry>,
 }
 
+/// One run in the MCP status surface's list (MAIN-525 AC-1) — `LoopJob` with
+/// its two joins already paid: the card by KEY and the executor by NAME, so a
+/// chat client asking "what is this repo building" makes one call rather than
+/// one per row.
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
+pub struct LoopRunSummary {
+    pub id: JobId,
+    /// `spec` | `decompose` | `epic-run` | `review` | `build`.
+    pub kind: String,
+    /// `queued|claimed|running|waiting_on_human|completed|failed|canceled`.
+    pub state: String,
+    /// The card's human key (`MAIN-42`). `None` for a review run, which is
+    /// about a repository, and for a private card the viewer may not see —
+    /// the same viewer gate [`WorkspaceBuildRun`] applies.
+    pub task_key: Option<String>,
+    /// The node that claimed the run, by name; `None` while it is still queued.
+    pub executor_node: Option<String>,
+    /// When the run was raised — the only start this record has, and the one
+    /// the Builds panel orders by.
+    pub started_at: DateTime<Utc>,
+    /// Last lifecycle movement, which for a finished run is when it finished.
+    pub updated_at: DateTime<Utc>,
+    /// Seconds a live run has been going, or a finished run's whole duration.
+    /// Computed on read rather than stored: "how long has this been going" has
+    /// no answer a column could hold.
+    #[serde(default)]
+    #[db(skip)]
+    pub elapsed_seconds: i64,
+}
+
+/// One run with a BOUNDED tail of its transcript (MAIN-525 AC-2) — the answer
+/// to "how is that card's build going", in a payload a chat client can hold.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct LoopRunDetail {
+    #[serde(flatten)]
+    pub run: LoopRunSummary,
+    /// The repo the run happens in, by name.
+    pub workspace: Option<String>,
+    /// The pull request this run produced, or the one a review run is about.
+    pub pr_url: Option<String>,
+    /// What the run concluded: a build's `pr_opened|blocked|nothing_to_do`, or
+    /// a review's verdict. `None` means it concluded nothing — which for a
+    /// finished run is itself the news.
+    pub outcome: Option<String>,
+    pub transcript: LoopRunTranscriptTail,
+}
+
+/// A transcript tail and the truth about what it left out (MAIN-525 AC-3).
+///
+/// A build run narrates for as long as it runs, so the tail is bounded by
+/// LINES — `read_session`'s unit — and the counts below are what stop a
+/// truncated answer from reading like a complete one.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct LoopRunTranscriptTail {
+    /// Oldest first, so the tail reads in the order it was written.
+    pub entries: Vec<LoopJobTranscriptEntry>,
+    /// Lines returned, against lines the run has written in total.
+    pub lines: u32,
+    pub total_lines: u32,
+    /// True when older lines were left out to fit the requested tail.
+    pub truncated: bool,
+    /// The truncation as a sentence, for a model to relay rather than infer.
+    /// `None` when nothing was dropped.
+    pub note: Option<String>,
+}
+
+/// The answer to "how is MAIN-42 going?" — including when the answer is that
+/// nothing has run it yet (MAIN-525 AC-4), which is an ordinary reply and the
+/// common one, not an error.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct LoopRunLookup {
+    /// What the caller asked about, echoed back so a chat answer can name it.
+    pub queried: String,
+    /// The card, when the query named one that exists and the caller may see it.
+    pub task_key: Option<String>,
+    /// `None` when nothing has run this card yet.
+    pub run: Option<LoopRunDetail>,
+    /// One sentence stating the answer, empty or not.
+    pub summary: String,
+}
+
 /// Open a job against a ticket or epic. `decompose` requires the target to be a
 /// `type='epic'` task; `spec` targets any task. The workspace is derived from
 /// the target, and `requested_by` from the caller.
