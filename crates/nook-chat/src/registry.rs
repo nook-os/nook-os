@@ -135,6 +135,7 @@ mod tests {
             reactions: Vec::new(),
             edited_at: None,
             deleted: false,
+            kind: None,
         }
     }
 

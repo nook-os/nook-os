@@ -477,6 +477,7 @@ impl FakeMessageRepository {
             created_at: epoch(),
             edited_at: None,
             deleted_at: deleted.then(epoch),
+            kind: None,
         });
         self
     }
@@ -613,6 +614,7 @@ impl MessageRepository for FakeMessageRepository {
             created_at: epoch(),
             edited_at: None,
             deleted_at: None,
+            kind: new.kind,
         };
         st.messages.push(row.clone());
         Ok(row)

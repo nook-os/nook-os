@@ -9875,6 +9875,49 @@
           }
         }
       },
+      "ChatCommand": {
+        "type": "object",
+        "description": "One command a caller may run in a channel (MAIN-528 AC-1). The SERVER owns\nthis list — a client renders what it is given and never learns what a command\nmeans.",
+        "required": [
+          "name",
+          "description"
+        ],
+        "properties": {
+          "args_hint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "How the argument reads in a hint — `\"<text>\"` when it is required,\n`\"[text]\"` when optional, `None` when the command takes none."
+          },
+          "description": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string",
+            "description": "Without the slash: `\"help\"`, not `\"/help\"`."
+          }
+        }
+      },
+      "ChatCommandResult": {
+        "type": "object",
+        "description": "What a command answers with — ONE shape for all of them (MAIN-528 AC-3).\n\n`ephemeral` is for the caller's eyes only: it is this HTTP response and\nnothing else — never stored, never delivered over the websocket. A command\nthat posted names its message in `posted_message_id`; both fields empty is a\ncommand that did nothing.",
+        "properties": {
+          "ephemeral": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "posted_message_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          }
+        }
+      },
       "ChatMessage": {
         "type": "object",
         "description": "A posted message. `id` is a UUID v7, so history paginates by keyset on it\n(AC-2/AC-4), like the rest of NookOS.",
@@ -9922,6 +9965,13 @@
           "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What this message IS, beside what it says (MAIN-528): `None` for an\nordinary message, `\"action\"` for one posted by `/me`. A client that does\nnot know a kind renders it as ordinary — the set grows with the commands\nthat emit it, and only the server decides."
           },
           "last_reply_at": {
             "type": [
@@ -14914,6 +14964,25 @@
           "verdict": {
             "type": "string",
             "description": "`approved` | `changes_requested` | `needs_human` | `skipped`."
+          }
+        }
+      },
+      "RunChatCommand": {
+        "type": "object",
+        "description": "Run a command in a channel as the authenticated caller (MAIN-528 AC-2).",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "args": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Everything after the command word, unparsed — each command reads its own\nargument."
+          },
+          "name": {
+            "type": "string"
           }
         }
       },
