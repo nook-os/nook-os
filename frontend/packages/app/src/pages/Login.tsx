@@ -154,8 +154,15 @@ export function Login() {
   // A degraded IdP is NOT "nothing available": OIDC is configured and coming
   // back, so we show the retry notice rather than the "no method configured"
   // error that would tell the operator to go set OIDC_* (which is already set).
+  //
+  // Nor is a local status still in flight. `/auth/providers` reads config and
+  // `/auth/local/status` reads (and on a virgin database writes) the default
+  // tenant, so providers answers first — and a first-run local install would
+  // paint "set OIDC_*" for that gap, about the one thing that is expected to be
+  // absent there (MAIN-397 AC-3). `local` gates it: no verdict, no error.
   const nothingAvailable =
     providers &&
+    local &&
     !providers.oidc &&
     !degraded &&
     !providers.dev_login &&
