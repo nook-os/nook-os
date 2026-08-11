@@ -17,3 +17,6 @@ tracing = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 rmcp = { version = "2", features = ["server", "transport-streamable-http-server"] }
+
+[dev-dependencies]
+tower = { workspace = true, features = ["util"] }

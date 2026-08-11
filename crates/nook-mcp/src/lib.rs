@@ -1329,13 +1329,22 @@ impl ServerHandler for NookMcp {
 
 /// The `/mcp` streamable-HTTP service as an axum router.
 /// The transport config with OUR host allowlist in place of rmcp's
-/// loopback-only default (MAIN-190). Split out so the threading is testable:
-/// everything else stays at the crate's defaults.
+/// loopback-only default (MAIN-190), served STATELESSLY (MAIN-524). Split out
+/// so both are testable: everything else stays at the crate's defaults.
+///
+/// Stateless is deliberate. rmcp's default demands a session ticket: it issues
+/// `Mcp-Session-Id` on `initialize` and, for any later POST arriving without
+/// it, answers 422 instead of serving the request — which is every `tools/list`
+/// ChatGPT's connector sent us. All our tools are request/response, so the one
+/// thing statefulness buys (server→client push) is unused, while it costs
+/// sessions held in one process's RAM: every deploy severs every client, and a
+/// second replica would need sticky routing.
 fn transport_config(
     allowed_hosts: Vec<String>,
 ) -> rmcp::transport::streamable_http_server::StreamableHttpServerConfig {
     rmcp::transport::streamable_http_server::StreamableHttpServerConfig::default()
         .with_allowed_hosts(allowed_hosts)
+        .with_stateful_mode(false)
 }
 
 /// `allowed_hosts`: every Host header this service answers for — the caller
@@ -1365,7 +1374,13 @@ mod tests {
         let hosts = vec!["nook.example.test".to_string(), "localhost".to_string()];
         let cfg = transport_config(hosts.clone());
         assert_eq!(cfg.allowed_hosts, hosts);
-        assert!(cfg.stateful_mode, "other defaults are preserved");
+        assert!(
+            !cfg.stateful_mode,
+            "MAIN-524: stateless on purpose — a stateful transport 422s every \
+             request that carries no Mcp-Session-Id, which is what stopped the \
+             ChatGPT connector listing our tools. A refactor back to \
+             ::default() re-breaks it silently."
+        );
     }
 
     fn parts_with(caller: Option<McpCaller>) -> Parts {
