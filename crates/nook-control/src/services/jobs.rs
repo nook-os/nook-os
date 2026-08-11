@@ -13,6 +13,7 @@ use uuid::Uuid;
 use crate::error::{ApiError, ApiResult};
 use crate::events::{self, EventDraft};
 use crate::queue::NewWork;
+use crate::services::main_ci;
 use crate::state::AppState;
 
 /// The `capabilities @> '{"shared_operator":true}'::jsonb` containment test,
@@ -1568,9 +1569,30 @@ pub async fn select_executor(
     tenant: TenantId,
     job_id: JobId,
 ) -> ApiResult<LoopJob> {
+    select_executor_within(state, tenant, job_id, &mut main_ci::Pass::default()).await
+}
+
+/// [`select_executor`], sharing one dispatch pass's derived view of each
+/// workspace's default-branch CI (MAIN-543) so a pass with ten queued builds
+/// for one repo asks the forge once, not ten times.
+async fn select_executor_within(
+    state: &AppState,
+    tenant: TenantId,
+    job_id: JobId,
+    pass: &mut main_ci::Pass,
+) -> ApiResult<LoopJob> {
     let job = load(state, tenant, job_id).await?;
     if job.state != "queued" {
         return Ok(job); // already claimed/terminal — nothing to place.
+    }
+
+    // The FIRST gate, before any node is even considered (MAIN-543): a build
+    // run raised against a repo whose own trunk is broken cannot pass, and
+    // every one we place fails at the same error while the review loop
+    // escalates cards for a failure their PRs did not cause. Nothing is stored
+    // — the next pass re-derives, so a green trunk resumes dispatch by itself.
+    if let Some(red) = red_default_branch_holding(state, tenant, &job, pass).await {
+        return set_queued_reason(state, job_id, &main_ci::reason(&red)).await;
     }
 
     // The person the requester is — a node's ownership keys on the person, not
@@ -1745,6 +1767,25 @@ pub async fn select_executor(
     }
 }
 
+/// The failing default-branch run holding this job back, or `None` to carry on
+/// (MAIN-543 AC-1).
+///
+/// BUILD work only, and that is NG-1 rather than an oversight: a red trunk is
+/// not a reason to stop reviewing or merging — those are separate judgements —
+/// and a spec or decompose run writes no code the trunk could break. A job with
+/// no workspace has no trunk to read, so it dispatches.
+async fn red_default_branch_holding(
+    state: &AppState,
+    tenant: TenantId,
+    job: &LoopJob,
+    pass: &mut main_ci::Pass,
+) -> Option<crate::services::forge::CiRun> {
+    if job.kind != BUILD_KIND {
+        return None;
+    }
+    main_ci::red_default_branch(state, tenant, job.workspace_id?, pass).await
+}
+
 /// How many of a tenant's queued jobs one pass will try to place.
 ///
 /// Not a fairness rule — the order already is one. It bounds the work a single
@@ -1776,8 +1817,11 @@ pub const DISPATCH_PASS_LIMIT: usize = 32;
 pub async fn place_queued_in_order(state: &AppState, tenant: TenantId) -> ApiResult<Vec<LoopJob>> {
     let queued = state.jobs.queued_in_dispatch_order(tenant).await?;
     let mut placed = Vec::new();
+    // One memo for the whole pass, dropped with it: the default-branch signal
+    // is derived per PASS, never cached across them (MAIN-543 AC-2).
+    let mut pass = main_ci::Pass::default();
     for job_id in queued.into_iter().take(DISPATCH_PASS_LIMIT) {
-        match select_executor(state, tenant, job_id).await {
+        match select_executor_within(state, tenant, job_id, &mut pass).await {
             Ok(job) if job.state == "claimed" => placed.push(job),
             Ok(_) => {}
             // One job's transient failure is not the pass's: the jobs behind it
@@ -2402,6 +2446,46 @@ pub async fn cancel_queued_on_finished_cards(state: &AppState, tenant: TenantId)
     Ok(ended.len() as u64)
 }
 
+/// The queued build jobs a red default branch is currently holding (MAIN-543
+/// AC-9) — the ones the starvation window must not escalate.
+///
+/// A dispatch pause produces exactly the shape [`escalate_starved_queued`]
+/// looks for: a reason that does not move, on a job nothing is placing. Left
+/// alone, a trunk red for longer than `starve_secs` would mark every waiting
+/// card `blocked` and hand it back to a human — the outcome the pause exists to
+/// prevent. So the pause is EXEMPT, and the exemption is asked of the same
+/// derived signal on every scan rather than of a stored marker: the moment the
+/// trunk goes green the jobs are ordinary again, including for this rule.
+///
+/// A forge outage yields an empty set, which restores the pre-MAIN-496
+/// behaviour exactly — the same fail-open direction as dispatch itself.
+///
+/// The candidate read carries the starvation window, so a scan with nothing
+/// near it asks no forge at all: this costs one indexed query on the ordinary
+/// pass, and reaches GitHub only for a job that is actually about to be
+/// escalated.
+async fn paused_by_red_trunk(
+    state: &AppState,
+    tenant: TenantId,
+    starve_secs: u64,
+) -> ApiResult<Vec<JobId>> {
+    let queued = state
+        .jobs
+        .queued_builds_starving(tenant, starve_secs as i64)
+        .await?;
+    let mut pass = main_ci::Pass::default();
+    let mut exempt = Vec::new();
+    for build in queued {
+        if main_ci::red_default_branch(state, tenant, build.workspace_id, &mut pass)
+            .await
+            .is_some()
+        {
+            exempt.push(build.id);
+        }
+    }
+    Ok(exempt)
+}
+
 /// A queued job whose reason has stood unchanged past `starve_secs` is starved:
 /// cancel it, take the card out of the loop's reach, and say so on it
 /// (AC-2/AC-3).
@@ -2428,7 +2512,11 @@ pub async fn escalate_starved_queued(
 ) -> ApiResult<u64> {
     let ended = state
         .jobs
-        .cancel_starved_queued(tenant, starve_secs as i64)
+        .cancel_starved_queued(
+            tenant,
+            starve_secs as i64,
+            &paused_by_red_trunk(state, tenant, starve_secs).await?,
+        )
         .await?;
     for job in &ended {
         let reason = job.queued_reason.as_deref().unwrap_or("no reason recorded");

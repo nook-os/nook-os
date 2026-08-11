@@ -93,6 +93,27 @@ pub struct MergedPr {
     pub merged_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// The latest COMPLETED run of a repository's own CI on its default branch
+/// (MAIN-543).
+///
+/// COMPLETED is the whole point: a run still in progress is not a verdict on
+/// anything, and treating one as a failure-in-waiting would extend a pause past
+/// the push that fixes it (AC-4). The forge is asked for completed runs only,
+/// so an unfinished one cannot reach here to be misread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CiRun {
+    /// The branch the run is for — read from the repository rather than
+    /// assumed, because `main` is a convention and not a fact.
+    pub branch: String,
+    /// The workflow's display name, for the sentence a human reads.
+    pub workflow: String,
+    /// GitHub's own word: `success`, `failure`, `cancelled`, `timed_out`, …
+    pub conclusion: String,
+    /// Where to go and look.
+    pub url: String,
+    pub head_sha: String,
+}
+
 /// What the reconciler needs to know about a repository's review queue.
 ///
 /// Started as one operation (MAIN-448 kept build status, check runs and
@@ -123,6 +144,23 @@ pub trait Forge: Send + Sync {
     async fn pr_details(&self, repo: &Repo, number: u64) -> anyhow::Result<PrDetails> {
         let _ = (repo, number);
         anyhow::bail!("this forge cannot read pull request details")
+    }
+
+    /// The latest COMPLETED run of the repository's CI on its DEFAULT branch,
+    /// or `None` when there is nothing to read.
+    ///
+    /// The failure policy here is the opposite of `prs_needing_review`'s, and
+    /// deliberately so. There, an empty list read as "nothing to review" and
+    /// stopped every reviewer, so an implementation that cannot answer must
+    /// `Err`. Here the caller PAUSES on a definite failure and dispatches on
+    /// everything else, so the direction that costs is a false red — which is
+    /// why `None` (no CI configured, nothing completed yet) is a legitimate
+    /// answer rather than an error, and why a forge that reads no CI at all
+    /// says `None` rather than bailing. An `Err` still means outage, and the
+    /// caller fails open on it just the same (MAIN-543 AC-3).
+    async fn default_branch_ci(&self, repo: &Repo) -> anyhow::Result<Option<CiRun>> {
+        let _ = repo;
+        Ok(None)
     }
 
     /// The pull requests merged at or after `since`, for the body join.
@@ -498,6 +536,42 @@ impl Forge for GithubForge {
         Ok(merged_since(prs, since))
     }
 
+    async fn default_branch_ci(&self, repo: &Repo) -> anyhow::Result<Option<CiRun>> {
+        // Two reads, because the default branch is a repository fact we must
+        // not guess: this fleet's own repo is `main`, and a workspace pointing
+        // at one whose trunk is `master` or `develop` would otherwise be
+        // measured against a branch that does not exist — an empty answer that
+        // reads as green forever.
+        let repo_json = self
+            .get_json(format!(
+                "https://api.github.com/repos/{}/{}",
+                repo.owner, repo.name
+            ))
+            .await?;
+        let branch = repo_json
+            .get("default_branch")
+            .and_then(|b| b.as_str())
+            .ok_or_else(|| anyhow::anyhow!("repository carries no default_branch"))?
+            .to_string();
+        // `status=completed` is what makes AC-4 structural rather than a filter
+        // we could forget: an in-progress run is never in this answer.
+        // Built through `Url` rather than formatted, because a branch name may
+        // contain `/` and a hand-built query would silently truncate it.
+        let url = reqwest::Url::parse_with_params(
+            &format!(
+                "https://api.github.com/repos/{}/{}/actions/runs",
+                repo.owner, repo.name
+            ),
+            &[
+                ("branch", branch.as_str()),
+                ("status", "completed"),
+                ("per_page", "1"),
+            ],
+        )?;
+        let runs = self.get_json(url.to_string()).await?;
+        Ok(latest_completed_run(&runs, &branch))
+    }
+
     async fn issue_comment_bodies(&self, repo: &Repo, number: u64) -> anyhow::Result<Vec<String>> {
         // ALL pages, not page one. GitHub returns issue comments OLDEST-first
         // with no way to ask for the tail, and the marker this feeds sits on
@@ -625,6 +699,37 @@ fn merged_since(prs: &[serde_json::Value], since: chrono::DateTime<chrono::Utc>)
         .collect();
     merged.sort_by_key(|m| std::cmp::Reverse(m.merged_at));
     merged
+}
+
+/// The one run in a `?status=completed&per_page=1` answer, as [`CiRun`].
+///
+/// `None` for an empty list, which is the repo with no CI, no runs on this
+/// branch yet, or Actions disabled — all of them "nothing to read" rather than
+/// "everything is fine", and all of them dispatch (MAIN-543 AC-3). A run whose
+/// `conclusion` is `null` is dropped for the same reason: the forge answered
+/// with a shape we cannot read as a verdict, and a guess in either direction is
+/// worse than no answer.
+fn latest_completed_run(json: &serde_json::Value, branch: &str) -> Option<CiRun> {
+    let run = json.get("workflow_runs")?.as_array()?.first()?;
+    Some(CiRun {
+        branch: branch.to_string(),
+        workflow: run
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("CI")
+            .to_string(),
+        conclusion: run.get("conclusion")?.as_str()?.to_string(),
+        url: run
+            .get("html_url")
+            .and_then(|u| u.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        head_sha: run
+            .get("head_sha")
+            .and_then(|h| h.as_str())
+            .unwrap_or_default()
+            .to_string(),
+    })
 }
 
 /// How long a count stands before it is asked for again.
@@ -837,6 +942,44 @@ mod tests {
 
     fn ws() -> WorkspaceId {
         WorkspaceId(Uuid::from_u128(7))
+    }
+
+    fn runs(body: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "workflow_runs": [body] })
+    }
+
+    #[test]
+    fn a_completed_run_reads_as_its_conclusion() {
+        let got = latest_completed_run(
+            &runs(serde_json::json!({
+                "name": "CI",
+                "conclusion": "failure",
+                "html_url": "https://github.com/acme/api/actions/runs/9",
+                "head_sha": "deadbeef",
+            })),
+            "main",
+        )
+        .expect("a run");
+        assert_eq!(got.conclusion, "failure");
+        assert_eq!(got.workflow, "CI");
+        assert_eq!(got.branch, "main");
+        assert_eq!(got.head_sha, "deadbeef");
+    }
+
+    #[test]
+    fn nothing_to_read_is_none_rather_than_a_verdict() {
+        // A repo with no CI, or none completed on this branch yet.
+        assert_eq!(
+            latest_completed_run(&serde_json::json!({ "workflow_runs": [] }), "main"),
+            None
+        );
+        // Actions disabled answers a shape with no list at all.
+        assert_eq!(latest_completed_run(&serde_json::json!({}), "main"), None);
+        // A run the forge reports with no conclusion is not a verdict either.
+        assert_eq!(
+            latest_completed_run(&runs(serde_json::json!({ "conclusion": null })), "main"),
+            None
+        );
     }
 
     /// A forge whose answers the test dictates, counting how often it was asked.

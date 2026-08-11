@@ -110,6 +110,11 @@ pub struct AppState {
     /// caches would mean two answers to "how many reviewers does this repo
     /// want", and the UI would be reporting the one nobody converges toward.
     pub review_demand: Arc<crate::services::forge::ReviewDemand>,
+    /// What the pause log has already said about each workspace's default
+    /// branch (MAIN-543 AC-8), so a red trunk is announced once rather than
+    /// once per poll. Not a cache of the signal — that is derived every pass
+    /// and stored nowhere.
+    pub main_ci: Arc<crate::services::main_ci::PauseLog>,
     /// Throttles the PR hygiene pass (MAIN-476) to the forge cache's rhythm —
     /// its per-PR detail reads must not run at the reconciler's poll cadence.
     pub pr_hygiene: Arc<crate::services::pr_hygiene::Hygiene>,
@@ -205,6 +210,7 @@ impl AppState {
             oidc,
             mcp_auth_cache: Arc::new(dashmap::DashMap::new()),
             review_demand: Arc::new(crate::services::forge::ReviewDemand::from_env()),
+            main_ci: Arc::new(Default::default()),
             pr_hygiene: Arc::new(crate::services::pr_hygiene::Hygiene::new(
                 std::time::Duration::from_secs(60),
             )),

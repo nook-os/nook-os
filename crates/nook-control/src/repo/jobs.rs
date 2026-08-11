@@ -133,6 +133,15 @@ pub struct EndedQueuedJob {
     pub reason_since: chrono::DateTime<chrono::Utc>,
 }
 
+/// A queued BUILD job and the workspace it is for — the set the dispatch pause
+/// (MAIN-543) is derived over, both to decide what to hold back and to decide
+/// what the starvation window must not touch.
+#[derive(Debug, Clone, nook_db::FromDbRow)]
+pub struct QueuedBuild {
+    pub id: JobId,
+    pub workspace_id: WorkspaceId,
+}
+
 /// One row a scan is about to end, read BEFORE the cancel — which is the only
 /// way to see the `updated_at` that is the reason's clock rather than the moment
 /// of cancellation.
@@ -429,15 +438,38 @@ pub trait LoopJobRepository: Send + Sync {
         tenant: TenantId,
     ) -> ApiResult<Vec<EndedQueuedJob>>;
 
+    /// The `queued` BUILD jobs of this tenant that [`Self::cancel_starved_queued`]
+    /// would act on — same tenant, same reason-unchanged window — narrowed to
+    /// those naming a workspace (MAIN-543 AC-9).
+    ///
+    /// The window is in the query rather than left to the caller so the reaper
+    /// reads a forge only when there is in fact something to exempt: on an
+    /// ordinary scan this answers nothing and the pass costs one indexed read.
+    /// Not a `DISTINCT workspace_id`, because the answer is also the job list
+    /// the exemption is expressed in.
+    async fn queued_builds_starving(
+        &self,
+        tenant: TenantId,
+        starve_secs: i64,
+    ) -> ApiResult<Vec<QueuedBuild>>;
+
     /// Cancel `tenant`'s `queued` jobs whose `queued_reason` has stood unchanged
     /// for more than `starve_secs` (MAIN-496 AC-2). A job with NO reason yet has
     /// never been through dispatch — loops may simply be off — and is left
     /// alone; a job whose reason keeps moving is progressing toward placement
     /// and its `updated_at` keeps moving with it.
+    ///
+    /// `exempt` is the jobs a dispatch pause is currently holding (MAIN-543
+    /// AC-9). A pause produces exactly the shape this rule escalates — an
+    /// unchanging reason on a job nothing is placing — so without the exemption
+    /// a long red trunk would label every waiting card `blocked` and hand it to
+    /// a human, which is precisely what the pause exists to avoid. The caller
+    /// re-derives the set on every scan; nothing here is stored.
     async fn cancel_starved_queued(
         &self,
         tenant: TenantId,
         starve_secs: i64,
+        exempt: &[JobId],
     ) -> ApiResult<Vec<EndedQueuedJob>>;
 
     // ── transcript ──────────────────────────────────────────────────────────
@@ -1292,10 +1324,34 @@ impl LoopJobRepository for DbLoopJobRepository {
         Ok(ended)
     }
 
+    async fn queued_builds_starving(
+        &self,
+        tenant: TenantId,
+        starve_secs: i64,
+    ) -> ApiResult<Vec<QueuedBuild>> {
+        let cutoff = time_math(self.db.engine()).now_minus_scaled(
+            &type_mapping(self.db.engine()).cast("$2", "bigint"),
+            "1 second",
+        );
+        Ok(self
+            .db
+            .query_all(
+                &format!(
+                    "SELECT id, workspace_id FROM loop_jobs
+                      WHERE tenant_id = $1 AND state = 'queued' AND kind = 'build'
+                        AND workspace_id IS NOT NULL
+                        AND queued_reason IS NOT NULL AND updated_at < {cutoff}"
+                ),
+                params![tenant, starve_secs],
+            )
+            .await?)
+    }
+
     async fn cancel_starved_queued(
         &self,
         tenant: TenantId,
         starve_secs: i64,
+        exempt: &[JobId],
     ) -> ApiResult<Vec<EndedQueuedJob>> {
         let cutoff = |placeholder: &str| {
             time_math(self.db.engine()).now_minus_scaled(
@@ -1316,6 +1372,12 @@ impl LoopJobRepository for DbLoopJobRepository {
             .await?;
         let mut ended = Vec::new();
         for c in candidates {
+            // Filtered in Rust rather than in the predicate: the exemption is a
+            // derived fact about a repository, and the query has no business
+            // knowing what a forge is.
+            if exempt.contains(&c.id) {
+                continue;
+            }
             // Re-asserted, not assumed: a job whose reason moved between the
             // read and the write has its `updated_at` at now, falls out of this
             // guard, and keeps waiting — which is AC-6's negative holding even
@@ -2171,15 +2233,44 @@ impl LoopJobRepository for FakeLoopJobRepository {
         }))
     }
 
+    async fn queued_builds_starving(
+        &self,
+        tenant: TenantId,
+        starve_secs: i64,
+    ) -> ApiResult<Vec<QueuedBuild>> {
+        let s = self.inner.lock().unwrap();
+        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(starve_secs);
+        Ok(s.jobs
+            .iter()
+            .filter(|j| {
+                j.tenant_id == tenant
+                    && j.state == "queued"
+                    && j.kind == "build"
+                    && j.queued_reason.is_some()
+                    && j.updated_at < cutoff
+            })
+            .filter_map(|j| {
+                Some(QueuedBuild {
+                    id: j.id,
+                    workspace_id: j.workspace_id?,
+                })
+            })
+            .collect())
+    }
+
     async fn cancel_starved_queued(
         &self,
         tenant: TenantId,
         starve_secs: i64,
+        exempt: &[JobId],
     ) -> ApiResult<Vec<EndedQueuedJob>> {
         let mut s = self.inner.lock().unwrap();
         let cutoff = chrono::Utc::now() - chrono::Duration::seconds(starve_secs);
         Ok(cancel_queued(&mut s.jobs, |j| {
-            j.tenant_id == tenant && j.queued_reason.is_some() && j.updated_at < cutoff
+            j.tenant_id == tenant
+                && j.queued_reason.is_some()
+                && j.updated_at < cutoff
+                && !exempt.contains(&j.id)
         }))
     }
 
