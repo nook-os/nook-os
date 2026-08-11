@@ -105,6 +105,7 @@ fn facts(node: NodeId) -> NodeFacts {
         taints: vec![],
         runtimes: vec!["bash".into()],
         max_loop_jobs: None,
+        reserved: 0,
     }
 }
 
