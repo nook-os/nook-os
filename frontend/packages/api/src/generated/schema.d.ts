@@ -4,6 +4,22 @@
  */
 
 export interface paths {
+    "/api/v1/attachments/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["detach_content"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/auth/dev-accounts": {
         parameters: {
             query?: never;
@@ -418,6 +434,22 @@ export interface paths {
         options?: never;
         head?: never;
         patch: operations["update_comment"];
+        trace?: never;
+    };
+    "/api/v1/comments/{id}/attachments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_comment_attachments"];
+        put?: never;
+        post: operations["attach_to_comment"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/api/v1/config": {
@@ -2512,6 +2544,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tasks/{id}/attachments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_task_attachments"];
+        put?: never;
+        post: operations["attach_to_task"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tasks/{id}/claim": {
         parameters: {
             query?: never;
@@ -3960,6 +4008,18 @@ export interface components {
             };
             /** @enum {string} */
             type: "resize";
+        };
+        /**
+         * @description `POST /tasks/{id}/attachments` and its comment twin: hang already-uploaded
+         *     content on this parent.
+         *
+         *     Two steps rather than one multipart route per parent: the upload is the
+         *     expensive, cancellable, progress-reporting half and it already exists
+         *     (MAIN-532). Attaching is a row.
+         */
+        AttachContentRequest: {
+            /** Format: uuid */
+            user_content_id: string;
         };
         /** @description Terminal attach socket messages (control plane → browser). */
         AttachServerMessage: {
@@ -7500,6 +7560,44 @@ export interface components {
             tenant_id: components["schemas"]["TenantId"];
         };
         /**
+         * @description One file hung off a ticket or one of its comments (MAIN-533).
+         *
+         *     Flat rather than nesting a [`UserContent`]: this is what a list renders, and
+         *     a UI that has to reach through a wrapper to read a filename is paying for a
+         *     shape nothing here needs. The bytes are at
+         *     `/api/v1/user-content/{user_content_id}` — never inlined, so listing a
+         *     ticket's twenty screenshots costs one small response (AC-2).
+         */
+        TaskAttachment: {
+            /**
+             * @description Who attached it. The client compares this against its own user id to
+             *     decide whether to OFFER removal; the server decides whether to allow it
+             *     (AC-6).
+             */
+            attached_by: components["schemas"]["UserId"];
+            /**
+             * @description What the uploader claimed. Enough for a UI to pick a preview or a chip;
+             *     the serving route still decides what actually goes on the wire.
+             */
+            content_type: string;
+            /** Format: date-time */
+            created_at: string;
+            filename: string;
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            parent_id: string;
+            /**
+             * @description `task` | `task_comment`. One record type, two parent kinds — a screenshot
+             *     pasted into a comment belongs to that comment, not to the ticket.
+             */
+            parent_kind: string;
+            /** Format: int64 */
+            size_bytes: number;
+            /** Format: uuid */
+            user_content_id: string;
+        };
+        /**
          * @description Durable discussion on a task: the builder's blocking question, the
          *     reviewer's verdict, the human's answer.
          */
@@ -7578,6 +7676,14 @@ export interface components {
             archived_at?: string | null;
             assigned_node_id?: null | components["schemas"]["NodeId"];
             assignee_user_id?: null | components["schemas"]["UserId"];
+            /**
+             * Format: int64
+             * @description How many files are attached to this ticket, its comments included
+             *     (MAIN-533 AC-8). Computed for the card projections and left at `0`
+             *     everywhere else — the detail view lists the attachments themselves, so a
+             *     count there would be a second answer to a question already answered.
+             */
+            attachment_count?: number;
             board_id: components["schemas"]["BoardId"];
             branch?: string | null;
             checkout_id?: null | components["schemas"]["NodeWorkspaceId"];
@@ -8505,6 +8611,37 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    detach_content: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     dev_accounts: {
         parameters: {
             query?: {
@@ -9215,6 +9352,70 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TaskComment"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_comment_attachments: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskAttachment"][];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    attach_to_comment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AttachContentRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskAttachment"];
                 };
             };
             403: {
@@ -13034,6 +13235,66 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TaskItem"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_task_attachments: {
+        parameters: {
+            query?: {
+                include?: string | null;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskAttachment"][];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    attach_to_task: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AttachContentRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskAttachment"];
                 };
             };
             404: {

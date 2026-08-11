@@ -23,6 +23,7 @@ import {
   Check,
   MoreHorizontal,
   Archive,
+  Paperclip,
   X,
   Zap,
 } from "lucide-react";
@@ -54,7 +55,10 @@ import { fetchTaskJobs, taskJobsKey } from "../loop";
 import { recall, remember } from "../lastPlace";
 import { priorityMeta, priorityRank, previewText, PRIORITIES } from "../taskmeta";
 
-function Card({
+/** Exported for its own test: what a card shows at a glance is the whole
+ *  point of a board, and rendering the entire page to assert one badge is a
+ *  test that fails for reasons other than the badge. */
+export function Card({
   task,
   workspaceName,
   onOpen,
@@ -157,6 +161,7 @@ function Card({
       {(task.priority ||
         (task.labels ?? []).length > 0 ||
         task.assignee_user_id ||
+        (task.attachment_count ?? 0) > 0 ||
         workspaceName) && (
         <div className="card-meta">
           {workspaceName && (
@@ -182,6 +187,17 @@ function Card({
               {l.name}
             </span>
           ))}
+          {/* The ticket has context worth opening it for (MAIN-533 AC-8).
+              Comments' files count too — a screenshot in the discussion is
+              exactly what a scanner would otherwise never find. */}
+          {(task.attachment_count ?? 0) > 0 && (
+            <span
+              className="card-attach"
+              title={`${task.attachment_count} attachment(s)`}
+            >
+              <Paperclip size={10} /> {task.attachment_count}
+            </span>
+          )}
           {task.assignee_user_id && (
             <span className="card-assignee" title="claimed">
               ●

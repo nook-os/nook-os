@@ -10,6 +10,35 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/v1/attachments/{id}": {
+      "delete": {
+        "tags": [
+          "crate::routes::task_attachments"
+        ],
+        "operationId": "detach_content",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/auth/dev-accounts": {
       "get": {
         "tags": [
@@ -826,6 +855,86 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/TaskComment"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/comments/{id}/attachments": {
+      "get": {
+        "tags": [
+          "crate::routes::task_attachments"
+        ],
+        "operationId": "list_comment_attachments",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TaskAttachment"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::routes::task_attachments"
+        ],
+        "operationId": "attach_to_comment",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttachContentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskAttachment"
                 }
               }
             }
@@ -5806,6 +5915,94 @@
         }
       }
     },
+    "/api/v1/tasks/{id}/attachments": {
+      "get": {
+        "tags": [
+          "crate::routes::task_attachments"
+        ],
+        "operationId": "list_task_attachments",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "include",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TaskAttachment"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::routes::task_attachments"
+        ],
+        "operationId": "attach_to_task",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttachContentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskAttachment"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/tasks/{id}/claim": {
       "post": {
         "tags": [
@@ -9177,6 +9374,19 @@
           }
         ],
         "description": "Terminal attach socket messages (browser → control plane)."
+      },
+      "AttachContentRequest": {
+        "type": "object",
+        "description": "`POST /tasks/{id}/attachments` and its comment twin: hang already-uploaded\ncontent on this parent.\n\nTwo steps rather than one multipart route per parent: the upload is the\nexpensive, cancellable, progress-reporting half and it already exists\n(MAIN-532). Attaching is a row.",
+        "required": [
+          "user_content_id"
+        ],
+        "properties": {
+          "user_content_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
       },
       "AttachServerMessage": {
         "oneOf": [
@@ -16328,6 +16538,58 @@
           }
         }
       },
+      "TaskAttachment": {
+        "type": "object",
+        "description": "One file hung off a ticket or one of its comments (MAIN-533).\n\nFlat rather than nesting a [`UserContent`]: this is what a list renders, and\na UI that has to reach through a wrapper to read a filename is paying for a\nshape nothing here needs. The bytes are at\n`/api/v1/user-content/{user_content_id}` — never inlined, so listing a\nticket's twenty screenshots costs one small response (AC-2).",
+        "required": [
+          "id",
+          "parent_kind",
+          "parent_id",
+          "attached_by",
+          "user_content_id",
+          "filename",
+          "content_type",
+          "size_bytes",
+          "created_at"
+        ],
+        "properties": {
+          "attached_by": {
+            "$ref": "#/components/schemas/UserId",
+            "description": "Who attached it. The client compares this against its own user id to\ndecide whether to OFFER removal; the server decides whether to allow it\n(AC-6)."
+          },
+          "content_type": {
+            "type": "string",
+            "description": "What the uploader claimed. Enough for a UI to pick a preview or a chip;\nthe serving route still decides what actually goes on the wire."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "filename": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "parent_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "parent_kind": {
+            "type": "string",
+            "description": "`task` | `task_comment`. One record type, two parent kinds — a screenshot\npasted into a comment belongs to that comment, not to the ticket."
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "user_content_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
       "TaskComment": {
         "type": "object",
         "description": "Durable discussion on a task: the builder's blocking question, the\nreviewer's verdict, the human's answer.",
@@ -16519,6 +16781,11 @@
                 "$ref": "#/components/schemas/UserId"
               }
             ]
+          },
+          "attachment_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many files are attached to this ticket, its comments included\n(MAIN-533 AC-8). Computed for the card projections and left at `0`\neverywhere else — the detail view lists the attachments themselves, so a\ncount there would be a second answer to a question already answered."
           },
           "board_id": {
             "$ref": "#/components/schemas/BoardId"

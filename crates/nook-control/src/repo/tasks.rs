@@ -3166,6 +3166,7 @@ impl TaskRepository for FakeTaskRepository {
             url: None,
             parent_key: None,
             labels: vec![],
+            attachment_count: 0,
             archived_at: None,
             created_at: now,
             updated_at: now,

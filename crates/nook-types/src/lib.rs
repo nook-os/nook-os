@@ -2041,6 +2041,13 @@ pub struct TaskItem {
     #[serde(default)]
     #[db(skip)]
     pub labels: Vec<Label>,
+    /// How many files are attached to this ticket, its comments included
+    /// (MAIN-533 AC-8). Computed for the card projections and left at `0`
+    /// everywhere else — the detail view lists the attachments themselves, so a
+    /// count there would be a second answer to a question already answered.
+    #[serde(default)]
+    #[db(skip)]
+    pub attachment_count: i64,
     /// When this task was archived off the board, or `None` while it is live.
     /// Archived tasks are hidden from the board by default and excluded from the
     /// agent pick query, but the row is preserved and unarchiving clears this.
@@ -2488,6 +2495,44 @@ pub struct UserContent {
     /// Lowercase hex of the stored bytes, computed by the server on upload.
     pub sha256: String,
     pub created_at: DateTime<Utc>,
+}
+
+/// One file hung off a ticket or one of its comments (MAIN-533).
+///
+/// Flat rather than nesting a [`UserContent`]: this is what a list renders, and
+/// a UI that has to reach through a wrapper to read a filename is paying for a
+/// shape nothing here needs. The bytes are at
+/// `/api/v1/user-content/{user_content_id}` — never inlined, so listing a
+/// ticket's twenty screenshots costs one small response (AC-2).
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
+pub struct TaskAttachment {
+    pub id: Uuid,
+    /// `task` | `task_comment`. One record type, two parent kinds — a screenshot
+    /// pasted into a comment belongs to that comment, not to the ticket.
+    pub parent_kind: String,
+    pub parent_id: Uuid,
+    /// Who attached it. The client compares this against its own user id to
+    /// decide whether to OFFER removal; the server decides whether to allow it
+    /// (AC-6).
+    pub attached_by: UserId,
+    pub user_content_id: Uuid,
+    pub filename: String,
+    /// What the uploader claimed. Enough for a UI to pick a preview or a chip;
+    /// the serving route still decides what actually goes on the wire.
+    pub content_type: String,
+    pub size_bytes: i64,
+    pub created_at: DateTime<Utc>,
+}
+
+/// `POST /tasks/{id}/attachments` and its comment twin: hang already-uploaded
+/// content on this parent.
+///
+/// Two steps rather than one multipart route per parent: the upload is the
+/// expensive, cancellable, progress-reporting half and it already exists
+/// (MAIN-532). Attaching is a row.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct AttachContentRequest {
+    pub user_content_id: Uuid,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
