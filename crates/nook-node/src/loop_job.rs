@@ -3401,6 +3401,196 @@ mod tests {
         assert_eq!(human_bytes(1536), "1.5 KiB");
     }
 
+    // ── MAIN-538: what THIS repo declares, and what a refusal costs ─────────
+
+    /// MAIN-538 AC-2 and AC-4: the safety argument applied to the entries this
+    /// repo actually ships, not only to invented ones.
+    ///
+    /// `reclaim_build_output`'s guards make a wrong entry a no-op, which is
+    /// what lets the list be edited without fear — but "a no-op" is a silent
+    /// outcome, so nothing would have told us that a `reclaim` entry had
+    /// stopped matching. This reads the real `.nook.toml` and asserts every
+    /// declared path is one git IGNORES, which is exactly the condition under
+    /// which the delete is reachable at all.
+    #[test]
+    fn this_repos_declared_reclaim_names_only_ignored_build_output() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("crates/nook-node sits two below the repo root");
+        let declared = worktree_settings(root).reclaim;
+        assert!(
+            declared.len() > 1,
+            "this repo reclaims more than target/ (AC-1), got {declared:?}"
+        );
+
+        let normalized: Vec<String> = declared
+            .iter()
+            .map(|r| {
+                normalized_reclaim_entry(r)
+                    .unwrap_or_else(|| panic!("{r} does not name a path inside the worktree"))
+            })
+            .collect();
+        assert!(
+            normalized.iter().any(|r| r == "frontend/node_modules"),
+            "the pnpm half is declared (AC-3), got {normalized:?}"
+        );
+
+        // AC-2: `exclude` answers "too big to copy", `reclaim` answers
+        // "regenerable". `.nook-secrets/` is the case that separates them — it
+        // is excluded from seeding and holds the fleet's Claude session, which
+        // no rebuild reproduces.
+        for kept in [
+            ".nook-secrets",
+            ".cache/cargo-registry",
+            ".cache/web-node-modules",
+            "frontend/.pnpm-store",
+        ] {
+            assert!(
+                !normalized.iter().any(|r| r == kept),
+                "{kept} is deliberately NOT reclaimed"
+            );
+        }
+
+        if !git_available()
+            || crate::gitops::run_git(&["rev-parse", "--git-dir"], Some(root), None).is_err()
+        {
+            eprintln!("skipping the ignore half: no usable git checkout at the repo root");
+            return;
+        }
+        // Asked with a trailing slash, which is how git is told to treat a path
+        // it cannot see as a directory. `node_modules/` is a directory-ONLY
+        // pattern, so `check-ignore frontend/node_modules` answers "not
+        // ignored" purely because this checkout has not installed the frontend.
+        // Production never asks that question — `reclaimable_dir` filters to
+        // existing directories before `ignored_by_repo` runs.
+        let as_dirs: Vec<String> = normalized.iter().map(|r| format!("{r}/")).collect();
+        let ignored = ignored_by_repo(root, &as_dirs);
+        let unignored: Vec<&String> = as_dirs.iter().filter(|r| !ignored.contains(*r)).collect();
+        assert!(
+            unignored.is_empty(),
+            "these declared paths are not ignored here, so the reclaim would refuse them and free nothing: {unignored:?}"
+        );
+    }
+
+    /// Whether a read-only directory actually refuses an unlink on this run.
+    ///
+    /// It does not for root, which is why this exists: `./test.sh`'s default
+    /// path is `docker compose exec` into the control-plane container, and that
+    /// image sets no `USER`, so the suite runs as uid 0 and
+    /// `remove_dir_all` walks straight through `0o500`.
+    ///
+    /// Every step is best-effort on purpose. As root the probe's own
+    /// `remove_dir_all` SUCCEEDS, so the scaffold is already gone by the time
+    /// there is anything to restore — an `unwrap` on that restore panicked
+    /// before the caller could reach its skip, which is the bug this shape
+    /// fixes rather than the behaviour it tests.
+    #[cfg(unix)]
+    fn read_only_dirs_refuse_unlink(tmp: &Path) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+
+        let probe = tmp.join("root-probe");
+        let _ = std::fs::remove_dir_all(&probe);
+        if std::fs::create_dir_all(probe.join("inner")).is_err()
+            || std::fs::write(probe.join("inner/x"), b"x").is_err()
+            || std::fs::set_permissions(probe.join("inner"), std::fs::Permissions::from_mode(0o500))
+                .is_err()
+        {
+            return false;
+        }
+        let refused = std::fs::remove_dir_all(&probe).is_err();
+        let _ =
+            std::fs::set_permissions(probe.join("inner"), std::fs::Permissions::from_mode(0o700));
+        let _ = std::fs::remove_dir_all(&probe);
+        refused
+    }
+
+    /// MAIN-538 AC-5 and AC-6: one path that cannot be removed must not become
+    /// a silent skip, and must not take the entries behind it down with it.
+    ///
+    /// This is how the root-owned `.cache/cargo-target` problem surfaced at
+    /// all. The containers write parts of the target dirs as root, so a
+    /// host-side delete half-failing is the EXPECTED shape here rather than an
+    /// exotic one — and the run has already concluded, so the only thing left
+    /// to get right is the report.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_entry_is_named_and_does_not_stop_the_ones_behind_it() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let tmp =
+            std::env::temp_dir().join(format!("nook-538-part-{}", uuid::Uuid::now_v7().simple()));
+        let (_cache, wt, _b) = build_tree_after_a_pass(&tmp, "MAIN-538", false);
+        build_tree_with_output(&wt);
+
+        // Root ignores permission bits (`CAP_DAC_OVERRIDE`), so uid 0 cannot
+        // stage this failure at all — and uid 0 is the DEFAULT path here:
+        // `./test.sh` runs the suite with `docker compose exec` into the
+        // control-plane container, which sets no `USER` and no compose `user:`.
+        // Probed BEFORE the subject is built, so the skip cannot strand a
+        // half-sealed tree, and probed without `unwrap` because as root the
+        // probe deletes its own scaffold and there is nothing left to restore.
+        if !read_only_dirs_refuse_unlink(&tmp) {
+            eprintln!("skipping: running as root, permission bits do not bind");
+            let _ = std::fs::remove_dir_all(&tmp);
+            return;
+        }
+
+        // Sealed at the INNER directory, not the outer one: `remove_dir_all`
+        // recurses, so a read-only outer directory still lets it unlink the
+        // artifact inside and fail only on the final rmdir — a half-delete
+        // that would make "was anything preserved?" untestable. Read-only
+        // `inner` refuses the unlink itself, so the failure frees nothing.
+        let sealed = wt.join("sealed");
+        std::fs::create_dir_all(sealed.join("inner")).unwrap();
+        std::fs::write(sealed.join("inner/artifact.rlib"), vec![7u8; 4096]).unwrap();
+        std::fs::write(wt.join(".gitignore"), "/target\n/.cache/\n/sealed/\n.env\n").unwrap();
+        commit_all(&wt, "ignore the sealed directory too");
+        std::fs::set_permissions(sealed.join("inner"), std::fs::Permissions::from_mode(0o500))
+            .unwrap();
+
+        let settings = WorktreeSettings {
+            reclaim: vec!["sealed".into(), "target".into()],
+            ..WorktreeSettings::default()
+        };
+        let got = reclaim_build_output(&wt, &settings);
+
+        // Best-effort: the assertions below, not the cleanup, are what fail a
+        // broken run.
+        let _ =
+            std::fs::set_permissions(sealed.join("inner"), std::fs::Permissions::from_mode(0o700));
+
+        assert_eq!(
+            got.removed,
+            vec!["target"],
+            "the entry behind the refusal still runs — a refusal is not an abort"
+        );
+        assert!(!wt.join("target").exists());
+        assert_eq!(got.refused.len(), 1);
+        assert!(
+            got.refused[0].starts_with("sealed (") && got.refused[0].len() > "sealed ()".len(),
+            "the path is named and so is the reason, got {:?}",
+            got.refused[0]
+        );
+        assert!(
+            sealed.join("inner/artifact.rlib").exists(),
+            "and what could not be removed is still there, not half-reported gone"
+        );
+        assert_eq!(
+            got.bytes, 4096,
+            "only what actually went is counted as freed"
+        );
+        assert!(
+            reclaim_note(&got).is_some_and(|n| n.contains("could not reclaim sealed")),
+            "and the transcript carries it — a silent skip is the failure mode"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     /// MAIN-465 AC-2: the delivered API URL wins; absent or blank falls back
     /// to this node's own configured server, byte-identical to before.
     #[test]

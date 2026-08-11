@@ -210,20 +210,76 @@ exclude = [
 # biggest of the set. They are written by root inside the container, so a
 # host-side delete may only get part of them; that is reported, not fatal.
 #
-# NOT here, deliberately: `.cache/cargo-registry` and `.cache/web-node-modules`
-# are DOWNLOAD caches, refilled from the network rather than by compiling, and
-# `node_modules/` likewise. Reclaim is for what a rebuild reproduces locally.
+# `frontend/node_modules` is the pnpm half, and it is here for the same reason
+# `target` is: it is LINKED from a store rather than downloaded, so the next
+# pass reproduces it locally. Measured on `azul` 2026-08-11 across the twelve
+# live worktrees, a tree that ran the HOST-side `pnpm install` carries 218 MB
+# here — the largest single directory left standing after MAIN-493's set had
+# run. That install relinks from the host's global store
+# (`~/.local/share/pnpm/store`, outside every worktree), so the next pass pays
+# a local relink rather than a refetch.
+#
+# The host and container installs are DISJOINT, which is what makes these
+# entries safe to delete. A host-installed tree has a real 218 MB
+# `frontend/node_modules` and no `frontend/.pnpm-store` at all; the container
+# instead installs into `.cache/web-node-modules` (bind-mounted over
+# `/app/frontend/node_modules` by `docker-compose.yml`), leaving the host path
+# EMPTY — the mount lives in the container's namespace and shadows it, so a
+# host-side reclaim never reaches the container's files either way. Measured
+# against a live container on 2026-08-11 the host-side removal simply succeeds;
+# were a kernel to refuse it instead, the entry would be reported refused and
+# still free nothing, so the safety of this list does not rest on which happens.
+#
+# The five workspace packages are here because `reclaim` matches LITERAL paths
+# and `frontend/pnpm-workspace.yaml` declares `packages/*` and `apps/*`, each of
+# which gets its own `node_modules`. In the container shape that is where nearly
+# all of the host-side pnpm bytes actually are: `build-…-MAIN-138` and
+# `build-…-MAIN-524` measure 1 MB at the root and 18 MB nested, so the root
+# entry alone would have left the larger half standing.
+#
+# NOT here, deliberately, and each for a measured reason rather than for
+# appearing in `exclude` (MAIN-538 AC-2):
+#
+#   `.cache/cargo-registry` (872 MB) is a DOWNLOAD cache, refilled from the
+#   network rather than by compiling. Reclaim is for what a rebuild reproduces
+#   locally.
+#
+#   `.cache/web-node-modules` (233 MB) is NOT a cache despite the path — it is
+#   the web container's live `node_modules`, the install `pnpm install` writes
+#   on every `docker compose up`. Deleting it from under a running stack buys
+#   233 MB and costs a reinstall the developer did not ask for.
+#
+#   `frontend/.pnpm-store` (212 MB) is the CONTAINER's pnpm store — nothing in
+#   this tree sets `store-dir`, so the container, which has no home-directory
+#   store to use, puts one beside the workspace. It is the registry copy its
+#   `node_modules` hardlinks against, and it is root-written, so a host-side
+#   delete would only ever half-succeed and report a refusal that never
+#   resolves. Both facts point the same way: keep it.
+#
+#   `.nook-secrets/` is the case that proves `exclude` and `reclaim` answer
+#   different questions. It is excluded from SEEDING because a credential
+#   should not be copied into every card's worktree, and it must never be
+#   reclaimed — it is not regenerable, and deleting it costs the fleet its
+#   Claude session.
+#
+# Nothing is listed here on the strength of being gitignored alone. The `dist/`
+# and tauri `binaries/` directories pass that test and still measure 0 bytes in
+# every worktree on this node, so they stay out until they cost something.
 #
 # These overlap `exclude` above because both name the same class from opposite
 # ends — what a fresh tree must not be GIVEN, and what a concluded one must not
-# KEEP — and neither list is derivable from the other: `.nook-secrets/` is
-# excluded and must never be reclaimed, `.cache/cargo-target` is reclaimed via
-# the broader `/.cache/` exclusion.
+# KEEP — and neither list is derivable from the other.
 reclaim = [
   "/target",
   "/target-docker",
   "/target-docker-node",
   "/.cache/cargo-target",
   "/.cache/cargo-target-node",
+  "frontend/node_modules",
+  "frontend/packages/api/node_modules",
+  "frontend/packages/app/node_modules",
+  "frontend/packages/ui/node_modules",
+  "frontend/apps/desktop/node_modules",
+  "frontend/apps/web/node_modules",
   "frontend/apps/desktop/src-tauri/target",
 ]
