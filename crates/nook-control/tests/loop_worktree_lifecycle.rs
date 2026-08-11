@@ -201,7 +201,7 @@ async fn only_the_executing_node_may_record_a_worktree() {
         .await
         .expect("job");
 
-    jobs::record_worktree_from_node(&state, tenant, stranger, job, "/evil/path")
+    jobs::record_worktree_from_node(&state, stranger, job, "/evil/path")
         .await
         .expect("dropped, not errored");
     assert_eq!(
@@ -210,15 +210,9 @@ async fn only_the_executing_node_may_record_a_worktree() {
         "a node that does not execute this job cannot speak for its card"
     );
 
-    jobs::record_worktree_from_node(
-        &state,
-        tenant,
-        node,
-        job,
-        "/cache/worktrees/build-ws-MAIN-9",
-    )
-    .await
-    .expect("record");
+    jobs::record_worktree_from_node(&state, node, job, "/cache/worktrees/build-ws-MAIN-9")
+        .await
+        .expect("record");
     assert_eq!(
         recorded(&bed, card).await,
         (

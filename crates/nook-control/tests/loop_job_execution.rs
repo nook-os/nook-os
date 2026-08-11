@@ -375,7 +375,7 @@ async fn a_disconnect_fails_only_this_nodes_live_jobs() {
     let elsewhere = job(&bed, tenant, target, None, "running", Some(other)).await;
     let state = bed.app_state().await;
 
-    jobs::fail_stranded_for_node(&state, tenant, n)
+    jobs::fail_stranded_for_node(&state, n)
         .await
         .expect("fail stranded");
 
@@ -498,10 +498,10 @@ async fn a_node_cannot_touch_a_job_it_does_not_execute() {
 
     // An intruder node's transcript + finish are dropped (security): a node token
     // is scoped to its own runs.
-    jobs::transcript_from_node(&state, tenant, intruder, j, "agent", "evil injection")
+    jobs::transcript_from_node(&state, intruder, j, "agent", "evil injection")
         .await
         .expect("call returns ok");
-    jobs::finish_from_node(&state, tenant, intruder, j, false, "spoofed kill")
+    jobs::finish_from_node(&state, intruder, j, false, "spoofed kill")
         .await
         .expect("call returns ok");
     assert_eq!(
@@ -515,11 +515,11 @@ async fn a_node_cannot_touch_a_job_it_does_not_execute() {
     );
 
     // The actual executor's transcript + finish are applied.
-    jobs::transcript_from_node(&state, tenant, runner, j, "agent", "real output")
+    jobs::transcript_from_node(&state, runner, j, "agent", "real output")
         .await
         .expect("executor transcript");
     assert!(transcript_text(&bed, j).await.contains("real output"));
-    jobs::finish_from_node(&state, tenant, runner, j, true, "")
+    jobs::finish_from_node(&state, runner, j, true, "")
         .await
         .expect("executor finish");
     assert_eq!(load(&bed, j).await.state, "completed");
@@ -560,6 +560,125 @@ async fn a_steering_message_is_recorded_once() {
         mine, 1,
         "the steering message appears {mine} times — the control plane records \
          it on send, so the node must not record it again on the echo"
+    );
+
+    bed.teardown().await;
+}
+
+/// MAIN-515 NG-4: placement crossing tenants is only half a fix if the run's
+/// own reports are then thrown away.
+///
+/// A node authenticates on its websocket in the tenant the MACHINE was joined
+/// into. Once an owner's node runs a job raised in another of their tenants,
+/// that connection tenant is not the job's — and every `*_from_node` handler
+/// looked the job up with it, found nothing, and dropped the report as a spoof.
+/// The run would have executed to completion with no transcript, no worktree
+/// record and no terminal state, to be reaped later as stalled.
+#[tokio::test]
+async fn a_job_reported_from_its_executor_lands_whichever_tenant_the_node_is_homed_in() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let home = bed.tenant("njoined").await;
+    let other = bed.tenant("jobtenant").await;
+    // The machine lives in `home`; the work lives in `other`.
+    let runner = node(&bed, home).await;
+    let target = task_with_key(&bed, other, "ACME", 7).await;
+    let j = job(&bed, other, target, None, "running", Some(runner)).await;
+    let state = bed.app_state().await;
+
+    jobs::transcript_from_node(&state, runner, j, "agent", "real output")
+        .await
+        .expect("executor transcript");
+    assert!(
+        transcript_text(&bed, j).await.contains("real output"),
+        "the executor's own line is not a spoof just because its machine is \
+         homed elsewhere"
+    );
+
+    jobs::finish_from_node(&state, runner, j, true, "")
+        .await
+        .expect("executor finish");
+    assert_eq!(
+        load(&bed, j).await.state,
+        "completed",
+        "and the run reaches a terminal state rather than being reaped as stalled"
+    );
+
+    bed.teardown().await;
+}
+
+/// The security edge, restated across the boundary: widening the lookup to the
+/// job's own tenant must not let ANY node speak for a job it does not execute.
+#[tokio::test]
+async fn a_stranger_node_in_another_tenant_still_cannot_touch_the_job() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let home = bed.tenant("njoined").await;
+    let other = bed.tenant("jobtenant").await;
+    let runner = node(&bed, home).await;
+    let stranger = node(&bed, other).await;
+    let target = task_with_key(&bed, other, "ACME", 8).await;
+    let j = job(&bed, other, target, None, "running", Some(runner)).await;
+    let state = bed.app_state().await;
+
+    jobs::transcript_from_node(&state, stranger, j, "agent", "evil injection")
+        .await
+        .expect("call returns ok");
+    jobs::finish_from_node(&state, stranger, j, false, "spoofed kill")
+        .await
+        .expect("call returns ok");
+    assert!(transcript_text(&bed, j).await.is_empty());
+    assert_eq!(
+        load(&bed, j).await.state,
+        "running",
+        "the node match is what authorizes, and it still refuses everyone else"
+    );
+
+    bed.teardown().await;
+}
+
+/// A disconnect strands whatever the machine held — including work raised in
+/// another of its owner's tenants, which must be failed in ITS tenant.
+#[tokio::test]
+async fn a_disconnect_fails_cross_tenant_work_in_the_jobs_own_tenant() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let home = bed.tenant("njoined").await;
+    let other = bed.tenant("jobtenant").await;
+    let n = node(&bed, home).await;
+    let here = job(
+        &bed,
+        home,
+        task_with_key(&bed, home, "HOME", 1).await,
+        None,
+        "running",
+        Some(n),
+    )
+    .await;
+    let away = job(
+        &bed,
+        other,
+        task_with_key(&bed, other, "AWAY", 1).await,
+        None,
+        "running",
+        Some(n),
+    )
+    .await;
+    let state = bed.app_state().await;
+
+    jobs::fail_stranded_for_node(&state, n)
+        .await
+        .expect("fail stranded");
+
+    assert_eq!(load(&bed, here).await.state, "failed");
+    assert_eq!(
+        load(&bed, away).await.state,
+        "failed",
+        "a job left running with nothing behind it is the dishonest board this \
+         whole path exists to prevent — tenancy does not excuse it"
     );
 
     bed.teardown().await;
