@@ -1275,6 +1275,101 @@ pub struct ReviewLoopStatus {
     pub eligible: u32,
 }
 
+/// Why one node of the fleet contributes nothing to a viewer's BUILD capacity
+/// (MAIN-495).
+///
+/// A third vocabulary beside [`NodeBlocker`] and [`QueuedReason`], and
+/// deliberately so: those answer "why can this SESSION not be placed" and "why
+/// is this JOB still queued", and this answers "why does this MACHINE deliver
+/// no build slots to me". The variants are the legs of the very query
+/// `select_executor` resolves through, one for one, so a node excluded from
+/// the capacity sum is excluded for a reason a person can act on.
+///
+/// One reason per node, in a fixed order — ownership, then liveness, then what
+/// the node reports about itself. The permanent grounds come first: telling an
+/// operator their teammate's laptop is offline invites them to wait for
+/// something that would never have counted anyway.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BuildCapacityBlocker {
+    /// The shared operator, which never runs builds however it is labelled
+    /// (MAIN-383): a builder pushes code with credentials, and that is the
+    /// machine owner's own call.
+    SharedOperator,
+    /// Somebody else's machine — or nobody's, which is not yours either.
+    NotYours,
+    /// Yours, but not connected.
+    Offline,
+    /// Connected, but the loop runtime is not authorized on it — the fleet's
+    /// Claude login, which is what a build run actually executes.
+    ///
+    /// Reporting nothing as "unknown" here, unlike [`NodeBlocker`]: placement
+    /// requires a positive `authorized` report and an unreported runtime is
+    /// refused, so silence is a refusal and saying otherwise would promise
+    /// capacity that never arrives.
+    RuntimeNotAuthorized { runtime: String },
+    /// The node does not declare this loop kind, so it would refuse the job at
+    /// the claim even if placement chose it.
+    KindNotAccepted {
+        /// Renamed on the wire only: `kind` is the internal tag, and a variant
+        /// field of that name would overwrite the discriminant a client reads.
+        #[serde(rename = "job_kind")]
+        kind: String,
+    },
+    /// Eligible in every other way, but it does not carry the label builds are
+    /// confined to. The owner sets it on the Nodes page.
+    NoRoleLabel {
+        /// The selector key that matched nothing, e.g. `role/build`.
+        label: String,
+    },
+}
+
+/// A node that delivers no build capacity, and why (MAIN-495).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BuildCapacityBlockedNode {
+    pub node_id: NodeId,
+    pub node_name: String,
+    pub reason: BuildCapacityBlocker,
+}
+
+/// Desired versus deliverable for a workspace's BUILD loop (MAIN-495) —
+/// [`ReviewLoopStatus`]'s twin, and separate from it on purpose (NG-1): the
+/// two loops converge through different machinery and one shape would have to
+/// carry fields neither half means.
+///
+/// The number this exists for is `capacity`. A build ceiling is a declaration
+/// about a repo; whether the fleet can honour it is a fact about machines, and
+/// with nothing reporting the second the first reads as broken rather than as
+/// oversubscribed.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BuildLoopStatus {
+    /// What the ceiling resolves to: `null` -> 1, `0` -> 0, `N` -> N.
+    ///
+    /// The DECLARATION, not a demand plan. Builds have no planner to ask —
+    /// `converge_builds` decides what is owed from the board at the moment it
+    /// runs — and the question this endpoint answers is whether the number a
+    /// person typed can be honoured at all.
+    pub desired: u32,
+    /// Build runs holding a node slot right now. A `queued` run is excluded
+    /// deliberately: it is not running, and it is very often the thing the
+    /// shortfall below is about.
+    pub running: u32,
+    /// `desired - capacity`: the repo asks for more concurrent builds than the
+    /// viewer's own nodes can ever deliver. Zero is the healthy case, whatever
+    /// the fleet is busy with at this instant.
+    pub shortfall: u32,
+    /// Loop-job slots summed over the viewer's ELIGIBLE nodes only. A
+    /// tenant-wide total would report the fleet's size while a job waits behind
+    /// one machine's two slots, which is the confusion this reports away.
+    pub capacity: u32,
+    /// How many nodes that sum came from. Carried separately because `0` slots
+    /// from `0` nodes is not a limit, it is an absence, and a UI that showed
+    /// "capacity 0" would send somebody looking for a setting to raise.
+    pub eligible_nodes: u32,
+    /// Every node that delivered nothing, with the ground it failed on.
+    pub blocked: Vec<BuildCapacityBlockedNode>,
+}
+
 /// Set or clear a workspace's review-loop ceiling (MAIN-445).
 ///
 /// The field is a raw JSON value on purpose. Typed as `Option<i32>` it would be

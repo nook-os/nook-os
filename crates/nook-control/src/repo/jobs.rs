@@ -311,6 +311,20 @@ pub trait LoopJobRepository: Send + Sync {
         limit: i64,
     ) -> ApiResult<Vec<nook_types::WorkspaceBuildRun>>;
 
+    /// The states of a workspace's LIVE build runs (MAIN-495) — every run that
+    /// has not reached a terminal state, `queued` ones included.
+    ///
+    /// States rather than a count, because the build-loop status has to tell
+    /// the two apart: a queued run is not running, and it is very often exactly
+    /// what the shortfall beside it is about. Unbounded on purpose — a limit
+    /// would silently undercount, which is the one thing a capacity report may
+    /// not do, and the live set is bounded by the ceiling and the fleet anyway.
+    async fn live_build_states(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Vec<String>>;
+
     /// The MCP status surface's rows (MAIN-525 AC-1): a workspace's runs,
     /// newest first, each already carrying its card's KEY and its executor's
     /// NAME. `kind` `None` means every kind; `live_only` keeps the runs that
@@ -998,6 +1012,24 @@ impl LoopJobRepository for DbLoopJobRepository {
                     vis = crate::services::tasks::visible_sql("t", "$4"),
                 ),
                 params![tenant, workspace.0, limit, viewer],
+            )
+            .await?)
+    }
+
+    async fn live_build_states(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Vec<String>> {
+        // The same four states `build_run_heads` calls live, spelled the same
+        // way: what counts as in flight is one question with one answer.
+        Ok(self
+            .db
+            .query_scalar_all(
+                "SELECT state FROM loop_jobs
+                  WHERE tenant_id = $1 AND workspace_id = $2 AND kind = 'build'
+                    AND state IN ('queued', 'claimed', 'running', 'waiting_on_human')",
+                params![tenant, workspace.0],
             )
             .await?)
     }
@@ -1808,6 +1840,27 @@ impl LoopJobRepository for FakeLoopJobRepository {
         mine.sort_by_key(|r| std::cmp::Reverse(r.created_at));
         mine.truncate(limit.max(0) as usize);
         Ok(mine)
+    }
+
+    async fn live_build_states(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Vec<String>> {
+        let s = self.inner.lock().unwrap();
+        Ok(s.jobs
+            .iter()
+            .filter(|j| {
+                j.tenant_id == tenant && j.workspace_id == Some(workspace) && j.kind == "build"
+            })
+            .filter(|j| {
+                matches!(
+                    j.state.as_str(),
+                    "queued" | "claimed" | "running" | "waiting_on_human"
+                )
+            })
+            .map(|j| j.state.clone())
+            .collect())
     }
 
     async fn list_runs_for_workspace(

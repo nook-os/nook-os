@@ -550,6 +550,74 @@ pub async fn set_build_loop(
     }))
 }
 
+/// `GET /api/v1/workspaces/{id}/build-loop-status` — desired versus
+/// DELIVERABLE for the build loop (MAIN-495 AC-1), `/review-loop-status`'s
+/// twin.
+///
+/// The one it cannot borrow is the planner. Reviews resolve a desired number
+/// through the reconciler's `plan_now`; builds have no such thing — what is
+/// owed is decided from the board at the moment `converge_builds` runs. So
+/// `desired` here is the DECLARATION, and the question this endpoint exists to
+/// answer is whether the number somebody typed can be honoured by the machines
+/// they own at all: a ceiling of three against one node's two slots changes
+/// nothing observable, and the third run simply queues forever.
+///
+/// Advisory, never a gate (AC-5). `PUT /build-loop` still takes any valid
+/// number, because fleet capacity changes without warning and a refusal
+/// correct at write time is wrong an hour later.
+#[utoipa::path(get, path = "/api/v1/workspaces/{id}/build-loop-status",
+    operation_id = "get_build_loop_status",
+    params(("id" = String, Path,)),
+    responses((status = 200, body = BuildLoopStatus), (status = 404)))]
+pub async fn build_loop_status(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<WorkspaceId>,
+) -> ApiResult<Json<BuildLoopStatus>> {
+    let ws = state
+        .workspaces
+        .get(auth.tenant_id, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+
+    // `converge_builds`' own reading of the column, so the ceiling reported is
+    // the ceiling acted on: unset is the default of one, and an explicit 0 is
+    // the repo's kill switch.
+    let desired = ws.build_max_replicas.unwrap_or(1).max(0) as u32;
+    let running = state
+        .jobs
+        .live_build_states(auth.tenant_id, id)
+        .await?
+        .iter()
+        .filter(|s| s.as_str() != "queued")
+        .count() as u32;
+
+    // The VIEWER's own eligible nodes (AC-2): node ownership keys on the
+    // person, and a tenant-wide total would report the fleet's size while a job
+    // waits behind one machine's two slots.
+    //
+    // The scope is the nodes routes' own, resolved here because it is an access
+    // decision: this response NAMES nodes, and a member may not learn the
+    // identity of a machine `/api/v1/nodes` would not have shown them. It moves
+    // no number — every build candidate is the viewer's own — only which
+    // blocked machines are named.
+    let scope = crate::routes::nodes::visibility_scope(&state, &auth).await?;
+    let cap =
+        crate::services::jobs::build_capacity(&state, auth.tenant_id, auth.user_id, scope).await?;
+
+    Ok(Json(BuildLoopStatus {
+        desired,
+        running,
+        // Against CAPACITY, not against what is busy right now: a ceiling the
+        // fleet can reach is healthy however little of it is in use this
+        // second, and a ceiling it cannot reach is short even while idle.
+        shortfall: desired.saturating_sub(cap.capacity),
+        capacity: cap.capacity,
+        eligible_nodes: cap.eligible,
+        blocked: cap.blocked,
+    }))
+}
+
 /// `null` clears; anything else must be a non-negative integer that fits the
 /// column (AC-2). Every rejection names the field, because the caller's next
 /// move is to fix that key and a message that does not say which one costs a

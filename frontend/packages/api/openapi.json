@@ -7767,6 +7767,41 @@
         }
       }
     },
+    "/api/v1/workspaces/{id}/build-loop-status": {
+      "get": {
+        "tags": [
+          "crate::routes::workspaces"
+        ],
+        "summary": "`GET /api/v1/workspaces/{id}/build-loop-status` — desired versus\nDELIVERABLE for the build loop (MAIN-495 AC-1), `/review-loop-status`'s\ntwin.",
+        "description": "The one it cannot borrow is the planner. Reviews resolve a desired number\nthrough the reconciler's `plan_now`; builds have no such thing — what is\nowed is decided from the board at the moment `converge_builds` runs. So\n`desired` here is the DECLARATION, and the question this endpoint exists to\nanswer is whether the number somebody typed can be honoured by the machines\nthey own at all: a ceiling of three against one node's two slots changes\nnothing observable, and the third run simply queues forever.\n\nAdvisory, never a gate (AC-5). `PUT /build-loop` still takes any valid\nnumber, because fleet capacity changes without warning and a refusal\ncorrect at write time is wrong an hour later.",
+        "operationId": "get_build_loop_status",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BuildLoopStatus"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/workspaces/{id}/builds": {
       "get": {
         "tags": [
@@ -9498,6 +9533,135 @@
         "type": "string",
         "format": "uuid"
       },
+      "BuildCapacityBlockedNode": {
+        "type": "object",
+        "description": "A node that delivers no build capacity, and why (MAIN-495).",
+        "required": [
+          "node_id",
+          "node_name",
+          "reason"
+        ],
+        "properties": {
+          "node_id": {
+            "$ref": "#/components/schemas/NodeId"
+          },
+          "node_name": {
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/components/schemas/BuildCapacityBlocker"
+          }
+        }
+      },
+      "BuildCapacityBlocker": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "The shared operator, which never runs builds however it is labelled\n(MAIN-383): a builder pushes code with credentials, and that is the\nmachine owner's own call.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "shared_operator"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Somebody else's machine — or nobody's, which is not yours either.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "not_yours"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Yours, but not connected.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "offline"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Connected, but the loop runtime is not authorized on it — the fleet's\nClaude login, which is what a build run actually executes.\n\nReporting nothing as \"unknown\" here, unlike [`NodeBlocker`]: placement\nrequires a positive `authorized` report and an unreported runtime is\nrefused, so silence is a refusal and saying otherwise would promise\ncapacity that never arrives.",
+            "required": [
+              "runtime",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "runtime_not_authorized"
+                ]
+              },
+              "runtime": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The node does not declare this loop kind, so it would refuse the job at\nthe claim even if placement chose it.",
+            "required": [
+              "job_kind",
+              "kind"
+            ],
+            "properties": {
+              "job_kind": {
+                "type": "string",
+                "description": "Renamed on the wire only: `kind` is the internal tag, and a variant\nfield of that name would overwrite the discriminant a client reads."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "kind_not_accepted"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Eligible in every other way, but it does not carry the label builds are\nconfined to. The owner sets it on the Nodes page.",
+            "required": [
+              "label",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "no_role_label"
+                ]
+              },
+              "label": {
+                "type": "string",
+                "description": "The selector key that matched nothing, e.g. `role/build`."
+              }
+            }
+          }
+        ],
+        "description": "Why one node of the fleet contributes nothing to a viewer's BUILD capacity\n(MAIN-495).\n\nA third vocabulary beside [`NodeBlocker`] and [`QueuedReason`], and\ndeliberately so: those answer \"why can this SESSION not be placed\" and \"why\nis this JOB still queued\", and this answers \"why does this MACHINE deliver\nno build slots to me\". The variants are the legs of the very query\n`select_executor` resolves through, one for one, so a node excluded from\nthe capacity sum is excluded for a reason a person can act on.\n\nOne reason per node, in a fixed order — ownership, then liveness, then what\nthe node reports about itself. The permanent grounds come first: telling an\noperator their teammate's laptop is offline invites them to wait for\nsomething that would never have counted anyway."
+      },
       "BuildLoopDeclaration": {
         "type": "object",
         "description": "The ceiling on this repo's BUILD runs (MAIN-461) — `ReviewLoopDeclaration`'s\ntwin, kept separate because the two are set independently and a shared type\nwould let a rename on one silently rename the other's wire shape.\n`None` = nobody decided (effective 1), `0` = builds off for this repo.",
@@ -9508,6 +9672,57 @@
               "null"
             ],
             "format": "int32"
+          }
+        }
+      },
+      "BuildLoopStatus": {
+        "type": "object",
+        "description": "Desired versus deliverable for a workspace's BUILD loop (MAIN-495) —\n[`ReviewLoopStatus`]'s twin, and separate from it on purpose (NG-1): the\ntwo loops converge through different machinery and one shape would have to\ncarry fields neither half means.\n\nThe number this exists for is `capacity`. A build ceiling is a declaration\nabout a repo; whether the fleet can honour it is a fact about machines, and\nwith nothing reporting the second the first reads as broken rather than as\noversubscribed.",
+        "required": [
+          "desired",
+          "running",
+          "shortfall",
+          "capacity",
+          "eligible_nodes",
+          "blocked"
+        ],
+        "properties": {
+          "blocked": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BuildCapacityBlockedNode"
+            },
+            "description": "Every node that delivered nothing, with the ground it failed on."
+          },
+          "capacity": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Loop-job slots summed over the viewer's ELIGIBLE nodes only. A\ntenant-wide total would report the fleet's size while a job waits behind\none machine's two slots, which is the confusion this reports away.",
+            "minimum": 0
+          },
+          "desired": {
+            "type": "integer",
+            "format": "int32",
+            "description": "What the ceiling resolves to: `null` -> 1, `0` -> 0, `N` -> N.\n\nThe DECLARATION, not a demand plan. Builds have no planner to ask —\n`converge_builds` decides what is owed from the board at the moment it\nruns — and the question this endpoint answers is whether the number a\nperson typed can be honoured at all.",
+            "minimum": 0
+          },
+          "eligible_nodes": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many nodes that sum came from. Carried separately because `0` slots\nfrom `0` nodes is not a limit, it is an absence, and a UI that showed\n\"capacity 0\" would send somebody looking for a setting to raise.",
+            "minimum": 0
+          },
+          "running": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Build runs holding a node slot right now. A `queued` run is excluded\ndeliberately: it is not running, and it is very often the thing the\nshortfall below is about.",
+            "minimum": 0
+          },
+          "shortfall": {
+            "type": "integer",
+            "format": "int32",
+            "description": "`desired - capacity`: the repo asks for more concurrent builds than the\nviewer's own nodes can ever deliver. Zero is the healthy case, whatever\nthe fleet is busy with at this instant.",
+            "minimum": 0
           }
         }
       },

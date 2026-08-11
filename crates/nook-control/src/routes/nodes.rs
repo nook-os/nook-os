@@ -21,7 +21,15 @@ pub(crate) async fn node_tenant(state: &AppState, id: NodeId) -> ApiResult<nook_
 /// gets — and the unchanged view a node token gets (AC-1). Fails closed: if a
 /// user's person cannot be resolved, they are scoped to a person that owns
 /// nothing rather than shown the fleet.
-async fn visibility_scope(state: &AppState, auth: &AuthCtx) -> ApiResult<Option<uuid::Uuid>> {
+///
+/// `pub(crate)` because it is the tree's ONE answer to "how much of this fleet
+/// may this caller see", and any endpoint returning node identities owes the
+/// same answer — `/build-loop-status` names blocked nodes and reaches for it
+/// here rather than deciding again (MAIN-495).
+pub(crate) async fn visibility_scope(
+    state: &AppState,
+    auth: &AuthCtx,
+) -> ApiResult<Option<uuid::Uuid>> {
     if !matches!(auth.principal, crate::auth::Principal::User) {
         return Ok(None); // node token: current behavior, unchanged
     }

@@ -94,6 +94,20 @@ task_checkout_ids          # raw sqlx / bed.pool in the test itself (MAIN-268)
 # both lines at once.
 dispatch_order             # `no such column: e`, with executor_selection (MAIN-268)
 
+# A THIRD line for the same one query, added by MAIN-495 and measured the same
+# way: `/build-loop-status` reports the capacity of the set `select_executor`
+# resolves, so it asks `eligible_loop_executors` for that set rather than
+# re-deriving who may build — which is the whole reason the number it prints
+# can be trusted to match where jobs actually land. All 7 tests, one error,
+# 2026-08-11:
+#
+#   Db(Query(Database(SqliteError { code: 1, message: "no such column: e" })))
+#
+# So this list grows by one, on purpose and with its measurement, rather than
+# the endpoint keeping a private copy of placement's rule to stay engine-clean.
+# It is deleted with the two above, by the same fix, in one edit.
+workspace_build_loop_status # `no such column: e`, with executor_selection (MAIN-268)
+
 # ── the MAIN-423 residue, and what MEASURING it found (MAIN-472) ──
 #
 # MAIN-423 closed as a tracker on 2026-08-08 and its one surviving line —
