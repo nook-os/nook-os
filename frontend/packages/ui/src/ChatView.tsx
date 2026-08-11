@@ -18,7 +18,14 @@
 //     otherwise their scroll position is left alone.
 // Everything else (channel list, websockets, dedupe) belongs to the caller.
 
-import React, { useCallback, useLayoutEffect, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -42,6 +49,29 @@ export interface ChatViewReaction {
   emoji: string;
   count: number;
   reacted: boolean;
+}
+
+/** One command the SERVER offers in this conversation (MAIN-529 AC-1).
+ *
+ *  DATA ONLY: a name, how its argument reads, and what it does. No callback, no
+ *  handler, nothing this component could run — which is what keeps the browser
+ *  from ever holding a command set of its own. Structurally the chat service's
+ *  `ChatCommand`, named locally like every other shape here so the view stays
+ *  backend-agnostic. */
+export interface ChatViewCommand {
+  /** Without the slash: `help`, not the typed form. */
+  name: string;
+  /** How the argument reads in the palette, e.g. `<text>` or `[text]`. */
+  args_hint?: string | null;
+  description: string;
+}
+
+/** What running a command answered with — the server's `ChatCommandResult`.
+ *  `ephemeral` is text for the invoker's eyes only; `posted_message_id` names a
+ *  message the command posted, which arrives by the ordinary live path. */
+export interface ChatViewCommandResult {
+  ephemeral?: string | null;
+  posted_message_id?: string | null;
 }
 
 /** The minimal message shape the view needs. Deliberately not the chat
@@ -81,6 +111,12 @@ export interface ChatViewMessage {
    *  The caller decides — the view has no way to tell prose from a draft, and
    *  guessing would eventually render someone's message wrong. */
   markdown?: boolean | "chat";
+  /** This message is an ACTION rather than something its author said (MAIN-529
+   *  AC-8) — what the chat service marks `kind = "action"`. It renders italic
+   *  and author-prefixed on one line, carries no reaction row and offers no
+   *  Edit; deleting it is exactly as ordinary. The caller decides: the view
+   *  never infers an action from a body. */
+  action?: boolean;
   /** This message is folded TOOL ACTIVITY rather than something its author said
    *  (MAIN-499): the steps it stands for, in order, as they were recorded.
    *
@@ -180,6 +216,24 @@ export interface ChatViewProps {
   /** Which reading this list gets (MAIN-499). Omitted is `"chat"`, byte for
    *  byte what every consumer rendered before the variant existed. */
   variant?: ChatViewVariant;
+  /** The commands the server offers here (MAIN-529 AC-1), for the palette a
+   *  leading slash opens. Absent — every surface that has not wired the two
+   *  endpoints — means no palette and no command parsing at all: typed text is
+   *  passed to `onSend` exactly as it always was. */
+  commands?: ChatViewCommand[];
+  /** Run one of `commands` as the caller, answering with what the server said
+   *  (AC-1). The view posts a name and the remaining text and renders the
+   *  result; it never learns what a command means, and a rejected promise
+   *  renders through the same path as an `ephemeral` (AC-7). */
+  onCommand?: (
+    name: string,
+    args: string,
+  ) => Promise<ChatViewCommandResult> | ChatViewCommandResult;
+  /** An opaque identity for the conversation on screen. The view never reads
+   *  it: a CHANGE is the signal that drops the ephemeral notes, which belong to
+   *  the conversation they were answered in and must not follow the reader into
+   *  the next one (AC-7). A surface with one conversation passes nothing. */
+  conversationId?: string;
 }
 
 /**
@@ -203,6 +257,62 @@ export function insertAt(
     caret: from + insert.length,
   };
 }
+
+/**
+ * What the palette is filtering on, or `null` when the composer is not a command
+ * line at all (AC-3).
+ *
+ * A slash ONLY opens the palette as the first character, and only until the
+ * name is settled: once whitespace has been typed the person is writing
+ * arguments, and a palette still open there would swallow the Enter that runs
+ * the command (AC-4).
+ */
+export function paletteQuery(text: string): string | null {
+  if (!text.startsWith("/")) return null;
+  const rest = text.slice(1);
+  return /\s/.test(rest) ? null : rest;
+}
+
+/** The entries a query offers (AC-3). A prefix match on the name, in the
+ *  server's order — the view neither ranks nor rewrites the list it was given. */
+export function matchCommands(
+  commands: ChatViewCommand[],
+  query: string,
+): ChatViewCommand[] {
+  const q = query.toLowerCase();
+  return commands.filter((c) => c.name.toLowerCase().startsWith(q));
+}
+
+/**
+ * Read submitted text as a command invocation, or `null` when it is an ordinary
+ * message (AC-5/AC-6).
+ *
+ * The leading token has to be a name the SERVER listed — matched exactly, as the
+ * server matches it. Leading-slash text that is not in the list is not a
+ * command and is never treated as one: that is how `/nook-spec …` still reaches
+ * an agent verbatim on the surfaces that pass no commands, and on the ones that
+ * do.
+ */
+export function parseCommand(
+  text: string,
+  commands: ChatViewCommand[],
+): { name: string; args: string } | null {
+  if (!text.startsWith("/")) return null;
+  const rest = text.slice(1);
+  const gap = rest.search(/\s/);
+  const name = gap < 0 ? rest : rest.slice(0, gap);
+  if (!commands.some((c) => c.name === name)) return null;
+  return { name, args: gap < 0 ? "" : rest.slice(gap + 1) };
+}
+
+/** The palette is empty until something is typed, so it is sized for a handful
+ *  of rows — enough for `useAnchoredMenu` to flip it above the composer, which
+ *  is where it always belongs. */
+const PALETTE_HEIGHT = 220;
+
+/** A stable empty list, so a surface passing no commands does not hand the
+ *  memoised filter a fresh array on every render. */
+const NO_COMMANDS: ChatViewCommand[] = [];
 
 const GROUP_GAP_MS = 5 * 60 * 1000;
 const NEAR_BOTTOM_PX = 80;
@@ -231,6 +341,9 @@ function startsGroup(
   windowed: boolean,
 ): boolean {
   if (!prev) return true;
+  // An action carries its own author inline and shows no header (AC-8), so the
+  // message after one has nothing above it saying who is speaking.
+  if (prev.action) return true;
   if (prev.authorId !== m.authorId) return true;
   if (!windowed) return false;
   return new Date(m.createdAt).getTime() - new Date(prev.createdAt).getTime() > GROUP_GAP_MS;
@@ -528,6 +641,9 @@ export function ChatView({
   hideComposer = false,
   giphyKey,
   variant = "chat",
+  commands,
+  onCommand,
+  conversationId,
 }: ChatViewProps) {
   const transcript = variant === "transcript";
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -544,6 +660,24 @@ export function ChatView({
   // in-progress draft. Each row's popups own their own open state — see
   // `MessageActions`.
   const [editing, setEditing] = useState<{ id: string; draft: string } | null>(null);
+  // What commands answered (AC-7). Client-only and unsent: a note is this
+  // reader's copy of what the server told them, and nothing here ever posts it.
+  const [notes, setNotes] = useState<{ id: string; text: string }[]>([]);
+  const noteCounter = useRef(0);
+  // Dismissal, for the query that was on screen when it happened (AC-4) — set
+  // by Escape and by an outside click, cleared the moment the query changes.
+  // A flag rather than an edit to the draft, because the draft IS the query:
+  // the next keystroke asks again, which is what a dismissed menu should do.
+  // Nothing else may clear it; a second clearer is what let one dismissal
+  // strand the palette for the rest of the composing session.
+  const [paletteOff, setPaletteOff] = useState(false);
+  const [cmdIndex, setCmdIndex] = useState(0);
+  const addNote = useCallback((text: string) => {
+    setNotes((prev) => [...prev, { id: `note-${noteCounter.current++}`, text }]);
+  }, []);
+  // A new conversation answers its own commands; the last one's replies are not
+  // part of it. Nothing persists them, so a reload starts empty for free.
+  useEffect(() => setNotes([]), [conversationId]);
 
   const beginEdit = useCallback((m: ChatViewMessage) => {
     setEditing({ id: m.id, draft: m.body });
@@ -597,17 +731,40 @@ export function ChatView({
     } else if (nearBottomRef.current) {
       el.scrollTop = el.scrollHeight;
     }
-  }, [messages, typing]);
+  }, [messages, typing, notes]);
+
+  const commandSet = commands ?? NO_COMMANDS;
+
+  /** Post a command and show whatever comes back (AC-7). A refusal is the server
+   *  ANSWERING what was typed, so it renders where the typing happened rather
+   *  than as a toast or a wall of JSON — the same path an `ephemeral` takes. */
+  const invoke = useCallback(
+    async (name: string, args: string) => {
+      if (!onCommand) return;
+      try {
+        const res = await onCommand(name, args);
+        if (res?.ephemeral) addNote(res.ephemeral);
+      } catch (err) {
+        addNote(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [onCommand, addNote],
+  );
 
   const submit = useCallback(() => {
     const body = draft.trim();
     if (disabled || (!body && !allowEmpty)) return;
-    onSend(body);
+    // A leading token the SERVER listed is a command; anything else — including
+    // leading-slash text matching nothing — is the message it looks like
+    // (AC-5/AC-6).
+    const cmd = onCommand ? parseCommand(body, commandSet) : null;
+    if (cmd) void invoke(cmd.name, cmd.args);
+    else onSend(body);
     setDraft("");
     // Collapse back to the one-line resting height the stylesheet pins.
     const el = inputRef.current;
     if (el) el.style.height = "";
-  }, [draft, disabled, allowEmpty, onSend]);
+  }, [draft, disabled, allowEmpty, onSend, onCommand, commandSet, invoke]);
 
   /** Grow the box with its content instead of scrolling inside a 34px slot.
    *  Inline style, cleared at rest, so the stylesheet keeps owning the resting
@@ -648,14 +805,75 @@ export function ChatView({
     [draft, autoGrow],
   );
 
+  const query = onCommand ? paletteQuery(draft) : null;
+  const matches = useMemo(
+    () => (query === null ? [] : matchCommands(commandSet, query)),
+    [commandSet, query],
+  );
+  const paletteOpen = !paletteOff && matches.length > 0;
+  const selected = Math.min(cmdIndex, matches.length - 1);
+  // A different query is a different question: it gets the first row
+  // highlighted rather than wherever the last list was left, and it undoes a
+  // dismissal, which belonged to the query it was typed against.
+  useEffect(() => {
+    setCmdIndex(0);
+    setPaletteOff(false);
+  }, [query]);
+
+  const closePalette = useCallback(() => setPaletteOff(true), []);
+  const palette = useAnchoredMenu(paletteOpen, closePalette, {
+    height: PALETTE_HEIGHT,
+    matchWidth: true,
+  });
+
+  /** Put the highlighted command in the box with a space after it, ready for its
+   *  arguments (AC-4). Completing is not running: the person presses Enter once
+   *  more, having seen what they are about to send. */
+  const completeCommand = useCallback((name: string) => {
+    const next = `/${name} `;
+    setDraft(next);
+    requestAnimationFrame(() => {
+      const box = inputRef.current;
+      if (!box) return;
+      box.focus();
+      box.setSelectionRange(next.length, next.length);
+    });
+  }, []);
+
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      if (paletteOpen) {
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          setCmdIndex((i) => (Math.min(i, matches.length - 1) + 1) % matches.length);
+          return;
+        }
+        if (e.key === "ArrowUp") {
+          e.preventDefault();
+          setCmdIndex(
+            (i) =>
+              (Math.min(i, matches.length - 1) + matches.length - 1) % matches.length,
+          );
+          return;
+        }
+        if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
+          // AC-4: with the palette open Enter completes and never sends.
+          e.preventDefault();
+          completeCommand(matches[selected].name);
+          return;
+        }
+        if (e.key === "Escape") {
+          e.preventDefault();
+          setPaletteOff(true);
+          return;
+        }
+      }
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         submit();
       }
     },
-    [submit],
+    [paletteOpen, matches, selected, completeCommand, submit],
   );
 
   return (
@@ -681,14 +899,19 @@ export function ChatView({
             // "what it said"; in chat every message is prose (AC-1).
             const activity = transcript ? m.activity : undefined;
             const mine = currentUserId != null && m.authorId === currentUserId;
+            // An action is a stage direction, not a remark (AC-8): it says who
+            // did the thing inside its own line, so it shows no header, and it
+            // is not something to react to or to reword afterwards. Deleting it
+            // is exactly as ordinary.
+            const action = !m.deleted && !!m.action;
             // Reactions and edit/delete/react actions only apply to a settled,
             // non-deleted message. A deleted one shows only its placeholder.
             const settled = !m.pending && !m.failed && !m.deleted;
-            const canReact = settled && !!onToggleReaction;
+            const canReact = settled && !action && !!onToggleReaction;
             // Edit is always author-only. Delete is author OR tenant admin
             // (MAIN-116 AC-4) — `canDeleteAny` plumbs the admin role, so an admin
             // can remove someone else's message, which the backend already allows.
-            const canEdit = settled && mine && !!onEditMessage;
+            const canEdit = settled && !action && mine && !!onEditMessage;
             const canDelete = settled && (mine || canDeleteAny) && !!onDeleteMessage;
             // Replying moved into the hover bar (MAIN-300); the "N replies"
             // affordance below stays, because it reports state rather than
@@ -709,12 +932,12 @@ export function ChatView({
               <div
                 key={m.id}
                 data-author={m.authorId}
-                data-kind={activity ? "activity" : undefined}
+                data-kind={activity ? "activity" : action ? "action" : undefined}
                 className={`chat-msg${head ? " head" : ""}${mine ? " mine" : ""}${
                   m.pending ? " pending" : ""
                 }${m.failed ? " failed" : ""}${m.deleted ? " deleted" : ""}`}
               >
-                {head && (
+                {head && !action && (
                   <div className="chat-msg-head">
                     <span className="chat-author">{authorLabel(m)}</span>
                     <span className="chat-time">{timeLabel(m.createdAt)}</span>
@@ -729,6 +952,15 @@ export function ChatView({
                     open={!!openActivity[m.id]}
                     onToggle={() => toggleActivity(m.id)}
                   />
+                ) : action ? (
+                  // AC-8: one italic line, author first — `<em>` rather than a
+                  // stylesheet rule, so the emphasis is in the document a
+                  // screen reader reads and not only in the paint.
+                  <div className="chat-body action">
+                    <em>
+                      {authorLabel(m)} {m.body}
+                    </em>
+                  </div>
                 ) : isEditing ? (
                   <textarea
                     className="chat-edit-input"
@@ -788,7 +1020,7 @@ export function ChatView({
                     Failed — retry
                   </button>
                 )}
-                {!m.deleted && reactions.length > 0 && (
+                {!m.deleted && !action && reactions.length > 0 && (
                   <div className="chat-reactions">
                     {reactions.map((r) => (
                       <button
@@ -812,7 +1044,7 @@ export function ChatView({
                   (canReact || canReply || canEdit || canDelete || canCopy) && (
                     <MessageActions
                       message={m}
-                      time={head ? undefined : timeLabel(m.createdAt)}
+                      time={head && !action ? undefined : timeLabel(m.createdAt)}
                       canReact={canReact}
                       canReply={canReply}
                       canEdit={canEdit}
@@ -842,6 +1074,11 @@ export function ChatView({
             );
           })
         )}
+        {notes.map((n) => (
+          <div key={n.id} className="chat-note" role="status">
+            {n.text}
+          </div>
+        ))}
         {typing && (
           <div className="chat-typing" role="status" aria-live="polite">
             <span className="chat-typing-dots" aria-hidden="true">
@@ -855,7 +1092,7 @@ export function ChatView({
       </div>
       {beforeComposer}
       {!hideComposer && (
-      <div className="chat-composer">
+      <div className="chat-composer" ref={palette.hostRef}>
         <textarea
           ref={inputRef}
           className="chat-input"
@@ -864,6 +1101,14 @@ export function ChatView({
           placeholder={placeholder}
           rows={1}
           aria-label="Message"
+          {...(paletteOpen
+            ? {
+                role: "combobox",
+                "aria-expanded": true,
+                "aria-controls": "chat-cmd-palette",
+                "aria-activedescendant": `chat-cmd-${matches[selected].name}`,
+              }
+            : {})}
           onChange={(e) => {
             setDraft(e.target.value);
             autoGrow();
@@ -890,6 +1135,32 @@ export function ChatView({
         >
           {sendLabel}
         </button>
+        {/* The list the server gave us, filtered — and nothing else. Portalled
+            out of the composer by `useAnchoredMenu` for the same reason the
+            reaction and more menus are: the panel around it has an overflow
+            that would clip it. */}
+        {palette.portal(
+          matches.map((c, i) => (
+            <button
+              key={c.name}
+              id={`chat-cmd-${c.name}`}
+              type="button"
+              role="option"
+              aria-selected={i === selected}
+              className={`chat-cmd-option${i === selected ? " on" : ""}`}
+              // The box keeps focus the whole time the palette is open, so a
+              // press here must not take it away — the click still completes.
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => completeCommand(c.name)}
+            >
+              <span className="chat-cmd-name">/{c.name}</span>
+              {c.args_hint && <span className="chat-cmd-args">{c.args_hint}</span>}
+              <span className="chat-cmd-desc">{c.description}</span>
+            </button>
+          )),
+          "chat-cmd-palette",
+          { id: "chat-cmd-palette", role: "listbox", "aria-label": "Commands" },
+        )}
       </div>
       )}
     </div>

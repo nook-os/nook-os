@@ -8,8 +8,14 @@
 // take that buffer as a prop and let `buildThreadMessages` surface just this
 // thread's live replies (AC-4) and reconcile our optimistic sends.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useInfiniteQuery, useMutation } from "@tanstack/react-query";
-import { messageThread, postMessage, type ChatMessage } from "@nookos/api";
+import { useInfiniteQuery, useMutation, useQuery } from "@tanstack/react-query";
+import {
+  listCommands,
+  messageThread,
+  postMessage,
+  runCommand,
+  type ChatMessage,
+} from "@nookos/api";
 import { ChatView } from "@nookos/ui";
 import { buildThreadMessages, type PendingMessage } from "./chatMessages";
 
@@ -116,6 +122,19 @@ export function ThreadPanel({
     [send],
   );
 
+  // The same list, from the same channel, under the same query key Chat.tsx
+  // uses — so opening a thread costs no second fetch (MAIN-529 AC-9). A command
+  // run here is a command run in the channel: that is the server's shape, and
+  // this panel does not reinterpret it.
+  const commandsQuery = useQuery({
+    queryKey: ["chat", "commands", channelId],
+    queryFn: () => listCommands(channelId),
+  });
+  const onCommand = useCallback(
+    (name: string, args: string) => runCommand(channelId, name, args),
+    [channelId],
+  );
+
   const messages = useMemo(
     () => buildThreadMessages(replies, live, pending, parent.id, meId, names),
     [replies, live, pending, parent.id, meId, names],
@@ -165,6 +184,9 @@ export function ThreadPanel({
         onDeleteMessage={onDeleteMessage}
         canDeleteAny={canDeleteAny}
         giphyKey={giphyKey}
+        commands={commandsQuery.data}
+        onCommand={onCommand}
+        conversationId={parent.id}
       />
     </aside>
   );

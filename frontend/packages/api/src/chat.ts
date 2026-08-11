@@ -15,9 +15,12 @@ type ChatMessagePage = Schemas["ChatMessagePage"];
 export type ChatThread = Schemas["ChatThread"];
 export type ChatReactionAggregate = Schemas["ChatReactionAggregate"];
 export type ChatCategory = Schemas["ChatCategory"];
+export type ChatCommand = Schemas["ChatCommand"];
+export type ChatCommandResult = Schemas["ChatCommandResult"];
 type CreateChatChannel = Schemas["CreateChatChannel"];
 type UpdateChatChannel = Schemas["UpdateChatChannel"];
 type UpdateChatMessage = Schemas["UpdateChatMessage"];
+type RunChatCommand = Schemas["RunChatCommand"];
 export type DmSummary = Schemas["DmSummary"];
 export type PersonRef = Schemas["PersonRef"];
 type ChatServerFrame = Schemas["ChatServerMessage"];
@@ -326,6 +329,53 @@ export async function postMessage(
     throw new Error(message);
   }
   return (await res.json()) as ChatMessage;
+}
+
+/**
+ * The commands the caller may run in this channel (MAIN-528 AC-1). The set is
+ * the SERVER's — this client renders what it is handed and never adds to it, so
+ * a command the backend gains reaches the composer without a frontend release.
+ */
+export function listCommands(channelId: string): Promise<ChatCommand[]> {
+  return chatGet<ChatCommand[]>(`/channels/${channelId}/commands`);
+}
+
+/**
+ * Run a command as the caller. `args` is everything after the command word,
+ * unparsed — the server owns what each command makes of it.
+ *
+ * Deliberately NOT `chatWrite`: a refusal here ("Unknown command …") is the
+ * server ANSWERING what the person typed, not a write that silently vanished,
+ * so it must not raise the global write-failure toast. It is rethrown instead,
+ * and the composer renders the message inline where the command was typed
+ * (MAIN-529 AC-7).
+ */
+export async function runCommand(
+  channelId: string,
+  name: string,
+  args: string,
+): Promise<ChatCommandResult> {
+  const body: RunChatCommand = { name, args };
+  const res = await fetch(apiUrl(`${CHAT_PREFIX}/channels/${channelId}/commands`), {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    credentials: "same-origin",
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    let message = `${res.status} ${res.statusText}`.trim();
+    try {
+      const text = await res.clone().text();
+      if (text) {
+        const parsed = JSON.parse(text) as { message?: string; error?: string };
+        message = parsed.message ?? parsed.error ?? text.slice(0, 200);
+      }
+    } catch {
+      // A body we cannot read is not worth failing over.
+    }
+    throw new Error(message);
+  }
+  return (await res.json()) as ChatCommandResult;
 }
 
 /**
