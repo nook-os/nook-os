@@ -11,6 +11,7 @@
 mod bus;
 mod categories;
 mod channels;
+mod commands;
 mod config;
 mod dms;
 mod messages;
@@ -39,7 +40,7 @@ use uuid::Uuid;
 /// schema, so it never touches the control plane's `public._sqlx_migrations`.
 /// Embedded: 0001_chat_init, 0002_chat_channel_archive, 0003_chat_dm,
 /// 0004_chat_threads, 0005_chat_reactions, 0006_chat_categories,
-/// 0007_chat_read_cursors.
+/// 0007_chat_read_cursors, 0008_chat_message_kind.
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 /// The service's own search_path: chat first, `public` behind it.
@@ -163,6 +164,13 @@ async fn main() -> anyhow::Result<()> {
         // Advance the caller's read cursor for a channel (MAIN-117 AC-2).
         .route("/api/channels/{id}/read", put(channels::mark_read))
         .route("/api/channels/{id}/typing", post(presence::typing))
+        // The command surface (MAIN-528): the set the caller may run here, and
+        // running one. Both are gated on the posting rule, so a command cannot
+        // be reachable where a message is not.
+        .route(
+            "/api/channels/{id}/commands",
+            get(commands::list).post(commands::run),
+        )
         .route(
             "/api/channels/{id}/messages",
             get(messages::history).post(messages::post),

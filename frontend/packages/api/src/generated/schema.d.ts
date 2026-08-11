@@ -4312,6 +4312,34 @@ export interface components {
             position: number;
         };
         /**
+         * @description One command a caller may run in a channel (MAIN-528 AC-1). The SERVER owns
+         *     this list — a client renders what it is given and never learns what a command
+         *     means.
+         */
+        ChatCommand: {
+            /**
+             * @description How the argument reads in a hint — `"<text>"` when it is required,
+             *     `"[text]"` when optional, `None` when the command takes none.
+             */
+            args_hint?: string | null;
+            description: string;
+            /** @description Without the slash: `"help"`, not `"/help"`. */
+            name: string;
+        };
+        /**
+         * @description What a command answers with — ONE shape for all of them (MAIN-528 AC-3).
+         *
+         *     `ephemeral` is for the caller's eyes only: it is this HTTP response and
+         *     nothing else — never stored, never delivered over the websocket. A command
+         *     that posted names its message in `posted_message_id`; both fields empty is a
+         *     command that did nothing.
+         */
+        ChatCommandResult: {
+            ephemeral?: string | null;
+            /** Format: uuid */
+            posted_message_id?: string | null;
+        };
+        /**
          * @description A posted message. `id` is a UUID v7, so history paginates by keyset on it
          *     (AC-2/AC-4), like the rest of NookOS.
          */
@@ -4339,6 +4367,13 @@ export interface components {
             edited_at?: string | null;
             /** Format: uuid */
             id: string;
+            /**
+             * @description What this message IS, beside what it says (MAIN-528): `None` for an
+             *     ordinary message, `"action"` for one posted by `/me`. A client that does
+             *     not know a kind renders it as ordinary — the set grows with the commands
+             *     that emit it, and only the server decides.
+             */
+            kind?: string | null;
             /**
              * Format: date-time
              * @description When the latest reply landed, for ordering/preview; `None` with no replies.
@@ -6710,6 +6745,15 @@ export interface components {
             body?: string | null;
             /** @description `approved` | `changes_requested` | `needs_human` | `skipped`. */
             verdict: string;
+        };
+        /** @description Run a command in a channel as the authenticated caller (MAIN-528 AC-2). */
+        RunChatCommand: {
+            /**
+             * @description Everything after the command word, unparsed — each command reads its own
+             *     argument.
+             */
+            args?: string | null;
+            name: string;
         };
         RuntimeAuthAccepted: {
             /**

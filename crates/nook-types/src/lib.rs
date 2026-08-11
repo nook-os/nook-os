@@ -4105,6 +4105,12 @@ pub struct ChatMessage {
     pub edited_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub deleted: bool,
+    /// What this message IS, beside what it says (MAIN-528): `None` for an
+    /// ordinary message, `"action"` for one posted by `/me`. A client that does
+    /// not know a kind renders it as ordinary — the set grows with the commands
+    /// that emit it, and only the server decides.
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 /// One emoji's reaction tally on a message (MAIN-116 AC-2): how many reacted and
@@ -4171,6 +4177,44 @@ pub struct PostChatMessage {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct UpdateChatMessage {
     pub body: String,
+}
+
+/// One command a caller may run in a channel (MAIN-528 AC-1). The SERVER owns
+/// this list — a client renders what it is given and never learns what a command
+/// means.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ChatCommand {
+    /// Without the slash: `"help"`, not `"/help"`.
+    pub name: String,
+    /// How the argument reads in a hint — `"<text>"` when it is required,
+    /// `"[text]"` when optional, `None` when the command takes none.
+    #[serde(default)]
+    pub args_hint: Option<String>,
+    pub description: String,
+}
+
+/// Run a command in a channel as the authenticated caller (MAIN-528 AC-2).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RunChatCommand {
+    pub name: String,
+    /// Everything after the command word, unparsed — each command reads its own
+    /// argument.
+    #[serde(default)]
+    pub args: Option<String>,
+}
+
+/// What a command answers with — ONE shape for all of them (MAIN-528 AC-3).
+///
+/// `ephemeral` is for the caller's eyes only: it is this HTTP response and
+/// nothing else — never stored, never delivered over the websocket. A command
+/// that posted names its message in `posted_message_id`; both fields empty is a
+/// command that did nothing.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct ChatCommandResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ephemeral: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub posted_message_id: Option<Uuid>,
 }
 
 /// A person the caller may address in a DM (MAIN-113 AC-4): the stable

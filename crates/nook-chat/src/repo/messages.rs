@@ -32,6 +32,8 @@ pub struct MessageRow {
     pub created_at: DateTime<Utc>,
     pub edited_at: Option<DateTime<Utc>>,
     pub deleted_at: Option<DateTime<Utc>>,
+    /// NULL for an ordinary message; `"action"` for a `/me` post (MAIN-528).
+    pub kind: Option<String>,
 }
 
 /// One emoji's tally on one message, with whether the viewer is among them.
@@ -67,6 +69,8 @@ pub struct NewMessage {
     pub tenant_id: Uuid,
     pub body: String,
     pub parent_message_id: Option<Uuid>,
+    /// `None` posts an ordinary message; a command sets its own kind (MAIN-528).
+    pub kind: Option<String>,
 }
 
 /// A keyset page: v7 ids are time-ordered, so `id < before` is "older" and
@@ -84,7 +88,7 @@ fn select_message(engine: nook_db::Engine) -> String {
     format!(
         "SELECT m.id, m.channel_id, m.author_id, \
          u.display_name AS author_name, m.body, m.parent_message_id, m.created_at, \
-         m.edited_at, m.deleted_at, \
+         m.edited_at, m.deleted_at, m.kind, \
          {zero} AS reply_count, {null_ts} AS last_reply_at \
          FROM chat_messages m LEFT JOIN users u ON u.id = m.author_id",
         zero = type_mapping(engine).cast("0", "bigint"),
@@ -96,7 +100,7 @@ fn select_message(engine: nook_db::Engine) -> String {
 /// `chat_messages_parent_idx`.
 const SELECT_MESSAGE_WITH_REPLIES: &str = "SELECT m.id, m.channel_id, m.author_id, \
      u.display_name AS author_name, m.body, m.parent_message_id, m.created_at, \
-     m.edited_at, m.deleted_at, \
+     m.edited_at, m.deleted_at, m.kind, \
      (SELECT count(*) FROM chat_messages r WHERE r.parent_message_id = m.id) AS reply_count, \
      (SELECT max(r.created_at) FROM chat_messages r WHERE r.parent_message_id = m.id) \
        AS last_reply_at \
@@ -219,12 +223,12 @@ impl MessageRepository for DbMessageRepository {
             .query_one::<MessageRow>(
                 &format!(
                     "INSERT INTO chat_messages
-                        (id, channel_id, author_id, tenant_id, body, parent_message_id)
-                     VALUES ($1, $2, $3, $4, $5, $6)
+                        (id, channel_id, author_id, tenant_id, body, parent_message_id, kind)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)
                      RETURNING id, channel_id, author_id,
                          (SELECT display_name FROM users WHERE id = author_id)
                            AS author_name,
-                         body, parent_message_id, created_at, edited_at, deleted_at,
+                         body, parent_message_id, created_at, edited_at, deleted_at, kind,
                          {zero} AS reply_count, {null_ts} AS last_reply_at",
                     zero = type_mapping(self.db.engine()).cast("0", "bigint"),
                     null_ts = type_mapping(self.db.engine()).cast("NULL", "timestamptz"),
@@ -235,7 +239,8 @@ impl MessageRepository for DbMessageRepository {
                     new.author_id,
                     new.tenant_id,
                     new.body,
-                    new.parent_message_id
+                    new.parent_message_id,
+                    new.kind
                 ],
             )
             .await

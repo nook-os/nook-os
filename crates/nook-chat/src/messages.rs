@@ -50,6 +50,7 @@ impl From<MessageRow> for ChatMessage {
             reactions: Vec::new(),
             edited_at: r.edited_at,
             deleted,
+            kind: r.kind,
         }
     }
 }
@@ -107,10 +108,7 @@ pub async fn post(
     Path(channel_id): Path<Uuid>,
     Json(req): Json<PostChatMessage>,
 ) -> Result<(StatusCode, Json<ChatMessage>), ApiError> {
-    let scope = crate::channels::access(&*state.channels, channel_id, &caller).await?;
-    if scope.archived {
-        return Err(ApiError::Conflict("this channel is archived".into()));
-    }
+    crate::channels::require_postable(&*state.channels, channel_id, &caller).await?;
     let body = req.body.trim();
     if body.is_empty() {
         return Err(ApiError::BadRequest("a message needs a body".into()));
@@ -139,17 +137,29 @@ pub async fn post(
         }
     }
 
-    let row = state
-        .messages
-        .post(NewMessage {
+    let msg = deliver(
+        &state,
+        NewMessage {
             channel_id,
             author_id: caller.user_id,
             tenant_id: caller.tenant_id,
             body: body.to_owned(),
             parent_message_id: req.parent_message_id,
-        })
-        .await
-        .map_err(|_| internal())?;
+            kind: None,
+        },
+    )
+    .await?;
+
+    Ok((StatusCode::CREATED, Json(msg)))
+}
+
+/// Write a message and put it on the wire — the ordinary posting path, shared
+/// so a command posts through exactly the same one (MAIN-528 AC-3/AC-8).
+///
+/// Authorization and validation stay with the caller: this is the half after
+/// the decision to post has been made.
+pub(crate) async fn deliver(state: &AppState, new: NewMessage) -> Result<ChatMessage, ApiError> {
+    let row = state.messages.post(new).await.map_err(|_| internal())?;
     let msg: ChatMessage = row.into(); // no reactions on a brand-new message
 
     // Deliver to subscribers here now, and announce it so peer instances do the
@@ -158,8 +168,7 @@ pub async fn post(
         .registry
         .publish_local(ChatServerMessage::Message(msg.clone()));
     crate::bus::publish(&state.db, msg.id, state.registry.instance(), false).await;
-
-    Ok((StatusCode::CREATED, Json(msg)))
+    Ok(msg)
 }
 
 #[derive(Deserialize)]

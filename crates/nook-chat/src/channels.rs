@@ -80,6 +80,21 @@ pub async fn access(
     })
 }
 
+/// The posting rule, in ONE place: the caller can reach the channel and the
+/// channel is not archived (MAIN-528 AC-2). Both the command routes and
+/// `messages::post` gate on this, so "who may run a command here" cannot drift
+/// from "who may post here" — that is why it is a function and not two copies.
+pub async fn require_postable(
+    repo: &dyn crate::repo::channels::ChannelRepository,
+    channel_id: Uuid,
+    caller: &Caller,
+) -> Result<(), ApiError> {
+    if access(repo, channel_id, caller).await?.archived {
+        return Err(ApiError::Conflict("this channel is archived".into()));
+    }
+    Ok(())
+}
+
 /// Does the caller's person belong to any tenant under `org`? Resolves the
 /// caller's `person_id` (from their user row) and asks whether that person has a
 /// user in any tenant whose `org_id` matches — the cross-tenant membership rule

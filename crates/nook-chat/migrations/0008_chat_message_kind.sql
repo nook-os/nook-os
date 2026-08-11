@@ -1,0 +1,11 @@
+-- MAIN-528: what a message IS, beside what it says.
+--
+-- NULL means an ordinary message, so every existing row stays valid with no
+-- backfill and no default. Today the only other value is 'action' (`/me`); the
+-- column is deliberately unconstrained text rather than an enum or a CHECK,
+-- because the next kind arrives with the command that emits it and a rendering
+-- client already has to tolerate a kind it does not know.
+--
+-- Idempotent (ADD COLUMN IF NOT EXISTS) so a database that already has the
+-- column by other means converges instead of failing.
+ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS kind text;

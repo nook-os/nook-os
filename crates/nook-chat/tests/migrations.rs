@@ -97,3 +97,75 @@ async fn chat_migrations_apply_into_an_isolated_schema() {
     db.close().await;
     bed.teardown().await;
 }
+
+/// MAIN-528 AC-7: `chat_messages.kind` arrives nullable, an existing row stays
+/// valid without a backfill, and applying the statement to a database that
+/// already has the column converges instead of failing.
+///
+/// The second apply is the DDL itself rather than `MIGRATOR.run` — the ledger
+/// makes a re-run a no-op, so running the migrator again would prove sqlx skips
+/// applied versions, not that this migration is idempotent.
+#[tokio::test]
+async fn message_kind_is_nullable_and_its_migration_is_idempotent() {
+    let Some(mut bed) = nook_testkit::TestBed::new().await else {
+        return;
+    };
+    if !bed.is_postgres() {
+        eprintln!(
+            "skipping message_kind_is_nullable_and_its_migration_is_idempotent — \
+             chat has no SQLite migration track (MAIN-528 NG-5)"
+        );
+        bed.teardown().await;
+        return;
+    }
+    let url = bed.database_url().expect("a Postgres bed exposes its URL");
+    let opts = PgConnectOptions::from_str(&url)
+        .unwrap()
+        .options([("search_path", "chat")]);
+    let db = PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(opts)
+        .await
+        .unwrap();
+
+    ensure_chat_schema(&db).await;
+    MIGRATOR.run(&db).await.unwrap();
+
+    // A message written with no kind at all — what every row in a database that
+    // predates this migration looks like.
+    let channel: uuid::Uuid = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO chat_channels (id, owner_type, owner_id, name, slug)
+         VALUES ($1, 'tenant', gen_random_uuid(), 'general', 'general')",
+    )
+    .bind(channel)
+    .execute(&db)
+    .await
+    .unwrap();
+    let message: uuid::Uuid = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO chat_messages (id, channel_id, author_id, tenant_id, body)
+         VALUES ($1, $2, gen_random_uuid(), gen_random_uuid(), 'before the column')",
+    )
+    .bind(message)
+    .bind(channel)
+    .execute(&db)
+    .await
+    .unwrap();
+
+    // Applying it again over a database that already has the column and the row.
+    sqlx::query("ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS kind text")
+        .execute(&db)
+        .await
+        .expect("the migration is idempotent");
+
+    let (kind,): (Option<String>,) = sqlx::query_as("SELECT kind FROM chat_messages WHERE id = $1")
+        .bind(message)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert!(kind.is_none(), "an ordinary message carries no kind");
+
+    db.close().await;
+    bed.teardown().await;
+}
