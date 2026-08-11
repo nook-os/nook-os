@@ -1,9 +1,48 @@
 name: CI
 
+# A merge queue builds the PROSPECTIVE merge commit and reports on
+# `merge_group` — a distinct event, not a push and not a pull_request. Without
+# it here, an enqueued PR waits on three required contexts that never start and
+# the queue ejects it on timeout. So this trigger lands BEFORE the queue is
+# switched on (MAIN-540); enabling it is a separate card.
+#
+# WHICH JOBS ANSWER WHICH EVENT, and why:
+#
+#   job              push  pull_request  merge_group   why
+#   rust (postgres)   y         y             y        required context
+#   rust (sqlite)     y         y             y        required context
+#   chart-e2e         y         y             y        required context (see
+#                                                      its own note: the queue
+#                                                      build takes the fast
+#                                                      path)
+#   workflows         y         y             .        not required, so its
+#   frontend          y         y             .        verdict cannot gate the
+#   desktop           y         y             .        queue — running it on a
+#   type-gen-drift    y         y             .        queue build burns a
+#   helm              y         y             .        runner to produce a
+#                                                      result nothing reads.
+#                                                      The PR run already gave
+#                                                      it, and the `push` run
+#                                                      on main gives it again
+#                                                      after the merge.
+#   operator-node-e2e .         .             .        workflow_dispatch only
+#
+# MAKING ONE OF THE SKIPPED JOBS REQUIRED MEANS DELETING ITS `if` HERE FIRST. A
+# required context that skips on `merge_group` never reports, and a queue waits
+# on it forever — the exact failure this card exists to prevent.
+#
+# There is deliberately NO `concurrency:` block in this workflow, and adding one
+# is the other way to break a queue: the obvious group key
+# (`${{ github.workflow }}-${{ github.ref }}` with `cancel-in-progress`) lets a
+# PR push cancel the queue build for the same branch, which leaves the required
+# contexts reporting `cancelled` forever. If a group is ever added it must key
+# on `github.event_name` too, so a `merge_group` run and a `pull_request` run
+# can never share one.
 on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
   workflow_dispatch:
 
 env:
@@ -164,6 +203,7 @@ jobs:
   # `if`, which is not a context that exists there. actionlint catches it in
   # seconds.
   workflows:
+    if: github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -174,6 +214,7 @@ jobs:
           args: -color
 
   frontend:
+    if: github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -202,6 +243,7 @@ jobs:
   # never complete, and CI was green throughout. This is the job that would
   # have caught it.
   desktop:
+    if: github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     defaults:
@@ -253,6 +295,7 @@ jobs:
         run: cargo test
 
   type-gen-drift:
+    if: github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -278,6 +321,7 @@ jobs:
   # The Helm chart must lint and render valid, secret-free manifests. Cheap and
   # fast, so it runs on every PR rather than only when charts/ changes.
   helm:
+    if: github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -301,7 +345,9 @@ jobs:
   # UNCONDITIONALLY (no job-level `if`) and gates only its heavy steps: on a PR
   # that touches no chart files every heavy step skips and the job is a fast
   # success (the explicit skip note below), so `chart-e2e` reports green on
-  # EVERY PR — chart PRs run the deploy, non-chart PRs are not blocked.
+  # EVERY PR — chart PRs run the deploy, non-chart PRs are not blocked. The same
+  # reasoning is why it has no `merge_group` `if` either (MAIN-540): a queue
+  # waits on this context by name.
   chart-e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -313,8 +359,16 @@ jobs:
       packages: read
     steps:
       - uses: actions/checkout@v4
+      # Skipped on a queue build, which leaves `charts` unset so every heavy
+      # step below skips too. Two reasons, either sufficient: a `merge_group`
+      # event carries no before/base the filter can diff against, so asking it
+      # would redden a REQUIRED context on the event this job most has to
+      # answer; and a chart PR already ran the full kind deploy on its head, so
+      # repeating it would put 30 minutes into every merge for a signal already
+      # in hand and repeated by the `push` run on main straight after.
       - uses: dorny/paths-filter@v3
         id: changes
+        if: github.event_name != 'merge_group'
         with:
           filters: |
             charts:
@@ -322,10 +376,15 @@ jobs:
               - 'deploy/docker/**'
               - 'scripts/k8s-e2e.sh'
               - '.github/workflows/ci.yml'
+      - name: Queue build — skip the deploy test
+        if: github.event_name == 'merge_group'
+        run: |
+          echo "merge_group build: the kind deploy test ran on the PR head already."
+          echo "Skipping it here; this required check reports success."
       # The fast-success path: no chart-affecting files changed, so the deploy
       # test is intentionally skipped and this required check reports green.
       - name: No chart changes — skip the deploy test
-        if: steps.changes.outputs.charts != 'true' && github.event_name != 'workflow_dispatch'
+        if: github.event_name != 'merge_group' && steps.changes.outputs.charts != 'true' && github.event_name != 'workflow_dispatch'
         run: |
           echo "No changes under charts/, deploy/docker/, scripts/k8s-e2e.sh or the CI workflow."
           echo "Skipping the kind deploy test; this required check reports success."
