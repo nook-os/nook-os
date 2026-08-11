@@ -1,0 +1,2 @@
+Throwaway file. Exercises a merge queue on a throwaway branch to verify
+that ci.yml answers on merge_group (MAIN-540). Deleted with the branch.
