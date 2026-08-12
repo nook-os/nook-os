@@ -1898,6 +1898,187 @@ fn placement_selector(kind: &str) -> Option<std::collections::BTreeMap<String, S
     }
 }
 
+/// What a viewer's own fleet can deliver for BUILD work, and why each machine
+/// that delivers nothing does not (MAIN-495).
+#[derive(Debug, Clone, Default)]
+pub struct BuildCapacity {
+    /// Loop-job slots summed over the eligible nodes.
+    pub capacity: u32,
+    /// How many nodes that sum came from — `0` is an absence, not a limit.
+    pub eligible: u32,
+    pub blocked: Vec<BuildCapacityBlockedNode>,
+}
+
+/// Resolve it.
+///
+/// The eligible SET is `eligible_loop_executors` plus the same label filter
+/// [`select_executor`] applies, never a second reading of the rule: a capacity
+/// that disagreed with placement would answer the operator's question with a
+/// number nothing acts on. Only the per-node REASONS are derived here, and they
+/// EXPLAIN that set rather than deciding it.
+///
+/// Capacity is what is in force per node (MAIN-508's precedence), so a central
+/// retune shows up here at once — and `0`, a cordon, contributes nothing while
+/// still counting as an eligible node, which is the honest reading of a machine
+/// that has been told to stop claiming. A node ASSERTING a cordon (MAIN-505)
+/// reads identically, for the identical reason: the two are one intent spelled
+/// two ways, and a fleet where only the central spelling counted would report
+/// different capacity for the same instruction.
+///
+/// `node_scope` is [`crate::routes::nodes::visibility_scope`]'s answer for the
+/// caller, and it is an ACCESS decision that belongs to the caller's route:
+/// `None` is the whole tenant and is the admin's answer alone. Passing `None`
+/// for a member would name every machine in the tenant to somebody the nodes
+/// routes deliberately show only their own.
+pub async fn build_capacity(
+    state: &AppState,
+    tenant: TenantId,
+    viewer: UserId,
+    node_scope: Option<Uuid>,
+) -> ApiResult<BuildCapacity> {
+    // Ownership keys on the person, not the per-tenant user (MAIN-130). Without
+    // one, nothing is the viewer's and nothing is eligible — the same
+    // conclusion `select_executor` reaches, for the same reason.
+    let person = state.identity.person_id_of(viewer).await?;
+
+    // Every node that could possibly qualify, as far as this caller may SEE
+    // it: `node_scope`'s slice of the tenant, plus the viewer's own machines
+    // wherever else they are homed — placement crosses to those (MAIN-515), so
+    // a report that stopped at this tenant would undercount the very slots a
+    // job lands in.
+    //
+    // The scope does not move `capacity` by a single slot, and cannot: every
+    // build candidate is owned by the viewer (the build leg excludes the shared
+    // operator, leaving `owner_person_id = person`), and a member's own leg
+    // returns all of those. It bounds the `blocked` NAMES only.
+    let fleet = state.nodes.list(tenant, node_scope, person).await?;
+
+    let eligible = match person {
+        Some(p) => {
+            state
+                .nodes
+                .eligible_loop_executors(tenant, p, LOOP_RUNTIME, BUILD_KIND)
+                .await?
+        }
+        None => Vec::new(),
+    };
+
+    let by_id: std::collections::HashMap<NodeId, &Node> = fleet.iter().map(|n| (n.id, n)).collect();
+    let mut capacity: u32 = 0;
+    let mut counted: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+    for id in eligible {
+        // Always present: a build candidate is a node the viewer owns, and the
+        // list's second leg returns those from every tenant.
+        let Some(node) = by_id.get(&id) else { continue };
+        if !carries_build_label(node) {
+            continue;
+        }
+        // A draining node still ACCEPTS build work — it is not blocked, and
+        // reporting it as such would make one cordoned machine read as "no node
+        // of yours accepts build work". It delivers nothing while it drains,
+        // which is exactly how the central `0` already reads.
+        let slots = match node_cordon(node) {
+            Some(_) => 0,
+            None => crate::services::loop_capacity::of(node).effective,
+        };
+        capacity = capacity.saturating_add(slots);
+        counted.insert(id);
+    }
+
+    let blocked = fleet
+        .iter()
+        .filter(|n| !counted.contains(&n.id))
+        .filter_map(|n| {
+            build_capacity_blocker(n, person).map(|reason| BuildCapacityBlockedNode {
+                node_id: n.id,
+                node_name: n.name.clone(),
+                reason,
+            })
+        })
+        .collect();
+
+    Ok(BuildCapacity {
+        capacity,
+        eligible: counted.len() as u32,
+        blocked,
+    })
+}
+
+/// Does this node carry the label builds are confined to? Read through
+/// [`placement_of`], so an old-style `role=build` widens exactly as it does for
+/// placement (MAIN-463) rather than by a second rule written here.
+fn carries_build_label(node: &Node) -> bool {
+    let labels = crate::routes::nodes::placement_of(node).labels;
+    build_selector()
+        .iter()
+        .all(|(k, v)| labels.get(k).is_some_and(|got| got == v))
+}
+
+/// Why one node delivers no build capacity to `person`: the legs of
+/// `eligible_loop_executors`' own WHERE clause read back, in a fixed order so a
+/// node carries ONE reason rather than whichever gate happened to be checked
+/// first. Permanent grounds come before transient ones — telling somebody a
+/// teammate's laptop is offline invites them to wait for a machine that would
+/// never have counted.
+///
+/// `None` means it qualifies, and the query is what decides that; this only
+/// explains. A node it cannot account for is therefore left unlisted rather
+/// than handed a guessed ground.
+fn build_capacity_blocker(node: &Node, person: Option<Uuid>) -> Option<BuildCapacityBlocker> {
+    if node
+        .capabilities
+        .get("shared_operator")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return Some(BuildCapacityBlocker::SharedOperator);
+    }
+    if person.is_none() || node.owner_person_id != person {
+        return Some(BuildCapacityBlocker::NotYours);
+    }
+    if node.status != "online" {
+        return Some(BuildCapacityBlocker::Offline);
+    }
+    if !runtime_authorized(node, LOOP_RUNTIME) {
+        return Some(BuildCapacityBlocker::RuntimeNotAuthorized {
+            runtime: LOOP_RUNTIME.to_string(),
+        });
+    }
+    if !declares_kind(node, BUILD_KIND) {
+        return Some(BuildCapacityBlocker::KindNotAccepted {
+            kind: BUILD_KIND.to_string(),
+        });
+    }
+    if !carries_build_label(node) {
+        return Some(BuildCapacityBlocker::NoRoleLabel {
+            label: build_label(),
+        });
+    }
+    None
+}
+
+/// The `EXISTS` over `runtime_auth`, in Rust. Nothing reported is a refusal,
+/// not an unknown: placement requires a positive `authorized` entry.
+fn runtime_authorized(node: &Node, runtime: &str) -> bool {
+    node.capabilities
+        .get("runtime_auth")
+        .and_then(|v| v.as_array())
+        .is_some_and(|entries| {
+            entries.iter().any(|e| {
+                e.get("runtime").and_then(|v| v.as_str()) == Some(runtime)
+                    && e.get("state").and_then(|v| v.as_str()) == Some("authorized")
+            })
+        })
+}
+
+/// The `loop_kinds` containment test, in Rust.
+fn declares_kind(node: &Node, kind: &str) -> bool {
+    node.capabilities
+        .get("loop_kinds")
+        .and_then(|v| v.as_array())
+        .is_some_and(|kinds| kinds.iter().any(|k| k.as_str() == Some(kind)))
+}
+
 /// The wall, asked of the STORED node row and answered as the refusal message
 /// (MAIN-142 AC-2/AC-3), or `None` when this node may run this kind.
 ///

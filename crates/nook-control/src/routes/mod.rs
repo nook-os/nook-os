@@ -187,6 +187,10 @@ pub fn build_router(state: AppState) -> Router {
             get(workspaces::get_build_loop).put(workspaces::set_build_loop),
         )
         .route(
+            "/workspaces/{id}/build-loop-status",
+            get(workspaces::build_loop_status),
+        )
+        .route(
             "/workspaces/{id}/ports",
             get(workspaces::get_port_requirements).put(workspaces::set_port_requirements),
         )
