@@ -4,7 +4,7 @@
 // create. This pins that handoff. jsdom only, heavy deps mocked.
 import React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
@@ -41,12 +41,19 @@ const DETAIL = {
   children: [],
 };
 
+// The upload half is stubbed alongside the API client, because TaskDetail
+// reaches both through this one module (MAIN-533).
+const uploads = vi.hoisted(() => ({
+  reject: undefined as ((e: Error) => void) | undefined,
+}));
+
 vi.mock("@nookos/api", () => ({
   api: {
     GET: vi.fn(async (path: string) => {
       if (path === "/api/v1/tasks/{id}") return { data: DETAIL };
       if (path === "/api/v1/labels") return { data: [] };
       if (path === "/api/v1/workspaces") return { data: [] };
+      if (path === "/api/v1/tasks/{id}/attachments") return { data: [] };
       return { data: null };
     }),
     PATCH: vi.fn(async () => ({ data: DETAIL.task })),
@@ -54,12 +61,36 @@ vi.mock("@nookos/api", () => ({
     DELETE: vi.fn(async () => ({ data: {} })),
     PUT: vi.fn(async () => ({ data: {} })),
   },
+  contentNeedsFetch: () => false,
+  userContentUrl: (id: string) => `/api/v1/user-content/${id}`,
+  userContentObjectUrl: async (id: string) => `blob:${id}`,
+  messageFrom: () => "the upload failed",
+  uploadUserContent: () => ({
+    done: new Promise((_res, rej) => {
+      uploads.reject = rej as (e: Error) => void;
+    }),
+    abort: () => {},
+  }),
 }));
 
 vi.mock("@nookos/ui", () => ({
   Pill: ({ children }: { children: React.ReactNode }) => <span>{children}</span>,
   Markdown: ({ src }: { src: string }) => <div>{src}</div>,
-  MarkdownEditor: () => null,
+  MarkdownEditor: ({
+    value,
+    onChange,
+    placeholder,
+  }: {
+    value: string;
+    onChange: (v: string) => void;
+    placeholder?: string;
+  }) => (
+    <textarea
+      aria-label={placeholder ?? "editor"}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+    />
+  ),
   EditableMarkdown: ({ src }: { src: string }) => <div>{src}</div>,
   Select: () => null,
   // The type control moved to @nookos/ui (MAIN-174); this file stubs the whole
@@ -109,5 +140,38 @@ describe("TaskDetail → LoopPanel (MAIN-209)", () => {
     // Opened by key, but LoopPanel receives the resolved UUID.
     await waitFor(() => expect(captured.loopTaskId).toBe("uuid-real-1"));
     expect(captured.loopTaskId).not.toBe("MAIN-42");
+  });
+});
+
+describe("TaskDetail → attachments (MAIN-533)", () => {
+  it("a failed paste-upload leaves the comment being written intact (AC-5)", async () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <MemoryRouter>
+        <QueryClientProvider client={qc}>
+          <TaskDetail
+            taskId="MAIN-42"
+            columns={[{ id: "col1", name: "Todo" }]}
+            onClose={() => {}}
+          />
+        </QueryClientProvider>
+      </MemoryRouter>,
+    );
+
+    const composer = (await screen.findByLabelText("Add a comment…")) as HTMLTextAreaElement;
+    fireEvent.change(composer, { target: { value: "half a thought" } });
+
+    const png = new File(["bytes"], "shot.png", { type: "image/png" });
+    fireEvent.paste(composer, {
+      clipboardData: { items: [{ kind: "file", getAsFile: () => png }] },
+    });
+
+    await waitFor(() => expect(uploads.reject).toBeTruthy());
+    uploads.reject!(new Error("the file store is unavailable"));
+
+    await screen.findByText("the file store is unavailable");
+    expect((screen.getByLabelText("Add a comment…") as HTMLTextAreaElement).value).toBe(
+      "half a thought",
+    );
   });
 });

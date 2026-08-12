@@ -193,6 +193,10 @@ pub async fn delete_comment(
 ) -> ApiResult<axum::http::StatusCode> {
     let task = owned_comment(&state, &auth, id).await?;
     state.tasks.delete_comment(id, auth.tenant_id).await?;
+    // The comment's files go with it, bytes included (MAIN-533 AC-7). No
+    // foreign key could do this: `task_attachments.parent_id` is polymorphic,
+    // and the objects live outside the database entirely.
+    crate::services::attachments::purge_comment(&state, auth.tenant_id, id).await?;
     state.registry.publish(
         auth.tenant_id,
         nook_proto::UiEvent::TaskChanged { task_id: task },

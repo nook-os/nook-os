@@ -27,6 +27,7 @@ pub mod schedule;
 pub mod sessions;
 pub mod settings;
 pub mod skills;
+pub mod task_attachments;
 pub mod task_detail;
 pub mod task_query;
 pub mod taskwork;
@@ -317,6 +318,15 @@ pub fn build_router(state: AppState) -> Router {
             get(task_detail::list_comments).post(task_detail::create_comment),
         )
         .route("/tasks/{id}/revisions", get(task_detail::list_revisions))
+        .route(
+            "/tasks/{id}/attachments",
+            get(task_attachments::list_for_task).post(task_attachments::attach_to_task),
+        )
+        .route(
+            "/comments/{id}/attachments",
+            get(task_attachments::list_for_comment).post(task_attachments::attach_to_comment),
+        )
+        .route("/attachments/{id}", delete_route(task_attachments::detach))
         .route(
             "/comments/{id}",
             patch(task_detail::update_comment).delete(task_detail::delete_comment),

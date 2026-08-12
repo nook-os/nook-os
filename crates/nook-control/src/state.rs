@@ -64,6 +64,9 @@ pub struct AppState {
     /// What people have uploaded (MAIN-532). Rows only — the bytes live in
     /// `artifacts`, under a prefix of their own.
     pub user_content: Arc<dyn crate::repo::user_content::UserContentRepository>,
+    /// Which uploads hang off which ticket or comment (MAIN-533). The join
+    /// MAIN-532's store deliberately knows nothing about.
+    pub attachments: Arc<dyn crate::repo::attachments::TaskAttachmentRepository>,
     /// Tenant- and user-scoped settings rows (MAIN-258).
     pub settings: Arc<dyn crate::repo::admin::SettingRepository>,
     /// Org-visibility policy rows (MAIN-305).
@@ -171,6 +174,9 @@ impl AppState {
             tenant_cas: Arc::new(crate::repo::nodes::DbTenantCaRepository::new(db.clone())),
             notebook: Arc::new(crate::repo::notebook::DbNotebookRepository::new(db.clone())),
             user_content: Arc::new(crate::repo::user_content::DbUserContentRepository::new(
+                db.clone(),
+            )),
+            attachments: Arc::new(crate::repo::attachments::DbTaskAttachmentRepository::new(
                 db.clone(),
             )),
             notifications: Arc::new(crate::repo::notifications::DbNotificationRepository::new(

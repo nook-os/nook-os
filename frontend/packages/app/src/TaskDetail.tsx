@@ -17,7 +17,7 @@ import {
   ChevronDown,
   Plus,
 } from "lucide-react";
-import { api, type TaskLabel, type RelatedTask } from "@nookos/api";
+import { api, type TaskAttachment, type TaskLabel, type RelatedTask } from "@nookos/api";
 import {
   Pill,
   Markdown,
@@ -29,6 +29,14 @@ import {
   useAnchoredMenu,
 } from "@nookos/ui";
 import { PRIORITIES } from "./taskmeta";
+import {
+  AttachButton,
+  AttachmentList,
+  DropZone,
+  UploadTray,
+  pastedFiles,
+  useUploads,
+} from "./TaskAttachments";
 import { TaskPicker, isDone, type PickerTask } from "./TaskPicker";
 import { toggleTaskCheckbox } from "./taskCheckbox";
 import { TaskInteractions } from "./Interactions";
@@ -66,6 +74,7 @@ export function TaskDetail({
   useEffect(() => {
     setEditing(false);
     setBody("");
+    setPending([]);
   }, [taskId]);
 
   const { data, isLoading } = useQuery({
@@ -88,15 +97,86 @@ export function TaskDetail({
     qc.invalidateQueries({ queryKey: ["boards"] });
   };
 
+  // ── Attachments (MAIN-533) ──────────────────────────────────────────────
+  //
+  // ONE request for the whole thread — the ticket's files and every comment's —
+  // because a page with N comments would otherwise make N+1 of them. Grouped
+  // below by the `parent_kind`/`parent_id` each record already carries.
+  const { data: attachments } = useQuery({
+    queryKey: ["task-attachments", taskId],
+    queryFn: async () =>
+      (
+        await api.GET("/api/v1/tasks/{id}/attachments", {
+          params: { path: { id: taskId }, query: { include: "comments" } },
+        })
+      ).data ?? [],
+  });
+  const { data: me } = useQuery({
+    queryKey: ["me"],
+    queryFn: async () => (await api.GET("/api/v1/auth/me")).data ?? null,
+  });
+  const bustAttachments = () =>
+    qc.invalidateQueries({ queryKey: ["task-attachments", taskId] });
+
+  const attachToTask = async (contentId: string) => {
+    await api.POST("/api/v1/tasks/{id}/attachments", {
+      params: { path: { id: taskId } },
+      body: { user_content_id: contentId },
+    });
+    await bustAttachments();
+    // The board card's count comes off the board read, not this one.
+    qc.invalidateQueries({ queryKey: ["boards"] });
+  };
+  const ticketUploads = useUploads(attachToTask);
+
+  // A file pasted or dropped into the composer belongs to the comment being
+  // written — which has no id yet. So the bytes go up now and the join waits
+  // here until the comment exists.
+  const [pending, setPending] = useState<{ contentId: string; name: string }[]>([]);
+  const commentUploads = useUploads((contentId, file) =>
+    setPending((prev) => [...prev, { contentId, name: file.name }]),
+  );
+
+  const removeAttachment = async (id: string) => {
+    await api.DELETE("/api/v1/attachments/{id}", { params: { path: { id } } });
+    await bustAttachments();
+    qc.invalidateQueries({ queryKey: ["boards"] });
+  };
+
+  /// Offered to the person who attached it and to a tenant owner/admin — the
+  /// same rule the server enforces (AC-6).
+  const canRemove = (a: TaskAttachment) =>
+    a.attached_by === me?.user.id ||
+    me?.user.role === "owner" ||
+    me?.user.role === "admin";
+
+  const forParent = (kind: string, id: string) =>
+    (attachments ?? []).filter((a) => a.parent_kind === kind && a.parent_id === id);
+
   const comment = useMutation({
     mutationFn: async (body_md: string) => {
-      await api.POST("/api/v1/tasks/{id}/comments", {
-        params: { path: { id: taskId } },
-        body: { body_md },
-      });
+      const created = (
+        await api.POST("/api/v1/tasks/{id}/comments", {
+          params: { path: { id: taskId } },
+          body: { body_md },
+        })
+      ).data;
+      // The comment exists now, so its waiting files can be hung on it. A
+      // failure here is reported by the shared write-failure path and leaves
+      // the comment posted rather than the text lost.
+      if (created) {
+        for (const p of pending) {
+          await api.POST("/api/v1/comments/{id}/attachments", {
+            params: { path: { id: created.id } },
+            body: { user_content_id: p.contentId },
+          });
+        }
+      }
     },
     onSuccess: () => {
       setBody("");
+      setPending([]);
+      void bustAttachments();
       bust();
     },
   });
@@ -308,6 +388,7 @@ export function TaskDetail({
   }
 
   const { task, comments, blocked_by, blocking, related, is_blocked, children } = data;
+  const taskAttachments = forParent("task", task.id);
   const linked = [...blocked_by, ...blocking, ...related];
   const isEpic = task.type === "epic";
 
@@ -338,7 +419,7 @@ export function TaskDetail({
           The split is what makes a long spec readable — prose gets the width,
           and the fields that are read at a glance stop interrupting it. */}
       <div className="task-panes">
-        <div className="task-main">
+        <DropZone className="task-main" onFiles={ticketUploads.add}>
           {/* Upper-left, by the title: the type is what a ticket IS, so it
               classifies the spec before you read it (AC-1). */}
           <TypeSelect value={task.type} onChange={setType} />
@@ -405,6 +486,34 @@ export function TaskDetail({
               onSave={saveDescription}
               onToggle={toggleCheckbox}
               placeholder="No description yet — double-click to write the acceptance criteria."
+            />
+          </div>
+
+          {/* The ticket's own files (MAIN-533). Dropping anywhere on the left
+              pane attaches here — a spec or a screenshot is context for the
+              whole issue, and making people find a small target for that is
+              how attachments end up pasted into comments instead. */}
+          <div className="task-section">
+            <div className="task-section-h">
+              attachments · {taskAttachments.length}
+              <span style={{ marginLeft: "auto" }}>
+                <AttachButton onFiles={ticketUploads.add} />
+              </span>
+            </div>
+            {taskAttachments.length === 0 && ticketUploads.uploads.length === 0 && (
+              <div className="faint small">
+                Drop a file here, paste one into a comment, or use Attach.
+              </div>
+            )}
+            <AttachmentList
+              attachments={taskAttachments}
+              canRemove={canRemove}
+              onRemove={(id) => void removeAttachment(id)}
+            />
+            <UploadTray
+              uploads={ticketUploads.uploads}
+              onRetry={ticketUploads.retry}
+              onDismiss={ticketUploads.dismiss}
             />
           </div>
 
@@ -536,18 +645,48 @@ export function TaskDetail({
                   </span>
                 </div>
                 <Markdown src={c.body_md} />
+                <AttachmentList
+                  attachments={forParent("task_comment", c.id)}
+                  canRemove={canRemove}
+                  onRemove={(id) => void removeAttachment(id)}
+                />
               </div>
             ))}
 
-            <MarkdownEditor
-              value={body}
-              onChange={setBody}
-              onSave={() => body.trim() && comment.mutate(body.trim())}
-              placeholder="Add a comment…"
-              minHeight={70}
-              autoFocus={false}
+            {/* Paste is caught on the WRAPPER, not on the editor: CodeMirror
+                owns its own paste handling, and an image paste has no text for
+                it to insert anyway — so the file is taken here and the event
+                falls through untouched for everything else (NG-6). */}
+            <div
+              onPaste={(e) => {
+                const files = pastedFiles(e.clipboardData);
+                if (files.length === 0) return;
+                e.preventDefault();
+                commentUploads.add(files);
+              }}
+            >
+              <MarkdownEditor
+                value={body}
+                onChange={setBody}
+                onSave={() => body.trim() && comment.mutate(body.trim())}
+                placeholder="Add a comment…"
+                minHeight={70}
+                autoFocus={false}
+              />
+            </div>
+            <UploadTray
+              uploads={commentUploads.uploads}
+              onRetry={commentUploads.retry}
+              onDismiss={commentUploads.dismiss}
             />
-            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 5 }}>
+            {pending.length > 0 && (
+              <div className="attach-pending faint small">
+                {pending.length} file(s) will be attached to this comment:{" "}
+                {pending.map((p) => p.name).join(", ")}
+              </div>
+            )}
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 5, marginTop: 5 }}>
+              <AttachButton onFiles={commentUploads.add} />
               <button
                 className="btn small primary"
                 disabled={!body.trim() || comment.isPending}
@@ -557,7 +696,7 @@ export function TaskDetail({
               </button>
             </div>
           </div>
-        </div>
+        </DropZone>
 
         {/* ── the sidebar ── */}
         <aside className="task-side">

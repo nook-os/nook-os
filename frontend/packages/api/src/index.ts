@@ -5,6 +5,8 @@ import type { paths, components } from "./generated/schema";
 import { apiUrl, authHeaders, isRemote, openSocket } from "./endpoint";
 import { reportWriteFailure } from "./write-failure";
 
+export * from "./uploads";
+
 export type Schemas = components["schemas"];
 export type Tenant = Schemas["Tenant"];
 export type User = Schemas["User"];
@@ -49,6 +51,9 @@ export type SessionMessage = Schemas["SessionMessage"];
 export type TaskDetail = Schemas["TaskDetail"];
 export type TaskLabel = Schemas["Label"];
 export type TaskComment = Schemas["TaskComment"];
+// Files on a ticket or one of its comments (MAIN-533). The bytes live in the
+// user-content store; this is the join, plus the metadata a list renders.
+export type TaskAttachment = Schemas["TaskAttachment"];
 export type RelatedTask = Schemas["RelatedTask"];
 export type EventItem = Schemas["Event"];
 export type Note = Schemas["Note"];

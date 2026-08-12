@@ -1240,6 +1240,13 @@ table.nook-table tr.clickable { cursor: pointer; }
   white-space: nowrap;
 }
 
+.card-attach {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 10px;
+  color: var(--nook-fg-faint);
+}
 .card-assignee { color: var(--nook-accent); font-size: 9px; margin-left: auto; }
 .col-type { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.04em; }
 
@@ -1651,6 +1658,81 @@ table.nook-table tr.clickable { cursor: pointer; }
   margin-bottom: 7px;
 }
 .task-comment-head { margin-bottom: 2px; }
+
+/* ── Attachments on a ticket and its comments (MAIN-533) ─────────────────── */
+
+.attach-list { display: flex; flex-wrap: wrap; gap: 6px; align-items: flex-start; margin-top: 4px; }
+
+.attach-item { position: relative; display: inline-flex; align-items: center; }
+
+.attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 240px;
+  padding: 2px 6px;
+  border: 1px solid var(--nook-border-bright);
+  border-radius: 2px;
+  font-size: 11px;
+  color: var(--nook-fg);
+  text-decoration: none;
+}
+.attach-chip:hover { border-color: var(--nook-accent); color: var(--nook-fg-bright); }
+
+.attach-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* The browser scaling the original — there is no thumbnail (NG-5). */
+.attach-thumb {
+  display: block;
+  max-width: 190px;
+  max-height: 130px;
+  border: 1px solid var(--nook-border-bright);
+  border-radius: 2px;
+  background: var(--nook-bg-raised);
+}
+
+.attach-remove {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  border: 1px solid var(--nook-border-bright);
+  border-radius: 50%;
+  background: var(--nook-bg);
+  color: var(--nook-fg-faint);
+  cursor: pointer;
+}
+.attach-remove:hover { color: var(--nook-err); border-color: var(--nook-err); }
+
+.attach-tray { display: flex; flex-direction: column; gap: 3px; margin-top: 5px; }
+
+.attach-upload {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  padding: 2px 4px;
+  border: 1px solid var(--nook-border);
+  border-radius: 2px;
+}
+.attach-upload.failed { border-color: var(--nook-err); }
+.attach-upload .attach-name { flex: 1; min-width: 0; }
+.attach-error { color: var(--nook-err); }
+.attach-progress { width: 90px; height: 4px; }
+
+.attach-pending { margin-top: 4px; }
+
+/* Dropping a file anywhere on the ticket's left pane attaches it (AC-3). */
+.task-main.drop-over {
+  outline: 1px dashed var(--nook-accent);
+  outline-offset: -3px;
+  background: var(--nook-bg-raised);
+}
 
 
 

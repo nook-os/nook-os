@@ -192,7 +192,12 @@ pub async fn query(
     RawQuery(raw): RawQuery,
 ) -> ApiResult<Json<Vec<TaskItem>>> {
     let f = TaskFilter::parse(raw.as_deref())?;
-    Ok(Json(pick(&state, auth.tenant_id, auth.user_id, f).await?))
+    let mut rows = pick(&state, auth.tenant_id, auth.user_id, f).await?;
+    // Here rather than in `pick`, which MCP also calls: an attachment count on
+    // a card is for the person scanning the board (AC-8), and the agent surface
+    // is what NG-1 leaves for the next ticket.
+    crate::services::attachments::fill_counts(&state, auth.tenant_id, &mut rows).await?;
+    Ok(Json(rows))
 }
 
 /// The pick query itself, callable from MCP as well as HTTP.

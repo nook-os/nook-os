@@ -103,16 +103,17 @@ pub async fn get_one(
     // rather than in the provider because only this layer knows the public URL
     // — a provider that had to be told its own deployment's hostname would be
     // the wrong shape for the external ones this trait exists to allow.
-    let detail = BoardDetail {
-        tasks: crate::services::tasks::enrich(
-            state.tasks.as_ref(),
-            &state.cfg.public_base_url,
-            auth.user_id,
-            visible,
-        )
-        .await?,
-        ..detail
-    };
+    let mut tasks = crate::services::tasks::enrich(
+        state.tasks.as_ref(),
+        &state.cfg.public_base_url,
+        auth.user_id,
+        visible,
+    )
+    .await?;
+    // What a card shows about its attachments, without listing them (MAIN-533
+    // AC-8): one query for the whole board.
+    crate::services::attachments::fill_counts(&state, auth.tenant_id, &mut tasks).await?;
+    let detail = BoardDetail { tasks, ..detail };
     Ok(Json(detail))
 }
 
@@ -432,10 +433,16 @@ pub async fn delete_task(
 ) -> ApiResult<axum::http::StatusCode> {
     let id =
         crate::services::tasks::resolve_id(state.tasks.as_ref(), auth.tenant_id, &ident).await?;
+    // Gathered BEFORE the delete: the comment rows this reads through are about
+    // to be cascaded away, and `task_attachments.parent_id` has no foreign key
+    // to follow them (MAIN-533 AC-7).
+    let attached = state.attachments.of_task(auth.tenant_id, id).await?;
     let res = state.tasks.delete_task(id, auth.tenant_id).await?;
     if res == 0 {
         return Err(ApiError::NotFound);
     }
+    let content: Vec<uuid::Uuid> = attached.into_iter().map(|a| a.user_content_id).collect();
+    crate::services::attachments::purge_content(&state, auth.tenant_id, &content).await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
