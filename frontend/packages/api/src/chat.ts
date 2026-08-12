@@ -288,11 +288,15 @@ export function messageThread(
  *
  * Pass `parentMessageId` to post a threaded reply (MAIN-114) — the server
  * requires the parent to be in this same channel and to be top-level itself.
+ *
+ * `attachmentIds` are user-content ids already uploaded by this caller
+ * (MAIN-535). With at least one, `body` may be empty.
  */
 export async function postMessage(
   channelId: string,
   body: string,
   parentMessageId?: string,
+  attachmentIds: string[] = [],
 ): Promise<ChatMessage> {
   const path = `${CHAT_PREFIX}/channels/${channelId}/messages`;
   let res: Response;
@@ -301,9 +305,11 @@ export async function postMessage(
       method: "POST",
       headers: { ...authHeaders(), "Content-Type": "application/json" },
       credentials: "same-origin",
-      body: JSON.stringify(
-        parentMessageId ? { body, parent_message_id: parentMessageId } : { body },
-      ),
+      body: JSON.stringify({
+        body,
+        ...(parentMessageId ? { parent_message_id: parentMessageId } : {}),
+        ...(attachmentIds.length > 0 ? { attachments: attachmentIds } : {}),
+      }),
     });
   } catch (err) {
     // The request never left — offline, or a webview refusing the body.

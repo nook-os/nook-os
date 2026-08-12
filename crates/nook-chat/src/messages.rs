@@ -12,8 +12,8 @@ use axum::http::StatusCode;
 use axum::Json;
 use chrono::{DateTime, Utc};
 use nook_types::{
-    ChatMessage, ChatMessagePage, ChatReactionAggregate, ChatServerMessage, ChatThread,
-    PostChatMessage, UpdateChatMessage,
+    ChatAttachment, ChatMessage, ChatMessagePage, ChatReactionAggregate, ChatServerMessage,
+    ChatThread, PostChatMessage, UpdateChatMessage,
 };
 use serde::Deserialize;
 use uuid::Uuid;
@@ -51,6 +51,10 @@ impl From<MessageRow> for ChatMessage {
             edited_at: r.edited_at,
             deleted,
             kind: r.kind,
+            // Attached separately (they need a second query), exactly as
+            // reactions are — and never for a deleted message, whose files are
+            // gone with its content (MAIN-535 AC-6).
+            attachments: Vec::new(),
         }
     }
 }
@@ -102,6 +106,42 @@ async fn attach_reactions(
     }
 }
 
+/// How many files one message may carry (MAIN-535). A limit rather than none,
+/// because every attachment is a row and a stored object the delete path has to
+/// undo one by one; ten is well past what a person drags in at once.
+const MAX_ATTACHMENTS: usize = 10;
+
+/// Attach a batch of messages' files in ONE query, mirroring `attach_reactions`
+/// — so every read path (history, thread, the WS re-read) renders the same
+/// (MAIN-535 AC-5). A deleted message is skipped: its attachments are gone, and
+/// asking for them would only invite a future read path to show them.
+async fn attach_attachments(repo: &dyn MessageRepository, messages: &mut [ChatMessage]) {
+    let ids: Vec<Uuid> = messages
+        .iter()
+        .filter(|m| !m.deleted)
+        .map(|m| m.id)
+        .collect();
+    if ids.is_empty() {
+        return;
+    }
+    let rows = repo.attachments_for(&ids).await.unwrap_or_default();
+    let mut map: HashMap<Uuid, Vec<ChatAttachment>> = HashMap::new();
+    for r in rows {
+        map.entry(r.message_id).or_default().push(ChatAttachment {
+            id: r.id,
+            content_id: r.content_id,
+            filename: r.filename,
+            content_type: r.content_type,
+            size_bytes: r.size_bytes,
+        });
+    }
+    for m in messages.iter_mut() {
+        if !m.deleted {
+            m.attachments = map.remove(&m.id).unwrap_or_default();
+        }
+    }
+}
+
 pub async fn post(
     State(state): State<AppState>,
     caller: Caller,
@@ -110,7 +150,9 @@ pub async fn post(
 ) -> Result<(StatusCode, Json<ChatMessage>), ApiError> {
     crate::channels::require_postable(&*state.channels, channel_id, &caller).await?;
     let body = req.body.trim();
-    if body.is_empty() {
+    // A message needs *something*: text, or a file (MAIN-535 AC-2). An empty
+    // box with nothing attached is still nothing to say.
+    if body.is_empty() && req.attachments.is_empty() {
         return Err(ApiError::BadRequest("a message needs a body".into()));
     }
 
@@ -137,6 +179,7 @@ pub async fn post(
         }
     }
 
+    let attachments = resolve_uploads(&state, &caller, &req.attachments).await?;
     let msg = deliver(
         &state,
         NewMessage {
@@ -146,11 +189,59 @@ pub async fn post(
             body: body.to_owned(),
             parent_message_id: req.parent_message_id,
             kind: None,
+            attachments,
         },
     )
     .await?;
 
     Ok((StatusCode::CREATED, Json(msg)))
+}
+
+/// Turn the content ids a client sent into uploads it is allowed to attach
+/// (MAIN-535 AC-1), preserving the order it asked for.
+///
+/// Every id must resolve to one of the CALLER's OWN, not-yet-attached uploads
+/// in their own tenant. Anything else — another tenant's id, another person's,
+/// one that was never issued, one already hanging off another message — is one
+/// 400 with one wording, because telling them apart would answer "does this id
+/// exist" for somebody who has no business asking.
+async fn resolve_uploads(
+    state: &AppState,
+    caller: &Caller,
+    ids: &[Uuid],
+) -> Result<Vec<crate::repo::messages::UploadRef>, ApiError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    if ids.len() > MAX_ATTACHMENTS {
+        return Err(ApiError::BadRequest(format!(
+            "a message carries at most {MAX_ATTACHMENTS} files"
+        )));
+    }
+    let mut wanted = ids.to_vec();
+    wanted.sort();
+    wanted.dedup();
+    if wanted.len() != ids.len() {
+        return Err(ApiError::BadRequest(
+            "the same file was attached twice".into(),
+        ));
+    }
+
+    let found = state
+        .messages
+        .uploads_of(ids, caller.tenant_id, caller.user_id)
+        .await
+        .map_err(|_| internal())?;
+    if found.len() != ids.len() {
+        return Err(ApiError::BadRequest(
+            "one of those files is not an upload of yours".into(),
+        ));
+    }
+    // `uploads_of` answers set-wise; the sender's order is the one rendered.
+    Ok(ids
+        .iter()
+        .filter_map(|id| found.iter().find(|u| u.id == *id).cloned())
+        .collect())
 }
 
 /// Write a message and put it on the wire — the ordinary posting path, shared
@@ -159,8 +250,21 @@ pub async fn post(
 /// Authorization and validation stay with the caller: this is the half after
 /// the decision to post has been made.
 pub(crate) async fn deliver(state: &AppState, new: NewMessage) -> Result<ChatMessage, ApiError> {
-    let row = state.messages.post(new).await.map_err(|_| internal())?;
-    let msg: ChatMessage = row.into(); // no reactions on a brand-new message
+    let row = state.messages.post(new).await.map_err(|e| match e {
+        // Two posts raced the same content id and this one lost the unique
+        // index. `resolve_uploads` refuses that case ahead of the write, so
+        // reaching here means the loser of a race — the caller's error, not the
+        // server's, and the transaction already took its message back.
+        crate::repo::RepoError::Conflict => {
+            ApiError::BadRequest("one of those files is not an upload of yours".into())
+        }
+        crate::repo::RepoError::Other => internal(),
+    })?;
+    // No reactions on a brand-new message; its attachments are read BACK rather
+    // than echoed from what was passed in, so the payload delivered live is
+    // byte-for-byte the one a reload rebuilds (AC-5).
+    let mut msg: ChatMessage = row.into();
+    attach_attachments(&*state.messages, std::slice::from_mut(&mut msg)).await;
 
     // Deliver to subscribers here now, and announce it so peer instances do the
     // same (AC-3). The origin guard on the bus stops a double send here.
@@ -212,6 +316,7 @@ pub async fn history(
         .flatten();
     let mut messages: Vec<ChatMessage> = rows.into_iter().map(Into::into).collect();
     attach_reactions(&*state.messages, Some(caller.user_id), &mut messages).await;
+    attach_attachments(&*state.messages, &mut messages).await;
     Ok(Json(ChatMessagePage {
         messages,
         next_cursor,
@@ -239,6 +344,7 @@ async fn read_message(
             .await
             .remove(&id)
             .unwrap_or_default();
+        attach_attachments(repo, std::slice::from_mut(&mut msg)).await;
     }
     Some(msg)
 }
@@ -297,6 +403,8 @@ pub async fn thread(
     )
     .await;
     attach_reactions(&*state.messages, Some(caller.user_id), &mut replies).await;
+    attach_attachments(&*state.messages, std::slice::from_mut(&mut parent)).await;
+    attach_attachments(&*state.messages, &mut replies).await;
     Ok(Json(ChatThread {
         parent,
         replies,
@@ -465,12 +573,42 @@ pub async fn delete(
         .soft_delete(message_id, caller.user_id)
         .await
         .map_err(|_| internal())?;
+    forget_attachments(&state, &caller, message_id).await?;
 
     broadcast_update(&state, message_id).await;
     read_message(&*state.messages, Some(caller.user_id), message_id)
         .await
         .map(Json)
         .ok_or(ApiError::NotFound)
+}
+
+/// Take a deleted message's files with it (MAIN-535 AC-6): the rows here, and
+/// the stored bytes through the control plane, as the caller.
+///
+/// The rows go first and their failure IS fatal — a message that still lists
+/// files whose bytes are gone renders broken chips forever, which is worse than
+/// a delete the user can retry. The bytes are best effort by contrast: the
+/// attachments are already unreachable from every surface, and an orphaned
+/// object is invisible. It is logged loudly enough to find.
+async fn forget_attachments(
+    state: &AppState,
+    caller: &Caller,
+    message_id: Uuid,
+) -> Result<(), ApiError> {
+    let contents = state
+        .messages
+        .detach_all(message_id)
+        .await
+        .map_err(|_| internal())?;
+    for content_id in contents {
+        if let Err(e) = state.content.forget(content_id, &caller.credential).await {
+            tracing::warn!(
+                %content_id, %message_id, error = %e,
+                "attachment bytes outlived their message; the object is orphaned",
+            );
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -502,6 +640,7 @@ mod tests {
             user_id: user,
             tenant_id: tenant,
             cookie_session: true,
+            credential: crate::content::Credential::Session(Uuid::now_v7()),
         }
     }
 
@@ -537,6 +676,7 @@ mod tests {
             Json(PostChatMessage {
                 body: "  hello  ".into(),
                 parent_message_id: None,
+                attachments: Vec::new(),
             }),
         )
         .await
@@ -577,6 +717,7 @@ mod tests {
                 Json(PostChatMessage {
                     body: format!("m{i}"),
                     parent_message_id: None,
+                    attachments: Vec::new(),
                 }),
             )
             .await
@@ -649,6 +790,7 @@ mod tests {
             Json(PostChatMessage {
                 body: "sneaky".into(),
                 parent_message_id: None,
+                attachments: Vec::new(),
             }),
         )
         .await
@@ -670,6 +812,7 @@ mod tests {
             Json(PostChatMessage {
                 body: "before archive".into(),
                 parent_message_id: None,
+                attachments: Vec::new(),
             }),
         )
         .await
@@ -698,6 +841,7 @@ mod tests {
             Json(PostChatMessage {
                 body: "too late".into(),
                 parent_message_id: None,
+                attachments: Vec::new(),
             }),
         )
         .await
@@ -738,6 +882,7 @@ mod tests {
             Json(PostChatMessage {
                 body: body.into(),
                 parent_message_id: parent,
+                attachments: Vec::new(),
             }),
         )
         .await
@@ -811,6 +956,7 @@ mod tests {
             Json(PostChatMessage {
                 body: "wrong channel".into(),
                 parent_message_id: Some(parent.id),
+                attachments: Vec::new(),
             }),
         )
         .await
@@ -825,6 +971,7 @@ mod tests {
             Json(PostChatMessage {
                 body: "ghost parent".into(),
                 parent_message_id: Some(Uuid::now_v7()),
+                attachments: Vec::new(),
             }),
         )
         .await
@@ -850,6 +997,7 @@ mod tests {
             Json(PostChatMessage {
                 body: "reply to a reply".into(),
                 parent_message_id: Some(reply.id),
+                attachments: Vec::new(),
             }),
         )
         .await
@@ -985,6 +1133,7 @@ mod tests {
             Json(PostChatMessage {
                 body: body.into(),
                 parent_message_id: None,
+                attachments: Vec::new(),
             }),
         )
         .await
@@ -1186,6 +1335,544 @@ mod tests {
 
         state.teardown().await;
     }
+
+    // ── Attachments (MAIN-535) ───────────────────────────────────────────────
+    //
+    // `user_content` has real foreign keys to `tenants` and `users`, so unlike
+    // the message tests above these need genuine rows rather than random uuids.
+
+    async fn org_tenant_user(state: &AppState) -> (Uuid, Uuid) {
+        let org = Uuid::now_v7();
+        state
+            .db
+            .exec(
+                "INSERT INTO orgs (id, name, slug) VALUES ($1, $2, $2)",
+                params![org, format!("o-{}", org.simple())],
+            )
+            .await
+            .unwrap();
+        let tenant = Uuid::now_v7();
+        state
+            .db
+            .exec(
+                "INSERT INTO tenants (id, name, slug, org_id) VALUES ($1, $2, $2, $3)",
+                params![tenant, format!("t-{}", tenant.simple()), org],
+            )
+            .await
+            .unwrap();
+        let user = Uuid::now_v7();
+        state
+            .db
+            .exec(
+                "INSERT INTO users (id, tenant_id, person_id, display_name, email, role)
+                 VALUES ($1, $2, $3, 'Ana', $4, 'member')",
+                params![
+                    user,
+                    tenant,
+                    Uuid::now_v7(),
+                    format!("u-{}@example.test", user.simple())
+                ],
+            )
+            .await
+            .unwrap();
+        (tenant, user)
+    }
+
+    /// An upload as the control plane would have recorded it.
+    async fn upload(state: &AppState, tenant: Uuid, by: Uuid, name: &str, ct: &str) -> Uuid {
+        let id = Uuid::now_v7();
+        state
+            .db
+            .exec(
+                "INSERT INTO user_content
+                    (id, tenant_id, uploaded_by, filename, content_type, size_bytes,
+                     sha256, storage_key)
+                 VALUES ($1, $2, $3, $4, $5, 1234, 'deadbeef', $6)",
+                params![
+                    id,
+                    tenant,
+                    by,
+                    name.to_string(),
+                    ct.to_string(),
+                    format!("nook/user-content/{}", id.simple())
+                ],
+            )
+            .await
+            .unwrap();
+        id
+    }
+
+    async fn make_dm(state: &AppState, owner: Uuid, person: Uuid) -> Uuid {
+        let id = Uuid::now_v7();
+        state
+            .db
+            .exec(
+                "INSERT INTO chat_channels (id, owner_type, owner_id, name, slug)
+                 VALUES ($1, 'dm', $2, $3, $3)",
+                params![id, owner, format!("dm-{}", id.simple())],
+            )
+            .await
+            .unwrap();
+        state
+            .db
+            .exec(
+                "INSERT INTO chat_channel_participants (channel_id, person_id)
+                 VALUES ($1, $2)",
+                params![id, person],
+            )
+            .await
+            .unwrap();
+        id
+    }
+
+    /// AC-1 + AC-5, on the one path a channel, a DM and a thread reply all
+    /// share: posting carries the files, and every way of reading a message
+    /// back — the POST echo, history, a keyset page, a thread — renders the
+    /// same metadata with no cross-service call.
+    #[tokio::test]
+    async fn a_channel_post_carries_its_files_through_history_and_pagination() {
+        let Some(state) = state().await else { return };
+        let (tenant, user) = org_tenant_user(&state).await;
+        let channel = make_channel(&state, tenant, "files").await;
+        let shot = upload(&state, tenant, user, "shot.png", "image/png").await;
+        let logs = upload(&state, tenant, user, "logs.zip", "application/zip").await;
+
+        let (_, Json(posted)) = post(
+            State(state.clone()),
+            caller_as(tenant, user),
+            Path(channel),
+            Json(PostChatMessage {
+                // AC-2's server half: no text at all, and it still posts.
+                body: String::new(),
+                parent_message_id: None,
+                attachments: vec![shot, logs],
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(posted.attachments.len(), 2);
+        // The sender's order, not the database's.
+        assert_eq!(posted.attachments[0].filename, "shot.png");
+        assert_eq!(posted.attachments[1].content_id, logs);
+        assert_eq!(posted.attachments[0].content_type, "image/png");
+        assert_eq!(posted.attachments[0].size_bytes, 1234);
+
+        // Something to page PAST, so the read below is a keyset page rather
+        // than a single-row history.
+        for i in 0..2 {
+            let _ = post(
+                State(state.clone()),
+                caller_as(tenant, user),
+                Path(channel),
+                Json(PostChatMessage {
+                    body: format!("after {i}"),
+                    parent_message_id: None,
+                    attachments: Vec::new(),
+                }),
+            )
+            .await
+            .unwrap();
+        }
+        let Json(p1) = history(
+            State(state.clone()),
+            caller_as(tenant, user),
+            Path(channel),
+            Query(HistoryQuery {
+                before: None,
+                limit: Some(2),
+            }),
+        )
+        .await
+        .unwrap();
+        let Json(p2) = history(
+            State(state.clone()),
+            caller_as(tenant, user),
+            Path(channel),
+            Query(HistoryQuery {
+                before: p1.next_cursor,
+                limit: Some(2),
+            }),
+        )
+        .await
+        .unwrap();
+        let from_history = p2
+            .messages
+            .iter()
+            .find(|m| m.id == posted.id)
+            .expect("the attachment-carrying message, one page back");
+        assert_eq!(from_history.attachments.len(), 2);
+        assert_eq!(from_history.attachments[0].filename, "shot.png");
+        // Every other message is untouched — no empty list is invented for one
+        // that never carried a file, and no file leaks onto it.
+        assert!(p1.messages.iter().all(|m| m.attachments.is_empty()));
+
+        state.teardown().await;
+    }
+
+    /// The DM and the thread halves of AC-1, which is the same posting path
+    /// reached two other ways — the test exists because "identical in channels,
+    /// DMs and threads" (AC-4) is a claim, not an implementation detail.
+    #[tokio::test]
+    async fn a_dm_and_a_thread_reply_carry_files_the_same_way() {
+        let Some(state) = state().await else { return };
+        let (tenant, user) = org_tenant_user(&state).await;
+        let person: Uuid = state
+            .db
+            .query_scalar("SELECT person_id FROM users WHERE id = $1", params![user])
+            .await
+            .unwrap();
+        let dm = make_dm(&state, person, person).await;
+        let in_dm = upload(&state, tenant, user, "secret.pdf", "application/pdf").await;
+
+        let (_, Json(dm_msg)) = post(
+            State(state.clone()),
+            caller_as(tenant, user),
+            Path(dm),
+            Json(PostChatMessage {
+                body: "here it is".into(),
+                parent_message_id: None,
+                attachments: vec![in_dm],
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(dm_msg.attachments.len(), 1, "a DM carries files too");
+
+        // …and a reply under it, read back through the thread endpoint.
+        let reply_file = upload(&state, tenant, user, "reply.png", "image/png").await;
+        let _ = post(
+            State(state.clone()),
+            caller_as(tenant, user),
+            Path(dm),
+            Json(PostChatMessage {
+                body: String::new(),
+                parent_message_id: Some(dm_msg.id),
+                attachments: vec![reply_file],
+            }),
+        )
+        .await
+        .unwrap();
+        let Json(thread) = thread(
+            State(state.clone()),
+            caller_as(tenant, user),
+            Path(dm_msg.id),
+            Query(HistoryQuery {
+                before: None,
+                limit: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            thread.parent.attachments.len(),
+            1,
+            "the pinned parent's file"
+        );
+        assert_eq!(thread.replies.len(), 1);
+        assert_eq!(thread.replies[0].attachments[0].filename, "reply.png");
+
+        state.teardown().await;
+    }
+
+    /// AC-5's live half: the payload a peer instance re-delivers is built by the
+    /// SAME read the socket's own broadcast uses, so a second connected member
+    /// receives the message with its attachments rather than a bare body.
+    #[tokio::test]
+    async fn the_live_payload_carries_the_attachments() {
+        let Some(state) = state().await else { return };
+        let (tenant, user) = org_tenant_user(&state).await;
+        let channel = make_channel(&state, tenant, "live").await;
+        let id = upload(&state, tenant, user, "live.png", "image/png").await;
+
+        let (_, Json(posted)) = post(
+            State(state.clone()),
+            caller_as(tenant, user),
+            Path(channel),
+            Json(PostChatMessage {
+                body: "look".into(),
+                parent_message_id: None,
+                attachments: vec![id],
+            }),
+        )
+        .await
+        .unwrap();
+
+        // `fetch` is what the bus listener calls for a peer's announcement.
+        let refetched = fetch(&*state.messages, posted.id)
+            .await
+            .expect("the message reads back");
+        assert_eq!(refetched.attachments.len(), 1);
+        assert_eq!(refetched.attachments[0].content_id, id);
+
+        state.teardown().await;
+    }
+
+    /// AC-6: deleting takes the rows AND asks the store to forget the bytes,
+    /// leaving the ordinary placeholder behind.
+    #[tokio::test]
+    async fn deleting_a_message_takes_its_attachments_and_their_bytes() {
+        let Some(state) = state().await else { return };
+        let (tenant, user) = org_tenant_user(&state).await;
+        let channel = make_channel(&state, tenant, "delete").await;
+        let one = upload(&state, tenant, user, "one.png", "image/png").await;
+        let two = upload(&state, tenant, user, "two.zip", "application/zip").await;
+
+        let (_, Json(posted)) = post(
+            State(state.clone()),
+            caller_as(tenant, user),
+            Path(channel),
+            Json(PostChatMessage {
+                body: "bye".into(),
+                parent_message_id: None,
+                attachments: vec![one, two],
+            }),
+        )
+        .await
+        .unwrap();
+
+        let Json(gone) = delete(
+            State(state.clone()),
+            caller_as(tenant, user),
+            Path(posted.id),
+        )
+        .await
+        .unwrap();
+        assert!(gone.deleted);
+        assert_eq!(gone.body, DELETED_PLACEHOLDER);
+        assert!(gone.attachments.is_empty(), "nothing left to render");
+        assert_eq!(
+            state.forgotten_content(),
+            vec![one, two],
+            "both objects were asked to be forgotten",
+        );
+
+        // The rows really are gone, not merely hidden.
+        let left: i64 = state
+            .db
+            .query_scalar(
+                "SELECT count(*) FROM chat_message_attachments WHERE message_id = $1",
+                params![posted.id],
+            )
+            .await
+            .unwrap();
+        assert_eq!(left, 0);
+
+        // Deleting again is idempotent and must not ask twice — the bytes are
+        // already gone and the second ask would log a spurious failure.
+        let _ = delete(
+            State(state.clone()),
+            caller_as(tenant, user),
+            Path(posted.id),
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.forgotten_content().len(), 2);
+
+        state.teardown().await;
+    }
+
+    /// AC-1's boundary: a content id is only attachable by the person who
+    /// uploaded it, in their own tenant. Everything else is one 400 — telling
+    /// the cases apart would answer "does this id exist" for a stranger.
+    #[tokio::test]
+    async fn only_your_own_upload_can_be_attached() {
+        let Some(state) = state().await else { return };
+        let (tenant, user) = org_tenant_user(&state).await;
+        let (other_tenant, other_user) = org_tenant_user(&state).await;
+        let channel = make_channel(&state, tenant, "boundary").await;
+        let theirs = upload(&state, other_tenant, other_user, "theirs.png", "image/png").await;
+
+        for attachments in [vec![theirs], vec![Uuid::now_v7()]] {
+            let refused = post(
+                State(state.clone()),
+                caller_as(tenant, user),
+                Path(channel),
+                Json(PostChatMessage {
+                    body: "mine now".into(),
+                    parent_message_id: None,
+                    attachments,
+                }),
+            )
+            .await;
+            assert!(
+                matches!(refused, Err(ApiError::BadRequest(_))),
+                "another person's upload and an id that never existed answer alike",
+            );
+        }
+
+        // And an empty message with nothing attached is still nothing to say.
+        let empty = post(
+            State(state.clone()),
+            caller_as(tenant, user),
+            Path(channel),
+            Json(PostChatMessage {
+                body: "   ".into(),
+                parent_message_id: None,
+                attachments: Vec::new(),
+            }),
+        )
+        .await;
+        assert!(matches!(empty, Err(ApiError::BadRequest(_))));
+
+        state.teardown().await;
+    }
+
+    /// One upload, one message. Without this a second post could hang off bytes
+    /// the first message's delete is entitled to remove (AC-6).
+    #[tokio::test]
+    async fn the_same_upload_cannot_be_attached_twice() {
+        let Some(state) = state().await else { return };
+        let (tenant, user) = org_tenant_user(&state).await;
+        let channel = make_channel(&state, tenant, "once").await;
+        let once = upload(&state, tenant, user, "once.png", "image/png").await;
+
+        // Twice in ONE message is refused before any write.
+        let dup = post(
+            State(state.clone()),
+            caller_as(tenant, user),
+            Path(channel),
+            Json(PostChatMessage {
+                body: "twice".into(),
+                parent_message_id: None,
+                attachments: vec![once, once],
+            }),
+        )
+        .await;
+        assert!(matches!(dup, Err(ApiError::BadRequest(_))));
+
+        let _ = post(
+            State(state.clone()),
+            caller_as(tenant, user),
+            Path(channel),
+            Json(PostChatMessage {
+                body: "first".into(),
+                parent_message_id: None,
+                attachments: vec![once],
+            }),
+        )
+        .await
+        .unwrap();
+        // And across two messages: refused as the CALLER's error, before any
+        // write, because `uploads_of` no longer answers for an id that is
+        // already attached.
+        let before: i64 = state
+            .db
+            .query_scalar(
+                "SELECT count(*) FROM chat_messages WHERE channel_id = $1",
+                params![channel],
+            )
+            .await
+            .unwrap();
+        let second = post(
+            State(state.clone()),
+            caller_as(tenant, user),
+            Path(channel),
+            Json(PostChatMessage {
+                body: "again".into(),
+                parent_message_id: None,
+                attachments: vec![once],
+            }),
+        )
+        .await;
+        assert!(
+            matches!(second, Err(ApiError::BadRequest(_))),
+            "one upload belongs to one message, and saying so is the caller's error",
+        );
+        // The refusal left NOTHING behind. A message row surviving a failed post
+        // is what put a bodiless, fileless message in everyone's history and let
+        // the client's Retry add another on every press.
+        let after: i64 = state
+            .db
+            .query_scalar(
+                "SELECT count(*) FROM chat_messages WHERE channel_id = $1",
+                params![channel],
+            )
+            .await
+            .unwrap();
+        assert_eq!(after, before, "a refused post writes no message row");
+
+        state.teardown().await;
+    }
+
+    /// The transaction itself, driven at the repository rather than through the
+    /// handler: an attachment insert that fails must take its message with it.
+    ///
+    /// The failure is provoked the one way a real one arrives — a content id
+    /// that is already attached, which the unique index refuses — but reached
+    /// through `post` directly, BYPASSING `resolve_uploads`. That is the point:
+    /// the handler's check is one guard, and this asserts the write is atomic
+    /// even when something gets past it (two posts racing the same id).
+    #[tokio::test]
+    async fn a_failed_attachment_insert_takes_its_message_with_it() {
+        let Some(state) = state().await else { return };
+        let (tenant, user) = org_tenant_user(&state).await;
+        let channel = make_channel(&state, tenant, "atomic").await;
+        let taken = upload(&state, tenant, user, "taken.png", "image/png").await;
+
+        let claim = crate::repo::messages::UploadRef {
+            id: taken,
+            filename: "taken.png".into(),
+            content_type: "image/png".into(),
+            size_bytes: 1234,
+        };
+        let new = |body: &str| NewMessage {
+            channel_id: channel,
+            author_id: user,
+            tenant_id: tenant,
+            body: body.to_string(),
+            parent_message_id: None,
+            kind: None,
+            attachments: vec![claim.clone()],
+        };
+        state.messages.post(new("first")).await.unwrap();
+
+        let before: i64 = state
+            .db
+            .query_scalar(
+                "SELECT count(*) FROM chat_messages WHERE channel_id = $1",
+                params![channel],
+            )
+            .await
+            .unwrap();
+        let lost = state.messages.post(new("racing")).await;
+        assert!(lost.is_err(), "the unique index refuses the second claim");
+        let after: i64 = state
+            .db
+            .query_scalar(
+                "SELECT count(*) FROM chat_messages WHERE channel_id = $1",
+                params![channel],
+            )
+            .await
+            .unwrap();
+        assert_eq!(after, before, "the message rolled back with its attachment");
+
+        state.teardown().await;
+    }
+
+    /// The cap, asserted rather than trusted: a client that sends more than the
+    /// limit is refused before any row is written.
+    #[tokio::test]
+    async fn a_message_carries_at_most_the_attachment_limit() {
+        let Some(state) = state().await else { return };
+        let (tenant, user) = org_tenant_user(&state).await;
+        let channel = make_channel(&state, tenant, "cap").await;
+        let too_many: Vec<Uuid> = (0..=MAX_ATTACHMENTS).map(|_| Uuid::now_v7()).collect();
+
+        let refused = post(
+            State(state.clone()),
+            caller_as(tenant, user),
+            Path(channel),
+            Json(PostChatMessage {
+                body: "lots".into(),
+                parent_message_id: None,
+                attachments: too_many,
+            }),
+        )
+        .await;
+        assert!(matches!(refused, Err(ApiError::BadRequest(_))));
+
+        state.teardown().await;
+    }
 }
 
 /// Read-path behaviour against an in-memory [`FakeMessageRepository`] — no
@@ -1296,5 +1983,37 @@ mod fake_tests {
         attach_reactions(&repo, Some(viewer), &mut msgs).await;
         assert_eq!(msgs[0].reactions.len(), 1);
         assert!(msgs[1].reactions.is_empty());
+    }
+
+    /// The two halves of MAIN-535 that are pure decisions, asserted without a
+    /// database: only the caller's own uploads resolve, and a deleted message
+    /// is left alone by the batch attach exactly as it is by reactions.
+    #[tokio::test]
+    async fn only_the_callers_own_uploads_resolve_and_deleted_messages_stay_bare() {
+        let (channel, author) = (Uuid::now_v7(), Uuid::now_v7());
+        let (tenant, stranger) = (Uuid::now_v7(), Uuid::now_v7());
+        let (mine, theirs) = (Uuid::now_v7(), Uuid::now_v7());
+        let repo = FakeMessageRepository::new()
+            .with_upload(mine, tenant, author, "mine.png", "image/png", 10)
+            .with_upload(theirs, tenant, stranger, "theirs.png", "image/png", 10);
+
+        let found = repo
+            .uploads_of(&[mine, theirs], tenant, author)
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 1, "a stranger's upload is simply not there");
+        assert_eq!(found[0].id, mine);
+        // Right person, wrong tenant — also nothing.
+        assert!(repo
+            .uploads_of(&[mine], Uuid::now_v7(), author)
+            .await
+            .unwrap()
+            .is_empty());
+
+        let gone = Uuid::now_v7();
+        let repo = repo.with_deleted_message(gone, channel, author);
+        let mut msgs: Vec<ChatMessage> = vec![repo.get(gone).await.unwrap().unwrap().into()];
+        attach_attachments(&repo, &mut msgs).await;
+        assert!(msgs[0].attachments.is_empty());
     }
 }

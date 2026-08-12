@@ -17,7 +17,13 @@ import {
   type ChatMessage,
 } from "@nookos/api";
 import { ChatView } from "@nookos/ui";
-import { buildThreadMessages, type PendingMessage } from "./chatMessages";
+import {
+  buildThreadMessages,
+  toViewAttachments,
+  DM_ATTACHMENT_NOTICE,
+  type PendingMessage,
+} from "./chatMessages";
+import { useAttachments } from "./useAttachments";
 
 export interface ThreadPanelProps {
   channelId: string;
@@ -39,6 +45,9 @@ export interface ThreadPanelProps {
    *  composes the same way a channel message does. Absent → no GIF button, the
    *  emoji picker either way. */
   giphyKey?: string | null;
+  /** This thread hangs off a DM, so a file staged here gets the same
+   *  before-you-send notice the DM's own composer gives (MAIN-535 AC-7). */
+  isDm?: boolean;
 }
 
 const PAGE_SIZE = 50;
@@ -55,6 +64,7 @@ export function ThreadPanel({
   onDeleteMessage,
   canDeleteAny,
   giphyKey,
+  isDm = false,
 }: ThreadPanelProps) {
   const threadQuery = useInfiniteQuery({
     queryKey: ["chat", "thread", parent.id],
@@ -73,14 +83,18 @@ export function ThreadPanel({
   const [pending, setPending] = useState<PendingMessage[]>([]);
   const tempCounter = useRef(0);
 
-  // A different parent is a different thread — drop any in-flight optimism.
+  // A different parent is a different thread — drop any in-flight optimism, and
+  // anything staged for the thread being left.
   useEffect(() => {
     setPending([]);
+    attachments.clear();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [parent.id]);
 
+  const attachments = useAttachments();
   const sendMutation = useMutation({
-    mutationFn: (v: { tempId: string; body: string }) =>
-      postMessage(channelId, v.body, parent.id),
+    mutationFn: (v: { tempId: string; body: string; attachmentIds: string[] }) =>
+      postMessage(channelId, v.body, parent.id, v.attachmentIds),
     onError: (_err, v) => {
       // `postMessage` already surfaced the failure through the shared path; here
       // we only mark the optimistic bubble for retry. The echo (on success)
@@ -92,9 +106,9 @@ export function ThreadPanel({
   });
 
   const send = useCallback(
-    (body: string, tempId: string) => {
+    (body: string, tempId: string, attachmentIds: string[]) => {
       if (!meId) return;
-      sendMutation.mutate({ tempId, body });
+      sendMutation.mutate({ tempId, body, attachmentIds });
     },
     [meId, sendMutation],
   );
@@ -102,14 +116,28 @@ export function ThreadPanel({
   const onSend = useCallback(
     (body: string) => {
       if (!meId) return;
+      const attachmentIds = attachments.ids();
+      // `null` is "an upload is still in flight", which the composer already
+      // refuses to submit on. Refusing again here is what stops a future caller
+      // reintroducing the silent drop this replaces.
+      if (attachmentIds === null) return;
+      const staged = toViewAttachments(attachments.staged);
       const tempId = `pending-${tempCounter.current++}`;
       setPending((prev) => [
         ...prev,
-        { tempId, authorId: meId, body, createdAt: new Date().toISOString() },
+        {
+          tempId,
+          authorId: meId,
+          body,
+          createdAt: new Date().toISOString(),
+          attachments: staged,
+          attachmentIds,
+        },
       ]);
-      send(body, tempId);
+      attachments.clear();
+      send(body, tempId, attachmentIds);
     },
-    [meId, send],
+    [meId, send, attachments],
   );
 
   const onRetry = useCallback(
@@ -117,9 +145,10 @@ export function ThreadPanel({
       setPending((prev) =>
         prev.map((p) => (p.tempId === message.id ? { ...p, failed: false } : p)),
       );
-      send(message.body, message.id);
+      const failed = pending.find((p) => p.tempId === message.id);
+      send(message.body, message.id, failed?.attachmentIds ?? []);
     },
-    [send],
+    [send, pending],
   );
 
   // The same list, from the same channel, under the same query key Chat.tsx
@@ -187,6 +216,11 @@ export function ThreadPanel({
         commands={commandsQuery.data}
         onCommand={onCommand}
         conversationId={parent.id}
+        onAttachFiles={attachments.add}
+        staged={attachments.staged}
+        onRemoveStaged={attachments.remove}
+        attachError={attachments.error}
+        attachNotice={isDm ? DM_ATTACHMENT_NOTICE : null}
       />
     </aside>
   );

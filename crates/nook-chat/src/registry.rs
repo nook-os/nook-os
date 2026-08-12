@@ -136,6 +136,7 @@ mod tests {
             edited_at: None,
             deleted: false,
             kind: None,
+            attachments: Vec::new(),
         }
     }
 

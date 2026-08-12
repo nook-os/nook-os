@@ -50,7 +50,10 @@ enum Payload {
     Row(Notice),
     Ephemeral {
         origin: Uuid,
-        event: nook_types::ChatServerMessage,
+        /// Boxed only to keep the two variants a similar size — a `Notice` is
+        /// two uuids and a flag, an event is a whole message. Serde sees
+        /// through a `Box`, so the wire form is unchanged.
+        event: Box<nook_types::ChatServerMessage>,
     },
 }
 
@@ -94,7 +97,7 @@ pub async fn publish_ephemeral(pool: &DbPool, origin: Uuid, event: &nook_types::
     }
     let payload = serde_json::to_string(&Payload::Ephemeral {
         origin,
-        event: event.clone(),
+        event: Box::new(event.clone()),
     })
     .unwrap_or_default();
     if let Err(e) = PgEventBus::new(pool.clone())
@@ -168,7 +171,7 @@ async fn run(
                 if origin == registry.instance() {
                     continue;
                 }
-                registry.publish_local(event);
+                registry.publish_local(*event);
             }
         }
     }
@@ -199,7 +202,7 @@ mod tests {
             "event": {"type": "presence", "data": {"person": person, "online": true}}
         });
         match serde_json::from_value::<Payload>(eph).unwrap() {
-            Payload::Ephemeral { event, .. } => match event {
+            Payload::Ephemeral { event, .. } => match *event {
                 nook_types::ChatServerMessage::Presence { person: p, online } => {
                     assert_eq!(p, person);
                     assert!(online);
@@ -246,7 +249,7 @@ mod tests {
                     serde_json::from_str::<Payload>(&payload)
                 {
                     if o == origin {
-                        return event;
+                        return *event;
                     }
                 }
             }

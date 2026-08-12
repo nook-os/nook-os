@@ -10278,6 +10278,37 @@
           }
         }
       },
+      "ChatAttachment": {
+        "type": "object",
+        "description": "One file hanging off a message (MAIN-535).\n\n`content_id` is the ONLY join to the bytes: `GET /api/v1/user-content/{id}`\non the control plane serves them, and decides there what content type\nactually goes on the wire. `content_type` here is what the uploader claimed\n— enough to choose a preview from a chip, never enough to trust.",
+        "required": [
+          "id",
+          "content_id",
+          "filename",
+          "content_type",
+          "size_bytes"
+        ],
+        "properties": {
+          "content_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "content_type": {
+            "type": "string"
+          },
+          "filename": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "ChatCategory": {
         "type": "object",
         "description": "A channel category (MAIN-178): a Discord-style group shared across a\ntenant/org, ordered by `position`. Admin-defined; DMs are never categorized.",
@@ -10438,6 +10469,13 @@
           "created_at"
         ],
         "properties": {
+          "attachments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChatAttachment"
+            },
+            "description": "The files this message carries (MAIN-535 AC-1). Empty for the ordinary\ntext message, and empty for a deleted one — a delete takes the\nattachments and their bytes with it (AC-6).\n\nThe rendering facts travel here rather than being fetched per message,\nso drawing a page of history needs no call to the control plane at all."
+          },
           "author_id": {
             "type": "string",
             "format": "uuid"
@@ -14905,6 +14943,14 @@
           "body"
         ],
         "properties": {
+          "attachments": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "User-content ids to hang off this message (MAIN-535 AC-1) — each one\nalready uploaded to the control plane's store, and each one the\ncaller's own upload. With at least one of these the body may be empty\n(AC-2); with none it may not."
+          },
           "body": {
             "type": "string"
           },

@@ -178,6 +178,8 @@ async fn post(
             body,
             parent_message_id: None,
             kind: kind.map(str::to_string),
+            // A command posts text; nothing it can say carries a file.
+            attachments: Vec::new(),
         },
     )
     .await?;
@@ -208,6 +210,7 @@ mod tests {
             user_id: Uuid::now_v7(),
             tenant_id: tenant,
             cookie_session: true,
+            credential: crate::content::Credential::Session(Uuid::now_v7()),
         }
     }
 
@@ -251,6 +254,7 @@ mod tests {
                 user_id: who.user_id,
                 tenant_id: who.tenant_id,
                 cookie_session: who.cookie_session,
+                credential: who.credential.clone(),
             },
             Path(channel),
             Json(RunChatCommand {

@@ -13,6 +13,7 @@ mod categories;
 mod channels;
 mod commands;
 mod config;
+mod content;
 mod dms;
 mod messages;
 mod presence;
@@ -40,7 +41,7 @@ use uuid::Uuid;
 /// schema, so it never touches the control plane's `public._sqlx_migrations`.
 /// Embedded: 0001_chat_init, 0002_chat_channel_archive, 0003_chat_dm,
 /// 0004_chat_threads, 0005_chat_reactions, 0006_chat_categories,
-/// 0007_chat_read_cursors, 0008_chat_message_kind.
+/// 0007_chat_read_cursors, 0008_chat_message_kind, 0009_chat_attachments.
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 /// The service's own search_path: chat first, `public` behind it.
@@ -65,6 +66,10 @@ pub(crate) struct AppState {
     pub(crate) messages: Arc<dyn repo::messages::MessageRepository>,
     /// Direct messages and the person directory that gates them (MAIN-257).
     pub(crate) dms: Arc<dyn repo::dms::DmRepository>,
+    /// Forgetting an attachment's stored bytes (MAIN-535 AC-6) — the control
+    /// plane's store, reached as the caller. See `content.rs` for why chat does
+    /// not hold the store itself.
+    pub(crate) content: Arc<dyn content::ContentStore>,
 }
 
 #[tokio::main]
@@ -86,6 +91,7 @@ async fn main() -> anyhow::Result<()> {
         bind = %cfg.bind,
         web_origin = %cfg.web_origin,
         public_base_url = %cfg.public_base_url,
+        control_origin = %cfg.control_origin,
         "nook-chat starting",
     );
 
@@ -133,6 +139,7 @@ async fn main() -> anyhow::Result<()> {
         channels: Arc::new(repo::channels::DbChannelRepository::new(db.clone())),
         messages: Arc::new(repo::messages::DbMessageRepository::new(db.clone())),
         dms: Arc::new(repo::dms::DbDmRepository::new(db.clone())),
+        content: Arc::new(content::ControlPlaneContent::new(&cfg.control_origin)),
         db: db.clone(),
         registry: registry.clone(),
     };
@@ -345,6 +352,9 @@ pub(crate) struct Caller {
     pub(crate) user_id: Uuid,
     pub(crate) tenant_id: Uuid,
     pub(crate) cookie_session: bool,
+    /// What they arrived with, kept so chat can act as them against the control
+    /// plane rather than holding an authority of its own (MAIN-535 AC-6).
+    pub(crate) credential: content::Credential,
 }
 
 impl FromRequestParts<AppState> for Caller {
@@ -365,7 +375,10 @@ impl FromRequestParts<AppState> for Caller {
             let r = nook_auth::resolve_bearer(&state.db, tok)
                 .await
                 .map_err(ApiError::from)?;
-            return Ok(Self::from(r));
+            return Ok(Self::resolved(
+                r,
+                content::Credential::Bearer(tok.to_string()),
+            ));
         }
 
         // 2. The `nook_session` cookie (its value is the plaintext session id).
@@ -377,16 +390,17 @@ impl FromRequestParts<AppState> for Caller {
         let r = nook_auth::resolve_session(&state.db, sid)
             .await
             .map_err(ApiError::from)?;
-        Ok(Self::from(r))
+        Ok(Self::resolved(r, content::Credential::Session(sid)))
     }
 }
 
-impl From<nook_auth::Resolved> for Caller {
-    fn from(r: nook_auth::Resolved) -> Self {
+impl Caller {
+    fn resolved(r: nook_auth::Resolved, credential: content::Credential) -> Self {
         Self {
             user_id: r.user_id,
             tenant_id: r.tenant_id,
             cookie_session: r.cookie_session,
+            credential,
         }
     }
 }

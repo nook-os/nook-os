@@ -31,12 +31,19 @@ import {
   ChevronRight,
   Copy,
   MoreHorizontal,
+  Paperclip,
   Pencil,
   Reply,
   SmilePlus,
   Trash2,
 } from "lucide-react";
 import { ALLOWED_REACTIONS } from "@nookos/api";
+import {
+  MessageAttachments,
+  StagedAttachments,
+  type ChatViewAttachment,
+  type StagedAttachment,
+} from "./Attachments";
 import { EmojiPicker } from "./EmojiPicker";
 import { GifPicker, giphyGifUrl } from "./GifPicker";
 import { Markdown } from "./Markdown";
@@ -117,6 +124,9 @@ export interface ChatViewMessage {
    *  Edit; deleting it is exactly as ordinary. The caller decides: the view
    *  never infers an action from a body. */
   action?: boolean;
+  /** The files this message carries (MAIN-535). Absent/empty renders nothing,
+   *  so a text-only message is unchanged. */
+  attachments?: ChatViewAttachment[];
   /** This message is folded TOOL ACTIVITY rather than something its author said
    *  (MAIN-499): the steps it stands for, in order, as they were recorded.
    *
@@ -234,6 +244,24 @@ export interface ChatViewProps {
    *  the conversation they were answered in and must not follow the reader into
    *  the next one (AC-7). A surface with one conversation passes nothing. */
   conversationId?: string;
+  // ── Attachments (MAIN-535) ────────────────────────────────────────────────
+  // The view offers the three ways in — a button, a drop, a paste — and shows
+  // what is staged. It never uploads: the caller owns the network, exactly as
+  // it owns sending, which is what keeps this component backend-agnostic. Omit
+  // `onAttachFiles` and none of it renders.
+  /** Files the user chose, dropped or pasted. The caller uploads them and
+   *  reflects the result back through `staged`. */
+  onAttachFiles?: (files: File[]) => void;
+  /** What is waiting to be sent, in the order it will be sent (AC-2). */
+  staged?: StagedAttachment[];
+  /** Take one back off the message before sending. */
+  onRemoveStaged?: (key: string) => void;
+  /** An upload that failed or was refused, in the composer where it happened
+   *  (AC-8). The caller clears it; the view only shows it. */
+  attachError?: string | null;
+  /** Shown beside what is staged, before sending — DM files are stored
+   *  unencrypted and a person is entitled to know that first (AC-7). */
+  attachNotice?: string | null;
 }
 
 /**
@@ -644,8 +672,21 @@ export function ChatView({
   commands,
   onCommand,
   conversationId,
+  onAttachFiles,
+  staged,
+  onRemoveStaged,
+  attachError,
+  attachNotice,
 }: ChatViewProps) {
   const transcript = variant === "transcript";
+  const stagedFiles = staged ?? [];
+  const attachable = !!onAttachFiles && !disabled;
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  // Nested drag events fire enter/leave for every child the pointer crosses, so
+  // a boolean flag flickers. Counting them is what keeps the drop target lit
+  // for as long as the file is genuinely over the log.
+  const dragDepth = useRef(0);
+  const [dragging, setDragging] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [draft, setDraft] = useState("");
@@ -751,20 +792,95 @@ export function ChatView({
     [onCommand, addNote],
   );
 
+  // A file waiting to be sent is something to say (MAIN-535 AC-2), so it makes
+  // an empty box submittable exactly as `allowEmpty` does.
+  const hasStaged = stagedFiles.length > 0;
+  // An upload still in flight DISQUALIFIES the send, rather than merely failing
+  // to qualify it. As one more disjunct it was unreachable the moment the box
+  // held text: the person typed a line, attached a 20 MB bundle, pressed Enter
+  // while the chip still read "uploading…", and the message posted as text with
+  // every staged file silently dropped — no error, no trace in the bubble, and
+  // an orphaned object left in the store.
+  const uploading = stagedFiles.some((s) => s.uploading);
+  const canSubmit =
+    !disabled && !uploading && (draft.trim().length > 0 || allowEmpty || hasStaged);
+
   const submit = useCallback(() => {
     const body = draft.trim();
-    if (disabled || (!body && !allowEmpty)) return;
+    if (!canSubmit) return;
     // A leading token the SERVER listed is a command; anything else — including
     // leading-slash text matching nothing — is the message it looks like
     // (AC-5/AC-6).
     const cmd = onCommand ? parseCommand(body, commandSet) : null;
+    // A command is not a message, so it does not carry the staged files — and
+    // it deliberately does not clear them either. The chips stay in the
+    // composer, visible, for the message the person still means to send
+    // (MAIN-535); dropping them on the way past would be the silent loss that
+    // card's in-flight guard exists to prevent.
     if (cmd) void invoke(cmd.name, cmd.args);
     else onSend(body);
     setDraft("");
     // Collapse back to the one-line resting height the stylesheet pins.
     const el = inputRef.current;
     if (el) el.style.height = "";
-  }, [draft, disabled, allowEmpty, onSend, onCommand, commandSet, invoke]);
+  }, [draft, canSubmit, onSend, onCommand, commandSet, invoke]);
+
+  /** The three ways a file gets in, funnelled to one callback. */
+  const takeFiles = useCallback(
+    (files: FileList | File[] | null | undefined) => {
+      if (!onAttachFiles || !files) return;
+      const list = Array.from(files);
+      if (list.length > 0) onAttachFiles(list);
+    },
+    [onAttachFiles],
+  );
+
+  /** Pasting a screenshot (AC-2). Only files are taken — pasting text is still
+   *  pasting text, and a clipboard carrying both is a copied file with a name
+   *  beside it, where the file is what was meant. */
+  const onPaste = useCallback(
+    (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      if (!attachable) return;
+      const files = Array.from(e.clipboardData?.files ?? []);
+      if (files.length === 0) return;
+      e.preventDefault();
+      takeFiles(files);
+    },
+    [attachable, takeFiles],
+  );
+
+  const onDragEnter = useCallback(
+    (e: React.DragEvent) => {
+      if (!attachable || !e.dataTransfer?.types?.includes("Files")) return;
+      e.preventDefault();
+      dragDepth.current += 1;
+      setDragging(true);
+    },
+    [attachable],
+  );
+  const onDragLeave = useCallback(() => {
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (dragDepth.current === 0) setDragging(false);
+  }, []);
+  const onDragOver = useCallback(
+    (e: React.DragEvent) => {
+      if (!attachable || !e.dataTransfer?.types?.includes("Files")) return;
+      // Without this the browser navigates to the dropped file, which loses the
+      // whole app.
+      e.preventDefault();
+    },
+    [attachable],
+  );
+  const onDrop = useCallback(
+    (e: React.DragEvent) => {
+      if (!attachable) return;
+      e.preventDefault();
+      dragDepth.current = 0;
+      setDragging(false);
+      takeFiles(e.dataTransfer?.files);
+    },
+    [attachable, takeFiles],
+  );
 
   /** Grow the box with its content instead of scrolling inside a 34px slot.
    *  Inline style, cleared at rest, so the stylesheet keeps owning the resting
@@ -877,7 +993,15 @@ export function ChatView({
   );
 
   return (
-    <div className="chat-view">
+    <div
+      className={`chat-view${dragging ? " dropping" : ""}`}
+      // On the WHOLE surface, not just the composer: AC-2 asks for a drop onto
+      // the message list, which is where a person's pointer already is.
+      onDragEnter={onDragEnter}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+    >
       <div
         className={`chat-log${transcript ? " transcript" : ""}`}
         ref={scrollRef}
@@ -1011,6 +1135,13 @@ export function ChatView({
                     {m.edited && <span className="chat-edited"> (edited)</span>}
                   </div>
                 )}
+                {/* Outside the body branches on purpose: a message may carry
+                    files with NO text at all (AC-2), so this cannot hang off
+                    whichever body shape rendered. A deleted message shows its
+                    placeholder and nothing else — its files are gone (AC-6). */}
+                {!m.deleted && (m.attachments?.length ?? 0) > 0 && (
+                  <MessageAttachments attachments={m.attachments!} />
+                )}
                 {m.failed && (
                   <button
                     type="button"
@@ -1091,6 +1222,14 @@ export function ChatView({
         )}
       </div>
       {beforeComposer}
+      {!hideComposer && onAttachFiles && (
+        <StagedAttachments
+          staged={stagedFiles}
+          onRemove={(key) => onRemoveStaged?.(key)}
+          notice={attachNotice}
+          error={attachError}
+        />
+      )}
       {!hideComposer && (
       <div className="chat-composer" ref={palette.hostRef}>
         <textarea
@@ -1115,11 +1254,42 @@ export function ChatView({
             if (e.target.value.trim().length > 0) onTypingActivity?.();
           }}
           onKeyDown={onKeyDown}
+          onPaste={onPaste}
         />
         {/* The pickers sit AFTER the textarea in the DOM and are pulled back to
             the left of it by `.chat-composer-wrap { order: -1 }`, so tabbing
             into the composer lands on the message box — the primary control —
             rather than on a picker. Visual order is unchanged. */}
+        {onAttachFiles && (
+          <>
+            <input
+              ref={fileInputRef}
+              type="file"
+              className="chat-file-input"
+              multiple
+              // The store has no type allowlist and this must not invent one —
+              // what a file is allowed to BE is the server's decision, and it
+              // is made on the way out rather than on the way in.
+              onChange={(e) => {
+                takeFiles(e.target.files);
+                // Cleared so choosing the same file twice fires again.
+                e.target.value = "";
+              }}
+              aria-hidden="true"
+              tabIndex={-1}
+            />
+            <button
+              type="button"
+              className="chat-attach"
+              title="Attach a file"
+              aria-label="Attach a file"
+              disabled={disabled}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <Paperclip size={15} aria-hidden="true" />
+            </button>
+          </>
+        )}
         <EmojiPicker onPick={insertEmoji} disabled={disabled} />
         {/* AC-3: no key, no button. Not a disabled one — an affordance that is
             always there and never works is worse than one that is not. */}
@@ -1130,7 +1300,7 @@ export function ChatView({
           type="button"
           className="chat-send"
           title="Send message"
-          disabled={disabled || (draft.trim().length === 0 && !allowEmpty)}
+          disabled={!canSubmit}
           onClick={submit}
         >
           {sendLabel}

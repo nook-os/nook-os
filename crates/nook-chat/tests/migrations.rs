@@ -169,3 +169,100 @@ async fn message_kind_is_nullable_and_its_migration_is_idempotent() {
     db.close().await;
     bed.teardown().await;
 }
+
+/// MAIN-535 AC-3/AC-6: the attachments table arrives idempotently, and it goes
+/// with its message rather than outliving it.
+///
+/// The cascade is what the delete path relies on to stay honest: it detaches
+/// explicitly so it can report which bytes to forget, and the FK is the net for
+/// every other way a message row could ever leave.
+#[tokio::test]
+async fn attachments_cascade_from_their_message_and_the_migration_is_idempotent() {
+    let Some(mut bed) = nook_testkit::TestBed::new().await else {
+        return;
+    };
+    if !bed.is_postgres() {
+        eprintln!(
+            "skipping attachments_cascade_from_their_message_and_the_migration_is_idempotent — \
+             chat has no SQLite migration track (MAIN-535 AC-3)"
+        );
+        bed.teardown().await;
+        return;
+    }
+    let url = bed.database_url().expect("a Postgres bed exposes its URL");
+    let opts = PgConnectOptions::from_str(&url)
+        .unwrap()
+        .options([("search_path", "chat")]);
+    let db = PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(opts)
+        .await
+        .unwrap();
+
+    ensure_chat_schema(&db).await;
+    MIGRATOR.run(&db).await.unwrap();
+
+    let channel = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO chat_channels (id, owner_type, owner_id, name, slug)
+         VALUES ($1, 'tenant', gen_random_uuid(), 'files', 'files')",
+    )
+    .bind(channel)
+    .execute(&db)
+    .await
+    .unwrap();
+    let message = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO chat_messages (id, channel_id, author_id, tenant_id, body)
+         VALUES ($1, $2, gen_random_uuid(), gen_random_uuid(), 'here')",
+    )
+    .bind(message)
+    .bind(channel)
+    .execute(&db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO chat_message_attachments
+            (id, message_id, content_id, filename, content_type, size_bytes)
+         VALUES (gen_random_uuid(), $1, gen_random_uuid(), 'a.png', 'image/png', 10)",
+    )
+    .bind(message)
+    .execute(&db)
+    .await
+    .unwrap();
+
+    // Applying the DDL again — the migrator would skip the version, so this is
+    // the statement itself, which is what "idempotent" actually claims.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS chat_message_attachments (
+            id uuid PRIMARY KEY,
+            message_id uuid NOT NULL REFERENCES chat_messages (id) ON DELETE CASCADE,
+            content_id uuid NOT NULL,
+            filename text NOT NULL,
+            content_type text NOT NULL,
+            size_bytes bigint NOT NULL,
+            position integer NOT NULL DEFAULT 0,
+            created_at timestamptz NOT NULL DEFAULT now())",
+    )
+    .execute(&db)
+    .await
+    .expect("the migration is idempotent");
+
+    // A hard-deleted message takes its attachment rows with it. Chat itself
+    // only ever soft-deletes, so this is the net rather than the path.
+    sqlx::query("DELETE FROM chat_messages WHERE id = $1")
+        .bind(message)
+        .execute(&db)
+        .await
+        .unwrap();
+    let (left,): (i64,) =
+        sqlx::query_as("SELECT count(*) FROM chat_message_attachments WHERE message_id = $1")
+            .bind(message)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(left, 0, "attachments do not outlive their message");
+
+    db.close().await;
+    bed.teardown().await;
+}

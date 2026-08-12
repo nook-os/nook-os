@@ -2604,6 +2604,7 @@ dependencies = [
  "nook-errors",
  "nook-testkit",
  "nook-types",
+ "reqwest",
  "serde",
  "serde_json",
  "sqlx",

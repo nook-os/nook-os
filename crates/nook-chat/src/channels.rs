@@ -406,6 +406,7 @@ mod tests {
             user_id: user,
             tenant_id: tenant,
             cookie_session: false,
+            credential: crate::content::Credential::Session(Uuid::now_v7()),
         }
     }
 
@@ -1253,6 +1254,7 @@ mod fake_tests {
             user_id: user,
             tenant_id: tenant,
             cookie_session: false,
+            credential: crate::content::Credential::Session(Uuid::now_v7()),
         }
     }
 

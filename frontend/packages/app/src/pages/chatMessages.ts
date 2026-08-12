@@ -10,8 +10,15 @@
 // The output is one chronological list (oldest → newest) for `ChatView`, with
 // each optimistic message dropped as soon as its server echo appears — so a
 // post never double-renders when its own broadcast comes back.
-import type { ChatMessage } from "@nookos/api";
-import type { ChatViewMessage } from "@nookos/ui";
+import { userContentUrl, type ChatMessage } from "@nookos/api";
+import type { ChatViewAttachment, ChatViewMessage, StagedAttachment } from "@nookos/ui";
+
+/** What a person is told before sending a file into a DM (MAIN-535 AC-7).
+ *  DMs are not end-to-end encrypted yet — MAIN-175 owns that — and an
+ *  attachment is stored exactly as a channel's is, so saying so is the only
+ *  honest thing to do while it is true. */
+export const DM_ATTACHMENT_NOTICE =
+  "Files in DMs are stored unencrypted — they are not private yet.";
 
 export interface PendingMessage {
   tempId: string;
@@ -19,6 +26,42 @@ export interface PendingMessage {
   body: string;
   createdAt: string;
   failed?: boolean;
+  /** What was staged alongside it (MAIN-535). Carried so an attachment-only
+   *  send shows its files rather than an empty bubble for the round trip. */
+  attachments?: ChatViewAttachment[];
+  /** The content ids the send carried, so a RETRY re-sends the same files
+   *  rather than whatever happens to be staged when it is pressed. */
+  attachmentIds?: string[];
+}
+
+/** Staged composer files as the optimistic bubble renders them. The bytes are
+ *  already uploaded by the time anything is sent, so the same URL the confirmed
+ *  message will use is available here — the bubble does not change shape when
+ *  the server's copy replaces it. */
+export function toViewAttachments(staged: StagedAttachment[]): ChatViewAttachment[] {
+  return staged
+    .filter((s) => s.contentId)
+    .map((s) => ({
+      id: s.key,
+      filename: s.filename,
+      contentType: s.contentType,
+      sizeBytes: s.sizeBytes,
+      url: userContentUrl(s.contentId as string),
+    }));
+}
+
+/** A message's files as the view takes them; `undefined` when it has none, so
+ *  nothing renders for the overwhelming majority of messages. */
+function toAttachments(m: ChatMessage): ChatViewAttachment[] | undefined {
+  const list = m.attachments ?? [];
+  if (list.length === 0) return undefined;
+  return list.map((a) => ({
+    id: a.id,
+    filename: a.filename,
+    contentType: a.content_type,
+    sizeBytes: a.size_bytes,
+    url: userContentUrl(a.content_id),
+  }));
 }
 
 function toView(
@@ -49,6 +92,10 @@ function toView(
     // A kind this client does not know renders as ordinary prose, so the set
     // can grow server-side without a release here.
     action: m.kind === "action",
+    // MAIN-535: the files, with the URL the browser fetches the bytes from
+    // resolved here — the view stays backend-agnostic and never learns where
+    // user content lives.
+    attachments: toAttachments(m),
     // Chat semantics, not document semantics: `**bold**`, `` `code` `` and
     // links render, and a single newline stays the line break the person typed
     // (Shift+Enter). Until now the body rendered as raw text, so markdown a
@@ -179,6 +226,7 @@ function pendingViews(
     createdAt: p.createdAt,
     pending: !p.failed,
     failed: p.failed,
+    attachments: p.attachments,
     // Same rendering as the confirmed echo it becomes — a message must not
     // change shape the moment the server confirms it.
     markdown: "chat" as const,

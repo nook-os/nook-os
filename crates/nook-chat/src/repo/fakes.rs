@@ -19,7 +19,8 @@ use uuid::Uuid;
 use super::channels::{CategoryRow, ChannelOwner, ChannelRepository, ChannelRow, OwnerScope};
 use super::dms::{DmRepository, Participant, PersonEntry};
 use super::messages::{
-    MessageMeta, MessageParent, MessageRepository, MessageRow, NewMessage, Page, ReactionRow,
+    AttachmentRow, MessageMeta, MessageParent, MessageRepository, MessageRow, NewMessage, Page,
+    ReactionRow, UploadRef,
 };
 use super::{RepoError, RepoResult};
 
@@ -437,6 +438,10 @@ struct MessageState {
     reactions: Vec<(Uuid, Uuid, String)>,
     /// `(message, prior_body, action, actor)` — the revision trail.
     revisions: Vec<(Uuid, String, String, Uuid)>,
+    /// Attachment rows, in insertion order (MAIN-535).
+    attachments: Vec<AttachmentRow>,
+    /// Uploads the store would answer for: `(id, tenant, uploader, ref)`.
+    uploads: Vec<(Uuid, Uuid, Uuid, UploadRef)>,
 }
 
 impl FakeMessageRepository {
@@ -454,6 +459,30 @@ impl FakeMessageRepository {
 
     pub(crate) fn with_deleted_message(self, id: Uuid, channel: Uuid, author: Uuid) -> Self {
         self.push(id, channel, author, "secret", None, true)
+    }
+
+    /// An upload `uploader` made in `tenant`, as `uploads_of` will answer for it.
+    pub(crate) fn with_upload(
+        self,
+        id: Uuid,
+        tenant: Uuid,
+        uploader: Uuid,
+        filename: &str,
+        content_type: &str,
+        size_bytes: i64,
+    ) -> Self {
+        self.inner.lock().unwrap().uploads.push((
+            id,
+            tenant,
+            uploader,
+            UploadRef {
+                id,
+                filename: filename.to_string(),
+                content_type: content_type.to_string(),
+                size_bytes,
+            },
+        ));
+        self
     }
 
     fn push(
@@ -616,6 +645,17 @@ impl MessageRepository for FakeMessageRepository {
             deleted_at: None,
             kind: new.kind,
         };
+        for (position, upload) in new.attachments.iter().enumerate() {
+            st.attachments.push(AttachmentRow {
+                id: Uuid::now_v7(),
+                message_id: row.id,
+                content_id: upload.id,
+                filename: upload.filename.clone(),
+                content_type: upload.content_type.clone(),
+                size_bytes: upload.size_bytes,
+            });
+            let _ = position;
+        }
         st.messages.push(row.clone());
         Ok(row)
     }
@@ -694,6 +734,50 @@ impl MessageRepository for FakeMessageRepository {
         let m = st.messages.iter_mut().find(|m| m.id == message).unwrap();
         m.deleted_at = Some(epoch());
         Ok(())
+    }
+
+    async fn uploads_of(
+        &self,
+        ids: &[Uuid],
+        tenant: Uuid,
+        uploader: Uuid,
+    ) -> RepoResult<Vec<UploadRef>> {
+        let st = self.inner.lock().unwrap();
+        Ok(st
+            .uploads
+            .iter()
+            .filter(|(id, t, u, _)| {
+                ids.contains(id)
+                    && *t == tenant
+                    && *u == uploader
+                    // Already hanging off a message is the fourth way to be
+                    // absent from this answer, same as in the real query.
+                    && !st.attachments.iter().any(|a| a.content_id == *id)
+            })
+            .map(|(_, _, _, r)| r.clone())
+            .collect())
+    }
+
+    async fn attachments_for(&self, messages: &[Uuid]) -> RepoResult<Vec<AttachmentRow>> {
+        let st = self.inner.lock().unwrap();
+        Ok(st
+            .attachments
+            .iter()
+            .filter(|a| messages.contains(&a.message_id))
+            .cloned()
+            .collect())
+    }
+
+    async fn detach_all(&self, message: Uuid) -> RepoResult<Vec<Uuid>> {
+        let mut st = self.inner.lock().unwrap();
+        let gone: Vec<Uuid> = st
+            .attachments
+            .iter()
+            .filter(|a| a.message_id == message)
+            .map(|a| a.content_id)
+            .collect();
+        st.attachments.retain(|a| a.message_id != message);
+        Ok(gone)
     }
 }
 

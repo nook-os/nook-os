@@ -218,6 +218,11 @@ services:
     environment:
       DATABASE_URL: postgres://nook:nook@postgres:5432/nook
       CHAT_BIND: 0.0.0.0:8082
+      # Where chat reaches the control plane, for the one call it makes there:
+      # forgetting an attachment's bytes when its message is deleted (MAIN-535).
+      # The mirror of nginx's CHAT_ORIGIN, and a service name for the same
+      # reason — chat's own localhost is not the control plane's.
+      NOOK_CONTROL_ORIGIN: http://control-plane:8080
       CARGO_TARGET_DIR: /app/target-docker
     ports:
       - "${NOOK_CHAT_PORT:-8082}:8082"

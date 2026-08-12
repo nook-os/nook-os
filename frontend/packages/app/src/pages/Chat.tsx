@@ -35,9 +35,12 @@ import {
 } from "@nookos/api";
 import { Plus } from "lucide-react";
 import { ChatView } from "@nookos/ui";
+import { useAttachments } from "./useAttachments";
 import {
   applyMessageUpdate,
   buildChatMessages,
+  toViewAttachments,
+  DM_ATTACHMENT_NOTICE,
   type PendingMessage,
 } from "./chatMessages";
 import {
@@ -485,9 +488,19 @@ export function ChatPage() {
     return () => window.removeEventListener("focus", onFocus);
   }, [markConversationRead]);
 
+  const attachments = useAttachments();
+  // A conversation switch abandons whatever was staged for the last one: the
+  // files were chosen to say something HERE, and carrying them across is how a
+  // screenshot ends up in the wrong channel.
+  useEffect(() => {
+    attachments.clear();
+    // `clear` is stable; re-running on the hook object would fire every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId]);
+
   const sendMutation = useMutation({
-    mutationFn: (v: { tempId: string; body: string }) =>
-      postMessage(selectedId!, v.body),
+    mutationFn: (v: { tempId: string; body: string; attachmentIds: string[] }) =>
+      postMessage(selectedId!, v.body, undefined, v.attachmentIds),
     onSuccess: (echo) => {
       // Fold the server's copy into live so the message is confirmed even if the
       // websocket echo is slow or absent; `reconcilePending` then drops the
@@ -504,9 +517,9 @@ export function ChatPage() {
   });
 
   const send = useCallback(
-    (body: string, tempId: string) => {
+    (body: string, tempId: string, attachmentIds: string[]) => {
       if (!selectedId || !meId) return;
-      sendMutation.mutate({ tempId, body });
+      sendMutation.mutate({ tempId, body, attachmentIds });
     },
     [selectedId, meId, sendMutation],
   );
@@ -514,14 +527,31 @@ export function ChatPage() {
   const onSend = useCallback(
     (body: string) => {
       if (!meId) return;
+      // Read the staged ids ONCE, before clearing: the composer is emptied
+      // immediately (the message is on its way), and a retry re-sends these
+      // rather than whatever is staged by then.
+      const attachmentIds = attachments.ids();
+      // `null` is "an upload is still in flight", which the composer already
+      // refuses to submit on. Refusing again here is what stops a future caller
+      // reintroducing the silent drop this replaces.
+      if (attachmentIds === null) return;
+      const staged = toViewAttachments(attachments.staged);
       const tempId = `pending-${tempCounter.current++}`;
       setPending((prev) => [
         ...prev,
-        { tempId, authorId: meId, body, createdAt: new Date().toISOString() },
+        {
+          tempId,
+          authorId: meId,
+          body,
+          createdAt: new Date().toISOString(),
+          attachments: staged,
+          attachmentIds,
+        },
       ]);
-      send(body, tempId);
+      attachments.clear();
+      send(body, tempId, attachmentIds);
     },
-    [meId, send],
+    [meId, send, attachments],
   );
 
   const onRetry = useCallback(
@@ -529,9 +559,10 @@ export function ChatPage() {
       setPending((prev) =>
         prev.map((p) => (p.tempId === message.id ? { ...p, failed: false } : p)),
       );
-      send(message.body, message.id);
+      const failed = pending.find((p) => p.tempId === message.id);
+      send(message.body, message.id, failed?.attachmentIds ?? []);
     },
-    [send],
+    [send, pending],
   );
 
   // The commands this conversation offers (MAIN-529 AC-9). The SERVER's list,
@@ -736,6 +767,11 @@ export function ChatPage() {
             commands={commandsQuery.data}
             onCommand={onCommand}
             conversationId={selectedId ?? undefined}
+            onAttachFiles={selectedId ? attachments.add : undefined}
+            staged={attachments.staged}
+            onRemoveStaged={attachments.remove}
+            attachError={attachments.error}
+            attachNotice={activeDm ? DM_ATTACHMENT_NOTICE : null}
           />
           {threadParent && selectedId && (
             <ThreadPanel
@@ -750,6 +786,7 @@ export function ChatPage() {
               onDeleteMessage={onDeleteMessage}
               canDeleteAny={canManage}
               giphyKey={appConfig?.giphy_key}
+              isDm={!!activeDm}
             />
           )}
         </div>
