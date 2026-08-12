@@ -796,6 +796,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/jobs/{id}/commands": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/jobs/{id}/commands` — the commands the caller may run on this
+         *     run (MAIN-530 AC-1).
+         * @description Gated exactly as steering it is (AC-2): a person's action, on a run they can
+         *     see. A node token gets the same refusal `POST /messages` gives it.
+         */
+        get: operations["list_job_commands"];
+        put?: never;
+        /** `POST /api/v1/jobs/{id}/commands` — run one of them (AC-1). */
+        post: operations["run_job_command"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/jobs/{id}/messages": {
         parameters: {
             query?: never;
@@ -2207,6 +2230,34 @@ export interface paths {
          *     raised — so a per-turn `running`/`idle` stream costs the inbox nothing.
          */
         post: operations["report_agent_state"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sessions/{id}/commands": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/sessions/{id}/commands` — the commands the caller may run in
+         *     this session (MAIN-530 AC-1).
+         * @description Gated on session-content access, like execution: a caller who may not read
+         *     the conversation is refused rather than handed a menu of things they cannot
+         *     run.
+         */
+        get: operations["list_session_commands"];
+        put?: never;
+        /**
+         * `POST /api/v1/sessions/{id}/commands` — run one of them (AC-1).
+         * @description The same gate `post_message` applies, so a caller with no claim to the
+         *     session is refused exactly as sending to it is refused (AC-2).
+         */
+        post: operations["run_session_command"];
         delete?: never;
         options?: never;
         head?: never;
@@ -9957,6 +10008,82 @@ export interface operations {
             };
         };
     };
+    list_job_commands: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChatCommand"][];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    run_job_command: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RunChatCommand"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChatCommandResult"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     job_message: {
         parameters: {
             query?: never;
@@ -12556,6 +12683,82 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_session_commands: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChatCommand"][];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    run_session_command: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RunChatCommand"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChatCommandResult"];
+                };
             };
             400: {
                 headers: {

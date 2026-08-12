@@ -279,3 +279,88 @@ pub async fn rerun(
         jobs::rerun(&state, auth.tenant_id, auth.user_id, id).await?,
     ))
 }
+
+/// `GET /api/v1/jobs/{id}/commands` — the commands the caller may run on this
+/// run (MAIN-530 AC-1).
+///
+/// Gated exactly as steering it is (AC-2): a person's action, on a run they can
+/// see. A node token gets the same refusal `POST /messages` gives it.
+#[utoipa::path(get, path = "/api/v1/jobs/{id}/commands",
+    operation_id = "list_job_commands",
+    params(("id" = String, Path,)),
+    responses((status = 200, body = [ChatCommand]), (status = 403), (status = 404)))]
+pub async fn commands(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<JobId>,
+) -> ApiResult<Json<Vec<ChatCommand>>> {
+    auth.require_user()?;
+    jobs::visible(&state, auth.tenant_id, auth.user_id, id).await?;
+    Ok(Json(crate::services::agent_commands::catalog()))
+}
+
+/// `POST /api/v1/jobs/{id}/commands` — run one of them (AC-1).
+#[utoipa::path(post, path = "/api/v1/jobs/{id}/commands",
+    operation_id = "run_job_command",
+    params(("id" = String, Path,)),
+    request_body = RunChatCommand,
+    responses((status = 200, body = ChatCommandResult), (status = 400), (status = 403), (status = 404)))]
+pub async fn run_command(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<JobId>,
+    Json(req): Json<RunChatCommand>,
+) -> ApiResult<Json<ChatCommandResult>> {
+    auth.require_user()?;
+    let job = jobs::visible(&state, auth.tenant_id, auth.user_id, id).await?;
+    Ok(Json(
+        crate::services::agent_commands::run(&req, || status_text(&state, auth.tenant_id, &job))
+            .await?,
+    ))
+}
+
+/// What `/status` says about a loop run (AC-5): its state, the machine holding
+/// it, the card it is about, and — only while it is still queued — why it has
+/// not started.
+///
+/// Every line is read off the job row that already exists (NG-6). The queued
+/// reason is the sentence the run view itself renders, and it is CONDITIONAL on
+/// the state for the same reason that view makes it conditional: a reason left
+/// behind on a row that has since been claimed describes a wait that is over,
+/// and repeating it would be inventing a gate for a run that has passed it.
+async fn status_text(state: &AppState, tenant: TenantId, job: &LoopJob) -> ApiResult<String> {
+    let node = match job.executor_node_id {
+        Some(id) => state
+            .nodes
+            .name_of(id)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| id.0.to_string()),
+        None => "not placed on a machine yet".into(),
+    };
+    let ticket = match job.target_task_id {
+        Some(id) => state
+            .tasks
+            .key_of(tenant, id)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| id.0.to_string()),
+        // A review run is about a repository and carries no card — the column
+        // is nullable for exactly that reason.
+        None => "none — this run is about a repo, not a card".into(),
+    };
+
+    let mut out = format!(
+        "Run: {} ({})\nNode: {node}\nTicket: {ticket}",
+        job.state, job.kind
+    );
+    if job.state == "queued" {
+        if let Some(reason) = job.queued_reason.as_deref() {
+            out.push_str("\nWaiting: ");
+            out.push_str(reason);
+        }
+    }
+    Ok(out)
+}

@@ -17,6 +17,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { api, type LoopJobTranscriptEntry } from "@nookos/api";
 import { ChatView, Empty, Panel, Pill } from "@nookos/ui";
+import { useAgentCommands } from "./agentCommands";
 import { transcriptMessages } from "./LoopPanel";
 import { agentActivityLabel, foldToolActivity, jobStateMeta } from "./loop";
 import { fileSlug, TranscriptActions } from "./transcriptExport";
@@ -255,6 +256,13 @@ export function WorkspaceRuns({
   // so narrowing the list never leaves the transcript of a hidden run beside it.
   const openRun = visible.find((r) => r.id === openId) ?? visible[0] ?? null;
   const open = openRun?.id ?? null;
+  // The open run's commands (MAIN-530 AC-6): the same list, from the same
+  // endpoint, that the loop page and the ticket's panel read. The composer
+  // below stays hidden — a managed run is the control plane's work, not a
+  // conversation somebody steers (MAIN-488), and opening it is not this card's
+  // change — so this panel serves the surface without offering a box to type
+  // prose into.
+  const { commands, onCommand } = useAgentCommands("run", open);
 
   const { data: detail } = useQuery({
     queryKey: ["job", open],
@@ -395,6 +403,9 @@ export function WorkspaceRuns({
                 // read as broken.
                 onSend={() => {}}
                 hideComposer
+                commands={commands}
+                onCommand={onCommand}
+                conversationId={open ?? undefined}
               />
             </>
           ) : (

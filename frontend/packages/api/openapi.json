@@ -1641,6 +1641,95 @@
         }
       }
     },
+    "/api/v1/jobs/{id}/commands": {
+      "get": {
+        "tags": [
+          "crate::routes::jobs"
+        ],
+        "summary": "`GET /api/v1/jobs/{id}/commands` — the commands the caller may run on this\nrun (MAIN-530 AC-1).",
+        "description": "Gated exactly as steering it is (AC-2): a person's action, on a run they can\nsee. A node token gets the same refusal `POST /messages` gives it.",
+        "operationId": "list_job_commands",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ChatCommand"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::routes::jobs"
+        ],
+        "summary": "`POST /api/v1/jobs/{id}/commands` — run one of them (AC-1).",
+        "operationId": "run_job_command",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunChatCommand"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatCommandResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/jobs/{id}/messages": {
       "post": {
         "tags": [
@@ -4982,6 +5071,96 @@
         "responses": {
           "204": {
             "description": ""
+          },
+          "400": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{id}/commands": {
+      "get": {
+        "tags": [
+          "crate::routes::sessions"
+        ],
+        "summary": "`GET /api/v1/sessions/{id}/commands` — the commands the caller may run in\nthis session (MAIN-530 AC-1).",
+        "description": "Gated on session-content access, like execution: a caller who may not read\nthe conversation is refused rather than handed a menu of things they cannot\nrun.",
+        "operationId": "list_session_commands",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ChatCommand"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::routes::sessions"
+        ],
+        "summary": "`POST /api/v1/sessions/{id}/commands` — run one of them (AC-1).",
+        "description": "The same gate `post_message` applies, so a caller with no claim to the\nsession is refused exactly as sending to it is refused (AC-2).",
+        "operationId": "run_session_command",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunChatCommand"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatCommandResult"
+                }
+              }
+            }
           },
           "400": {
             "description": ""

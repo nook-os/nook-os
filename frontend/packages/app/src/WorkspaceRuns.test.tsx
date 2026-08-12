@@ -22,6 +22,9 @@ vi.mock("@nookos/api", () => ({
     GET: vi.fn(async (path: string) => {
       if (path.includes("/builds")) return { data: state.builds };
       if (path.includes("/reviews")) return { data: state.reviews };
+      // Before the `/jobs/` arm: a run's command list is a different endpoint
+      // under the same prefix, and it answers a LIST (MAIN-530).
+      if (path.endsWith("/commands")) return { data: [] };
       if (path.includes("/jobs/")) return { data: { transcript: state.transcript } };
       return { data: null };
     }),
