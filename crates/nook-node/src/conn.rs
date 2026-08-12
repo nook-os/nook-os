@@ -37,10 +37,12 @@ fn port_is_free(port: i32) -> bool {
     std::net::TcpListener::bind(("0.0.0.0", p)).is_ok()
 }
 const DISCOVERY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
-/// How often to tell the control plane which build compose stacks are up
-/// (MAIN-507). Ten minutes: it costs one `docker compose ls`, and the thing it
-/// catches — a stack whose card finished — is measured in hours of idle RAM.
-const STACK_REPORT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
+/// How often to tell the control plane which build worktrees and compose stacks
+/// this node holds (MAIN-507, MAIN-537). Ten minutes: it costs one
+/// `docker compose ls` and one directory listing, and the things it catches — a
+/// stack whose card finished, a merged card's checkout — are measured in hours
+/// of idle RAM and days of disk.
+const INVENTORY_REPORT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
 /// How often to reconsider our certificate.
 ///
 /// Six hours against a seven-day renewal window: a node that is asleep, or one
@@ -338,35 +340,53 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
 
     // Best-effort: on every (re)connect, prune loop-job worktrees orphaned by a
     // crash or a node restart (MAIN-161 AC-4). Blocking git, non-fatal.
-    //
-    // Build worktrees are exempt from that sweep and REPORTED instead: whether
-    // one is still wanted is a card fact this process cannot see, so the
-    // control plane answers with a `RemoveWorktree` for each it no longer
-    // records (MAIN-480 AC-1).
     {
         let cfg = cfg.clone();
-        let tx = ctl_tx.clone();
-        tokio::task::spawn_blocking(move || {
-            crate::loop_job::reconcile(&cfg);
-            let paths = crate::loop_job::build_worktrees_held(&cfg);
-            let _ = tx.blocking_send(NodeToControl::LoopWorktreesHeld { paths });
-        });
+        tokio::task::spawn_blocking(move || crate::loop_job::reconcile(&cfg));
     }
 
-    // The same report for compose stacks (MAIN-507 AC-5), and on a timer as
-    // well as on connect: a node that stays up for days accumulates the stacks
-    // of every card that finished in between, and only the control plane can
-    // say which of them belong to a card that is over.
-    let stacks_tx = ctl_tx.clone();
-    let stacks_task = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(STACK_REPORT_INTERVAL);
+    // What this node holds for finished cards, on a timer as well as on connect.
+    //
+    // Build worktrees are exempt from the sweep above and REPORTED instead:
+    // whether one is still wanted is a card fact this process cannot see, so the
+    // control plane answers with a `RemoveWorktree` for each it no longer
+    // records (MAIN-480 AC-1) and for each whose card is over (MAIN-537 AC-4).
+    // The compose stacks those worktrees boot are reported the same way
+    // (MAIN-507 AC-5).
+    //
+    // **On a timer, and the worktree half is why this is one task rather than
+    // two.** The stack report got the timer when it landed, with the reason
+    // written on it: a node that stays up for days accumulates the leavings of
+    // every card that finished in between, and only the control plane can say
+    // which of them belong to a card that is over. That is exactly as true of
+    // worktrees, which had only the connect-time report — so on a node that
+    // never restarts, a merged card's tree was collected by nothing at all
+    // (MAIN-537). One task reports both, so neither can be given a schedule the
+    // other lacks again.
+    let inventory_cfg = cfg.clone();
+    let inventory_tx = ctl_tx.clone();
+    let inventory_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(INVENTORY_REPORT_INTERVAL);
         loop {
             interval.tick().await; // the first tick is immediate: the connect-time report
-            let projects = tokio::task::spawn_blocking(crate::compose::build_stacks_held)
+            let cfg = inventory_cfg.clone();
+            let held = tokio::task::spawn_blocking(move || {
+                (
+                    crate::loop_job::build_worktrees_held(&cfg),
+                    crate::compose::build_stacks_held(),
+                )
+            })
+            .await
+            .unwrap_or_default();
+            if inventory_tx
+                .send(NodeToControl::LoopWorktreesHeld { paths: held.0 })
                 .await
-                .unwrap_or_default();
-            if stacks_tx
-                .send(NodeToControl::BuildStacksHeld { projects })
+                .is_err()
+            {
+                break;
+            }
+            if inventory_tx
+                .send(NodeToControl::BuildStacksHeld { projects: held.1 })
                 .await
                 .is_err()
             {
@@ -970,6 +990,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
             ControlToNode::RemoveWorktree {
                 request_id,
                 worktree_path,
+                delete_branch,
             } => {
                 let tx = ctl_tx.clone();
                 let roots = cfg.workspace_roots.clone();
@@ -977,7 +998,11 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                     // The stack goes first (MAIN-507 AC-3) — see the function.
                     let outcome = crate::compose::reap_then_remove_worktree(
                         &worktree_path,
-                        crate::gitops::remove_worktree,
+                        if delete_branch {
+                            crate::gitops::remove_build_worktree
+                        } else {
+                            crate::gitops::remove_worktree
+                        },
                     );
                     let ok = outcome.ok;
                     let _ = tx.blocking_send(NodeToControl::OpResult {
@@ -1437,7 +1462,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
     heartbeat.abort();
     drain.abort();
     discovery_task.abort();
-    stacks_task.abort();
+    inventory_task.abort();
     Ok(())
 }
 

@@ -389,6 +389,18 @@ pub trait TaskRepository: Send + Sync {
     /// not the test; reaching a terminal column is.
     async fn active_worktree_paths_on_node(&self, node: NodeId) -> ApiResult<Vec<String>>;
 
+    /// The complement: every worktree on this node whose card IS finished, with
+    /// the card that records it (MAIN-537 AC-4).
+    ///
+    /// The card move prunes the tree of the card it moved; this answers the
+    /// other question — which of the trees a long-lived node holds belong to a
+    /// card that finished while nothing was listening. Both are the same test
+    /// (`completed`/`canceled`), asked from opposite ends.
+    async fn finished_worktrees_on_node(
+        &self,
+        node: NodeId,
+    ) -> ApiResult<Vec<(TenantId, TaskId, String)>>;
+
     /// Move a card to `column`. Leaving a `started` column clears the claim
     /// lease (MAIN-229 AC-2) — the destination's type decides, in the same
     /// statement, so every mover (drag, `/move`, bulk) is covered by one rule.
@@ -1398,6 +1410,22 @@ impl TaskRepository for DbTaskRepository {
             )
             .await?;
         Ok(rows.into_iter().map(|(p,)| p).collect())
+    }
+
+    async fn finished_worktrees_on_node(
+        &self,
+        node: NodeId,
+    ) -> ApiResult<Vec<(TenantId, TaskId, String)>> {
+        Ok(self
+            .db
+            .query_all(
+                "SELECT t.tenant_id, t.id, t.worktree_path FROM tasks t
+                   JOIN board_columns c ON c.id = t.column_id
+                  WHERE t.worktree_node_id = $1 AND t.worktree_path IS NOT NULL
+                    AND c.type IN ('completed', 'canceled')",
+                params![node],
+            )
+            .await?)
     }
 
     async fn set_column(&self, id: TaskId, column: ColumnId) -> ApiResult<TaskItem> {
@@ -3426,6 +3454,26 @@ impl TaskRepository for FakeTaskRepository {
             .filter(|t| t.worktree_node_id == Some(node))
             .filter(|t| t.archived_at.is_none() && !terminal.contains(&t.column_id))
             .filter_map(|t| t.worktree_path.clone())
+            .collect())
+    }
+
+    async fn finished_worktrees_on_node(
+        &self,
+        node: NodeId,
+    ) -> ApiResult<Vec<(TenantId, TaskId, String)>> {
+        let st = self.inner.lock().unwrap();
+        let terminal: Vec<ColumnId> = st
+            .columns
+            .iter()
+            .filter(|c| matches!(c.r#type.as_str(), "completed" | "canceled"))
+            .map(|c| c.id)
+            .collect();
+        Ok(st
+            .tasks
+            .iter()
+            .filter(|t| t.worktree_node_id == Some(node))
+            .filter(|t| terminal.contains(&t.column_id))
+            .filter_map(|t| Some((t.tenant_id, t.id, t.worktree_path.clone()?)))
             .collect())
     }
 

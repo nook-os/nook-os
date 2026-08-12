@@ -6,6 +6,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev curl git tmux bash procps openssh-client \
     && rm -rf /var/lib/apt/lists/*
 RUN cargo install cargo-watch --locked
+
+# Usable by whatever UID compose runs this as (MAIN-537 AC-1). The services in
+# this stack write into a bind-mounted checkout, so they run as the HOST user —
+# which owns nothing in the image, and cargo's first act is to take the package
+# cache lock inside CARGO_HOME. World-writable is a dev-image trade nobody makes
+# in production: the alternative is baking a uid, and the host's is not knowable
+# at build time.
+RUN chmod -R a+rwX "$CARGO_HOME"
 WORKDIR /app
 
 # The dev NODE, on top of the same base: the loop toolchain a build run shells
@@ -45,6 +53,14 @@ RUN mkdir -p -m 755 /etc/apt/keyrings \
          > /etc/apt/sources.list.d/github-cli.list \
     && apt-get update && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
+
+# What the entrypoint and the node write as the host user (MAIN-537 AC-1): the
+# `nook` symlink it re-makes on every start, its HOME, and the mount points of
+# the two named volumes. A volume Docker initializes from a directory that is
+# not there arrives root-owned and unwritable, so these exist HERE rather than
+# being created by the first container to want them.
+RUN mkdir -p /root/.config/nook /workspace \
+    && chmod -R a+rwX /root /workspace /usr/local/bin
 
 # Fail the BUILD if the toolchain is incomplete, as operator-node.Dockerfile
 # does — a renamed package or a failed installer must never ship as a node that

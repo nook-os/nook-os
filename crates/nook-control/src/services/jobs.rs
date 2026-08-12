@@ -2898,6 +2898,10 @@ pub async fn sweep_worktrees_on_node(
             nook_proto::ControlToNode::RemoveWorktree {
                 request_id,
                 worktree_path: (*path).clone(),
+                // No card records this tree, so nothing here knows what its
+                // branch was for; the branch outlives it (MAIN-537 AC-5 covers
+                // the trees a card DOES record).
+                delete_branch: false,
             }
         });
     }

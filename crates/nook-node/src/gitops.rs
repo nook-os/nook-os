@@ -513,6 +513,76 @@ pub fn push_current(checkout_path: &str, ssh_key_material: Option<&str>) -> OpOu
     }
 }
 
+/// Remove a build worktree and, when git agrees the branch it held is merged,
+/// free that branch too (MAIN-537 AC-5).
+///
+/// **`branch -d`, never `-D`.** "Is this merged" is a question git already
+/// answers from the refs it holds; our own version of it would be a second
+/// opinion nobody can audit, and the failure mode is the destruction of work
+/// that was never pushed. A refusal is reported and the branch stays.
+///
+/// The branch is read BEFORE the removal and deleted AFTER it, in that order by
+/// necessity: a branch checked out in a worktree cannot be deleted, and a
+/// removed worktree can no longer be asked what it was on.
+///
+/// Deliberately local: nothing here fetches first. A `--mirror` clone's
+/// `fetch --prune` deletes every local ref the remote no longer has, which on a
+/// node holding several cards' branches is exactly the wrong tool — so a mirror
+/// that has not seen the merge yet simply refuses, says so, and the next sweep
+/// tries again.
+pub fn remove_build_worktree(worktree_path: &str) -> OpOutcome {
+    let reclaimed = crate::loop_job::dir_bytes(Path::new(worktree_path));
+    let held = worktree_branch(worktree_path);
+    let repo = run_git(
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        Some(Path::new(worktree_path)),
+        None,
+    )
+    .ok();
+
+    let mut outcome = remove_worktree(worktree_path);
+    if !outcome.ok {
+        return outcome;
+    }
+    outcome.message = format!(
+        "{} ({} reclaimed)",
+        outcome.message,
+        crate::loop_job::human_bytes(reclaimed)
+    );
+    outcome.message = format!(
+        "{}; {}",
+        outcome.message,
+        free_branch(repo.as_deref(), held)
+    );
+    outcome
+}
+
+/// The branch a worktree has checked out, or `None` when it is detached — the
+/// state a build tree is left in when a pass dies mid-preparation.
+fn worktree_branch(worktree_path: &str) -> Option<String> {
+    run_git(
+        &["symbolic-ref", "--quiet", "--short", "HEAD"],
+        Some(Path::new(worktree_path)),
+        None,
+    )
+    .ok()
+    .filter(|b| !b.is_empty())
+}
+
+/// What became of the branch, as the sentence the card carries (AC-7).
+fn free_branch(repo: Option<&str>, held: Option<String>) -> String {
+    let (Some(repo), Some(branch)) = (repo, held) else {
+        return "no branch to free — the worktree was detached".into();
+    };
+    match run_git(&["branch", "-d", &branch], Some(Path::new(repo)), None) {
+        Ok(_) => format!("deleted branch {branch}"),
+        Err(e) => format!(
+            "kept branch {branch} ({})",
+            e.lines().next().unwrap_or("").trim()
+        ),
+    }
+}
+
 pub fn remove_worktree(worktree_path: &str) -> OpOutcome {
     let dir = Path::new(worktree_path);
     if !dir.join(".git").exists() {
@@ -612,7 +682,10 @@ pub fn read_workspace_file(checkout_path: &str, name: &str) -> Result<Vec<u8>, S
 
 #[cfg(test)]
 mod tests {
-    use super::{add_worktree, commit_paths, repo_path_from_url, staging_path_ok};
+    use super::{
+        add_worktree, commit_paths, remove_build_worktree, repo_path_from_url, run_git,
+        staging_path_ok,
+    };
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -882,5 +955,145 @@ mod tests {
         assert!(!out.ok);
         assert!(out.message.contains("refusing to stage"), "{}", out.message);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A fixture the shape a build run leaves: a `--mirror` clone with a linked
+    /// worktree on the card's branch, exactly as `loop_job` builds it.
+    fn build_fixture(name: &str) -> Option<(std::path::PathBuf, String, String)> {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .map(|o| !o.status.success())
+            .unwrap_or(true)
+        {
+            eprintln!("skipping: git not on PATH");
+            return None;
+        }
+        let tmp = std::env::temp_dir().join(format!("nook537-{name}-{}", uuid::Uuid::now_v7()));
+        let remote = tmp.join("remote");
+        std::fs::create_dir_all(&remote).unwrap();
+        let git = |cwd: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "t@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "t@example.com")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&remote, &["init", "-b", "main"]);
+        std::fs::write(remote.join("README.md"), "# demo\n").unwrap();
+        git(&remote, &["add", "."]);
+        git(&remote, &["commit", "-m", "init"]);
+
+        let cache = tmp.join("cache.git");
+        git(
+            &tmp,
+            &[
+                "clone",
+                "--mirror",
+                &remote.to_string_lossy(),
+                &cache.to_string_lossy(),
+            ],
+        );
+        let wt = tmp.join("worktrees").join("build-card");
+        git(
+            &cache,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "main-537-card",
+                &wt.to_string_lossy(),
+                "main",
+            ],
+        );
+        Some((
+            tmp,
+            cache.to_string_lossy().to_string(),
+            wt.to_string_lossy().to_string(),
+        ))
+    }
+
+    fn branches(cache: &str) -> String {
+        run_git(
+            &["branch", "--format=%(refname:short)"],
+            Some(Path::new(cache)),
+            None,
+        )
+        .unwrap()
+    }
+
+    /// AC-5: the branch has nothing the mirror's HEAD does not already have, so
+    /// git agrees to free it and the card is told both things.
+    #[test]
+    fn a_merged_cards_branch_goes_with_its_worktree() {
+        let Some((tmp, cache, wt)) = build_fixture("merged") else {
+            return;
+        };
+        let outcome = remove_build_worktree(&wt);
+
+        assert!(outcome.ok, "{}", outcome.message);
+        assert!(!Path::new(&wt).exists(), "the worktree should be gone");
+        assert!(
+            outcome.message.contains("deleted branch main-537-card"),
+            "{}",
+            outcome.message
+        );
+        assert!(
+            outcome.message.contains("reclaimed"),
+            "the card is told what it got back: {}",
+            outcome.message
+        );
+        assert!(!branches(&cache).contains("main-537-card"));
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// AC-8's fourth case, and the one that must never become `-D`: work that
+    /// was never merged is refused BY GIT, the tree still goes, and the refusal
+    /// is what the card carries.
+    #[test]
+    fn an_unmerged_branch_survives_the_prune_that_takes_its_worktree() {
+        let Some((tmp, cache, wt)) = build_fixture("unmerged") else {
+            return;
+        };
+        std::fs::write(Path::new(&wt).join("new.txt"), "work\n").unwrap();
+        run_git(&["add", "."], Some(Path::new(&wt)), None).unwrap();
+        run_git(
+            &[
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "user.name=Test",
+                "commit",
+                "-m",
+                "unmerged work",
+            ],
+            Some(Path::new(&wt)),
+            None,
+        )
+        .unwrap();
+
+        let outcome = remove_build_worktree(&wt);
+
+        assert!(outcome.ok, "{}", outcome.message);
+        assert!(!Path::new(&wt).exists(), "the worktree should still go");
+        assert!(
+            outcome.message.contains("kept branch main-537-card"),
+            "{}",
+            outcome.message
+        );
+        assert!(
+            branches(&cache).contains("main-537-card"),
+            "unmerged work is not ours to delete"
+        );
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }

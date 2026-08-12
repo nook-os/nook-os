@@ -72,6 +72,24 @@ RUN mkdir -p -m 755 /etc/apt/keyrings \
     && apt-get update && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 
+# The dev stack runs this image as the HOST's uid/gid, because it bind-mounts
+# `.nook-secrets/claude` out of the checkout and a root-written session file
+# there is one more thing an ordinary user's prune cannot delete (MAIN-537
+# AC-1). Nothing here needs root; what it needs is for its HOME, its workspace
+# root and its tmux dir to exist with permissive modes, so that the named
+# volumes Docker initializes from them are writable by that uid.
+#
+# **Behind a build arg, and off by default.** This image is also the RELEASED
+# operator node, where it runs as root and `/root` holds the node's identity,
+# its `contexts.toml` and its generated SSH key — a world-writable HOME is not
+# something to ship for a convenience only a local stack needs. The directories
+# are created either way; only the mode is dev's.
+ARG NOOK_DEV_PERMISSIVE_DIRS=0
+RUN mkdir -p /root/.config/nook /workspace /var/lib/nook/tmux \
+    && if [ "$NOOK_DEV_PERMISSIVE_DIRS" = "1" ]; then \
+         chmod -R a+rwX /root /workspace /var/lib/nook; \
+       fi
+
 COPY --from=build /out/nook /usr/local/bin/nook
 COPY deploy/docker/operator-node-entrypoint.sh /usr/local/bin/node-entrypoint.sh
 RUN chmod +x /usr/local/bin/node-entrypoint.sh

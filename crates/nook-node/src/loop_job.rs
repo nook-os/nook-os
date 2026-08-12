@@ -771,7 +771,7 @@ fn ignored_by_repo(worktree: &Path, rels: &[String]) -> HashSet<String> {
 }
 
 /// Bytes held by a directory tree, links counted as links rather than followed.
-fn dir_bytes(dir: &Path) -> u64 {
+pub(crate) fn dir_bytes(dir: &Path) -> u64 {
     walkdir::WalkDir::new(dir)
         .into_iter()
         .filter_map(Result::ok)
@@ -813,7 +813,7 @@ fn reclaim_and_note(out: &Sender<NodeToControl>, job_id: &str, worktree: &Path) 
     }
 }
 
-fn human_bytes(n: u64) -> String {
+pub(crate) fn human_bytes(n: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut v = n as f64;
     let mut unit = 0;
@@ -1170,12 +1170,22 @@ fn remove_job_worktree(cache: &Path, worktree: &Path) -> Result<(), String> {
 
 /// Every build worktree this node currently holds, as absolute paths — what
 /// `LoopWorktreesHeld` reports so the control plane can order the removal of
-/// the ones it no longer records (MAIN-480 AC-1).
+/// the ones it no longer records (MAIN-480 AC-1) and of those whose card is
+/// over (MAIN-537 AC-4).
+///
+/// **A tree this node is building in right now is withheld.** The control plane
+/// removes any reported tree no card records, and there is a window between
+/// `git worktree add` and it persisting `LoopWorktreeReady` in which that is
+/// true of a live run's own working directory. MAIN-537 put this report on a
+/// ten-minute timer, so the window went from being sampled once per connect to
+/// 144 times a day — small odds either way, and the loss is a build's work.
+/// This node knows what it is running; nothing else does.
 pub fn build_worktrees_held(cfg: &NodeConfig) -> Vec<String> {
-    held_build_worktrees_in(&cache_base(&cfg.server).join("worktrees"))
+    let running = running_jobs().lock().map(|s| s.clone()).unwrap_or_default();
+    held_build_worktrees_in(&cache_base(&cfg.server).join("worktrees"), &running)
 }
 
-fn held_build_worktrees_in(wt_base: &Path) -> Vec<String> {
+fn held_build_worktrees_in(wt_base: &Path, running: &HashSet<String>) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(wt_base) else {
         return Vec::new();
     };
@@ -1183,6 +1193,7 @@ fn held_build_worktrees_in(wt_base: &Path) -> Vec<String> {
         .flatten()
         .filter(|e| e.path().is_dir())
         .filter(|e| e.file_name().to_str().is_some_and(is_build_dirname))
+        .filter(|e| !e.file_name().to_str().is_some_and(|d| running.contains(d)))
         .map(|e| e.path().to_string_lossy().to_string())
         .collect()
 }
@@ -3152,9 +3163,33 @@ mod tests {
         );
         assert!(!review.exists(), "every other kind is swept as before");
         assert_eq!(
-            held_build_worktrees_in(&wt_base),
+            held_build_worktrees_in(&wt_base, &HashSet::new()),
             vec![build.to_string_lossy().to_string()],
             "what it keeps, it reports — the control plane decides if it is still wanted"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// MAIN-537: the report is what the control plane removes from, and a tree
+    /// whose run has not yet reported `LoopWorktreeReady` is recorded by no card
+    /// — so reporting it while the run is live offers up a working directory
+    /// with a build in it. The node is the only side that knows.
+    #[test]
+    fn a_tree_this_node_is_building_in_is_not_reported() {
+        let tmp =
+            std::env::temp_dir().join(format!("nook-537-held-{}", uuid::Uuid::now_v7().simple()));
+        let wt_base = tmp.join("worktrees");
+        let live = build_dirname("ws-1", "MAIN-537");
+        let idle = build_dirname("ws-1", "MAIN-505");
+        std::fs::create_dir_all(wt_base.join(&live)).unwrap();
+        std::fs::create_dir_all(wt_base.join(&idle)).unwrap();
+
+        let running: HashSet<String> = [live].into_iter().collect();
+
+        assert_eq!(
+            held_build_worktrees_in(&wt_base, &running),
+            vec![wt_base.join(&idle).to_string_lossy().to_string()],
+            "only the tree no pass is using is offered for collection"
         );
         let _ = std::fs::remove_dir_all(&tmp);
     }
