@@ -6,13 +6,20 @@
 //! re-run (verdicted-head finality), the builder's repair query found nothing,
 //! and the epic runner rightly refused to merge. Two heals close that hole:
 //!
-//! - a CONFLICTING open PR re-enters the repair queue — `loop-changes-requested`
+//! - a CONFLICTING open PR re-enters the repair queue — a recorded
+//!   `changes_requested` at the conflicting head, `loop-changes-requested`
 //!   plus one comment per head, mirrored onto the linked card — so the builder
 //!   rebases it (the control plane NEVER rebases; it only routes the work);
 //! - a PR whose verdict label was stripped externally gets it restored from the
 //!   verdict this deployment itself recorded for the CURRENT head, and only
 //!   from that: one writer wins, and someone else's judgement is not ours to
 //!   reapply.
+//!
+//! The RECORD is the load-bearing half, and it was missing until MAIN-516: the
+//! repair queue reads the job ledger (`rejected_review_heads`), never the PR's
+//! labels, so a labelled PR with no recorded rejection was in a queue nothing
+//! could see it in. An approved PR that a merge made conflict does not move its
+//! head, so nothing ever re-triggered — a stable deadlock, observed on #407.
 //!
 //! This is deliberately not part of `run_reconcile`, whose whole contract is
 //! that it does not know what a pull request is.
@@ -80,6 +87,16 @@ pub fn plan(prs: &[PullRequest], recorded: &[RecordedVerdict]) -> Vec<Action> {
         // restored `loop-changes-requested` is already routed, and a restored
         // `needs-human-review` re-escalates rather than re-queues. A restored
         // `loop-approved` stays a candidate — the base may have moved under it.
+        //
+        // Since MAIN-516 a conflict records its own `changes_requested`, so a
+        // stripped label at an ALREADY-ANNOUNCED head is now restored here
+        // instead of being re-labelled by the conflict branch — and that branch
+        // is also where `mirror_to_card` retries a mirror that failed earlier.
+        // The retry is therefore given up for that pass. Deliberate, and narrow:
+        // it needs a failed mirror AND a label stripped afterwards, and buying
+        // it back would mean a `pr_details` round trip on every restore to learn
+        // what only the conflict branch needs to know. The next pass in which
+        // the label is absent AND no verdict restores it still retries.
         let routed = has("loop-changes-requested")
             || matches!(
                 restored,
@@ -110,11 +127,27 @@ fn closes_key(body: &str) -> Option<String> {
     })
 }
 
+/// What the recorded conflict row says it is, for anyone reading the job
+/// ledger: the cause, and the fact that no agent produced it (AC-6). The
+/// `review_verdict_source` column is the machine-readable half of the same
+/// statement.
+fn conflict_seed(pr: u64) -> String {
+    format!(
+        "PR #{pr} conflicts with its base branch — rebase required. Recorded by the \
+         control plane's pull-request hygiene pass: no review run was raised, no agent \
+         read this head, and there are no findings behind this verdict."
+    )
+}
+
 /// What one heal pass did, for the caller's log line.
 #[derive(Debug, Default)]
 pub struct Healed {
     pub restored: usize,
     pub marked: usize,
+    /// Conflicting heads returned to the repair queue AS THE QUEUE READS IT —
+    /// a recorded `changes_requested` (MAIN-516). `marked` counts the label,
+    /// which is a different write and can succeed or fail on its own.
+    pub recorded: usize,
 }
 
 /// Run both heals over one workspace's open PRs.
@@ -163,6 +196,51 @@ pub async fn heal(
                 // never treat it as either answer. A later pass asks again.
                 if details.mergeable != Some(false) {
                     continue;
+                }
+                // FIRST, before either forge write, because the label is
+                // one-way: once `loop-changes-requested` is on, `plan` calls
+                // the PR routed and no later pass reaches this branch again
+                // (NG-2). Labelling before recording is therefore the exact
+                // deadlock MAIN-516 exists to end — a PR in the repair queue
+                // by its label, and invisible to the queue's own query.
+                //
+                // The reverse partial failure is self-healing: a recorded row
+                // with no label is restored from that very verdict by the
+                // restore heal above, on the next pass.
+                let row = nook_types::JobId::new();
+                let why = conflict_seed(pr);
+                match state
+                    .jobs
+                    .record_conflict_rejection(crate::repo::jobs::ConflictRejection {
+                        id: row,
+                        tenant,
+                        workspace,
+                        requested_by,
+                        pr: pr as i64,
+                        head: head.clone(),
+                        seed: why.clone(),
+                    })
+                    .await
+                {
+                    Ok(true) => {
+                        healed.recorded += 1;
+                        // The transcript is where a person looks to see what a
+                        // run did, and this one has nothing to show. Say so, or
+                        // an empty transcript beside a verdict reads as an
+                        // agent that reviewed and found nothing.
+                        crate::services::jobs::append_transcript(state, row, "system", &why)
+                            .await
+                            .ok();
+                        tracing::info!(%workspace, pr, head = %head, "recorded a conflict rejection — the repair queue can see this PR");
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        // Do not label what the queue cannot read: leaving the
+                        // PR untouched costs one pass, where labelling it costs
+                        // every future pass.
+                        tracing::warn!(%workspace, pr, error = %e, "could not record the conflict rejection");
+                        continue;
+                    }
                 }
                 let marker = format!("{CONFLICT_MARK} {head}");
                 let announced = match forge.issue_comment_bodies(repo, pr).await {

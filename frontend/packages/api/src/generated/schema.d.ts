@@ -5536,6 +5536,14 @@ export interface components {
              */
             review_verdict?: string | null;
             /**
+             * @description WHO concluded the verdict (MAIN-516). `None` is an agent's own
+             *     judgement — every ordinary review. `conflict` is the control plane's:
+             *     the hygiene pass found the PR conflicting with its base and recorded the
+             *     `changes_requested` the repair queue reads, with no run, no agent and no
+             *     findings behind it. A verdict nobody reviewed must not read as one.
+             */
+            review_verdict_source?: string | null;
+            /**
              * @description The general idea the run starts from (MAIN-231) — the human's opening
              *     brief, set at create time and carried into the executor's session.
              *     `None` when the job was opened with nothing but its ticket.

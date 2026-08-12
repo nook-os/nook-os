@@ -248,6 +248,10 @@ async fn a_conflicted_pr_is_requeued_once_and_mirrored_to_its_card() {
     .await
     .unwrap();
     assert_eq!((healed.marked, healed.restored), (1, 0));
+    assert_eq!(
+        healed.recorded, 1,
+        "MAIN-516: the label alone was never the repair queue"
+    );
 
     let comments = forge.comments_of(5);
     assert_eq!(comments.len(), 1, "one conflict comment");
@@ -293,6 +297,12 @@ async fn a_conflicted_pr_is_requeued_once_and_mirrored_to_its_card() {
 
     // The label stripped at the SAME head while the comment stands: the label
     // comes back, the comment does not repeat, the card is not re-told.
+    //
+    // It comes back through the RESTORE heal now (MAIN-516), not through a
+    // second conflict check: the first pass recorded a `changes_requested` at
+    // this head, and a recorded verdict for the current head is exactly what
+    // the restore reads. Same label, same silence, one fewer forge round trip —
+    // which counter moves is the whole difference.
     let healed = pr_hygiene::heal(
         &state,
         &forge,
@@ -304,7 +314,12 @@ async fn a_conflicted_pr_is_requeued_once_and_mirrored_to_its_card() {
     )
     .await
     .unwrap();
-    assert_eq!(healed.marked, 1);
+    assert_eq!((healed.restored, healed.marked), (1, 0));
+    assert_eq!(
+        forge.labels_of(5),
+        vec!["loop-changes-requested"],
+        "restored from the conflict's own recorded verdict"
+    );
     assert_eq!(forge.comments_of(5).len(), 1, "still one PR comment");
     assert_eq!(
         card_comments(&bed, f.task).await.len(),

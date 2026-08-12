@@ -12592,6 +12592,13 @@
             ],
             "description": "What a review run CONCLUDED: `approved` | `changes_requested` |\n`needs_human` | `skipped`. `None` means it concluded nothing — however\nthe process exited — and such a run does not count as having reviewed\nits head."
           },
+          "review_verdict_source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "WHO concluded the verdict (MAIN-516). `None` is an agent's own\njudgement — every ordinary review. `conflict` is the control plane's:\nthe hygiene pass found the PR conflicting with its base and recorded the\n`changes_requested` the repair queue reads, with no run, no agent and no\nfindings behind it. A verdict nobody reviewed must not read as one."
+          },
           "seed": {
             "type": [
               "string",
