@@ -484,11 +484,12 @@ pub async fn converge_builds(
     // The workspace's declared ceiling (MAIN-461, landed): unset means the
     // default of one, 0 is the workspace-level kill-switch.
     let ceiling = ws.build_max_replicas.unwrap_or(1).max(0) as usize;
-    let rejected_heads: std::collections::HashMap<i64, String> = state
+    let rejected_heads: std::collections::HashMap<i64, crate::repo::jobs::RejectedHead> = state
         .jobs
         .rejected_review_heads(tenant, workspace)
         .await?
         .into_iter()
+        .map(|r| (r.review_pr_number, r))
         .collect();
     // MAIN-489 AC-5: the manual trigger overrules the loop's OWN escalation —
     // a card it labelled `blocked` after three runs concluded nothing — and

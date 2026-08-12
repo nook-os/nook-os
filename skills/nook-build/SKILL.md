@@ -1,7 +1,7 @@
 ---
 name: nook-build
 description: "Build the one NookOS card a run is directed at, end to end: read the contract, implement it in a branch, verify, open a PR, and report the outcome. Judgment only — the control plane picks, claims, moves cards and records. Designed for directed build runs; never merges."
-version: 2.2.0
+version: 2.3.0
 author: NookOS
 license: MIT
 platforms: [linux, macos]
@@ -61,16 +61,24 @@ If the card already records a PR, this run is a repair, not a rebuild — §2.
 A card whose `nook task` output shows a **`pr:` line** is not new work: a PR
 exists, and this run exists to REPAIR it. The control plane raises these runs
 when the PR carries `loop-changes-requested` (a reviewer's verdict, or the
-conflict hygiene pass routing a rebase here).
+hygiene pass routing a rebase here — for a conflict, or for an ejection from
+the merge queue).
 
-- The run's contract is on the PR, under one of two comment markers:
+- The run's contract is on the PR, under one of three comment markers:
   - **`Loop review of COMMIT_SHA`** — a reviewer's verdict. Fix **only** its
     "Must fix before merge" items. Should-fix items are welcome only when
     they do not widen the diff's scope.
   - **`Loop conflict check of <head>`** — the conflict hygiene pass. The
     contract is exactly a rebase: bring in the default branch by rebase,
     resolve, and re-verify. No verdict findings to work through.
-- When both are present, rebase first, then apply the newest verdict's
+  - **`Loop queue ejection of <head>`** — the merge queue threw this PR out
+    because the build of it MERGED INTO the current default branch failed.
+    **This branch's own checks are green and re-running them proves nothing** —
+    that build exists nowhere but the queue. The contract is: rebase onto the
+    current default branch, find what the two changes do to each other, fix it,
+    and make the checks pass ON THE REBASED BRANCH. Ending a pass because "the
+    tests already pass" is the one wrong answer here. No verdict findings.
+- When more than one is present, rebase first, then apply the newest verdict's
   must-fix list **only if that verdict names the branch's current head** — a
   verdict for an older head was already answered by the amends that moved it,
   and re-working it repeats finished work.

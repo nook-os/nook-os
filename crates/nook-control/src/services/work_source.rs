@@ -131,6 +131,28 @@ pub fn repair_fingerprint(head_sha: &str) -> String {
     format!("repair:{head_sha}")
 }
 
+/// What the builder is TOLD a repair is for — the run's seed, and the first
+/// line of its transcript.
+///
+/// A reviewer's `changes_requested` and a merge conflict need no explaining
+/// here: both leave their contract on the pull request, where the builder's
+/// repair pass reads it. A QUEUE EJECTION is the one that does (MAIN-542
+/// AC-5), because the thing that failed is not a thing this branch can run:
+/// the PR's own checks are green, and a builder that goes looking at them
+/// concludes there is nothing to fix and hands the card back.
+pub fn repair_label(pr: u64, source: Option<&str>) -> String {
+    if source == Some(crate::repo::jobs::EJECTION_VERDICT_SOURCE) {
+        return format!(
+            "repair PR #{pr} — the merge queue EJECTED it. Its own checks passed against the \
+             base it was branched from; the build the queue ran against the CURRENT base \
+             branch failed, and that build runs nowhere else. Rebase onto the current base \
+             branch and make the checks pass THERE — re-running this branch's own checks \
+             will show nothing wrong."
+        );
+    }
+    format!("repair PR #{pr}")
+}
+
 /// Build work: the board's approved cards, one run each — plus REPAIR items,
 /// cards whose recorded PR carries `loop-changes-requested` at a head no
 /// repair run has answered (MAIN-458 AC-1).
@@ -141,11 +163,12 @@ pub struct BuildWork<'a> {
     pub viewer: UserId,
     pub demand: &'a crate::services::forge::ReviewDemand,
     pub token: Option<String>,
-    /// Per PR: the newest head a `changes_requested` review REJECTED — what a
-    /// repair item is fingerprinted on. Never the PR's current head, which
-    /// the repair's own push moves: that fingerprint would clear its own
-    /// answer and raise a second repair before any reviewer looked.
-    pub rejected_heads: std::collections::HashMap<i64, String>,
+    /// Per PR: the newest head a `changes_requested` REJECTED, and what
+    /// rejected it — what a repair item is fingerprinted on, and what it is
+    /// labelled with. Never the PR's current head, which the repair's own push
+    /// moves: that fingerprint would clear its own answer and raise a second
+    /// repair before any reviewer looked.
+    pub rejected_heads: std::collections::HashMap<i64, crate::repo::jobs::RejectedHead>,
     /// A card the manual trigger named AND the loop itself escalated — the one
     /// case where the `blocked` exclusion stands down, see
     /// [`BuildWork::fresh_items`]. `None` on the reconciler's own passes, and
@@ -260,8 +283,8 @@ impl BuildWork<'_> {
                     // outcome can never overwrite the record that the card's
                     // content was already built.
                     key: -number,
-                    fingerprint: repair_fingerprint(rejected),
-                    label: format!("repair PR #{pr_number}"),
+                    fingerprint: repair_fingerprint(&rejected.review_head_sha),
+                    label: repair_label(pr_number, rejected.review_verdict_source.as_deref()),
                     target_task_id: Some(task),
                     // The card already sits claimed-and-parked in In Review;
                     // re-claiming would drag the board under a human's feet.
@@ -309,6 +332,26 @@ mod fingerprint_tests {
         assert_ne!(a, card_fingerprint("Retitled", Some("## AC-1")));
         // Absent and empty descriptions are the same contract.
         assert_eq!(card_fingerprint("t", None), card_fingerprint("t", Some("")));
+    }
+
+    /// MAIN-542 AC-5. Only the ejection needs explaining, and it needs the
+    /// whole explanation: a builder told "repair PR #7" re-runs this branch's
+    /// checks, finds them green, and concludes there is nothing to fix.
+    #[test]
+    fn a_queue_ejections_repair_says_what_actually_failed() {
+        let ejected = repair_label(7, Some(crate::repo::jobs::EJECTION_VERDICT_SOURCE));
+        assert!(ejected.starts_with("repair PR #7 —"));
+        assert!(ejected.contains("merge queue EJECTED it"));
+        assert!(ejected.contains("CURRENT base branch"));
+        assert!(ejected.contains("Rebase onto the current base branch"));
+
+        // A reviewer's own rejection and a conflict both leave their contract
+        // on the pull request, where the builder's repair pass reads it.
+        assert_eq!(repair_label(7, None), "repair PR #7");
+        assert_eq!(
+            repair_label(7, Some(crate::repo::jobs::CONFLICT_VERDICT_SOURCE)),
+            "repair PR #7"
+        );
     }
 
     /// A new rejected head re-raises; an unchanged one does not — and a card
