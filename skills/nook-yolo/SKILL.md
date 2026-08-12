@@ -1,7 +1,7 @@
 ---
 name: nook-yolo
 description: "Merge the workspace's loop-approved PRs, unattended, all night. Consumes what the build and review loops produce and lands what their evidence clears — board-wide, not one epic. Runs NO builds and NO reviews itself, writes no code, and never pushes. Skips and records anything it cannot land; never halts the night."
-version: 1.1.0
+version: 1.2.0
 author: NookOS
 license: MIT
 platforms: [linux, macos]
@@ -93,8 +93,8 @@ still reach Done, or the board lies all night.
 For every ticket in this workspace sitting in **In Review** (or any non-completed
 column) whose PR is **merged**:
 
-- Move the card to Done (`POST /api/v1/tasks/KEY/move`, `{"column":"Done"}`).
-- Prune its worktree if one is recorded (`POST /api/v1/tasks/KEY/prune-worktree`).
+- `nook issues move KEY completed` — the card lands in Done.
+- `nook issues prune-worktree KEY` if one is recorded.
 - `nook comment KEY "Reconciled: PR <url> is merged; card moved to Done."`
 
 This is granted autonomy, not a judgment call: the merge is already real, so the

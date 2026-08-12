@@ -1,7 +1,7 @@
 ---
 name: nook-review
 description: "Review open PRs against their linked NookOS board issue and required GitHub checks, then post a three-group verdict with loop labels. Use when asked to run the loop's reviewer or review its PR queue. Designed for /loop; never merges or pushes code."
-version: 1.5.0
+version: 1.6.0
 author: NookOS
 license: MIT
 platforms: [linux, macos]
@@ -193,13 +193,12 @@ verdict line yourself. What remains yours is the card's LABEL state:
 nook label <KEY> <the verdict label>          # and --remove the one it replaces
 ```
 
-Attach and detach are idempotent once the label names exist
-(`POST /api/v1/labels` returns the existing row, so ensuring them is safe to
-re-run). A pre-existing `needs-human-review` on the card survives an otherwise
-clean pass — it may be a separate human gate. **Mirroring is best-effort**: if
-a board call fails, say so and carry on — the posted verdict is the record of
-truth — but never silently, or the build loop reads a card that looks
-unreviewed.
+Attach and detach are idempotent: re-applying a label the card already carries
+changes nothing and records no event, so a retried pass is safe. A pre-existing
+`needs-human-review` on the card survives an otherwise clean pass — it may be a
+separate human gate. **Mirroring is best-effort**: if a board call fails, say so
+and carry on — the posted verdict is the record of truth — but never silently,
+or the build loop reads a card that looks unreviewed.
 
 ## 5. Hard limits
 

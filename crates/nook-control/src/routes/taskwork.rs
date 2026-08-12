@@ -5,7 +5,7 @@ use axum::Json;
 use nook_types::*;
 
 use crate::auth::AuthCtx;
-use crate::error::ApiResult;
+use crate::error::{ApiError, ApiResult};
 use crate::services::taskwork;
 use crate::state::AppState;
 
@@ -116,7 +116,8 @@ pub async fn renew_claim(
     operation_id = "task_move",
     params(("id" = String, Path,)),
     request_body = MoveTaskRequest,
-    responses((status = 200, body = TaskItem)))]
+    responses((status = 200, body = TaskItem),
+              (status = 422, description = "`column` and `column_type` together, or neither")))]
 pub async fn move_task(
     State(state): State<AppState>,
     auth: AuthCtx,
@@ -125,7 +126,19 @@ pub async fn move_task(
 ) -> ApiResult<Json<TaskItem>> {
     let id =
         crate::services::tasks::resolve_id(state.tasks.as_ref(), auth.tenant_id, &ident).await?;
-    Ok(Json(
-        taskwork::move_task(&state, auth.tenant_id, id, &req.column).await?,
-    ))
+    let moved = match (req.column.as_deref(), req.column_type.as_deref()) {
+        (Some(name), None) => taskwork::move_task(&state, auth.tenant_id, id, name).await?,
+        (None, Some(t)) => taskwork::move_task_to_type(&state, auth.tenant_id, id, t).await?,
+        // One sentence for both halves of the rule: a caller that sent neither
+        // and one that sent both are both owed the same statement of what was
+        // expected, and neither is owed a guess at which field wins.
+        _ => {
+            return Err(ApiError::Unprocessable(
+                "give exactly one of `column` (an exact column name) or `column_type` \
+                 (backlog|unstarted|started|review|completed|canceled)"
+                    .into(),
+            ))
+        }
+    };
+    Ok(Json(moved))
 }

@@ -1,7 +1,7 @@
 ---
 name: nook-epic-runner
 description: "Merge-manage one named epic: consume the PRs and verdicts the build/review loops produce, merge what their evidence clears, and close the epic with a follow-up issue when everything is in. Runs NO builds and NO reviews itself — it fully depends on the loops running outside it. The loop's only merge authority; stops for humans on anything meaningful."
-version: 1.3.0
+version: 1.4.0
 author: NookOS
 license: MIT
 platforms: [linux, macos]
@@ -105,9 +105,10 @@ Todo → In Progress → In Review → Done with no human touching the board.
 
 **Reconcile stragglers first.** Before looking at open PRs, find any child
 whose PR is already **merged** (whoever merged it — this run, a prior run, or
-a human by hand) but whose card is not in a completed column: move it to Done,
-prune its worktree, and comment the reconciliation on the ticket. The board
-must keep flowing even when merges happen outside the runner.
+a human by hand) but whose card is not in a completed column: `nook issues move
+KEY completed`, `nook issues prune-worktree KEY` if one is recorded, and comment
+the reconciliation on the ticket. The board must keep flowing even when merges
+happen outside the runner.
 
 Then, for each open PR closing one of this epic's children (oldest first),
 read its labels and its latest `Loop review of COMMIT_SHA` verdict, and act
@@ -266,7 +267,7 @@ and the default branch holds every merge:
    the default branch tip are green. Any discrepancy is a stop condition. A PR
    this run *queued* is not a PR that merged — it is still open, so the epic is
    simply not closeable yet, and that is a plain report rather than a stop.
-2. Close the epic: move it to the completed column and comment the closing
+2. Close the epic: `nook issues move NOOK-7 completed`, and comment the closing
    summary — issues merged (key → PR), decisions recorded, anything canceled.
 3. **File the follow-up issue** (the run's only write that isn't a merge or a
    board move): collect every "Should fix soon" group from the run's review

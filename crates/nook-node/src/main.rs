@@ -231,6 +231,15 @@ enum Command {
     /// A new noun group, per docs/cli-style.md — the top level stays frozen.
     #[command(subcommand)]
     Builds(BuildsCommand),
+    /// Board cards, by key — the verbs a skill used to reach for `curl` to
+    /// perform (MAIN-138).
+    ///
+    /// The CLI is the surface skills are meant to drive the board through: one
+    /// tested client, fewer tokens, and no hand-built request body to get
+    /// wrong. A new noun group, per docs/cli-style.md — the top level stays
+    /// frozen and none of the flat task verbs move.
+    #[command(subcommand)]
+    Issues(IssuesCommand),
     /// Epic-runner passes (MAIN-144): the loop's merge authority, one
     /// deliberate enqueue per pass.
     #[command(subcommand)]
@@ -699,6 +708,16 @@ async fn main() -> Result<()> {
         Command::Epics(EpicsCommand::Run { epic, seed }) => {
             cli::epics_run(&epic, seed.as_deref()).await
         }
+        Command::Issues(IssuesCommand::Move { key, state, column }) => {
+            cli::issues_move(&key, state.as_deref(), column.as_deref()).await
+        }
+        Command::Issues(IssuesCommand::Release { key }) => cli::issues_release(&key).await,
+        Command::Issues(IssuesCommand::PruneWorktree { key }) => {
+            cli::issues_prune_worktree(&key).await
+        }
+        Command::Issues(IssuesCommand::SetParent { key, parent }) => {
+            cli::issues_set_parent(&key, &parent).await
+        }
         Command::Tunnels(TunnelsArgs {
             command: Some(TunnelsCommand::List { json }),
             ..
@@ -1137,6 +1156,47 @@ enum EpicsCommand {
         /// An opening brief for the pass.
         #[arg(long)]
         seed: Option<String>,
+    },
+}
+
+/// `nook issues …` — the board verbs a skill drives a card with (MAIN-138).
+///
+/// Every one takes the card by KEY (`MAIN-42`) as well as by uuid, because a
+/// key is what an agent is handed.
+#[derive(clap::Subcommand)]
+enum IssuesCommand {
+    /// Move a card to the column that means <state> on its own board.
+    ///
+    /// The type form — `nook issues move MAIN-42 started` — is the one to
+    /// write: it survives a board that renamed its columns, which an exact
+    /// `--column "In Review"` does not.
+    Move {
+        /// The card, by key or uuid.
+        key: String,
+        /// backlog | unstarted | started | review | completed | canceled.
+        /// Omit only when giving --column.
+        state: Option<String>,
+        /// Target an EXACT column name instead, for a board whose columns do
+        /// not map onto the six types.
+        #[arg(long)]
+        column: Option<String>,
+    },
+    /// Give a claimed card back: clears the assignee, so it is pickable again.
+    Release {
+        /// The card, by key or uuid.
+        key: String,
+    },
+    /// Remove the worktree a card recorded, once its PR has landed.
+    PruneWorktree {
+        /// The card, by key or uuid.
+        key: String,
+    },
+    /// Re-file a card under an epic, or detach it.
+    SetParent {
+        /// The card, by key or uuid.
+        key: String,
+        /// The epic, by key or uuid — or `none` to detach it entirely.
+        parent: String,
     },
 }
 

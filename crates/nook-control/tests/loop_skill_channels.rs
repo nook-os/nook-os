@@ -62,8 +62,9 @@ fn interview_skills_route_job_mode_through_durable_interactions() {
 #[test]
 fn interview_skill_versions_were_bumped() {
     assert!(
-        skill("nook-spec").contains("version: 1.2.0"),
-        "nook-spec version must be bumped for the job-mode input channel"
+        skill("nook-spec").contains("version: 1.3.0"),
+        "nook-spec version must be bumped when its body changes — move this pin \
+         with the bump (1.2.0 was the job-mode input channel; 1.3.0 is MAIN-138)"
     );
     assert!(
         skill("nook-epic").contains("version: 2.4.0"),

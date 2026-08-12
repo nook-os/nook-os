@@ -13,9 +13,9 @@ This document is the convention, and
 **New commands land as `nook <plural-noun> <verb>`.**
 
 ```
-nook issues move MAIN-42 "In Review"      ✅  noun, then verb
+nook issues move MAIN-42 review           ✅  noun, then verb
 nook interactions ask "…"                 ✅
-nook move-issue MAIN-42 "In Review"       ❌  a thirty-first flat verb
+nook move-issue MAIN-42 review            ❌  a thirty-first flat verb
 ```
 
 Adding a top-level flat verb is prohibited. Adding a **noun group** is not —

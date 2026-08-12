@@ -37,6 +37,12 @@ pub enum ApiError {
     BadRequest(String),
     #[error("{0}")]
     Conflict(String),
+    /// The body parsed but says something the endpoint cannot act on — a 422
+    /// rather than a 400 so a caller can tell "I sent nonsense" apart from "I
+    /// sent two valid fields that contradict each other" (MAIN-138: `column`
+    /// and `column_type` together, or neither).
+    #[error("{0}")]
+    Unprocessable(String),
     /// Rate limited. A 429 rather than a 400: the request was fine, there were
     /// just too many of them, and a client that retries later will succeed.
     #[error("{0}")]
@@ -74,6 +80,7 @@ impl IntoResponse for ApiError {
             ApiError::NotFound => (StatusCode::NOT_FOUND, self.to_string()),
             ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m.clone()),
             ApiError::Conflict(m) => (StatusCode::CONFLICT, m.clone()),
+            ApiError::Unprocessable(m) => (StatusCode::UNPROCESSABLE_ENTITY, m.clone()),
             ApiError::TooManyRequests(m) => (StatusCode::TOO_MANY_REQUESTS, m.clone()),
             ApiError::PayloadTooLarge(m) => (StatusCode::PAYLOAD_TOO_LARGE, m.clone()),
             ApiError::SetupRequired(m) => (StatusCode::PRECONDITION_REQUIRED, m.clone()),
@@ -151,6 +158,11 @@ mod tests {
                 ApiError::Conflict("dupe".into()),
                 StatusCode::CONFLICT,
                 "dupe",
+            ),
+            (
+                ApiError::Unprocessable("contradictory".into()),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "contradictory",
             ),
             (
                 ApiError::TooManyRequests("slow".into()),

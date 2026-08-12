@@ -1,7 +1,7 @@
 ---
 name: nook-spec
 description: "Interview the user about a raw idea until confident, then file a build-ready issue on the NookOS board. Use when asked to run the loop's spec interview, draft a queue-ready issue, or plan a feature. A human answers — live at the terminal, or asynchronously when run as a detached loop job; never fully unattended."
-version: 1.2.0
+version: 1.3.0
 author: NookOS
 license: MIT
 platforms: [linux, macos]
@@ -262,9 +262,9 @@ When you spec a **chain** off an epic — decomposing it into the small buildabl
 issues the epic tracks — set `--parent` on **every** child so the whole chain is
 listable and the epic shows its progress. List an epic's tickets any time with
 `nook tasks --parent NOOK-7 --backlog` (a uuid or key), and `nook task NOOK-7`
-shows a Children section directly. Detach later with the `parent` field on a
-PATCH to `/api/v1/tasks/{id}` (`"parent": null`) — there is no CLI verb for that
-yet.
+shows a Children section directly. Detach later with `nook issues set-parent
+NOOK-42 none`, or re-file under another epic with `nook issues set-parent
+NOOK-42 NOOK-7`.
 
 ## Hard rule
 
