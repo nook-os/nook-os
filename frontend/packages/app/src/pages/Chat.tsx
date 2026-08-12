@@ -19,11 +19,13 @@ import {
   editMessage,
   listCategories,
   listChannels,
+  listCommands,
   listDms,
   markRead,
   me as chatMe,
   openDm,
   postMessage,
+  runCommand,
   sendTyping,
   toggleReaction,
   updateChannel,
@@ -532,6 +534,24 @@ export function ChatPage() {
     [send],
   );
 
+  // The commands this conversation offers (MAIN-529 AC-9). The SERVER's list,
+  // fetched per channel and handed to the composer as data — this page adds
+  // nothing to it and implements none of it. An ordinary query: the palette is
+  // worth no cache of its own (NG-6).
+  const commandsQuery = useQuery({
+    queryKey: ["chat", "commands", selectedId],
+    enabled: !!selectedId,
+    queryFn: () => listCommands(selectedId!),
+  });
+
+  // One call for every command there is or will be. A refusal is rethrown and
+  // rendered in the composer's log by ChatView (AC-7); a command that posted
+  // arrives by the ordinary live path, like any other message.
+  const onCommand = useCallback(
+    (name: string, args: string) => runCommand(selectedId!, name, args),
+    [selectedId],
+  );
+
   const names = useMemo(() => (meId ? { [meId]: "You" } : {}), [meId]);
   const messages = useMemo(
     () => buildChatMessages(history, live, pending, meId, names, newReplyIds),
@@ -713,6 +733,9 @@ export function ChatPage() {
             typing={typingLine}
             onTypingActivity={onTypingActivity}
             giphyKey={appConfig?.giphy_key}
+            commands={commandsQuery.data}
+            onCommand={onCommand}
+            conversationId={selectedId ?? undefined}
           />
           {threadParent && selectedId && (
             <ThreadPanel

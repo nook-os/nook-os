@@ -45,6 +45,10 @@ function toView(
     reactions: reactions.length > 0 ? reactions : undefined,
     edited: m.edited_at != null,
     deleted: m.deleted ?? false,
+    // What the message IS, as the SERVER marked it (MAIN-528/MAIN-529 AC-8).
+    // A kind this client does not know renders as ordinary prose, so the set
+    // can grow server-side without a release here.
+    action: m.kind === "action",
     // Chat semantics, not document semantics: `**bold**`, `` `code` `` and
     // links render, and a single newline stays the line break the person typed
     // (Shift+Enter). Until now the body rendered as raw text, so markdown a
