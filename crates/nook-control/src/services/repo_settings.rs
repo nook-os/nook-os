@@ -499,4 +499,74 @@ env  = "PORT"
             );
         }
     }
+
+    /// A service that writes into the checkout must not write into it as root
+    /// (MAIN-537 AC-1).
+    ///
+    /// Here beside the port guard because it is the same kind of rule about the
+    /// same file — a property of this repo's compose that no reviewer should
+    /// have to remember. What it prevents is specific and has happened: a build
+    /// worktree ended up holding 14,918 root-owned files, and the node that
+    /// created the tree, running as an ordinary user, could not delete it. Every
+    /// merged card then leaked its checkout, permanently.
+    ///
+    /// Keyed on bind mounts because that is exactly the reach: a named volume
+    /// lives in Docker's own storage and `down -v` collects it whatever its
+    /// owner, while a `./` source is a directory on the host that outlives the
+    /// container and belongs to whoever wrote it.
+    #[test]
+    fn every_service_that_bind_mounts_the_checkout_runs_as_the_host_user() {
+        let compose = include_str!("../../../../docker-compose.yml");
+        const USER: &str = r#"user: "${NOOK_UID:-1000}:${NOOK_GID:-1000}""#;
+
+        let mut service = String::new();
+        let mut declares_user = false;
+        let mut binds_checkout = false;
+        let mut offenders: Vec<String> = Vec::new();
+        let close = |service: &str, binds: bool, user: bool, offenders: &mut Vec<String>| {
+            if binds && !user {
+                offenders.push(service.to_string());
+            }
+        };
+        let mut in_services = false;
+        for line in compose.lines() {
+            let indent = line.len() - line.trim_start().len();
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if indent == 0 {
+                in_services = trimmed == "services:";
+                close(&service, binds_checkout, declares_user, &mut offenders);
+                service.clear();
+                continue;
+            }
+            if !in_services {
+                continue;
+            }
+            // A service key: two spaces in, ends in a colon, nothing after it.
+            if indent == 2 && trimmed.ends_with(':') && !trimmed.contains(' ') {
+                close(&service, binds_checkout, declares_user, &mut offenders);
+                service = trimmed.trim_end_matches(':').to_string();
+                declares_user = false;
+                binds_checkout = false;
+                continue;
+            }
+            declares_user |= trimmed == USER;
+            // `- .:/app`, `- ./frontend:/app/frontend` — a source on the host.
+            binds_checkout |= trimmed.starts_with("- .") && trimmed.contains(':');
+        }
+        close(&service, binds_checkout, declares_user, &mut offenders);
+
+        assert!(
+            offenders.is_empty(),
+            "these services bind-mount the checkout and would write into it as root: {offenders:?} \
+             — add `{USER}`, or the build worktrees they touch can never be pruned"
+        );
+        // The guard is only worth having if it can SEE the services it guards.
+        assert!(
+            compose.matches(USER).count() >= 6,
+            "the compose file should still declare the host user on every bind-mounting service"
+        );
+    }
 }

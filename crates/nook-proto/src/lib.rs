@@ -625,9 +625,17 @@ pub enum ControlToNode {
     /// The node brings the worktree's compose stack down FIRST (MAIN-507 AC-3):
     /// the project name is derived from this directory, so after git takes the
     /// tree away nothing can name the containers it left running.
+    ///
+    /// `delete_branch` also frees the branch the tree held, with git's own
+    /// `branch -d` (MAIN-537 AC-5) — asked for only where the tree is a build's
+    /// and the card is over, never on a human's own checkout. `#[serde(default)]`
+    /// so a node running an older build parses the message and does what it did
+    /// before: remove the directory and leave the branch.
     RemoveWorktree {
         request_id: uuid::Uuid,
         worktree_path: String,
+        #[serde(default)]
+        delete_branch: bool,
     },
     /// Bring build worktree compose projects down, volumes and all (MAIN-507).
     ///

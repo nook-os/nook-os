@@ -373,9 +373,16 @@ pub async fn prune_worktree(
     // clear it while the machine is down would leave the work unplaceable with
     // no way out. The directory is not lost: the node reports what it holds on
     // its next connect and is told to remove anything no card records.
-    let removal = remove_worktree_on_node(state, node_id, &path).await;
+    // Whether the branch goes with the tree is decided by the SAME test the
+    // reaper uses — is this a build worktree — rather than by which surface
+    // asked. A human pruning a finished card's build tree from the board meant
+    // the same thing the reaper means, and git still refuses an unmerged branch
+    // (MAIN-537 AC-5). A human's own checkout names no project and keeps its
+    // branch, which is the point of the checkout.
+    let build_tree = !nook_proto::compose::build_stack_projects(&path).is_empty();
+    let removal = remove_worktree_on_node(state, node_id, &path, build_tree).await;
     let unreachable = match removal {
-        Ok(()) => None,
+        Ok(_) => None,
         Err(e) => {
             tracing::warn!(
                 task = %task_id.0, node = %node_id.0, path = %path, error = %e,
@@ -401,21 +408,29 @@ pub async fn prune_worktree(
     Ok(updated)
 }
 
-/// Ask the node to remove a worktree, waiting for its answer.
+/// Ask the node to remove a worktree, waiting for its answer. `Ok` carries what
+/// the node did, which is what the card's report is written from (MAIN-537
+/// AC-7).
+///
+/// `delete_branch` asks it to free the branch the tree held as well (AC-5) —
+/// true only for the reaper's build-worktree prune, never for a human's own
+/// checkout, where the branch is the point of the checkout and not its leavings.
 ///
 /// Every failure is one value — offline, silent, disconnected, or a refusal
-/// from git itself — because the caller treats them identically: the record is
-/// cleared regardless and the reason is logged.
-async fn remove_worktree_on_node(
+/// from git itself — because the manual caller treats them identically: the
+/// record is cleared regardless and the reason is logged.
+pub(crate) async fn remove_worktree_on_node(
     state: &AppState,
     node_id: NodeId,
     path: &str,
-) -> Result<(), String> {
+    delete_branch: bool,
+) -> Result<String, String> {
     let rx = state
         .registry
         .request_op(node_id, |request_id| ControlToNode::RemoveWorktree {
             request_id,
             worktree_path: path.to_string(),
+            delete_branch,
         })
         .ok_or_else(|| "node is offline".to_string())?;
     let op = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
@@ -423,7 +438,7 @@ async fn remove_worktree_on_node(
         .map_err(|_| "node did not answer in time".to_string())?
         .map_err(|_| "node disconnected".to_string())?;
     if op.ok {
-        Ok(())
+        Ok(op.message)
     } else {
         Err(format!("prune failed: {}", op.message))
     }

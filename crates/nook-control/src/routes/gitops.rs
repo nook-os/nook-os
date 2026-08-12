@@ -552,6 +552,8 @@ pub async fn remove_worktree(
         .request_op(req.node_id, |request_id| ControlToNode::RemoveWorktree {
             request_id,
             worktree_path: req.path.clone(),
+            // A human removing a checkout said nothing about its branch.
+            delete_branch: false,
         })
         .ok_or_else(|| ApiError::BadRequest("node is offline".into()))?;
     let payload = tokio::time::timeout(std::time::Duration::from_secs(30), rx)

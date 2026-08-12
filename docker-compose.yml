@@ -1,6 +1,19 @@
 # NookOS dev stack — Docker FIRST. One command brings up everything; source
 # is bind-mounted and rebuilt by cargo watch / Vite INSIDE the containers.
 # `docker compose down -v` destroys everything; `./run.sh` recreates it.
+#
+# EVERY SERVICE THAT BIND-MOUNTS THIS DIRECTORY RUNS AS THE HOST'S UID/GID
+# (MAIN-537 AC-1). A container writing into a bind mount writes as ITS user, so
+# a stack booted as root filled the checkout with root-owned files — 14,897 of
+# them under `frontend/` in one build worktree — and the node, an ordinary user,
+# then could not delete its own build tree: the prune failed with `Permission
+# denied (os error 13)` and finished cards' checkouts accumulated for good.
+#
+# `scripts/dev-bootstrap.sh` writes the real numbers into `.env`; the default
+# below is the ordinary first user on a Linux host, so a plain clone that never
+# ran the bootstrap behaves as it did. **A stack from before this change must be
+# recreated** (`./run.sh`, or `docker compose down -v`): the named volumes below
+# were initialized root-owned and a non-root container cannot write them.
 services:
   postgres:
     image: postgres:16-alpine
@@ -87,6 +100,7 @@ services:
       - "${NOOK_MAILPIT_PORT:-8025}:8025" # Web UI — open http://localhost:8025 to read dev mail
 
   control-plane:
+    user: "${NOOK_UID:-1000}:${NOOK_GID:-1000}"
     # On BOTH networks: the default one it shares with postgres/web/node, and
     # the `operator` one, which is the operator node's only way out (MAIN-141).
     networks:
@@ -194,6 +208,7 @@ services:
   # owns its tables in the `chat` schema, and validates NookOS sessions via the
   # shared nook-auth crate. cargo-watch rebuilds it on save, like control-plane.
   chat:
+    user: "${NOOK_UID:-1000}:${NOOK_GID:-1000}"
     build:
       context: .
       dockerfile: deploy/docker/dev-rust.Dockerfile
@@ -227,6 +242,7 @@ services:
   # port and no healthcheck — cargo-watch rebuilds it on save like the others,
   # and it shares the control plane's cargo target so it stays warm.
   worker:
+    user: "${NOOK_UID:-1000}:${NOOK_GID:-1000}"
     build:
       context: .
       dockerfile: deploy/docker/dev-rust.Dockerfile
@@ -262,6 +278,7 @@ services:
         condition: service_healthy
 
   node:
+    user: "${NOOK_UID:-1000}:${NOOK_GID:-1000}"
     build:
       context: .
       dockerfile: deploy/docker/dev-rust.Dockerfile
@@ -329,6 +346,15 @@ services:
   # (via NOOK_DEV_JOIN_TOKEN, seeded by the control plane from .env); identity,
   # checkouts, and tmux live on named volumes so a restart re-attaches (AC-5).
   operator-node:
+    user: "${NOOK_UID:-1000}:${NOOK_GID:-1000}"
+    build:
+      context: .
+      dockerfile: deploy/docker/operator-node.Dockerfile
+      # Only a stack running this image as a non-root host user needs its HOME,
+      # workspace root and tmux dir group/other-writable. The released image
+      # runs as root and ships them tight (MAIN-537).
+      args:
+        NOOK_DEV_PERMISSIVE_DIRS: "1"
     # ONLY the `operator` network (MAIN-141): the agent workloads this node runs
     # can reach the control plane and the public internet, and cannot resolve —
     # let alone reach — postgres, mailpit, web, or the plain node. That is the
@@ -340,13 +366,18 @@ services:
     # and the chart's policy subtracts every private range there.
     networks:
       - operator
-    build:
-      context: .
-      dockerfile: deploy/docker/operator-node.Dockerfile
     # tini as PID 1 — reaps the tmux server daemons that reparent to PID 1 (see
     # the `node` service). Same reason, same one-line fix.
     init: true
     environment:
+      # Docker resolves the exec user against /etc/passwd, and a numeric uid
+      # this image has no entry for gets `HOME=/` — which is root-owned 0755 and
+      # not where the identity volume is mounted. Stated rather than left to the
+      # entrypoint's `${HOME:-/root}`, which never fires against a HOME that IS
+      # set, just set wrong: without this the node cannot write node.toml, the
+      # container exits under `set -e`, and a restart would re-join as a brand
+      # new node.
+      HOME: /root
       NOOK_SERVER: http://control-plane:8080
       NOOK_JOIN_TOKEN: ${NOOK_DEV_JOIN_TOKEN:-}
       NOOK_NODE_NAME: dev-operator
@@ -408,9 +439,20 @@ services:
 
   web:
     image: node:22-slim
+    user: "${NOOK_UID:-1000}:${NOOK_GID:-1000}"
     working_dir: /app/frontend
-    command: sh -c "corepack enable && pnpm install && pnpm --filter @nookos/web dev"
+    # corepack's shims go to a writable directory rather than /usr/local/bin,
+    # and pnpm's store and cache to a mounted HOME, because this container is no
+    # longer root (see the header). Without the mounted HOME the store would be
+    # re-fetched into a throwaway layer on every boot.
+    command: >
+      sh -c "mkdir -p $$HOME/bin
+             && corepack enable --install-directory $$HOME/bin
+             && export PATH=$$HOME/bin:$$PATH
+             && pnpm install
+             && pnpm --filter @nookos/web dev"
     environment:
+      HOME: /home/web
       NOOK_API_PROXY: http://control-plane:8080
       NOOK_CHAT_PROXY: http://chat:8082
       # The browser arrives on the LEASED host port; Vite still binds 5173
@@ -423,6 +465,9 @@ services:
     volumes:
       - ./frontend:/app/frontend
       - ./.cache/web-node-modules:/app/frontend/node_modules
+      # A writable HOME for corepack and the pnpm store. A bind rather than a
+      # named volume so it belongs to the host user, which is the whole point.
+      - ./.cache/web-home:/home/web
     depends_on:
       control-plane:
         condition: service_healthy

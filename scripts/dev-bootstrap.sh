@@ -31,6 +31,28 @@ else
   cp .env.example .env
 fi
 
+# Who the stack's containers run as (MAIN-537 AC-1). Every service that
+# bind-mounts this checkout runs as the HOST user, so that nothing a build writes
+# into its worktree is root-owned and an ordinary prune can delete it. Written
+# here, once, because compose interpolates `.env` and cannot call `id`.
+#
+# Recorded rather than defaulted: `${NOOK_UID:-1000}` in the compose file is
+# right for the ordinary first user on a Linux host and wrong for everyone else,
+# and "wrong" here means a container that cannot write its own target directory.
+for var in "NOOK_UID=$(id -u)" "NOOK_GID=$(id -g)"; do
+  name=${var%%=*}
+  if grep -qE "^${name}=" .env; then
+    say "$name already set in .env"
+  else
+    say "Recording $var in .env"
+    # A hand-edited .env may not end in a newline, and appending to its last
+    # line would produce a malformed one — at which point dotenvy stops parsing
+    # and everything BELOW the damage silently disappears.
+    [ -s .env ] && [ -n "$(tail -c 1 .env)" ] && printf '\n' >> .env
+    printf '%s\n' "$var" >> .env
+  fi
+done
+
 # The operator node joins with this token; without it the node starts and can
 # never join, which looks like a broken stack rather than a missing line. The
 # check is here rather than only in run.sh so `dev-up.sh` inherits it.
@@ -78,8 +100,25 @@ fi
 # with it, and they no longer depend on the compose project name — one checkout
 # used to warm three separate caches because run.sh and dev-up.sh derived
 # different project names. Created here so Docker does not invent them.
-for d in cargo-registry cargo-target cargo-target-node web-node-modules; do
+for d in cargo-registry cargo-target cargo-target-node web-node-modules web-home; do
   mkdir -p ".cache/$d"
 done
+
+# Same reasoning for the fleet's Claude session directory: Docker creates a
+# missing bind source as ROOT, and this one is inside the checkout — 21
+# root-owned files in a build worktree came from exactly that (MAIN-537).
+mkdir -p .nook-secrets/claude
+
+# A checkout that ran the stack BEFORE MAIN-537 has root-owned caches, written
+# by containers that were root. The services now run as you, so cargo cannot
+# take its package-cache lock and the boot dies in a way that names neither this
+# change nor a fix. Detected rather than repaired: the repair needs privileges
+# this script must never take by itself.
+if [ -n "$(find .cache .nook-secrets -mindepth 1 ! -user "$(id -u)" -print -quit 2>/dev/null)" ]; then
+  printf '\033[31m▲ .cache/.nook-secrets hold files owned by another user (root, from a pre-MAIN-537 stack)\033[0m\n' >&2
+  echo "  The containers now run as $(id -u):$(id -g) and cannot write them. Fix with:" >&2
+  echo "    sudo chown -R $(id -u):$(id -g) .cache .nook-secrets" >&2
+  echo "  (or delete .cache to rebuild the caches from scratch)" >&2
+fi
 
 say "Checkout ready — 'docker compose up -d' will start, or use ./scripts/dev-up.sh"

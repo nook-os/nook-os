@@ -1020,12 +1020,28 @@ async fn handle_message(
                 .await;
             }
         }
-        // A reconnecting node's inventory of build worktrees (MAIN-480 AC-1):
-        // it keeps every one this side still records and is told to remove the
-        // rest — including any pruned while it was unreachable.
+        // A node's inventory of the build worktrees it holds — on connect and
+        // then every ten minutes. Two questions of the same list: it keeps every
+        // tree this side still records and is told to remove the rest (MAIN-480
+        // AC-1), and then every tree it holds for a card that is OVER is pruned,
+        // stack first (MAIN-537 AC-4). The second is what collects the trees
+        // merged long before either existed.
         NodeToControl::LoopWorktreesHeld { paths } => {
             let _ = crate::services::jobs::sweep_worktrees_on_node(state, tenant, node_id, &paths)
                 .await;
+            // Detached, unlike its neighbour above, because a prune WAITS on the
+            // far end — a `compose down -v` per tree, up to two minutes each —
+            // and this task is the node's message loop. Blocking it would stall
+            // every heartbeat and every op result behind a disk cleanup.
+            let state = state.clone();
+            tokio::spawn(async move {
+                if let Err(e) =
+                    crate::services::stack_reaper::sweep_worktrees_on_node(&state, node_id, &paths)
+                        .await
+                {
+                    tracing::warn!(node = %node_id.0, error = %e, "could not sweep this node's finished worktrees");
+                }
+            });
         }
         // The same shape for the compose stacks those worktrees boot (MAIN-507
         // AC-5): the node lists what is running, this side keeps every stack an
