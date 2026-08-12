@@ -126,7 +126,12 @@ impl DmRepository for DbDmRepository {
         let rows: Vec<(Uuid, String)> = self
             .db
             .query_all(
-                "SELECT DISTINCT ON (u.person_id) u.person_id, u.display_name
+                // `GROUP BY` + `MIN`, not `DISTINCT ON` — the latter is
+                // Postgres-only and SQLite reports it as `near "ON"`
+                // (MAIN-439). `DISTINCT ON (x) … ORDER BY x, y` means "the row
+                // with the smallest y per x", and y is the only other column
+                // selected, so the minimum IS that row. Both engines compute it.
+                "SELECT u.person_id, MIN(u.display_name)
                    FROM users u
                    JOIN tenants t ON t.id = u.tenant_id
                   WHERE u.person_id <> $1
@@ -135,7 +140,8 @@ impl DmRepository for DbDmRepository {
                         JOIN tenants t2 ON t2.id = u2.tenant_id
                         WHERE u2.person_id = $1
                     )
-                  ORDER BY u.person_id, u.display_name",
+                  GROUP BY u.person_id
+                  ORDER BY u.person_id",
                 params![me],
             )
             .await?;
@@ -221,11 +227,17 @@ impl DmRepository for DbDmRepository {
         let rows: Vec<(Uuid, Option<String>)> = self
             .db
             .query_all(
-                "SELECT DISTINCT ON (pp.person_id) pp.person_id, u.display_name
+                // Same rewrite as `people_in_my_orgs` (MAIN-439). The LEFT JOIN
+                // makes `display_name` nullable, and the two spellings agree
+                // there too: Postgres sorts NULLs last under a plain ASC, so
+                // `DISTINCT ON` took the smallest non-NULL name and NULL only
+                // when every row had one — which is exactly what `MIN` returns.
+                "SELECT pp.person_id, MIN(u.display_name)
                    FROM chat_channel_participants pp
                    LEFT JOIN users u ON u.person_id = pp.person_id
                   WHERE pp.channel_id = $1
-                  ORDER BY pp.person_id, u.display_name",
+                  GROUP BY pp.person_id
+                  ORDER BY pp.person_id",
                 params![channel],
             )
             .await?;
