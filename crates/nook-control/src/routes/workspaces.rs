@@ -672,17 +672,13 @@ pub async fn review_loop_status(
     // — not a second lookup. The comment below anticipated this card, and its
     // point stands: reporting the ceiling while the loop converges on
     // `min(open_prs, ceiling)` would be the drift it warns about.
-    let open_prs = state
-        .review_demand
-        .open_prs(
-            id,
-            ws.git_remote_url.as_deref(),
-            crate::services::workspace_gh_token(&state, auth.tenant_id, id)
-                .await
-                .as_deref(),
-        )
-        .await;
-    let spec = recon::review_loop_spec(ws.review_loop_max_replicas, open_prs);
+    let gh_token = crate::services::workspace_gh_token(&state, auth.tenant_id, id).await;
+    let spec = recon::review_declaration(&state, &ws, gh_token.as_deref()).await;
+    // The node's ceiling is spent across the tenant's workspaces in ascending
+    // id order (MAIN-452), so reporting on one of them means replaying what the
+    // ones before it took. Without this a workspace on a full node reports the
+    // plan it would get if it had the fleet to itself.
+    let taken = recon::review_budget_before(&state, auth.tenant_id, id).await?;
     // The same call `pass()` makes, with the same purpose and the same slots —
     // so this reports the plan the loop acts on rather than a second opinion
     // that drifts when `review_loop_spec` changes.
@@ -697,6 +693,7 @@ pub async fn review_loop_status(
         // the pass's own spread is what keeps this a report rather than a
         // second opinion.
         recon::Spread::Sharded,
+        &taken,
     )
     .await?;
 

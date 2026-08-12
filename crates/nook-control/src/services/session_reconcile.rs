@@ -147,13 +147,77 @@ pub struct NodeFacts {
     /// [`jobs::CAPACITY_WHEN_UNREPORTED`] for the reason given there — the
     /// shipped default, not permission to take everything.
     pub max_loop_jobs: Option<u32>,
+    /// How much of that ceiling the workspaces planned BEFORE this one already
+    /// spent (MAIN-452). Not a property of the machine — it is what is LEFT of
+    /// the machine for the declaration being planned, which is why these facts
+    /// are re-derived per workspace instead of shared across a pass.
+    ///
+    /// Set by [`NodeBudget::applied_to`] and nowhere else. Zero for the first
+    /// workspace of a pass, and for every declaration that is not
+    /// [`Spread::Sharded`]: a per-checkout spec counts NODES and nothing about
+    /// it competes for a node's loop-job ceiling.
+    pub reserved: usize,
 }
 
 impl NodeFacts {
-    /// How many managed sessions of one declaration this node may hold.
+    /// How many managed sessions of one declaration this node may hold — the
+    /// ceiling less what the tenant's earlier workspaces already took.
     fn capacity(&self) -> usize {
-        self.max_loop_jobs
-            .unwrap_or(crate::services::jobs::CAPACITY_WHEN_UNREPORTED) as usize
+        (self
+            .max_loop_jobs
+            .unwrap_or(crate::services::jobs::CAPACITY_WHEN_UNREPORTED) as usize)
+            .saturating_sub(self.reserved)
+    }
+}
+
+/// One fleet's loop-job ceiling, spent across a tenant's workspaces (MAIN-452).
+///
+/// `max_loop_jobs` is a NODE's number, but planning happens one workspace at a
+/// time — [`reconcile_workspace`] reads its `actual` from a single workspace's
+/// live sessions. Without something carried between them the node's ceiling was
+/// applied afresh to each, so five workspaces at `max_replicas: 3` put fifteen
+/// agents on a box that declared three.
+///
+/// **Ascending workspace id decides who keeps the room when it runs out**, and
+/// that is the whole rule (AC-3). It is total, stable and already stored, so two
+/// replicas planning the same instant agree without a lease or a round of
+/// coordination. An "oldest declaration" rule would need a column nothing
+/// writes; round-robin would move a reviewer between repos every pass and
+/// repartition both of them for no gain (NG-1). The workspaces that do not fit
+/// report the gap as shortfall, exactly as a fleet with no loop node does.
+///
+/// **Scoped to one tenant's pass**, which is the boundary the reconciler
+/// already has: `actual`, the workspace list and the eligible nodes are all read
+/// per tenant, and `/review-loop-status` cannot replay a prefix it may not read.
+/// A node shared by two tenants (MAIN-353) is therefore still counted once per
+/// tenant here — the global count belongs to `job_dispatch`, which asks
+/// `in_flight_on_node` and refuses the claim.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NodeBudget {
+    spent: BTreeMap<NodeId, usize>,
+}
+
+impl NodeBudget {
+    /// The fleet as the NEXT workspace sees it: the same nodes, each carrying
+    /// what the workspaces before it took.
+    pub fn applied_to(&self, nodes: &[NodeFacts]) -> Vec<NodeFacts> {
+        nodes
+            .iter()
+            .map(|n| NodeFacts {
+                reserved: self.spent.get(&n.id).copied().unwrap_or(0),
+                ..n.clone()
+            })
+            .collect()
+    }
+
+    /// Spend one workspace's placements, so the next one plans against what is
+    /// left. Charged from [`Plan::per_node`] rather than from the plan's Start
+    /// actions: a session already running holds the node just as firmly as one
+    /// about to be started, and only the former produces no action.
+    pub fn charge(&mut self, plan: &Plan) {
+        for (node, sessions) in &plan.per_node {
+            *self.spent.entry(*node).or_default() += sessions;
+        }
     }
 }
 
@@ -224,6 +288,10 @@ pub struct Plan {
     /// an unexplained failure to converge — the cap is deliberate, and it is a
     /// different condition from a pending clone or an ineligible fleet.
     pub capped: bool,
+    /// How many managed sessions this plan wants on each node — held plus
+    /// started. What the tenant's next workspace has to plan around, and the
+    /// only number [`NodeBudget`] spends (MAIN-452).
+    pub per_node: BTreeMap<NodeId, usize>,
 }
 
 impl Plan {
@@ -472,6 +540,9 @@ fn plan_per_checkout(
     out.desired = slots.len() + needs_clone.len() + unmet_nodes;
     out.shortfall = needs_clone.len() + unmet_nodes;
     out.capped = capped;
+    for c in &slots {
+        *out.per_node.entry(c.node_id).or_default() += 1;
+    }
     out
 }
 
@@ -502,7 +573,18 @@ fn plan_sharded(
     actual: &[Actual],
     capped: bool,
 ) -> Plan {
-    let capacity = |n: &NodeFacts| if capped { 1 } else { n.capacity() };
+    // The port cap holds this workspace to one session per machine; the node's
+    // remaining ceiling holds every workspace together (MAIN-452). Whichever is
+    // smaller wins — a cap of one must not buy a place on a node another
+    // workspace has already filled.
+    let capacity = |n: &NodeFacts| {
+        let room = n.capacity();
+        if capped {
+            room.min(1)
+        } else {
+            room
+        }
+    };
     let target = match spec.replicas {
         Replicas::Count { count } => count as usize,
         Replicas::Single => 1,
@@ -615,6 +697,9 @@ fn plan_sharded(
 
     out.placed = desired.len();
     out.desired = target;
+    for (c, _) in &desired {
+        *out.per_node.entry(c.node_id).or_default() += 1;
+    }
     // Everything the declaration asked for that no node could host: a pending
     // clone, a fleet with no loop node at all, or a count past the capacity of
     // the ones there are (AC-6). Reported, never capped away.
@@ -834,7 +919,11 @@ pub async fn pass(state: &AppState, clones: &CloneThrottle) -> crate::error::Api
                 continue;
             }
         };
-        for ws in state.workspaces.list(tenant).await? {
+        // Who keeps the room when a node's `max_loop_jobs` runs out (MAIN-452):
+        // the workspaces are walked in ascending id, and each plans against
+        // what the ones before it took.
+        let mut fleet = NodeBudget::default();
+        for ws in workspaces_to_plan(state, tenant).await? {
             // NO ACCESS RECONCILIATION. A terminal you opened is yours, and the
             // control plane does not have an opinion about how many of them
             // there should be.
@@ -873,23 +962,26 @@ pub async fn pass(state: &AppState, clones: &CloneThrottle) -> crate::error::Api
             // (MAIN-456); the fleet variable is only the single-tenant
             // fallback.
             let gh_token = crate::services::workspace_gh_token(state, tenant, ws.id).await;
-            let open_prs = state
-                .review_demand
-                .open_prs(ws.id, ws.git_remote_url.as_deref(), gh_token.as_deref())
-                .await;
-            if let Err(e) = reconcile_workspace(
+            match reconcile_workspace(
                 state,
                 tenant,
                 ws.id,
-                &review_loop_spec(ws.review_loop_max_replicas, open_prs),
+                &review_declaration(state, &ws, gh_token.as_deref()).await,
                 clones,
                 ManagedPurpose::ReviewLoop,
                 Slots::ClonesOnly,
                 Spread::Sharded,
+                &fleet,
             )
             .await
             {
-                tracing::warn!(workspace = %ws.id, error = %e, "workspace clone reconcile failed");
+                // Spent before the next workspace is planned — that ordering IS
+                // the per-node ceiling (MAIN-452). A workspace that could not be
+                // planned placed nothing, so it charges nothing.
+                Ok(plan) => fleet.charge(&plan),
+                Err(e) => {
+                    tracing::warn!(workspace = %ws.id, error = %e, "workspace clone reconcile failed")
+                }
             }
 
             // A fleet that deployed BEFORE MAIN-455 still carries live tmux
@@ -1114,6 +1206,93 @@ pub(crate) fn review_loop_spec(max_replicas: Option<i32>, open_prs: Option<u32>)
     }
 }
 
+/// One workspace's review-loop declaration, as the pass builds it: the ceiling
+/// the repo declared, measured against the demand the forge reported (MAIN-448).
+///
+/// One definition for the pass, the status endpoint and the budget replay below
+/// — three readers of `min(open_prs, ceiling)` that must not be able to differ
+/// about which workspace fills a node.
+pub(crate) async fn review_declaration(
+    state: &AppState,
+    ws: &nook_types::Workspace,
+    gh_token: Option<&str>,
+) -> SessionSpec {
+    let open_prs = state
+        .review_demand
+        .open_prs(ws.id, ws.git_remote_url.as_deref(), gh_token)
+        .await;
+    review_loop_spec(ws.review_loop_max_replicas, open_prs)
+}
+
+/// The tenant's workspaces in the order they are PLANNED — ascending id, which
+/// is therefore who loses out when a node's ceiling runs out (MAIN-452 AC-3).
+///
+/// The read and the ordering together, so there is one place a caller can get
+/// this list from. `list()` orders by NAME, which a rename reshuffles; the pass
+/// and `/review-loop-status` disagreeing about the order would mean the status
+/// page reports a plan nobody is converging to.
+pub async fn workspaces_to_plan(
+    state: &AppState,
+    tenant: TenantId,
+) -> crate::error::ApiResult<Vec<nook_types::Workspace>> {
+    let mut workspaces = state.workspaces.list(tenant).await?;
+    workspaces.sort_by_key(|w| w.id.0);
+    Ok(workspaces)
+}
+
+/// What the workspaces planned BEFORE this one have already taken out of the
+/// fleet (MAIN-452).
+///
+/// A status endpoint reports on one workspace, but the number it reports comes
+/// out of a ceiling the tenant's other repos spend too — so it replays the
+/// prefix [`pass`] would have walked.
+///
+/// Reads only, and mostly database ones — but NOT only database ones. Each
+/// replayed workspace asks [`review_declaration`] for its forge count, which is
+/// served from `ReviewDemand`'s 60s cache only while the pass is warming it.
+/// This endpoint deliberately reports what WOULD converge with a gate down, and
+/// in exactly that state — as on a cold boot, or after the TTL expires — the
+/// prefix issues one live forge request per workspace, sequentially. Bounded by
+/// the TTL rather than free.
+///
+/// A prefix workspace that cannot be planned is WARNED and skipped, not
+/// propagated: [`pass`] carries on to the next workspace for the same failure,
+/// and an endpoint that 500s because some other repo is unplannable would be
+/// strictly more fragile than the loop it reports on. Skipping charges nothing,
+/// which is the same thing the pass does with it.
+pub(crate) async fn review_budget_before(
+    state: &AppState,
+    tenant: TenantId,
+    workspace: WorkspaceId,
+) -> crate::error::ApiResult<NodeBudget> {
+    let mut fleet = NodeBudget::default();
+    for ws in workspaces_to_plan(state, tenant).await? {
+        if ws.id == workspace {
+            break;
+        }
+        let gh_token = crate::services::workspace_gh_token(state, tenant, ws.id).await;
+        let spec = review_declaration(state, &ws, gh_token.as_deref()).await;
+        match plan_now(
+            state,
+            tenant,
+            ws.id,
+            &spec,
+            ManagedPurpose::ReviewLoop,
+            Slots::ClonesOnly,
+            Spread::Sharded,
+            &fleet,
+        )
+        .await
+        {
+            Ok((plan, _)) => fleet.charge(&plan),
+            Err(e) => {
+                tracing::warn!(workspace = %ws.id, error = %e, "could not replay a workspace's claim on the fleet — reporting without it")
+            }
+        }
+    }
+    Ok(fleet)
+}
+
 /// Which of a workspace's checkouts a declaration may place into.
 ///
 /// One variant, deliberately: the review loop is the only managed purpose left,
@@ -1203,8 +1382,13 @@ pub(crate) async fn plan_now(
     purpose: ManagedPurpose,
     slots: Slots,
     spread: Spread,
+    // What the tenant's earlier workspaces already took out of the fleet
+    // (MAIN-452). A default budget is "this workspace has the fleet to itself",
+    // which is true of the first one planned and of every declaration that is
+    // not sharded.
+    budget: &NodeBudget,
 ) -> crate::error::ApiResult<(Plan, Vec<Actual>)> {
-    let nodes = node_facts(state, tenant).await?;
+    let nodes = budget.applied_to(&node_facts(state, tenant).await?);
     // Which checkouts this declaration may use. `clone_hosts` is the existing
     // "rows that make a node a placement host" read, so `ClonesOnly` reuses the
     // definition of a clone rather than restating it.
@@ -1263,8 +1447,12 @@ async fn reconcile_workspace(
     purpose: ManagedPurpose,
     slots: Slots,
     spread: Spread,
-) -> crate::error::ApiResult<()> {
-    let (plan, actual) = plan_now(state, tenant, workspace, spec, purpose, slots, spread).await?;
+    budget: &NodeBudget,
+) -> crate::error::ApiResult<Plan> {
+    let (plan, actual) = plan_now(
+        state, tenant, workspace, spec, purpose, slots, spread, budget,
+    )
+    .await?;
 
     // AC-4's "logs desired-vs-actual". One line per workspace per pass, and
     // only when there is something to say — a converged workspace is silent, or
@@ -1311,7 +1499,7 @@ async fn reconcile_workspace(
             start_clone(state, tenant, workspace, *node, clones.clone()).await;
         }
     }
-    Ok(())
+    Ok(plan)
 }
 
 /// Ask a node to clone the workspace's repo. Fire-and-forget: discovery lands
@@ -1488,6 +1676,10 @@ pub(crate) async fn node_facts(
             taints: placement.taints,
             runtimes,
             max_loop_jobs,
+            // The fleet as nobody has spent it yet. What earlier workspaces
+            // took is applied by `NodeBudget::applied_to` at the one planner
+            // that has a budget (MAIN-452) — these are the node's own facts.
+            reserved: 0,
         });
     }
     Ok(out)
@@ -1600,6 +1792,9 @@ mod tests {
             // `CAPACITY_WHEN_UNREPORTED` unless they say otherwise — the same
             // number a node in the field gets for not saying.
             max_loop_jobs: None,
+            // A fleet nobody has spent yet. The cross-workspace cases below put
+            // this through `NodeBudget` rather than setting it by hand.
+            reserved: 0,
         }
     }
 
@@ -2683,6 +2878,193 @@ mod tests {
             Spread::Sharded,
         );
         assert_eq!(placements(&declared).len(), 3);
+    }
+
+    // ── MAIN-452: the ceiling belongs to the NODE, not to each workspace ──────
+
+    /// A workspace row carrying the one field the review loop reads off it.
+    fn repo(id: u128, ceiling: i32) -> nook_types::Workspace {
+        let now = chrono::Utc::now();
+        nook_types::Workspace {
+            id: WorkspaceId(Uuid::from_u128(id)),
+            tenant_id: TenantId(Uuid::from_u128(9000)),
+            name: format!("repo-{id}"),
+            slug: format!("repo-{id}"),
+            description: None,
+            git_remote_url: None,
+            git_remote_normalized: None,
+            session_spec: None,
+            port_requirements: None,
+            git_credential_id: None,
+            review_loop_max_replicas: Some(ceiling),
+            build_max_replicas: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    /// Every workspace of one tenant, planned against ONE fleet — the fold
+    /// [`pass`] performs, with the database taken out of it.
+    ///
+    /// The ORDER is not re-derived here — `workspaces_to_plan` owns it, and
+    /// `the_planning_order_is_the_id_and_not_the_name` drives that against a
+    /// real database. This is the fold the ordered list is fed into.
+    fn plan_tenant(
+        tenant: &[(nook_types::Workspace, Vec<CheckoutSlot>)],
+        nodes: &[NodeFacts],
+        ports: PortSafety,
+    ) -> Vec<(WorkspaceId, Plan)> {
+        let mut order: Vec<nook_types::Workspace> =
+            tenant.iter().map(|(ws, _)| ws.clone()).collect();
+        order.sort_by_key(|w| w.id.0);
+
+        let mut fleet = NodeBudget::default();
+        let mut out = Vec::new();
+        for ws in order {
+            let (_, cos) = tenant.iter().find(|(w, _)| w.id == ws.id).unwrap();
+            // `review_declaration` without its forge lookup, which wants an
+            // `AppState` these cases deliberately do not have.
+            let spec = review_loop_spec(ws.review_loop_max_replicas, None);
+            let p = plan(
+                &spec,
+                &fleet.applied_to(nodes),
+                cos,
+                &[],
+                ports,
+                Spread::Sharded,
+            );
+            fleet.charge(&p);
+            out.push((ws.id, p));
+        }
+        out
+    }
+
+    /// AC-1 and AC-2, and the whole card: `max_loop_jobs` bounds the MACHINE.
+    /// Two repos each asking for three reviewers on a three-job box get three
+    /// between them — not three each — and the one that misses out says so.
+    #[test]
+    fn one_nodes_ceiling_is_shared_by_every_workspace() {
+        let nodes = [loop_node(1, 3)];
+        let plans = plan_tenant(
+            &[
+                (repo(1, 3), vec![checkout(1, 1)]),
+                (repo(2, 3), vec![checkout(2, 1)]),
+            ],
+            &nodes,
+            PortSafety::Declared,
+        );
+
+        let total: usize = plans.iter().map(|(_, p)| p.placed).sum();
+        assert_eq!(
+            total, 3,
+            "the node declared three, so three is what it runs"
+        );
+        assert_eq!(plans[0].1.placed, 3);
+        assert_eq!(plans[1].1.placed, 0, "the second finds the node full");
+
+        // Never silently dropped: the workspace that lost out reports the whole
+        // ask as shortfall, exactly as a fleet with no loop node does.
+        assert_eq!(plans[1].1.desired, 3);
+        assert_eq!(plans[1].1.shortfall, 3);
+        assert_eq!(plans[0].1.shortfall, 0);
+    }
+
+    /// AC-3/AC-4. Ascending workspace id decides, so the walk order the database
+    /// happened to return cannot change who keeps the room — two replicas
+    /// planning the same instant place the same sessions.
+    #[test]
+    fn which_workspace_keeps_the_room_does_not_depend_on_the_walk_order() {
+        let nodes = [loop_node(1, 3)];
+        let a = (repo(7, 2), vec![checkout(1, 1)]);
+        let b = (repo(3, 3), vec![checkout(2, 1)]);
+
+        let one = plan_tenant(&[a.clone(), b.clone()], &nodes, PortSafety::Declared);
+        let other = plan_tenant(&[b, a], &nodes, PortSafety::Declared);
+        assert_eq!(one, other, "the same plan, whatever order they arrive in");
+
+        // And the rule is the id, not the arrival: workspace 3 arrives second in
+        // the first call and still fills the node.
+        assert_eq!(one[0].0, WorkspaceId(Uuid::from_u128(3)));
+        assert_eq!(one[0].1.placed, 3);
+        assert_eq!(one[1].1.placed, 0);
+    }
+
+    /// The budget is per NODE, so a machine one workspace filled does not close
+    /// the rest of the fleet to the next — it moves onto the one with room
+    /// rather than reporting a shortfall the fleet does not have.
+    #[test]
+    fn a_full_node_does_not_close_the_rest_of_the_fleet() {
+        let nodes = [loop_node(1, 2), loop_node(2, 2)];
+        let plans = plan_tenant(
+            &[
+                (repo(1, 2), vec![checkout(1, 1)]),
+                (repo(2, 2), vec![checkout(2, 1), checkout(3, 2)]),
+            ],
+            &nodes,
+            PortSafety::Declared,
+        );
+        assert_eq!(plans[0].1.placed, 2, "the first fills the machine it is on");
+        assert_eq!(plans[1].1.placed, 2, "the second finds the other one");
+        assert_eq!(plans[1].1.shortfall, 0);
+        assert_eq!(
+            plans[1].1.per_node,
+            [(nodes[1].id, 2)].into_iter().collect(),
+            "all of it on the node with room, none on the full one"
+        );
+    }
+
+    /// The port cap and the node's ceiling are different limits, and the smaller
+    /// wins. An undeclared workspace may have one session per machine — but not
+    /// on a machine another workspace has already filled.
+    #[test]
+    fn the_port_cap_does_not_buy_a_place_on_a_full_node() {
+        let nodes = [loop_node(1, 1)];
+        let plans = plan_tenant(
+            &[
+                (repo(1, 1), vec![checkout(1, 1)]),
+                (repo(2, 1), vec![checkout(2, 1)]),
+            ],
+            &nodes,
+            PortSafety::Undeclared,
+        );
+        assert_eq!(plans[0].1.placed, 1);
+        assert_eq!(plans[1].1.placed, 0, "one job means one job");
+        assert_eq!(plans[1].1.shortfall, 1);
+    }
+
+    /// A sharded plan charges what it WANTS on each node, held sessions
+    /// included. Charging its Start actions instead would free a machine every
+    /// time a workspace converged, and the next workspace would double up on it.
+    #[test]
+    fn a_converged_workspace_still_holds_its_share_of_the_node() {
+        let nodes = [loop_node(1, 2)];
+        let spec = review_loop_spec(Some(2), None);
+        let live = [
+            sharded(1, 1, 1, ShardAssignment { index: 0, of: 2 }),
+            sharded(2, 1, 1, ShardAssignment { index: 1, of: 2 }),
+        ];
+        let converged = plan(
+            &spec,
+            &nodes,
+            &[checkout(1, 1)],
+            &live,
+            PortSafety::Declared,
+            Spread::Sharded,
+        );
+        assert!(converged.actions.is_empty(), "nothing to do");
+
+        let mut fleet = NodeBudget::default();
+        fleet.charge(&converged);
+        let next = plan(
+            &spec,
+            &fleet.applied_to(&nodes),
+            &[checkout(2, 1)],
+            &[],
+            PortSafety::Declared,
+            Spread::Sharded,
+        );
+        assert_eq!(next.placed, 0, "the node is full of running reviewers");
+        assert_eq!(next.shortfall, 2);
     }
 
     /// The skill and the control plane must describe the SAME contract. The

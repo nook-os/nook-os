@@ -578,3 +578,51 @@ async fn a_reconcile_pass_creates_no_access_sessions() {
 
     bed.teardown().await;
 }
+
+/// MAIN-452 AC-3: the order the pass plans a tenant's workspaces in is the
+/// stored ID, and not the NAME `list()` sorts by.
+///
+/// The planner's own tests feed `plan_tenant` an already-ordered list, so they
+/// stay green whatever the production read returns — this is the one that
+/// drives `workspaces_to_plan`, which is where both `pass()` and
+/// `/review-loop-status` get their list. Names are chosen to sort OPPOSITE to
+/// the ids, so a read that forgot to order fails here instead of silently
+/// handing the node's room to whichever repo was renamed last.
+#[tokio::test]
+async fn the_planning_order_is_the_id_and_not_the_name() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("own").await;
+    let state = bed.app_state().await;
+
+    // `zulu` holds the LOWER id, so id order and name order disagree.
+    let first = WorkspaceId(Uuid::from_u128(1));
+    let second = WorkspaceId(Uuid::from_u128(2));
+    for (id, name) in [(first, "zulu"), (second, "alpha")] {
+        bed.db()
+            .exec(
+                "INSERT INTO workspaces (id, tenant_id, name, slug) VALUES ($1, $2, $3, $3)",
+                nook_db::params![id, tenant, name],
+            )
+            .await
+            .expect("create workspace");
+    }
+
+    let planned = nook_control::services::session_reconcile::workspaces_to_plan(&state, tenant)
+        .await
+        .expect("ordered read");
+    assert_eq!(
+        planned.iter().map(|w| w.id).collect::<Vec<_>>(),
+        vec![first, second],
+        "ascending id decides who keeps a full node's room — a rename must not \
+         move it"
+    );
+    assert_eq!(
+        planned.iter().map(|w| w.name.as_str()).collect::<Vec<_>>(),
+        vec!["zulu", "alpha"],
+        "and the names prove this is not `list()`'s own ORDER BY name"
+    );
+
+    bed.teardown().await;
+}
