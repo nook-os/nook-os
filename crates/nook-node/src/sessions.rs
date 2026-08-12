@@ -865,10 +865,16 @@ mod tests {
         // end of its thread does, panic or not.
         drop(manager);
 
+        // A TOTAL deadline, not a per-message one, and a generous one: this
+        // asserts that the agent does not OUTLIVE its connection, which is a
+        // statement about eventuality rather than latency. Ten seconds read as
+        // a latency bound and made the test fail on loaded CI runners with
+        // "the agent outlived its connection" while the kill path was working
+        // perfectly — it failed on `main` too, including the 0.6.7 version
+        // bump, which contains no session work at all.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
         let mut exited = false;
-        while let Ok(Some(msg)) =
-            tokio::time::timeout(std::time::Duration::from_secs(10), ctl_rx.recv()).await
-        {
+        while let Ok(Some(msg)) = tokio::time::timeout_at(deadline, ctl_rx.recv()).await {
             if let NodeToControl::SessionExited { session_id: id, .. } = msg {
                 assert_eq!(id, session_id, "the session that exited is ours");
                 exited = true;

@@ -1,0 +1,24 @@
+-- The SQLite twin of nook-chat's `0008_chat_message_kind.sql` (MAIN-528).
+--
+-- It lives on the CONTROL track, not in `crates/nook-chat/migrations_sqlite/`,
+-- because that directory does not exist and should not: one SQLite file is one
+-- namespace with one ledger, so chat's tables are created by
+-- `migrations_sqlite/0001_init.sql` here. `chat_messages` is defined at
+-- 0001_init.sql:990.
+--
+-- Without this, every `rust (sqlite)` run since #412 fails: ~20 nook-chat tests
+-- across `commands`, `dms` and `messages` return `Internal(chat: internal
+-- error)` because the query selects a column the schema does not have. It fails
+-- on every open PR, not on the branch that happens to be running.
+--
+-- No `IF NOT EXISTS`: SQLite's ALTER TABLE has no such clause. The ledger is
+-- what makes this once-only, which is the same guarantee the Postgres side
+-- gets from its own row.
+--
+-- Numbered 0063 rather than 0062 because an unmerged branch (MAIN-516) already
+-- claims 0062 on both tracks. A gap is harmless — sqlx applies in version
+-- order — and a collision is not.
+--
+-- SQLite-only, so the Postgres track skips 0063, exactly as it skipped 0038 for
+-- `settings_null_equating_unique`.
+ALTER TABLE chat_messages ADD COLUMN kind TEXT;
