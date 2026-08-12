@@ -982,6 +982,44 @@ mod tests {
         assert_eq!(s(serde_json::json!({})), MergeState::Open);
     }
 
+    /// MAIN-541 AC-7. A merge queue merges a pull request the same way a human
+    /// does — the document says `merged: true` — so the reconciler needs no
+    /// queue awareness and the sweep's behaviour is unchanged: the tests in
+    /// `tests/merge_reconcile.rs` that move a card once and honour the
+    /// `needs-human-review` opt-out already cover a queue merge, because this
+    /// is the only place the two could have differed.
+    ///
+    /// The other queue shape is an EJECTION, and it is the one that would bite:
+    /// the queue drops the entry and leaves the pull request plain OPEN. Open
+    /// means unfinished, which is exactly right — no card move (nothing
+    /// merged) and no escalation either (nothing was closed). Reporting an
+    /// ejection is the merge loops' job, not this sweep's.
+    ///
+    /// `merged_by` and `auto_merge` below are the queue-merged document's
+    /// shape, not assertions: `merge_state` reads `merged` and `state` and
+    /// nothing else, which is precisely why the queue cannot surprise it.
+    #[test]
+    fn a_queue_merge_is_a_merge_and_an_ejection_is_merely_open() {
+        let s = |v: serde_json::Value| merge_state(&v);
+        assert_eq!(
+            s(serde_json::json!({
+                "state": "closed",
+                "merged": true,
+                "merged_by": { "login": "github-merge-queue[bot]", "type": "Bot" },
+                "auto_merge": { "merge_method": "squash" },
+            })),
+            MergeState::Merged
+        );
+        assert_eq!(
+            s(serde_json::json!({
+                "state": "open",
+                "merged": false,
+                "auto_merge": serde_json::Value::Null,
+            })),
+            MergeState::Open
+        );
+    }
+
     /// The window is a filter over `merged_at`, and a closed-unmerged PR has
     /// none — so it falls out rather than needing a second test.
     #[test]
