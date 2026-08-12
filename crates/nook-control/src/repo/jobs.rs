@@ -81,6 +81,24 @@ pub struct RunHeads {
     pub done_head: Option<String>,
 }
 
+/// The newest REJECTING head for one PR, and WHY it was rejected — what a
+/// repair item is fingerprinted on, and what the builder is told it is for.
+///
+/// The source is carried because the three causes need different instructions
+/// (MAIN-542 AC-5): a reviewer's `changes_requested` and a conflict are
+/// self-evident from the PR, and a queue ejection is the opposite — the PR's
+/// own checks are green, so a builder not told what happened concludes nothing
+/// is wrong.
+#[derive(Debug, Clone, nook_db::FromDbRow)]
+pub struct RejectedHead {
+    pub review_pr_number: i64,
+    pub review_head_sha: String,
+    /// `None` is an agent's own `changes_requested`; the control plane's own
+    /// causes name themselves — see [`CONFLICT_VERDICT_SOURCE`] and
+    /// [`EJECTION_VERDICT_SOURCE`].
+    pub review_verdict_source: Option<String>,
+}
+
 /// The newest recorded verdict for one PR: which head it judged, and what it
 /// said. What label restoration (MAIN-476 AC-3) reads — only verdicts this
 /// deployment itself recorded, which is the "one writer wins" rule.
@@ -93,14 +111,21 @@ pub struct RecordedVerdict {
 
 /// The value `review_verdict_source` carries for a verdict the CONTROL PLANE
 /// concluded from a merge conflict (MAIN-516). `NULL` is an agent's own
-/// judgement; this is the one thing that is not.
+/// judgement; this is one of the things that is not.
 pub const CONFLICT_VERDICT_SOURCE: &str = "conflict";
 
-/// A `changes_requested` nobody reviewed: the pull request conflicts with its
-/// base, so the control plane puts it back in the repair queue — which reads
-/// this ledger and not the PR's labels (MAIN-516).
+/// Its twin for a pull request the MERGE QUEUE threw out (MAIN-542): the PR's
+/// own checks were green on the base it branched from, and the build the queue
+/// ran against the current base failed. A different cause reaching the same
+/// conclusion — rebase — which is why it is a value here and not a second
+/// recorder (MAIN-542 AC-9).
+pub const EJECTION_VERDICT_SOURCE: &str = "queue_ejection";
+
+/// A `changes_requested` nobody reviewed: the control plane concluded it, from
+/// a cause of its own, and put the pull request back in the repair queue —
+/// which reads this ledger and not the PR's labels (MAIN-516).
 #[derive(Debug, Clone)]
-pub struct ConflictRejection {
+pub struct ControlPlaneRejection {
     pub id: JobId,
     pub tenant: TenantId,
     pub workspace: WorkspaceId,
@@ -108,12 +133,16 @@ pub struct ConflictRejection {
     /// comments and labels as.
     pub requested_by: UserId,
     pub pr: i64,
-    /// The head the conflict is AT, which is what the repair fingerprints on:
+    /// The head the cause is AT, which is what the repair fingerprints on:
     /// the rebase that answers it moves the head, and the fingerprint clears
     /// itself.
     pub head: String,
     /// What a reader of the ledger sees this row was about.
     pub seed: String,
+    /// WHICH cause — [`CONFLICT_VERDICT_SOURCE`] or [`EJECTION_VERDICT_SOURCE`].
+    /// The machine-readable half of what `seed` says in prose, and the one
+    /// thing a reader cannot get by parsing it.
+    pub source: &'static str,
 }
 
 /// A job the reaper found stranded on a node that stopped reporting, with the
@@ -271,7 +300,7 @@ pub trait LoopJobRepository: Send + Sync {
         &self,
         tenant: TenantId,
         workspace: WorkspaceId,
-    ) -> ApiResult<Vec<(i64, String)>>;
+    ) -> ApiResult<Vec<RejectedHead>>;
 
     /// `review_run_heads`'s twin for BUILD runs (MAIN-458), keyed by the
     /// card's board number — the same key `BuildWork` items carry — with
@@ -371,8 +400,14 @@ pub trait LoopJobRepository: Send + Sync {
     /// verdict on a finished or foreign job is a caller bug, answered with 0.
     async fn set_review_verdict(&self, id: JobId, verdict: &str) -> ApiResult<u64>;
 
-    /// Record the `changes_requested` a CONFLICTING pull request earns, at the
-    /// head it conflicts at (MAIN-516). Answers whether it recorded one.
+    /// Record the `changes_requested` the control plane concludes for a pull
+    /// request, at the head it concluded it AT (MAIN-516, MAIN-542). Answers
+    /// whether it recorded one.
+    ///
+    /// ONE recorder for every such cause, deliberately (MAIN-542 AC-9): the
+    /// repair queue reads `changes_requested` and a head, and a second writer
+    /// would be a second thing to keep in step with that contract. What
+    /// differs between causes is the row's `source` and its `seed`.
     ///
     /// `false` is the idempotent case, and it covers both shapes of "already
     /// said": this head already carries a `changes_requested` — an agent's, or
@@ -386,7 +421,10 @@ pub trait LoopJobRepository: Send + Sync {
     /// answer (the pull request does conflict, whatever the reviewer thought of
     /// the code), and it does not stick: the rebase moves the head, and the
     /// verdict recorded for the new one is nobody's but the reviewer's.
-    async fn record_conflict_rejection(&self, rejection: ConflictRejection) -> ApiResult<bool>;
+    async fn record_control_plane_rejection(
+        &self,
+        rejection: ControlPlaneRejection,
+    ) -> ApiResult<bool>;
 
     /// The live epic-run for this epic, if one is in flight (MAIN-144 AC-3) —
     /// the dedupe that keeps "one deliberate enqueue per pass" true.
@@ -818,11 +856,13 @@ impl LoopJobRepository for DbLoopJobRepository {
             .await?)
     }
 
-    async fn record_conflict_rejection(&self, r: ConflictRejection) -> ApiResult<bool> {
+    async fn record_control_plane_rejection(&self, r: ControlPlaneRejection) -> ApiResult<bool> {
         // The idempotence covers an AGENT's rejection too, not only an earlier
-        // pass's: a head a reviewer already rejected is in the repair queue on
-        // its own account, and a second row saying the same thing would only
-        // compete to be the newest one read.
+        // pass's — and, since MAIN-542, the OTHER cause's: a head already
+        // carrying a `changes_requested` is in the repair queue on its own
+        // account, and a second row saying the same thing would only compete to
+        // be the newest one read. Source-blind on purpose, which is why 0064
+        // widened 0062's index to match.
         let already: Option<JobId> = self
             .db
             .query_scalar_opt(
@@ -860,7 +900,7 @@ impl LoopJobRepository for DbLoopJobRepository {
                     r.seed,
                     r.pr,
                     r.head,
-                    CONFLICT_VERDICT_SOURCE
+                    r.source
                 ],
             )
             .await
@@ -875,16 +915,12 @@ impl LoopJobRepository for DbLoopJobRepository {
         &self,
         tenant: TenantId,
         workspace: WorkspaceId,
-    ) -> ApiResult<Vec<(i64, String)>> {
-        #[derive(nook_db::FromDbRow)]
-        struct Row {
-            review_pr_number: i64,
-            review_head_sha: String,
-        }
-        let rows: Vec<Row> = self
+    ) -> ApiResult<Vec<RejectedHead>> {
+        Ok(self
             .db
             .query_all(
-                "SELECT j.review_pr_number, j.review_head_sha FROM loop_jobs j
+                "SELECT j.review_pr_number, j.review_head_sha, j.review_verdict_source
+                   FROM loop_jobs j
                   WHERE j.tenant_id = $1 AND j.workspace_id = $2 AND j.kind = 'review'
                     AND j.review_verdict = 'changes_requested'
                     AND j.review_pr_number IS NOT NULL AND j.review_head_sha IS NOT NULL
@@ -897,11 +933,7 @@ impl LoopJobRepository for DbLoopJobRepository {
                          ORDER BY k.created_at DESC, k.id DESC LIMIT 1)",
                 params![tenant, workspace.0],
             )
-            .await?;
-        Ok(rows
-            .into_iter()
-            .map(|r| (r.review_pr_number, r.review_head_sha))
-            .collect())
+            .await?)
     }
 
     async fn set_build_outcome(&self, id: JobId, outcome: &str) -> ApiResult<u64> {
@@ -1799,7 +1831,7 @@ impl LoopJobRepository for FakeLoopJobRepository {
         Ok(1)
     }
 
-    async fn record_conflict_rejection(&self, r: ConflictRejection) -> ApiResult<bool> {
+    async fn record_control_plane_rejection(&self, r: ControlPlaneRejection) -> ApiResult<bool> {
         let mut s = self.inner.lock().unwrap();
         if s.jobs.iter().any(|j| {
             j.tenant_id == r.tenant
@@ -1830,7 +1862,7 @@ impl LoopJobRepository for FakeLoopJobRepository {
             review_pr_number: Some(r.pr),
             review_head_sha: Some(r.head),
             review_verdict: Some("changes_requested".into()),
-            review_verdict_source: Some(CONFLICT_VERDICT_SOURCE.into()),
+            review_verdict_source: Some(r.source.into()),
             review_forced: false,
             build_outcome: None,
             build_fingerprint: None,
@@ -1842,10 +1874,12 @@ impl LoopJobRepository for FakeLoopJobRepository {
         &self,
         tenant: TenantId,
         workspace: WorkspaceId,
-    ) -> ApiResult<Vec<(i64, String)>> {
+    ) -> ApiResult<Vec<RejectedHead>> {
         let s = self.inner.lock().unwrap();
-        let mut newest: std::collections::HashMap<i64, (chrono::DateTime<chrono::Utc>, String)> =
-            std::collections::HashMap::new();
+        let mut newest: std::collections::HashMap<
+            i64,
+            (chrono::DateTime<chrono::Utc>, String, Option<String>),
+        > = std::collections::HashMap::new();
         for j in s.jobs.iter().filter(|j| {
             j.tenant_id == tenant
                 && j.workspace_id == Some(workspace)
@@ -1853,13 +1887,24 @@ impl LoopJobRepository for FakeLoopJobRepository {
                 && j.review_verdict.as_deref() == Some("changes_requested")
         }) {
             if let (Some(pr), Some(head)) = (j.review_pr_number, j.review_head_sha.as_ref()) {
-                let e = newest.entry(pr).or_insert((j.created_at, head.clone()));
+                let e = newest.entry(pr).or_insert((
+                    j.created_at,
+                    head.clone(),
+                    j.review_verdict_source.clone(),
+                ));
                 if j.created_at > e.0 {
-                    *e = (j.created_at, head.clone());
+                    *e = (j.created_at, head.clone(), j.review_verdict_source.clone());
                 }
             }
         }
-        Ok(newest.into_iter().map(|(pr, (_, h))| (pr, h)).collect())
+        Ok(newest
+            .into_iter()
+            .map(|(pr, (_, head, source))| RejectedHead {
+                review_pr_number: pr,
+                review_head_sha: head,
+                review_verdict_source: source,
+            })
+            .collect())
     }
 
     async fn build_run_heads(

@@ -5536,11 +5536,13 @@ export interface components {
              */
             review_verdict?: string | null;
             /**
-             * @description WHO concluded the verdict (MAIN-516). `None` is an agent's own
-             *     judgement — every ordinary review. `conflict` is the control plane's:
-             *     the hygiene pass found the PR conflicting with its base and recorded the
-             *     `changes_requested` the repair queue reads, with no run, no agent and no
-             *     findings behind it. A verdict nobody reviewed must not read as one.
+             * @description WHO concluded the verdict (MAIN-516), and from WHAT (MAIN-542). `None`
+             *     is an agent's own judgement — every ordinary review. `conflict` and
+             *     `queue_ejection` are the control plane's: the hygiene pass found the PR
+             *     conflicting with its base, or ejected from the merge queue, and recorded
+             *     the `changes_requested` the repair queue reads — no run, no agent and no
+             *     findings behind either. A verdict nobody reviewed must not read as one,
+             *     and two causes reaching one conclusion must not read as each other.
              */
             review_verdict_source?: string | null;
             /**

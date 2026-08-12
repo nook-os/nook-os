@@ -121,13 +121,19 @@ describe("row identity", () => {
     expect(shortHead(null)).toBe("");
   });
 
-  it("says when a verdict was the conflict check rather than a review", () => {
+  it("says when a verdict was the control plane's rather than a review", () => {
     // MAIN-516 records a `changes_requested` for a PR that conflicts with its
-    // base, so the repair queue can see it. Nobody reviewed that head, and the
-    // row must not read as if somebody had.
+    // base, MAIN-542 for one the merge queue ejected, so the repair queue can
+    // see them. Nobody reviewed either head, and the two causes are not each
+    // other — a row must not read as if somebody had reviewed it, nor as the
+    // wrong reason.
     const conflicted = review({ review_verdict_source: "conflict" });
     expect(reviewMeta(conflicted as never)).toBe("abcdef1 · conflict, not reviewed");
+    const ejected = review({ review_verdict_source: "queue_ejection" });
+    expect(reviewMeta(ejected as never)).toBe("abcdef1 · queue ejection, not reviewed");
     expect(reviewMeta(review() as never)).toBe("abcdef1");
+    // A source this build does not know renders as a plain review row.
+    expect(reviewMeta(review({ review_verdict_source: "martian" }) as never)).toBe("abcdef1");
   });
 
   it("maps the loop's muted onto the design system's dim", () => {

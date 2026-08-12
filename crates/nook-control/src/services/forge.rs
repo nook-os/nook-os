@@ -83,6 +83,25 @@ pub struct PrDetails {
     pub merge_state: MergeState,
 }
 
+/// A pull request the MERGE QUEUE threw out, at the head it threw out
+/// (MAIN-542).
+///
+/// The queue ejects a PR whose post-merge build fails — the build of the PR
+/// merged into the CURRENT base, which is a build that does not exist anywhere
+/// else. The PR's own checks stay green, its head does not move, and its
+/// recorded verdict stays whatever the reviewer said, so nothing in the loop
+/// re-triggers: the same stable deadlock MAIN-516 found by the conflict door.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueueEjection {
+    /// The head that was ejected — always the PR's current head, because an
+    /// ejection whose head has moved since is answered already and reports
+    /// nothing here.
+    pub head_sha: String,
+    /// GitHub's own reason, verbatim. Never rephrased and never guessed at:
+    /// the loops report it as it came (MAIN-541), and so does the ledger.
+    pub reason: String,
+}
+
 /// One merged pull request, as the body join's search space (MAIN-491 AC-2):
 /// a card whose `pr_url` was never recorded is found by reading `Closes KEY`
 /// out of what actually merged recently.
@@ -158,6 +177,24 @@ pub trait Forge: Send + Sync {
     async fn set_verdict_label(&self, repo: &Repo, number: u64, label: &str) -> anyhow::Result<()> {
         let _ = (repo, number, label);
         anyhow::bail!("this forge cannot write labels")
+    }
+
+    /// Whether the merge queue ejected this PR AT ITS CURRENT HEAD (MAIN-542).
+    ///
+    /// The one read here that defaults to an ANSWER rather than a refusal, and
+    /// the reason is which way being wrong cuts. Every other default bails
+    /// because a guessed answer would make the caller act — a guessed
+    /// `mergeable: false` labels a clean PR, a guessed empty comment list
+    /// re-posts a comment already there. "No ejection" makes the caller do
+    /// nothing at all, which leaves exactly the pre-MAIN-542 behaviour: a forge
+    /// that cannot see a merge queue reports what it can honestly see of one.
+    async fn queue_ejection(
+        &self,
+        repo: &Repo,
+        number: u64,
+    ) -> anyhow::Result<Option<QueueEjection>> {
+        let _ = (repo, number);
+        Ok(None)
     }
 }
 
@@ -257,6 +294,30 @@ impl GithubForge {
 /// which is a single-digit number, so a repo with more than this many open PRs
 /// and a page-two count would still place the same reviewers.
 const PAGE: usize = 100;
+
+/// Everything one pass needs to know about a PR's time in the merge queue
+/// (MAIN-542), in one round trip.
+///
+/// `commits(last:1)` is the head's own commit, and its `committedDate` is the
+/// only honest way to ask "was this branch pushed since the ejection?" — a
+/// rebase rewrites the committer date, so it moves exactly when the head does.
+/// `beforeCommit` is deliberately NOT read: it is the base the merge group was
+/// built on, a different pull request's commit, and comparing it to the head is
+/// the trap the merge loops document.
+const QUEUE_STATE_QUERY: &str = r#"
+query($owner:String!,$name:String!,$number:Int!){
+  repository(owner:$owner,name:$name){
+    pullRequest(number:$number){
+      merged
+      headRefOid
+      mergeQueueEntry{ state }
+      commits(last:1){ nodes{ commit{ committedDate } } }
+      timelineItems(last:20, itemTypes:[REMOVED_FROM_MERGE_QUEUE_EVENT]){
+        nodes{ ... on RemovedFromMergeQueueEvent { reason createdAt } }
+      }
+    }
+  }
+}"#;
 
 /// The comment-pagination bound: past this, `issue_comment_bodies` fails
 /// closed rather than pretending it read everything. Two thousand comments on
@@ -388,6 +449,48 @@ impl GithubForge {
         )
         .await?;
         Ok(())
+    }
+
+    /// POST one GraphQL query and return its `data`.
+    ///
+    /// GraphQL rather than REST for exactly one thing (MAIN-542): the merge
+    /// queue. `mergeQueueEntry` and `RemovedFromMergeQueueEvent` have no REST
+    /// spelling, so the alternative to this is not a simpler request but no
+    /// answer at all.
+    ///
+    /// A GraphQL error arrives with HTTP 200 and a partial body, so the status
+    /// check every other read here relies on would pass it through as data.
+    /// Surfacing it as an error is what keeps "could not ask" distinguishable
+    /// from "asked, and nothing was ejected".
+    async fn graphql(&self, body: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        let resp = self
+            .authed(self.http.post("https://api.github.com/graphql"))
+            .json(&body)
+            .send()
+            .await?;
+        let status = resp.status();
+        let json: serde_json::Value = if status.is_success() {
+            resp.json().await?
+        } else {
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!(
+                "{} {}",
+                status.as_u16(),
+                text.trim().chars().take(300).collect::<String>()
+            );
+        };
+        if let Some(errors) = json.get("errors").and_then(|e| e.as_array()) {
+            if let Some(first) = errors.first() {
+                anyhow::bail!(
+                    "graphql: {}",
+                    first
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("unspecified error")
+                );
+            }
+        }
+        Ok(json.get("data").cloned().unwrap_or(serde_json::Value::Null))
     }
 
     /// GET one JSON document, with the same error shape as `send`.
@@ -540,6 +643,27 @@ impl Forge for GithubForge {
     async fn set_verdict_label(&self, repo: &Repo, number: u64, label: &str) -> anyhow::Result<()> {
         self.replace_verdict_label(repo, number, label).await
     }
+
+    async fn queue_ejection(
+        &self,
+        repo: &Repo,
+        number: u64,
+    ) -> anyhow::Result<Option<QueueEjection>> {
+        let data = self
+            .graphql(serde_json::json!({
+                "query": QUEUE_STATE_QUERY,
+                "variables": {
+                    "owner": repo.owner,
+                    "name": repo.name,
+                    "number": number,
+                },
+            }))
+            .await?;
+        Ok(queue_ejection(
+            data.pointer("/repository/pullRequest")
+                .unwrap_or(&serde_json::Value::Null),
+        ))
+    }
 }
 
 /// Which of a repository's open PRs a reviewer would actually pick up.
@@ -593,6 +717,63 @@ fn merge_state(pr: &serde_json::Value) -> MergeState {
         Some("closed") => MergeState::ClosedUnmerged,
         _ => MergeState::Open,
     }
+}
+
+/// What GitHub calls the removal reason of a queue entry that MERGED. Every
+/// other reason is an ejection — `failed_checks`, `manual`, and whatever
+/// GitHub adds next — because a successful merge emits a removal event too,
+/// and treating every removal as an ejection would turn every merge into a
+/// false alarm.
+const MERGED_REMOVAL_REASON: &str = "merged";
+
+/// Whether the merge queue ejected this pull request AT ITS CURRENT HEAD
+/// (MAIN-542), from the one document [`QUEUE_STATE_QUERY`] returns.
+///
+/// Four ways to answer "no", and each is a different fact:
+///
+/// - it MERGED — the queue's other exit, and the one that owes nothing;
+/// - it is still IN the queue — in flight, and acting on an in-flight PR is
+///   the one move that makes this worse;
+/// - it has never been removed from a queue, or was removed BY merging;
+/// - the branch was pushed after the removal — someone has already answered
+///   the ejection, so the verdict is about a head that no longer exists.
+///
+/// The last one fails CLOSED: a head whose commit date cannot be read or
+/// parsed reports no ejection, because the alternative is recording a
+/// rejection against a head that may already have been repaired.
+fn queue_ejection(pr: &serde_json::Value) -> Option<QueueEjection> {
+    if pr.get("merged").and_then(|m| m.as_bool()) == Some(true) {
+        return None;
+    }
+    if pr.get("mergeQueueEntry").is_some_and(|e| !e.is_null()) {
+        return None;
+    }
+    let head_sha = pr.get("headRefOid")?.as_str()?.to_string();
+    // Newest by `createdAt` rather than by position: the query asks for the
+    // last twenty, but a PR ejected repeatedly must be judged on its most
+    // recent ejection whatever order they arrive in.
+    let (at, reason) = pr
+        .pointer("/timelineItems/nodes")?
+        .as_array()?
+        .iter()
+        .filter_map(|n| {
+            let at = n
+                .get("createdAt")?
+                .as_str()?
+                .parse::<chrono::DateTime<chrono::Utc>>()
+                .ok()?;
+            Some((at, n.get("reason")?.as_str()?.to_string()))
+        })
+        .max_by_key(|(at, _)| *at)?;
+    if reason.eq_ignore_ascii_case(MERGED_REMOVAL_REASON) {
+        return None;
+    }
+    let pushed_at = pr
+        .pointer("/commits/nodes/0/commit/committedDate")?
+        .as_str()?
+        .parse::<chrono::DateTime<chrono::Utc>>()
+        .ok()?;
+    (pushed_at <= at).then_some(QueueEjection { head_sha, reason })
 }
 
 /// The merged PRs in a closed-PR listing, newest merge first.
@@ -1018,6 +1199,119 @@ mod tests {
             })),
             MergeState::Open
         );
+    }
+
+    /// MAIN-542 AC-1/AC-3. The ejection rule, one clause at a time. `q` is the
+    /// document `QUEUE_STATE_QUERY` returns, and every field it reads is
+    /// present in each case — the differences below are the ones being tested,
+    /// not incidental absences.
+    #[test]
+    fn only_a_pr_ejected_at_its_current_head_is_an_ejection() {
+        let q = |merged: bool, entry: serde_json::Value, reason: &str, pushed: &str| {
+            serde_json::json!({
+                "merged": merged,
+                "headRefOid": "aaa",
+                "mergeQueueEntry": entry,
+                "commits": { "nodes": [{ "commit": { "committedDate": pushed } }] },
+                "timelineItems": { "nodes": [
+                    { "reason": reason, "createdAt": "2026-08-12T02:00:00Z" },
+                ]},
+            })
+        };
+        let null = serde_json::Value::Null;
+        let ejected = queue_ejection(&q(
+            false,
+            null.clone(),
+            "failed_checks",
+            "2026-08-12T01:00:00Z",
+        ));
+        assert_eq!(
+            ejected,
+            Some(QueueEjection {
+                head_sha: "aaa".into(),
+                reason: "failed_checks".into(),
+            }),
+            "ejected, and nothing has been pushed since"
+        );
+
+        // A queue merge emits a removal event too, so reading every removal as
+        // an ejection is what would turn every merge into a false alarm.
+        assert_eq!(
+            queue_ejection(&q(true, null.clone(), "merged", "2026-08-12T01:00:00Z")),
+            None,
+            "it landed"
+        );
+        assert_eq!(
+            queue_ejection(&q(false, null.clone(), "MERGED", "2026-08-12T01:00:00Z")),
+            None,
+            "the reason is the authority, whatever case the enum arrives in"
+        );
+        assert_eq!(
+            queue_ejection(&q(
+                false,
+                serde_json::json!({ "state": "QUEUED" }),
+                "failed_checks",
+                "2026-08-12T01:00:00Z"
+            )),
+            None,
+            "back in the queue: in flight, and acting on it is the one move that makes it worse"
+        );
+        assert_eq!(
+            queue_ejection(&q(false, null, "failed_checks", "2026-08-12T03:00:00Z")),
+            None,
+            "pushed since the ejection — somebody has already answered it"
+        );
+    }
+
+    /// The absences, which all mean the same thing: no ejection to report. A
+    /// PR that has never been near a merge queue is the common one, and every
+    /// unreadable shape joins it rather than becoming a guess.
+    #[test]
+    fn an_unreadable_or_unqueued_pr_reports_no_ejection() {
+        assert_eq!(queue_ejection(&serde_json::Value::Null), None);
+        assert_eq!(queue_ejection(&serde_json::json!({})), None);
+        assert_eq!(
+            queue_ejection(&serde_json::json!({
+                "merged": false,
+                "headRefOid": "aaa",
+                "mergeQueueEntry": null,
+                "commits": { "nodes": [{ "commit": { "committedDate": "2026-08-12T01:00:00Z" } }] },
+                "timelineItems": { "nodes": [] },
+            })),
+            None,
+            "never removed from a queue"
+        );
+        assert_eq!(
+            queue_ejection(&serde_json::json!({
+                "merged": false,
+                "headRefOid": "aaa",
+                "mergeQueueEntry": null,
+                "commits": { "nodes": [] },
+                "timelineItems": { "nodes": [
+                    { "reason": "failed_checks", "createdAt": "2026-08-12T02:00:00Z" },
+                ]},
+            })),
+            None,
+            "no head commit date: the head-moved test cannot be run, so it fails closed"
+        );
+    }
+
+    /// Repeated ejections: the NEWEST one decides, whatever order the timeline
+    /// hands them over in.
+    #[test]
+    fn the_newest_ejection_is_the_one_that_counts() {
+        let pr = serde_json::json!({
+            "merged": false,
+            "headRefOid": "aaa",
+            "mergeQueueEntry": null,
+            "commits": { "nodes": [{ "commit": { "committedDate": "2026-08-12T01:00:00Z" } }] },
+            "timelineItems": { "nodes": [
+                { "reason": "failed_checks", "createdAt": "2026-08-12T02:00:00Z" },
+                { "reason": "manual", "createdAt": "2026-08-12T04:00:00Z" },
+                { "reason": "failed_checks", "createdAt": "2026-08-12T03:00:00Z" },
+            ]},
+        });
+        assert_eq!(queue_ejection(&pr).map(|e| e.reason), Some("manual".into()));
     }
 
     /// The window is a filter over `merged_at`, and a closed-unmerged PR has

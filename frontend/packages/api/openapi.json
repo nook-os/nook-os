@@ -12597,7 +12597,7 @@
               "string",
               "null"
             ],
-            "description": "WHO concluded the verdict (MAIN-516). `None` is an agent's own\njudgement — every ordinary review. `conflict` is the control plane's:\nthe hygiene pass found the PR conflicting with its base and recorded the\n`changes_requested` the repair queue reads, with no run, no agent and no\nfindings behind it. A verdict nobody reviewed must not read as one."
+            "description": "WHO concluded the verdict (MAIN-516), and from WHAT (MAIN-542). `None`\nis an agent's own judgement — every ordinary review. `conflict` and\n`queue_ejection` are the control plane's: the hygiene pass found the PR\nconflicting with its base, or ejected from the merge queue, and recorded\nthe `changes_requested` the repair queue reads — no run, no agent and no\nfindings behind either. A verdict nobody reviewed must not read as one,\nand two causes reaching one conclusion must not read as each other."
           },
           "seed": {
             "type": [

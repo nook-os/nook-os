@@ -64,10 +64,11 @@ type ReviewRun = {
   review_pr_number?: number | null;
   review_head_sha?: string | null;
   created_at: string;
-  // `loop_jobs.review_verdict_source` (MAIN-516): `conflict` is the control
-  // plane's own `changes_requested` for a PR that conflicts with its base — no
-  // run, no agent, no findings. The row is a real review row in every other
-  // respect, so without this it reads as a review that happened.
+  // `loop_jobs.review_verdict_source` (MAIN-516, MAIN-542): the control plane's
+  // own `changes_requested` for a PR that conflicts with its base, or that the
+  // merge queue ejected — no run, no agent, no findings. The row is a real
+  // review row in every other respect, so without this it reads as a review
+  // that happened.
   review_verdict_source?: string | null;
 };
 
@@ -122,12 +123,22 @@ export function buildRow(r: BuildRun): RunRow {
   };
 }
 
-/** The right-hand annotation for a review row: the head, and — for the one
- *  verdict no agent produced — what it actually is (MAIN-516 AC-6). */
+/** What each verdict the CONTROL PLANE concluded says it is. Named one by one
+ *  rather than prettified from the column: an unknown source is a source this
+ *  build does not understand, and the honest rendering of that is to say
+ *  nothing extra rather than to invent a phrase for it. */
+const CONTROL_PLANE_VERDICTS: Record<string, string> = {
+  conflict: "conflict, not reviewed",
+  queue_ejection: "queue ejection, not reviewed",
+};
+
+/** The right-hand annotation for a review row: the head, and — for a verdict no
+ *  agent produced — what it actually is (MAIN-516 AC-6, MAIN-542 AC-4). */
 export function reviewMeta(r: ReviewRun): string {
   const head = shortHead(r.review_head_sha);
-  if (r.review_verdict_source !== "conflict") return head;
-  return head ? `${head} · conflict, not reviewed` : "conflict, not reviewed";
+  const cause = CONTROL_PLANE_VERDICTS[r.review_verdict_source ?? ""];
+  if (!cause) return head;
+  return head ? `${head} · ${cause}` : cause;
 }
 
 export function reviewRow(r: ReviewRun): RunRow {
