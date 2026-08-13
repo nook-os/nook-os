@@ -8,6 +8,7 @@
 //! Each test owns a private database (MAIN-156 TestBed) and only its own rows.
 
 use nook_control::services::{jobs, loops};
+use nook_db::dialect::json;
 use nook_db::{params, Db};
 use nook_testkit::TestBed;
 use nook_types::*;
@@ -112,10 +113,13 @@ async fn a_user_scoped_row_cannot_turn_the_fleet_on() {
     let tenant = bed.tenant("loops").await;
     let (user, _p) = bed.user(tenant, "member").await;
 
+    let on = json(bed.engine()).literal("true");
     bed.db()
         .exec(
-            "INSERT INTO settings (id, tenant_id, scope, user_id, key, value)
-         VALUES ($1, $2, 'user', $3, $4, 'true'::jsonb)",
+            &format!(
+                "INSERT INTO settings (id, tenant_id, scope, user_id, key, value)
+         VALUES ($1, $2, 'user', $3, $4, {on})"
+            ),
             params![SettingId::new(), tenant, user, loops::KEY],
         )
         .await
@@ -181,11 +185,15 @@ async fn a_job_queued_while_off_waits_and_runs_after_enable() {
 
     // Now give it somewhere to run and turn loops on.
     let node = bed.node(tenant, person).await;
+    let capabilities = json(bed.engine()).literal(
+        r#"{"loop_kinds":["spec","decompose"],"runtime_auth":[{"runtime":"claude","state":"authorized"}]}"#,
+    );
     bed.db()
         .exec(
-            "UPDATE nodes SET status = 'online',
-             capabilities = '{\"loop_kinds\":[\"spec\",\"decompose\"],\"runtime_auth\":[{\"runtime\":\"claude\",\"state\":\"authorized\"}]}'::jsonb
-         WHERE id = $1",
+            &format!(
+                "UPDATE nodes SET status = 'online', capabilities = {capabilities}
+         WHERE id = $1"
+            ),
             params![node],
         )
         .await

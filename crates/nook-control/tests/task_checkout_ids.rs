@@ -11,6 +11,7 @@
 //! resolution both paths use — directly.
 
 use nook_control::services::taskwork::{present_checkout_at, prune_target};
+use nook_db::dialect::type_mapping;
 use nook_db::{params, Db};
 use nook_testkit::TestBed;
 use nook_types::*;
@@ -25,11 +26,14 @@ async fn checkout(
     missing: bool,
 ) -> NodeWorkspaceId {
     let id = NodeWorkspaceId::new();
+    let now = type_mapping(bed.engine()).now();
     bed.db()
         .exec(
-            "INSERT INTO node_workspaces
+            &format!(
+                "INSERT INTO node_workspaces
              (id, tenant_id, node_id, workspace_id, path, kind, missing_at)
-         VALUES ($1, $2, $3, $4, $5, 'clone', CASE WHEN $6 THEN now() ELSE NULL END)",
+         VALUES ($1, $2, $3, $4, $5, 'clone', CASE WHEN $6 THEN {now} ELSE NULL END)"
+            ),
             params![id, tenant, node, ws, path, missing],
         )
         .await
@@ -112,11 +116,12 @@ async fn checkout_of(bed: &TestBed, id: TaskId) -> Option<NodeWorkspaceId> {
 
 // ── AC-2: migration backfill ─────────────────────────────────────────────────
 
-/// The exact backfill statement from 0027, run against fixture data.
+/// The backfill statement from 0027, run against fixture data — with `AS t`
+/// rather than a bare `t`, the one spelling both engines read (MAIN-472).
 async fn run_backfill(bed: &TestBed) {
     bed.db()
         .exec(
-            "UPDATE tasks t
+            "UPDATE tasks AS t
          SET checkout_id = nw.id
          FROM node_workspaces nw
          WHERE t.checkout_id IS NULL

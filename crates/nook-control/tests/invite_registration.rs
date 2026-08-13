@@ -14,6 +14,7 @@ use nook_control::error::ApiResult;
 use nook_control::routes::invites;
 use nook_control::services::{identity, local_auth};
 use nook_control::state::AppState;
+use nook_db::dialect::time_math;
 use nook_db::{params, Db};
 use nook_testkit::TestBed;
 use nook_types::*;
@@ -23,10 +24,13 @@ use uuid::Uuid;
 /// A pending invite for `email` with `role`, returning the plaintext token.
 async fn add_invite(bed: &TestBed, tenant: TenantId, email: &str, role: &str) -> String {
     let token = format!("inv-{}", Uuid::now_v7().simple());
+    let expires = time_math(bed.engine()).now_plus("14 days");
     bed.db()
         .exec(
-            "INSERT INTO invites (id, tenant_id, email, role, token_hash, status, expires_at)
-         VALUES ($1, $2, $3, $4, $5, 'pending', now() + interval '14 days')",
+            &format!(
+                "INSERT INTO invites (id, tenant_id, email, role, token_hash, status, expires_at)
+         VALUES ($1, $2, $3, $4, $5, 'pending', {expires})"
+            ),
             params![
                 Uuid::now_v7(),
                 tenant,
@@ -236,10 +240,13 @@ async fn identity_context_resolves_the_session_but_tenant_scoped_rejects_it() {
 
     // A live session for the memberless user.
     let sid = Uuid::now_v7();
+    let expires = time_math(bed.engine()).now_plus("1 hour");
     bed.db()
         .exec(
-            "INSERT INTO sessions_auth (id, user_id, tenant_id, expires_at)
-         VALUES ($1, $2, $3, now() + interval '1 hour')",
+            &format!(
+                "INSERT INTO sessions_auth (id, user_id, tenant_id, expires_at)
+         VALUES ($1, $2, $3, {expires})"
+            ),
             params![sid, user.id.0, tenant],
         )
         .await
@@ -423,10 +430,13 @@ async fn accept_moves_the_memberless_session_onto_the_accepted_tenant() {
     .unwrap();
 
     let sid = Uuid::now_v7();
+    let expires = time_math(bed.engine()).now_plus("1 hour");
     bed.db()
         .exec(
-            "INSERT INTO sessions_auth (id, user_id, tenant_id, expires_at)
-         VALUES ($1, $2, $3, now() + interval '1 hour')",
+            &format!(
+                "INSERT INTO sessions_auth (id, user_id, tenant_id, expires_at)
+         VALUES ($1, $2, $3, {expires})"
+            ),
             params![sid, user.id.0, tenant],
         )
         .await

@@ -7,6 +7,7 @@
 //! Needs Postgres: `DATABASE_URL` (`NOOK_REQUIRE_DB=1` in the suite).
 
 use nook_control::services::jobs;
+use nook_db::dialect::{time_math, type_mapping};
 use nook_db::{params, Db};
 use nook_types::*;
 
@@ -47,13 +48,26 @@ async fn target_task(bed: &TestBed, tenant: TenantId, creator: UserId) -> TaskId
     task
 }
 
+/// `now()` minus the bound seconds at `placeholder`, in this bed's dialect —
+/// the one expression all three fixtures below age a row with. Not named
+/// `secs_ago`: each of them binds a local of that name, which would shadow it.
+fn aged(bed: &TestBed, placeholder: &str) -> String {
+    time_math(bed.engine()).now_minus_scaled(
+        &type_mapping(bed.engine()).cast(placeholder, "bigint"),
+        "1 second",
+    )
+}
+
 /// A node whose `last_seen_at` is `secs_ago` seconds in the past.
 async fn node_seen(bed: &TestBed, tenant: TenantId, secs_ago: i64) -> NodeId {
     let id = NodeId::new();
+    let ago = aged(bed, "$5");
     bed.db()
         .exec(
-            "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status, last_seen_at)
-         VALUES ($1,$2,$3,$4,'online', now() - ($5::bigint * interval '1 second'))",
+            &format!(
+                "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status, last_seen_at)
+         VALUES ($1,$2,$3,$4,'online', {ago})"
+            ),
             params![
                 id,
                 tenant,
@@ -69,10 +83,10 @@ async fn node_seen(bed: &TestBed, tenant: TenantId, secs_ago: i64) -> NodeId {
 
 /// Age a job's `updated_at`, so a scan measuring silence has something to see.
 async fn last_touched(bed: &TestBed, id: JobId, secs_ago: i64) {
+    let ago = aged(bed, "$2");
     bed.db()
         .exec(
-            "UPDATE loop_jobs SET updated_at = now() - ($2::bigint * interval '1 second')
-              WHERE id = $1",
+            &format!("UPDATE loop_jobs SET updated_at = {ago} WHERE id = $1"),
             params![id, secs_ago],
         )
         .await
@@ -81,10 +95,13 @@ async fn last_touched(bed: &TestBed, id: JobId, secs_ago: i64) {
 
 /// One transcript entry `secs_ago` seconds old — a run showing a sign of life.
 async fn entry(bed: &TestBed, id: JobId, secs_ago: i64) {
+    let ago = aged(bed, "$3");
     bed.db()
         .exec(
-            "INSERT INTO loop_job_transcript (id, job_id, source, content, at)
-             VALUES ($1,$2,'agent','· Bash', now() - ($3::bigint * interval '1 second'))",
+            &format!(
+                "INSERT INTO loop_job_transcript (id, job_id, source, content, at)
+             VALUES ($1,$2,'agent','· Bash', {ago})"
+            ),
             params![JobTranscriptId::new(), id, secs_ago],
         )
         .await

@@ -68,7 +68,7 @@ async fn cols(bed: &TestBed, board: BoardId) -> Vec<(String, i32, String)> {
 async fn run_backfill(bed: &TestBed, board: BoardId) {
     bed.db()
         .exec(
-        "UPDATE board_columns c SET position = position + 1
+        "UPDATE board_columns AS c SET position = position + 1
          WHERE c.board_id = $1
            AND EXISTS (SELECT 1 FROM board_columns d WHERE d.board_id = c.board_id AND d.type = 'completed')
            AND NOT EXISTS (SELECT 1 FROM board_columns d WHERE d.board_id = c.board_id AND d.type = 'review')
@@ -80,14 +80,14 @@ async fn run_backfill(bed: &TestBed, board: BoardId) {
     bed.db()
         .exec(
         "INSERT INTO board_columns (id, board_id, name, position, type)
-         SELECT gen_random_uuid(), b.id, 'In Review',
+         SELECT $2, b.id, 'In Review',
                 (SELECT min(position) FROM board_columns c WHERE c.board_id = b.id AND c.type = 'completed') - 1,
                 'review'
          FROM boards b
          WHERE b.id = $1
            AND EXISTS (SELECT 1 FROM board_columns c WHERE c.board_id = b.id AND c.type = 'completed')
            AND NOT EXISTS (SELECT 1 FROM board_columns c WHERE c.board_id = b.id AND c.type = 'review')",
-            params![board],
+            params![board, Uuid::now_v7()],
         )
         .await
         .expect("insert review");

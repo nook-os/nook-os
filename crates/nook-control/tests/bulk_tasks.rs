@@ -41,10 +41,11 @@ async fn add_member(bed: &TestBed, tenant: TenantId, name: &str) -> UserId {
     bed.db()
         .exec(
             "INSERT INTO users (id, tenant_id, person_id, display_name, email, role)
-         VALUES ($1, $2, gen_random_uuid(), $3, $4, 'member')",
+         VALUES ($1, $2, $3, $4, $5, 'member')",
             params![
                 id,
                 tenant,
+                Uuid::now_v7(),
                 name,
                 format!("{}-{}@example.test", name, id.0.simple())
             ],
