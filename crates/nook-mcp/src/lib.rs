@@ -21,9 +21,9 @@ use uuid::Uuid;
 use nook_errors::ApiError;
 use nook_types::{
     AttachmentContent, CreateUserNote, CreateUserNoteFolder, Event, LoopRunLookup, LoopRunSummary,
-    Node, Note, Session, TaskAttachment, TaskItem, TenantId, UpdateUserNote, UpdateUserNoteFolder,
-    UserId, UserNote, UserNoteFolder, UserNoteFolderId, UserNoteId, UserNoteSummary,
-    WorkspaceDetail,
+    Node, Note, Session, TaskAttachment, TaskItem, TenantId, TunnelView, UpdateUserNote,
+    UpdateUserNoteFolder, UserId, UserNote, UserNoteFolder, UserNoteFolderId, UserNoteId,
+    UserNoteSummary, WorkspaceDetail,
 };
 
 /// The per-request MCP caller identity resolved from an OIDC bearer (MAIN-102).
@@ -197,6 +197,24 @@ pub trait NookBackend: Send + Sync + 'static {
         run: String,
         tail_lines: u32,
     ) -> anyhow::Result<LoopRunLookup>;
+
+    // ── Tunnels (MAIN-11) ───────────────────────────────────────────────────
+    //
+    // A second door onto the endpoints MAIN-404 built, never a second
+    // implementation: the naming, the collision handling, the zone requirement
+    // and the node gate all stay where the CLI already finds them.
+    /// Expose `port` on the node the session runs on. The session is named
+    /// rather than read from the environment — an MCP caller is not inside one.
+    async fn open_tunnel(
+        &self,
+        caller: McpCaller,
+        session_id: String,
+        port: u16,
+    ) -> anyhow::Result<TunnelView>;
+    /// Every tunnel open in the caller's tenant.
+    async fn list_tunnels(&self, caller: McpCaller) -> anyhow::Result<Vec<TunnelView>>;
+    /// Close one by its label. A label with no tunnel behind it is an error.
+    async fn stop_tunnel(&self, caller: McpCaller, label: String) -> anyhow::Result<()>;
 
     // ── Notebook (person-scoped; MAIN-102) ──────────────────────────────────
     // Unlike every method above (pre-scoped to the instance's first tenant),
@@ -488,6 +506,22 @@ pub struct GetBuildRunParams {
     /// 2000), mirroring read_session's `history_lines`. The response says what
     /// it left out.
     pub tail_lines: Option<u32>,
+}
+
+/// Open a tunnel to a port on a session's node (MAIN-11 AC-1).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct OpenTunnelParams {
+    /// The session whose machine the port is on. It also binds the tunnel's
+    /// lifetime: the tunnel ends when the session does.
+    pub session_id: String,
+    /// The port the app is listening on, on that machine's loopback.
+    pub port: u16,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct StopTunnelParams {
+    /// The tunnel's generated name — the `label` create and list return.
+    pub label: String,
 }
 
 #[derive(Clone)]
@@ -952,6 +986,74 @@ impl NookMcp {
                 .await
                 .map_err(backend_err)?,
         )
+    }
+
+    // ── Tunnels (MAIN-11) ───────────────────────────────────────────────────
+
+    #[tool(
+        description = "Open a tunnel: publish a port a session is serving on at a URL on \
+                       this deployment's tunnel domain, so a person can see what was just \
+                       built without a shell on that machine. Name the session (an MCP \
+                       caller is not inside one) \
+                       and the port it listens on; the reply carries the URL, the \
+                       generated name, the node and the port. The URL is NOT public — \
+                       opening it needs a signed-in member of this tenant, so offer it as \
+                       a link for the team, never as a share link. The tunnel ends with \
+                       its session, when it goes idle, or on stop_tunnel."
+    )]
+    async fn open_tunnel(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(p): Parameters<OpenTunnelParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = require_caller(&parts)?;
+        to_result(
+            &self
+                .backend
+                .open_tunnel(caller, p.session_id, p.port)
+                .await
+                .map_err(backend_err)?,
+        )
+    }
+
+    #[tool(
+        description = "List this tenant's live tunnels: each one's generated name, URL, \
+                       node, port, the session it belongs to and when it was opened, plus \
+                       how long it has been idle. Every URL here needs a signed-in member \
+                       of this tenant to open."
+    )]
+    async fn list_tunnels(
+        &self,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = require_caller(&parts)?;
+        to_result(
+            &self
+                .backend
+                .list_tunnels(caller)
+                .await
+                .map_err(backend_err)?,
+        )
+    }
+
+    #[tool(
+        description = "Close a tunnel by its generated name, taking its URL down at once. \
+                       A name with no tunnel behind it is an error, not a quiet success."
+    )]
+    async fn stop_tunnel(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(p): Parameters<StopTunnelParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = require_caller(&parts)?;
+        let label = p.label.trim().to_string();
+        self.backend
+            .stop_tunnel(caller, label.clone())
+            .await
+            .map_err(backend_err)?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            "closed {label}"
+        ))]))
     }
 
     #[tool(description = "Move a task to a named column (Triage/Todo/In Progress/Done)")]

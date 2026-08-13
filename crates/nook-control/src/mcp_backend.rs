@@ -900,6 +900,56 @@ impl NookBackend for McpBackend {
         })
     }
 
+    // ── Tunnels (MAIN-11) ───────────────────────────────────────────────────
+    // Every one of these calls `routes::tunnels`, so the naming, the collision
+    // handling, the `TUNNEL_DOMAIN` requirement and the node gate are the ones
+    // the CLI already goes through (AC-4). Scoped by the CALLER's tenant, never
+    // the instance's first one — a tunnel publishes a running app, so which
+    // tenant may open one has to come from the authenticated identity (NG-3).
+
+    async fn open_tunnel(
+        &self,
+        caller: McpCaller,
+        session_id: String,
+        port: u16,
+    ) -> anyhow::Result<TunnelView> {
+        let id: SessionId = session_id
+            .parse()
+            .map_err(|_| anyhow::anyhow!("bad session id"))?;
+        // The machine is the SESSION's, exactly as `nook tunnel` reads it from
+        // node.toml: an MCP caller is not in the session, so naming the node
+        // again would only be a second chance to name the wrong one. A session
+        // in another tenant is not found here, before anything is opened.
+        let session = self
+            .state
+            .sessions
+            .by_id_unscoped(id)
+            .await?
+            .filter(|s| s.tenant_id == caller.tenant_id)
+            .ok_or(crate::error::ApiError::NotFound)?;
+        Ok(crate::routes::tunnels::open(
+            &self.state,
+            auth_ctx(&caller),
+            CreateTunnelRequest {
+                port,
+                node_id: Some(session.node_id),
+                session_id: Some(session.id),
+            },
+        )
+        .await?)
+    }
+
+    async fn list_tunnels(&self, caller: McpCaller) -> anyhow::Result<Vec<TunnelView>> {
+        Ok(crate::routes::tunnels::live(
+            &self.state,
+            auth_ctx(&caller),
+        )?)
+    }
+
+    async fn stop_tunnel(&self, caller: McpCaller, label: String) -> anyhow::Result<()> {
+        Ok(crate::routes::tunnels::close(&self.state, auth_ctx(&caller), &label).await?)
+    }
+
     // ── Notebook (person-scoped; MAIN-102) ──────────────────────────────────
     // These take the caller's own resolved `person` (never the first-user
     // fallback) and route through the notebook module's service paths, so
@@ -980,6 +1030,23 @@ impl NookBackend for McpBackend {
         id: UserNoteFolderId,
     ) -> anyhow::Result<()> {
         Ok(crate::routes::notebook::delete_folder_for(&self.state, person, id).await?)
+    }
+}
+
+/// The MCP caller as the `AuthCtx` the control plane's own gates take, so a tool
+/// can call a route's logic instead of restating its rules (MAIN-11 AC-4).
+///
+/// An OIDC bearer is a person with no browser session behind it — the same
+/// shape `nook_user_` tokens already resolve to, which is why the principal is
+/// a user, `cookie_session` is false, and the session id is nil rather than
+/// invented.
+fn auth_ctx(caller: &McpCaller) -> crate::auth::AuthCtx {
+    crate::auth::AuthCtx {
+        session_id: AuthSessionId(uuid::Uuid::nil()),
+        user_id: caller.user_id,
+        tenant_id: caller.tenant_id,
+        principal: crate::auth::Principal::User,
+        cookie_session: false,
     }
 }
 

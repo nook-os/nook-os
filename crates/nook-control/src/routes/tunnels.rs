@@ -423,7 +423,20 @@ pub async fn create(
     auth: AuthCtx,
     Json(req): Json<CreateTunnelRequest>,
 ) -> ApiResult<Json<TunnelView>> {
-    let domain = zone(&state)?;
+    Ok(Json(open(&state, auth, req).await?))
+}
+
+/// The whole of "open a tunnel", callable in process.
+///
+/// Split from the handler so the MCP tools reach the naming, the zone check and
+/// the node gate by CALLING them rather than by restating them (MAIN-11 AC-4) —
+/// the one thing an agent-facing second door must not do.
+pub async fn open(
+    state: &AppState,
+    auth: AuthCtx,
+    req: CreateTunnelRequest,
+) -> ApiResult<TunnelView> {
+    let domain = zone(state)?;
     if req.port == 0 {
         return Err(ApiError::BadRequest("port must be 1-65535".into()));
     }
@@ -443,7 +456,7 @@ pub async fn create(
     // may run the thing behind it on. Not `require_node_owner` — a shared
     // operator node is the normal place work runs, and a tunnel you cannot open
     // to your own dev server there is a tunnel for nothing.
-    auth.require_node_may_use(&state, node_id).await?;
+    auth.require_node_may_use(state, node_id).await?;
 
     let node = state
         .nodes
@@ -501,7 +514,7 @@ pub async fn create(
     });
 
     events::record(
-        &state,
+        state,
         auth.tenant_id,
         EventDraft::new("tunnel.opened")
             .node(node_id)
@@ -517,7 +530,7 @@ pub async fn create(
         "tunnel opened"
     );
 
-    Ok(Json(view(&state, &tunnel, Duration::ZERO, &domain)))
+    Ok(view(state, &tunnel, Duration::ZERO, &domain))
 }
 
 /// `GET /api/v1/tunnels` — every tunnel open in the caller's tenant.
@@ -532,15 +545,18 @@ pub async fn list(
     State(state): State<AppState>,
     auth: AuthCtx,
 ) -> ApiResult<Json<Vec<TunnelView>>> {
-    let domain = zone(&state)?;
-    Ok(Json(
-        state
-            .registry
-            .tunnels_for_tenant(auth.tenant_id)
-            .iter()
-            .map(|(t, idle)| view(&state, t, *idle, &domain))
-            .collect(),
-    ))
+    Ok(Json(live(&state, auth)?))
+}
+
+/// Every tunnel open in `auth`'s tenant, callable in process (MAIN-11 AC-2).
+pub fn live(state: &AppState, auth: AuthCtx) -> ApiResult<Vec<TunnelView>> {
+    let domain = zone(state)?;
+    Ok(state
+        .registry
+        .tunnels_for_tenant(auth.tenant_id)
+        .iter()
+        .map(|(t, idle)| view(state, t, *idle, &domain))
+        .collect())
 }
 
 /// `DELETE /api/v1/tunnels/{label}` — close one.
@@ -553,23 +569,31 @@ pub async fn stop(
     auth: AuthCtx,
     Path(label): Path<String>,
 ) -> ApiResult<StatusCode> {
+    close(&state, auth, &label).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Close one tunnel by label, callable in process. A label this caller has no
+/// tunnel under is [`ApiError::NotFound`] — which is what makes stopping a name
+/// that does not exist an error rather than a silent success (MAIN-11 AC-3).
+pub async fn close(state: &AppState, auth: AuthCtx, label: &str) -> ApiResult<()> {
     // A tunnel in another tenant is NOT FOUND, never forbidden: the labels share
     // one zone, and "you may not stop that" confirms somebody else has it.
     let tunnel = state
         .registry
-        .tunnel_route(&label)
+        .tunnel_route(label)
         .filter(|t| t.tenant_id == auth.tenant_id)
         .ok_or(ApiError::NotFound)?;
-    auth.require_node_may_use(&state, tunnel.node_id).await?;
+    auth.require_node_may_use(state, tunnel.node_id).await?;
 
     // Re-read through the take: between the lookup above and here the sweep or
     // a node disconnect may have closed it, and reporting a close we did not
     // perform would be a small lie in the audit trail.
-    let Some(gone) = state.registry.take_tunnel_route(&label) else {
-        return Ok(StatusCode::NO_CONTENT);
+    let Some(gone) = state.registry.take_tunnel_route(label) else {
+        return Ok(());
     };
-    closed(&state, &gone, "stopped").await;
-    Ok(StatusCode::NO_CONTENT)
+    closed(state, &gone, "stopped").await;
+    Ok(())
 }
 
 /// Announce a tunnel's end, wherever it came from — the API, the idle sweep, a
