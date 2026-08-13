@@ -19,7 +19,7 @@ use uuid::Uuid;
 use crate::auth::AuthCtx;
 use crate::error::{ApiError, ApiResult};
 use crate::repo::attachments::{NewAttachment, PARENT_COMMENT, PARENT_TASK};
-use crate::services::tasks;
+use crate::services::{attachments, tasks};
 use crate::state::AppState;
 
 /// `include=comments` widens the answer to the whole thread — the ticket's own
@@ -53,6 +53,31 @@ pub async fn list_for_task(
             .list(auth.tenant_id, PARENT_TASK, task.0)
             .await?
     }))
+}
+
+/// One attachment by id — what `nook attachments get` resolves before it
+/// writes a byte (MAIN-534).
+///
+/// The listing routes answer "what is on this parent"; an agent handed an id
+/// has neither parent, and re-listing a whole thread to find one row is a
+/// question with an answer nobody asked for. Metadata BEFORE bytes is also
+/// what lets the CLI refuse to overwrite a file without having downloaded 25
+/// MiB first.
+///
+/// Another tenant's id and an id that never existed are the same 404, for the
+/// reason the content route already states: a distinguishable answer is a
+/// probe (AC-4).
+#[utoipa::path(get, path = "/api/v1/attachments/{id}",
+    operation_id = "get_task_attachment", params(("id" = String, Path,)),
+    responses((status = 200, body = TaskAttachment), (status = 404)))]
+pub async fn get_one(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<TaskAttachment>> {
+    Ok(Json(
+        crate::services::attachments::readable(&state, auth.tenant_id, auth.user_id, id).await?,
+    ))
 }
 
 #[utoipa::path(post, path = "/api/v1/tasks/{id}/attachments",
@@ -150,7 +175,9 @@ pub async fn detach(
     crate::services::attachments::purge_content(&state, auth.tenant_id, &[row.user_content_id])
         .await?;
 
-    if let Some(task) = parent_task(&state, &auth, &row).await? {
+    if let Some(task) =
+        attachments::parent_task(&state, auth.tenant_id, &row.parent_kind, row.parent_id).await?
+    {
         state.registry.publish(
             auth.tenant_id,
             nook_proto::UiEvent::TaskChanged { task_id: task },
@@ -191,26 +218,17 @@ async fn attach(
 }
 
 /// The task behind an identifier, refused as 404 when this viewer may not see
-/// it (MAIN-76).
+/// it (MAIN-76). The rule itself lives in the service layer, because MCP
+/// resolves the same parents and a second copy of a visibility check is a
+/// second chance to get one wrong (MAIN-534).
 async fn readable_task(state: &AppState, auth: &AuthCtx, ident: &str) -> ApiResult<TaskId> {
-    let id = tasks::resolve_id(state.tasks.as_ref(), auth.tenant_id, ident).await?;
-    let row = state
-        .tasks
-        .get_row(auth.tenant_id, id)
-        .await?
-        .ok_or(ApiError::NotFound)?;
-    if !tasks::visible_to(&row, auth.user_id) {
-        return Err(ApiError::NotFound);
-    }
-    Ok(id)
+    attachments::readable_task(state, auth.tenant_id, auth.user_id, ident).await
 }
 
 /// A comment's task, refused the same way — a comment is exactly as visible as
 /// the ticket it hangs on.
 async fn readable_comment(state: &AppState, auth: &AuthCtx, id: Uuid) -> ApiResult<TaskId> {
-    let (_, task) = state
-        .tasks
-        .comment_author(id, auth.tenant_id)
+    let task = attachments::parent_task(state, auth.tenant_id, PARENT_COMMENT, id)
         .await?
         .ok_or(ApiError::NotFound)?;
     let row = state
@@ -222,21 +240,4 @@ async fn readable_comment(state: &AppState, auth: &AuthCtx, id: Uuid) -> ApiResu
         return Err(ApiError::NotFound);
     }
     Ok(task)
-}
-
-/// Which ticket a removal should redraw. `None` when the parent has already
-/// gone, which is not an error — the removal still happened.
-async fn parent_task(
-    state: &AppState,
-    auth: &AuthCtx,
-    row: &crate::repo::attachments::AttachmentRow,
-) -> ApiResult<Option<TaskId>> {
-    if row.parent_kind == PARENT_TASK {
-        return Ok(Some(TaskId(row.parent_id)));
-    }
-    Ok(state
-        .tasks
-        .comment_author(row.parent_id, auth.tenant_id)
-        .await?
-        .map(|(_, task)| task))
 }

@@ -2524,6 +2524,49 @@ pub struct TaskAttachment {
     pub created_at: DateTime<Utc>,
 }
 
+/// A byte count as a person reads it at a glance.
+///
+/// Binary units, because an upload cap is expressed in them and a listing that
+/// disagreed with the refusal message would be its own small puzzle. Lives here
+/// rather than in either caller: the control plane renders it into an MCP
+/// answer and the CLI renders it into a listing, and two roundings of the same
+/// number is exactly the drift this crate exists to stop (MAIN-534).
+pub fn human_size(bytes: i64) -> String {
+    const KIB: f64 = 1024.0;
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let b = bytes as f64;
+    for (unit, scale) in [("KB", KIB), ("MB", KIB * KIB), ("GB", KIB * KIB * KIB)] {
+        let scaled = b / scale;
+        if scaled < 1024.0 || unit == "GB" {
+            return format!("{scaled:.1} {unit}");
+        }
+    }
+    unreachable!()
+}
+
+/// One attachment as an agent reads it over MCP (MAIN-534).
+///
+/// The point of the shape is what it REFUSES to do. A ticket's brief is text,
+/// and text belongs in the reply; a 4 MB screenshot does not, and returning it
+/// as base64 would spend a transcript on bytes no model can read anyway. So a
+/// file is either inlined or pointed at, never half of each — `content` and
+/// `not_inlined` are set exactly one at a time.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AttachmentContent {
+    /// The attachment id — the same one `nook attachments get` takes.
+    pub id: Uuid,
+    pub filename: String,
+    pub content_type: String,
+    pub size_bytes: i64,
+    /// The whole file, when it is text and small enough to belong in a reply.
+    pub content: Option<String>,
+    /// Why the bytes are not here, and the command that fetches them. Set
+    /// exactly when `content` is not.
+    pub not_inlined: Option<String>,
+}
+
 /// `POST /tasks/{id}/attachments` and its comment twin: hang already-uploaded
 /// content on this parent.
 ///
@@ -4583,4 +4626,19 @@ pub enum ChatServerMessage {
         /// needs no directory lookup; `None` when the user row carries none.
         display_name: Option<String>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sizes_read_as_a_person_would_say_them() {
+        assert_eq!(human_size(0), "0 B");
+        assert_eq!(human_size(999), "999 B");
+        assert_eq!(human_size(1024), "1.0 KB");
+        assert_eq!(human_size(1536), "1.5 KB");
+        assert_eq!(human_size(5 * 1024 * 1024), "5.0 MB");
+        assert_eq!(human_size(3 * 1024 * 1024 * 1024), "3.0 GB");
+    }
 }

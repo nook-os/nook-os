@@ -15,9 +15,9 @@ use uuid::Uuid;
 
 use nook_mcp::{BuildRunQuery, McpCaller, NookBackend, TaskQuery};
 use nook_types::{
-    CreateUserNote, CreateUserNoteFolder, Event, LoopRunLookup, LoopRunSummary, Node, Note,
-    Session, TaskItem, UpdateUserNote, UpdateUserNoteFolder, UserNote, UserNoteFolder,
-    UserNoteFolderId, UserNoteId, UserNoteSummary, WorkspaceDetail,
+    AttachmentContent, CreateUserNote, CreateUserNoteFolder, Event, LoopRunLookup, LoopRunSummary,
+    Node, Note, Session, TaskAttachment, TaskItem, UpdateUserNote, UpdateUserNoteFolder, UserNote,
+    UserNoteFolder, UserNoteFolderId, UserNoteId, UserNoteSummary, WorkspaceDetail,
 };
 
 const HOST: &str = "nook.example.test";
@@ -68,6 +68,8 @@ never_called! {
     fn set_priority(String, i32) -> anyhow::Result<TaskItem>;
     fn set_task_parent(String, Option<String>) -> anyhow::Result<TaskItem>;
     fn link_tasks(String, String, String) -> anyhow::Result<Value>;
+    fn list_task_attachments(String) -> anyhow::Result<Vec<TaskAttachment>>;
+    fn read_task_attachment(String) -> anyhow::Result<AttachmentContent>;
     fn list_build_runs(McpCaller, BuildRunQuery) -> anyhow::Result<Vec<LoopRunSummary>>;
     fn get_build_run(McpCaller, String, u32) -> anyhow::Result<LoopRunLookup>;
     fn notebook_list_notes(Uuid, Option<String>) -> anyhow::Result<Vec<UserNoteSummary>>;

@@ -1,7 +1,7 @@
 ---
 name: nook-build
 description: "Build the one NookOS card a run is directed at, end to end: read the contract, implement it in a branch, verify, open a PR, and report the outcome. Judgment only — the control plane picks, claims, moves cards and records. Designed for directed build runs; never merges."
-version: 2.3.0
+version: 2.4.0
 author: NookOS
 license: MIT
 platforms: [linux, macos]
@@ -49,6 +49,24 @@ Implement only its acceptance criteria. Non-goals are binding. Compare every
 `AC-N` against every `NG-N` before editing, and read the comments — a human
 ruling in a comment amends the contract. No unrelated changes and no
 opportunistic refactors.
+
+**A card can carry files, and they are part of the brief.** When `nook task`
+prints an Attachments section, a document, a screenshot or a schema was hung on
+the ticket or on one of its comments — it is contract, not decoration, and
+implementing without reading it is implementing from an incomplete brief. Fetch
+what the description depends on and nothing else:
+
+```bash
+nook attachments list "$NOOK_BUILD_TASK"   # filename, type, size, id
+nook attachments get <ID>                  # into the working directory
+nook attachments get <ID> --out /tmp/spec.md
+```
+
+Judgment, not a ritual: a mockup a criterion refers to is worth reading, a 12 MB
+video is not. Nothing downloads by itself, so a run only pays for what it asked
+for. `get` refuses to overwrite an existing file — pass `--out` to put it
+somewhere else. Fetched files are scratch: keep them out of the commit unless a
+criterion says otherwise.
 
 If an acceptance criterion is ambiguous, conflicts with a non-goal, or depends
 on something unresolved, do not guess — hand the decision to a human (§5,

@@ -609,6 +609,28 @@ impl NookBackend for McpBackend {
         Ok(serde_json::to_value(detail)?)
     }
 
+    async fn list_task_attachments(&self, task: String) -> anyhow::Result<Vec<TaskAttachment>> {
+        let tenant = self.tenant().await?;
+        let viewer = self.user().await?;
+        Ok(
+            crate::services::attachments::list_thread_readable(&self.state, tenant, viewer, &task)
+                .await?,
+        )
+    }
+
+    async fn read_task_attachment(&self, attachment: String) -> anyhow::Result<AttachmentContent> {
+        let tenant = self.tenant().await?;
+        let viewer = self.user().await?;
+        // Parsed here rather than let the repository match nothing: an id that
+        // is not a uuid is a caller mistake and deserves to say so, while a
+        // well-formed id that finds nothing is the 404 AC-4 is about.
+        let id: uuid::Uuid = attachment
+            .trim()
+            .parse()
+            .map_err(|_| anyhow::anyhow!("not an attachment id: {attachment}"))?;
+        Ok(crate::services::attachments::read_content(&self.state, tenant, viewer, id).await?)
+    }
+
     async fn claim_task(
         &self,
         task: String,

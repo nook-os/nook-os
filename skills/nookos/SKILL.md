@@ -1,7 +1,7 @@
 ---
 name: nookos
 description: "Run and drive coding agents on OTHER machines with `nook` — no ssh, no tmux. Start a Claude/Codex/bash session anywhere in the fleet, type into it, read its answer, and teach every agent in the fleet a skill at once."
-version: 1.4.0
+version: 1.5.0
 author: NookOS
 license: MIT
 platforms: [linux, macos]
@@ -313,6 +313,22 @@ description:
 ```bash
 nook task NOOK-42
 ```
+
+If it prints an **Attachments** section, the card carries files — on the ticket
+itself or on one of its comments — and they are part of the brief. Nothing
+downloads by itself; list them and pull only what you need:
+
+```bash
+nook attachments list NOOK-42            # filename, type, size, id
+nook attachments get <ID>                # into the working directory
+nook attachments get <ID> --out ./spec.md
+```
+
+`get` refuses to overwrite a file that is already there rather than replacing
+it. Over MCP the same two moves are `list_task_attachments` and
+`read_task_attachment` — the latter hands back a text file's content directly,
+and points anything binary back at the CLI rather than spending your context on
+bytes you cannot read.
 
 **Take it.** Claiming is atomic, so two agents polling the same queue cannot
 both win:

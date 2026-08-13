@@ -12,7 +12,7 @@ use axum::http::{header, Request, StatusCode};
 use nook_control::auth::{AuthCtx, Principal};
 use nook_control::routes::boards::delete_task;
 use nook_control::routes::task_attachments::{
-    attach_to_comment, attach_to_task, detach, list_for_comment, list_for_task, ListScope,
+    attach_to_comment, attach_to_task, detach, get_one, list_for_comment, list_for_task, ListScope,
 };
 use nook_control::routes::task_detail::delete_comment;
 use nook_control::routes::user_content::upload;
@@ -80,10 +80,22 @@ async fn multipart(filename: &str, content_type: &str, bytes: &[u8]) -> Multipar
 
 /// Upload real bytes and return the record.
 async fn put(state: &AppState, who: AuthCtx, filename: &str, bytes: &[u8]) -> UserContent {
+    put_typed(state, who, filename, "application/octet-stream", bytes).await
+}
+
+/// The same, saying what the file claims to be — which is the whole input to
+/// the inline-or-point decision (MAIN-534 AC-5).
+async fn put_typed(
+    state: &AppState,
+    who: AuthCtx,
+    filename: &str,
+    content_type: &str,
+    bytes: &[u8],
+) -> UserContent {
     let res = upload(
         State(state.clone()),
         who,
-        multipart(filename, "application/octet-stream", bytes).await,
+        multipart(filename, content_type, bytes).await,
     )
     .await
     .expect("the upload succeeds");
@@ -578,6 +590,293 @@ async fn the_card_count_sees_comments_too() {
         "two on the ticket, one on its comment"
     );
     assert_eq!(cards[1].attachment_count, 0);
+
+    bed.teardown().await;
+}
+
+/// A node token — what a loop run's `nook` carries. Its tenant is the same;
+/// its principal is not a person.
+fn node_ctx(tenant: TenantId) -> AuthCtx {
+    AuthCtx {
+        session_id: AuthSessionId(Uuid::nil()),
+        user_id: UserId(Uuid::nil()),
+        tenant_id: tenant,
+        principal: Principal::Node(NodeId(Uuid::now_v7())),
+        cookie_session: false,
+    }
+}
+
+/// Attach `bytes` to `task`, and answer with the attachment id an agent would
+/// be handed.
+async fn attached(
+    state: &AppState,
+    who: AuthCtx,
+    task: TaskId,
+    filename: &str,
+    content_type: &str,
+    bytes: &[u8],
+) -> Uuid {
+    let content = put_typed(state, who, filename, content_type, bytes).await;
+    attach_to_task(
+        State(state.clone()),
+        who,
+        Path(task.to_string()),
+        axum::Json(AttachContentRequest {
+            user_content_id: content.id,
+        }),
+    )
+    .await
+    .expect("attach")
+    .0
+    .id
+}
+
+/// MAIN-534 AC-4: the id resolves for its own tenant, under a user token and
+/// under a node token alike — and another tenant's id is a plain not-found,
+/// never a leak of the filename it names.
+#[tokio::test]
+async fn one_attachment_resolves_by_id_and_only_inside_its_tenant() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let scratch = Scratch::new("get-one");
+    let state = state_on(&bed, &scratch).await;
+    let tenant = bed.tenant("mine").await;
+    let (user, _) = bed.user(tenant, "member").await;
+    let board = board_in(&bed, tenant).await;
+    let task = task_on(&state, tenant, board, user).await;
+    let id = attached(
+        &state,
+        ctx(user, tenant),
+        task.id,
+        "spec.md",
+        "text/markdown",
+        b"# a brief",
+    )
+    .await;
+
+    let row = get_one(State(state.clone()), ctx(user, tenant), Path(id))
+        .await
+        .expect("the owner reads it")
+        .0;
+    assert_eq!(row.filename, "spec.md");
+    assert_eq!(row.size_bytes, 9);
+
+    // An agent's credential is not a person's, and reads the same record.
+    let as_node = get_one(State(state.clone()), node_ctx(tenant), Path(id))
+        .await
+        .expect("a node token reads it too")
+        .0;
+    assert_eq!(as_node.id, row.id);
+
+    let other = bed.tenant("theirs").await;
+    let (stranger, _) = bed.user(other, "member").await;
+    let err = get_one(State(state.clone()), ctx(stranger, other), Path(id))
+        .await
+        .expect_err("another tenant's id is not readable");
+    assert_eq!(status_of(err), StatusCode::NOT_FOUND);
+
+    // An id that never existed answers exactly the same, so neither is a probe.
+    let err = get_one(
+        State(state.clone()),
+        ctx(user, tenant),
+        Path(Uuid::now_v7()),
+    )
+    .await
+    .expect_err("an unknown id");
+    assert_eq!(status_of(err), StatusCode::NOT_FOUND);
+
+    bed.teardown().await;
+}
+
+/// AC-2/AC-4: `nook attachments list <KEY>` is one request for the ticket AND
+/// its comments, and a node token gets the same answer a person does.
+#[tokio::test]
+async fn the_thread_listing_serves_agents_too() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let scratch = Scratch::new("thread-list");
+    let state = state_on(&bed, &scratch).await;
+    let tenant = bed.tenant("thread").await;
+    let (user, _) = bed.user(tenant, "member").await;
+    let board = board_in(&bed, tenant).await;
+    let task = task_on(&state, tenant, board, user).await;
+    let comment = comment_on(&state, tenant, task.id, user).await;
+    // The key the way a human sees it — `create_task` answers with the row, and
+    // the key is a board join the enrichment adds, so it is read back here.
+    let (board_key, number): (String, i32) = bed
+        .db()
+        .query_one(
+            "SELECT b.key, t.number FROM tasks t
+               JOIN boards b ON b.id = t.board_id WHERE t.id = $1",
+            params![task.id],
+        )
+        .await
+        .expect("the card's key");
+    let key = format!("{board_key}-{number}");
+
+    attached(
+        &state,
+        ctx(user, tenant),
+        task.id,
+        "spec.md",
+        "text/markdown",
+        b"brief",
+    )
+    .await;
+    let on_comment = put(&state, ctx(user, tenant), "logs.zip", b"PK\x03\x04").await;
+    let _ = attach_to_comment(
+        State(state.clone()),
+        ctx(user, tenant),
+        Path(comment),
+        axum::Json(AttachContentRequest {
+            user_content_id: on_comment.id,
+        }),
+    )
+    .await
+    .expect("attach to the comment");
+
+    for (who, label) in [
+        (ctx(user, tenant), "a person"),
+        (node_ctx(tenant), "a node"),
+    ] {
+        let rows = nook_control::services::attachments::list_thread_readable(
+            &state,
+            tenant,
+            who.user_id,
+            &key,
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{label} lists the thread"));
+        assert_eq!(rows.len(), 2, "{label}: the ticket's and the comment's");
+        assert!(rows.iter().any(|r| r.parent_kind == "task_comment"));
+    }
+
+    // The key resolves as well as the uuid — a key is what an agent is handed.
+    let other = bed.tenant("elsewhere").await;
+    let (stranger, _) = bed.user(other, "member").await;
+    let err =
+        nook_control::services::attachments::list_thread_readable(&state, other, stranger, &key)
+            .await
+            .expect_err("another tenant cannot list this card");
+    assert_eq!(status_of(err), StatusCode::NOT_FOUND);
+
+    bed.teardown().await;
+}
+
+/// AC-5: text comes back as text; a binary file comes back as a pointer to the
+/// CLI, never as bytes in the transcript.
+#[tokio::test]
+async fn an_agent_reads_text_and_is_pointed_at_everything_else() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let scratch = Scratch::new("read-content");
+    let state = state_on(&bed, &scratch).await;
+    let tenant = bed.tenant("read").await;
+    let (user, _) = bed.user(tenant, "member").await;
+    let board = board_in(&bed, tenant).await;
+    let task = task_on(&state, tenant, board, user).await;
+
+    let doc = attached(
+        &state,
+        ctx(user, tenant),
+        task.id,
+        "spec.md",
+        "text/markdown",
+        b"# AC-1\nread me",
+    )
+    .await;
+    let png = attached(
+        &state,
+        ctx(user, tenant),
+        task.id,
+        "shot.png",
+        "image/png",
+        b"\x89PNG not really",
+    )
+    .await;
+
+    let read = |id| {
+        let state = state.clone();
+        async move {
+            nook_control::services::attachments::read_content(&state, tenant, user, id)
+                .await
+                .expect("readable")
+        }
+    };
+
+    let text = read(doc).await;
+    assert_eq!(text.content.as_deref(), Some("# AC-1\nread me"));
+    assert!(text.not_inlined.is_none());
+
+    let binary = read(png).await;
+    assert!(binary.content.is_none(), "no bytes reach the transcript");
+    let hint = binary.not_inlined.expect("a pointer instead");
+    assert!(
+        hint.contains(&format!("nook attachments get {png}")),
+        "the pointer names the command and the id: {hint}"
+    );
+    assert_eq!(binary.filename, "shot.png", "listed, just not inlined");
+
+    // A file whose type says text but whose bytes are not is the uploader's
+    // mistake — it points rather than returning replacement characters.
+    let lying = attached(
+        &state,
+        ctx(user, tenant),
+        task.id,
+        "notes.txt",
+        "text/plain",
+        &[0xff, 0xfe, 0x00],
+    )
+    .await;
+    assert!(read(lying).await.content.is_none());
+
+    // And another tenant's id is the same 404 the record lookup gives.
+    let other = bed.tenant("read-other").await;
+    let (stranger, _) = bed.user(other, "member").await;
+    let err = nook_control::services::attachments::read_content(&state, other, stranger, doc)
+        .await
+        .expect_err("cross-tenant");
+    assert_eq!(status_of(err), StatusCode::NOT_FOUND);
+
+    bed.teardown().await;
+}
+
+/// AC-5's other half: text that is too big for a reply is pointed at as well.
+/// "Is it text" and "does it belong in a context window" are different
+/// questions, and a 25 MiB log answers yes to the first.
+#[tokio::test]
+async fn text_too_large_to_inline_is_pointed_at() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let scratch = Scratch::new("big-text");
+    let state = state_on(&bed, &scratch).await;
+    let tenant = bed.tenant("big").await;
+    let (user, _) = bed.user(tenant, "member").await;
+    let board = board_in(&bed, tenant).await;
+    let task = task_on(&state, tenant, board, user).await;
+
+    let big = vec![b'x'; 300 * 1024];
+    let id = attached(
+        &state,
+        ctx(user, tenant),
+        task.id,
+        "run.log",
+        "text/plain",
+        &big,
+    )
+    .await;
+
+    let read = nook_control::services::attachments::read_content(&state, tenant, user, id)
+        .await
+        .expect("readable");
+    assert!(read.content.is_none());
+    let hint = read.not_inlined.expect("a pointer");
+    assert!(hint.contains("inline limit"), "{hint}");
+    assert_eq!(read.size_bytes, big.len() as i64);
 
     bed.teardown().await;
 }

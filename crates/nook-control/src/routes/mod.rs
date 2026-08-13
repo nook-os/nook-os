@@ -326,7 +326,10 @@ pub fn build_router(state: AppState) -> Router {
             "/comments/{id}/attachments",
             get(task_attachments::list_for_comment).post(task_attachments::attach_to_comment),
         )
-        .route("/attachments/{id}", delete_route(task_attachments::detach))
+        .route(
+            "/attachments/{id}",
+            get(task_attachments::get_one).delete(task_attachments::detach),
+        )
         .route(
             "/comments/{id}",
             patch(task_detail::update_comment).delete(task_detail::delete_comment),
