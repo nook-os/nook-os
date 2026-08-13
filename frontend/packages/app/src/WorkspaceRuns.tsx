@@ -18,6 +18,7 @@ import { useSearchParams } from "react-router-dom";
 import { api, type LoopJobTranscriptEntry } from "@nookos/api";
 import { ChatView, Empty, Panel, Pill } from "@nookos/ui";
 import { useAgentCommands } from "./agentCommands";
+import { BuildOutcome } from "./BuilderStrip";
 import { transcriptMessages } from "./LoopPanel";
 import { agentActivityLabel, foldToolActivity, jobStateMeta } from "./loop";
 import { fileSlug, TranscriptActions } from "./transcriptExport";
@@ -270,7 +271,9 @@ export function WorkspaceRuns({
     queryFn: async () =>
       (
         await api.GET("/api/v1/jobs/{id}", { params: { path: { id: open as string } } })
-      ).data as { transcript?: LoopJobTranscriptEntry[] } | undefined,
+      ).data as
+        | { kind?: string; transcript?: LoopJobTranscriptEntry[] }
+        | undefined,
   });
 
   if (!runs) return null;
@@ -371,6 +374,15 @@ export function WorkspaceRuns({
           )}
         </ul>
         <div className="reviews-transcript" data-testid="run-transcript">
+          {/* Above the transcript, not inside it (MAIN-387 AC-7): the branch and
+              the PR are what the open run PRODUCED, and reading a log to find
+              them is the thing this replaces. */}
+          {open && (
+            <BuildOutcome
+              job={{ id: open, kind: openRun?.kind ?? "" }}
+              workspaceId={workspaceId}
+            />
+          )}
           {detail?.transcript?.length ? (
             <>
               <div className="reviews-transcript-actions">

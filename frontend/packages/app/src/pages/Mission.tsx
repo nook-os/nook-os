@@ -26,6 +26,7 @@ import type {
   Session,
 } from "@nookos/api";
 import { Empty, Panel, Pill, StatusDot, statusTone } from "@nookos/ui";
+import { MissionBuildLoop } from "../BuildLoopPanel";
 import { useNewWork } from "../newwork";
 import { notify } from "../dialogs";
 import { liveAgentMark, useLive, type AgentState } from "../live";
@@ -668,6 +669,10 @@ function RepoSection({
         <span className="m-repo-remote" title={w.git_remote_url ?? undefined}>
           {w.git_remote_normalized ?? w.git_remote_url ?? "no remote"}
         </span>
+        {/* Is this repo building itself, and where (AC-3) — flippable here, so
+            the answer to "why is nothing running" does not start with a
+            navigation. */}
+        <MissionBuildLoop workspaceId={w.id} />
         <span className="m-repo-roll">
           {roll.sessions > 0 && (
             <span
@@ -768,6 +773,7 @@ function GridCard({
         <Link className="m-repo-name bright" to={`/workspaces/${w.id}`}>
           {w.name}
         </Link>
+        <MissionBuildLoop workspaceId={w.id} />
         <span className="m-repo-roll">
           {roll.sessions > 0 && (
             <span className="m-roll-live">● {roll.sessions}</span>

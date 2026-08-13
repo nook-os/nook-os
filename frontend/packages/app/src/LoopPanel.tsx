@@ -26,6 +26,7 @@ import {
   type FoldedTranscriptEntry,
 } from "./loop";
 import { ChatView, type ChatViewMessage } from "@nookos/ui";
+import { BuildOutcome } from "./BuilderStrip";
 import { useAgentCommands } from "./agentCommands";
 import { answerInteraction, useTaskInteractions } from "./Interactions";
 import { fileSlug, TranscriptActions } from "./transcriptExport";
@@ -172,6 +173,10 @@ function LoopJobView({
             {detail.queued_reason}
           </span>
         )}
+        {/* What a BUILD run produced, in the bar rather than in the transcript
+            (MAIN-387 AC-7). Silent for every other kind — a spec run's output
+            is the ticket it filled in, and it has no branch to claim. */}
+        <BuildOutcome job={detail} />
         <span className="loop-job-bar-actions">
           <TranscriptActions
             lines={transcript}

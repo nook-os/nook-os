@@ -2327,6 +2327,66 @@ table.nook-table tr.clickable { cursor: pointer; }
 .loop-scale-actions { display: flex; align-items: center; gap: 6px; }
 .loop-scale-edit .input { width: 84px; }
 
+/* ── Build loop: the switch, the pin, and what it is doing ──────────────── */
+
+.bl-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+  min-height: 0;
+}
+/* Controls wrap rather than scroll: the pin is a repo-wide decision read at a
+   glance, and a picker that slides off the edge of a narrow panel is one
+   nobody finds. */
+.bl-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.bl-controls .input { max-width: 260px; }
+.bl-live { display: flex; flex-direction: column; gap: 6px; }
+
+/* A warning that carries its own fix — the tenant switch, or the cards a human
+   now owns. Bordered rather than tinted so it survives a theme that does not
+   distinguish two background shades. */
+.bl-warn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 8px;
+  font-size: 11px;
+  color: var(--nook-warn);
+  border: 1px solid var(--nook-warn);
+  border-radius: var(--nook-radius);
+}
+.bl-escalated-list { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+
+/* What the builder is doing, and what it produced. One row, wrapping, in both
+   its homes — the panel and a Mission Control repo header. */
+.builder-strip,
+.build-facts {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+/* Full width in the panel, where it is a row of its own; natural width in a
+   Mission Control repo header, where it shares the line. */
+.bl-live .builder-strip { width: 100%; }
+.build-facts a,
+.builder-strip a { display: inline-flex; align-items: center; gap: 3px; }
+
+.bl-mission {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
 /* ── Workspace port declaration ─────────────────────────────────────────── */
 
 .ports-body { display: grid; gap: 10px; padding: 10px; }
