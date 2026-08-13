@@ -7,7 +7,7 @@
 // with the kind in the URL so an old link still lands somewhere true.
 import React from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, useLocation } from "react-router-dom";
 
@@ -15,11 +15,20 @@ const state = vi.hoisted(() => ({
   builds: [] as unknown[],
   reviews: [] as unknown[],
   transcript: [] as unknown[],
+  /** Every cancel/rerun the panel actually sent, in order. */
+  posts: [] as { path: string; id?: string }[],
+  /** What the next POST refuses with, in the server's own body shape. */
+  postError: null as string | null,
+  /** The repo, which is where a review row's PR link comes from. */
+  workspace: null as unknown,
 }));
 
 vi.mock("@nookos/api", () => ({
   api: {
     GET: vi.fn(async (path: string) => {
+      // Before the `/builds` arm: the repo itself, which the panel reads for
+      // the remote a review's PR link is built from.
+      if (path === "/api/v1/workspaces/{id}") return { data: state.workspace };
       if (path.includes("/builds")) return { data: state.builds };
       if (path.includes("/reviews")) return { data: state.reviews };
       // Before the `/jobs/` arm: a run's command list is a different endpoint
@@ -28,9 +37,15 @@ vi.mock("@nookos/api", () => ({
       if (path.includes("/jobs/")) return { data: { transcript: state.transcript } };
       return { data: null };
     }),
+    POST: vi.fn(async (path: string, opts?: { params?: { path?: { id?: string } } }) => {
+      state.posts.push({ path, id: opts?.params?.path?.id });
+      return state.postError ? { error: { error: state.postError } } : { data: {} };
+    }),
   },
 }));
 
+import { ContextMenuProvider } from "./contextMenu";
+import { DialogHost } from "./dialogs";
 import {
   KIND_CHOICES,
   mergeRuns,
@@ -44,6 +59,10 @@ import {
   RUNS_MIN_PANE_PX,
   shortHead,
   stateGlyph,
+  prWebUrl,
+  runHref,
+  runStateMeta,
+  shownState,
   useLegacyRunsSectionRedirect,
   WorkspaceRuns,
 } from "./WorkspaceRuns";
@@ -70,6 +89,9 @@ beforeEach(() => {
   state.builds = [];
   state.reviews = [];
   state.transcript = [];
+  state.posts = [];
+  state.postError = null;
+  state.workspace = null;
 });
 
 /** Rendered, and actually SEEN — a control hidden by its own style or by an
@@ -96,13 +118,19 @@ function Search() {
   );
 }
 
+/** The panel in the shape the app mounts it in: the shared context menu and the
+ *  dialog host are what its row actions open (MAIN-559), and a panel tested
+ *  without them would be testing a component the app never renders. */
 function renderRuns(url = "/workspaces/ws-1") {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <MemoryRouter initialEntries={[url]}>
       <QueryClientProvider client={qc}>
-        <WorkspaceRuns workspaceId="ws-1" />
-        <Search />
+        <ContextMenuProvider>
+          <WorkspaceRuns workspaceId="ws-1" />
+          <Search />
+          <DialogHost />
+        </ContextMenuProvider>
       </QueryClientProvider>
     </MemoryRouter>,
   );
@@ -377,9 +405,11 @@ describe("the list is live (AC-8)", () => {
     state.builds = [build({ created_at: "2026-08-08T11:00:00Z" })];
     await jobChanged(qc);
 
-    const rows = await screen.findAllByTestId("run-row");
-    expect(rows).toHaveLength(2);
-    expect(kindOf(rows[0])).toBe("build");
+    // `waitFor` the COUNT, not `findAll`: the latter resolves on the first row
+    // to appear, which since MAIN-559 is not necessarily the whole list — the
+    // panel commits the header and its own queries alongside it.
+    await waitFor(() => expect(screen.getAllByTestId("run-row")).toHaveLength(2));
+    expect(kindOf(screen.getAllByTestId("run-row")[0])).toBe("build");
   });
 
   it("stops filtering by a state nothing is in any more", async () => {
@@ -580,6 +610,9 @@ describe("one stable row shape (MAIN-556)", () => {
     "runs-row-state",
     "runs-row-meta",
     "runs-row-time",
+    // Reserved on every row, showing or not (MAIN-559 AC-1) — a row that only
+    // grew this cell on hover would reflow at the moment of pointing at it.
+    "runs-row-menu",
   ];
 
   const cellsOf = (row: HTMLElement) =>
@@ -636,13 +669,18 @@ describe("one stable row shape (MAIN-556)", () => {
     render(
       <MemoryRouter>
         <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-          <div style={{ width: RUNS_MIN_PANE_PX }}>
-            <WorkspaceRuns workspaceId="ws-1" />
-          </div>
+          <ContextMenuProvider>
+            <div style={{ width: RUNS_MIN_PANE_PX }}>
+              <WorkspaceRuns workspaceId="ws-1" />
+            </div>
+          </ContextMenuProvider>
         </QueryClientProvider>
       </MemoryRouter>,
     );
-    const badge = await screen.findByRole("img", { name: "state: waiting on human" });
+    // The ROW's badge: the detail header states the same thing (MAIN-559 AC-7),
+    // and it is the row's column this is about.
+    const row = (await screen.findAllByTestId("run-row"))[0];
+    const badge = within(row).getByRole("img", { name: "state: waiting on human" });
     expect(isVisible(badge)).toBe(true);
     expect(badge.textContent).toContain("waiting on human");
   });
@@ -802,9 +840,9 @@ describe("one stable row shape (MAIN-556)", () => {
   it("names the kind and state badges for a reader who cannot see them (AC-9)", async () => {
     state.builds = [build({ state: "running" })];
     renderRuns();
-    await screen.findAllByTestId("run-row");
-    expect(isVisible(screen.getByRole("img", { name: "kind: build" }))).toBe(true);
-    expect(isVisible(screen.getByRole("img", { name: "state: running" }))).toBe(true);
+    const row = (await screen.findAllByTestId("run-row"))[0];
+    expect(isVisible(within(row).getByRole("img", { name: "kind: build" }))).toBe(true);
+    expect(isVisible(within(row).getByRole("img", { name: "state: running" }))).toBe(true);
   });
 
   it("ages a run in the queue panel's words, and loses only the age to a bad date", () => {
@@ -827,5 +865,434 @@ describe("one stable row shape (MAIN-556)", () => {
       // to "when exactly", without spending a column on it.
       expect(time.getAttribute("title")).toMatch(/^2026-08-0\d/);
     }
+  });
+});
+
+// ── Row actions (MAIN-559) ─────────────────────────────────────────────────
+describe("row actions (MAIN-559)", () => {
+  const menu = () => screen.queryByRole("menu");
+  /** The LABEL of each row, not its whole text: a refused action carries its
+   *  reason in a hint beside the label (AC-6), and folding the two together
+   *  would make every assertion here about the reason as well as the action. */
+  const menuLabels = () =>
+    screen
+      .queryAllByRole("menuitem")
+      .map((i) => i.querySelector(".ctxmenu-label")?.textContent?.trim() ?? "");
+  const menuItem = (name: string) =>
+    screen.getAllByRole("menuitem").find((i) => i.textContent?.startsWith(name))!;
+  const actionsButton = (label: string) => screen.getByLabelText(`actions for ${label}`);
+
+  /** Both routes to a row's menu, so every assertion below can be made about
+   *  each of them (AC-1) rather than about whichever one is convenient. */
+  const openBy = {
+    rightClick: (row: HTMLElement) => fireEvent.contextMenu(row),
+    button: (label: string) => fireEvent.click(actionsButton(label)),
+  };
+
+  it("puts the same menu behind right-click AND a visible button (AC-1)", async () => {
+    state.builds = [build({ state: "running" })];
+    renderRuns();
+    const row = (await screen.findAllByTestId("run-row"))[0];
+
+    // The button is on the row, not somewhere the pointer has to find.
+    const button = within(row).getByTestId("run-actions");
+    expect(row.contains(button)).toBe(true);
+    // And it is not a second tab stop: the list stays one, with Shift+F10 as
+    // the keyboard's route.
+    expect(button.getAttribute("tabindex")).toBe("-1");
+
+    openBy.rightClick(row);
+    const viaRightClick = menuLabels();
+    expect(viaRightClick).toEqual(["Open", "Cancel run", "Copy run ID", "Copy link"]);
+    fireEvent.keyDown(menu()!, { key: "Escape" });
+
+    openBy.button("MAIN-42");
+    expect(menuLabels()).toEqual(viaRightClick);
+  });
+
+  it("offers what the state permits, and nothing it does not (AC-2)", async () => {
+    state.builds = [
+      build({ id: "b-live", state: "running", task_key: "MAIN-42" }),
+      build({
+        id: "b-dead",
+        state: "failed",
+        task_key: "MAIN-43",
+        created_at: "2026-08-08T08:00:00Z",
+      }),
+    ];
+    renderRuns();
+    const rows = await screen.findAllByTestId("run-row");
+
+    openBy.rightClick(rows[0]);
+    expect(menuLabels()).toContain("Cancel run");
+    expect(menuLabels()).not.toContain("Re-run");
+    fireEvent.keyDown(menu()!, { key: "Escape" });
+
+    openBy.rightClick(rows[1]);
+    expect(menuLabels()).toContain("Re-run");
+    // The one thing AC-2 states negatively: never on a terminal run.
+    expect(menuLabels()).not.toContain("Cancel run");
+  });
+
+  it("confirms a cancel, naming the run and what stops (AC-3)", async () => {
+    state.builds = [build({ state: "running" })];
+    renderRuns();
+    const row = (await screen.findAllByTestId("run-row"))[0];
+    openBy.rightClick(row);
+    await act(async () => {
+      fireEvent.click(menuItem("Cancel run"));
+    });
+
+    expect(screen.getByText(/Cancel build run MAIN-42\?/)).toBeTruthy();
+    expect(screen.getByText(/agent working on this run will be stopped/)).toBeTruthy();
+    // Nothing has been sent while the question is on screen.
+    expect(state.posts).toHaveLength(0);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "cancel run" }));
+    });
+    expect(state.posts).toEqual([{ path: "/api/v1/jobs/{id}/cancel", id: "job-b1" }]);
+  });
+
+  it("sends nothing when the confirmation is declined (AC-3)", async () => {
+    state.builds = [build({ state: "running" })];
+    renderRuns();
+    openBy.rightClick((await screen.findAllByTestId("run-row"))[0]);
+    await act(async () => {
+      fireEvent.click(menuItem("Cancel run"));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "cancel" }));
+    });
+    expect(state.posts).toHaveLength(0);
+  });
+
+  it("shows the row canceling while the request is out, and disables a second (AC-4)", async () => {
+    state.builds = [build({ state: "running" })];
+    // A cancel that does not answer, so the in-flight state can be observed.
+    let release: (() => void) | null = null;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    const api = (await import("@nookos/api")).api as unknown as {
+      POST: ReturnType<typeof vi.fn>;
+    };
+    api.POST.mockImplementationOnce(async (path: string, opts: never) => {
+      state.posts.push({ path, id: (opts as { params: { path: { id: string } } }).params.path.id });
+      await held;
+      return { data: {} };
+    });
+
+    renderRuns();
+    openBy.rightClick((await screen.findAllByTestId("run-row"))[0]);
+    await act(async () => {
+      fireEvent.click(menuItem("Cancel run"));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "cancel run" }));
+    });
+
+    const row = screen.getAllByTestId("run-row")[0];
+    expect(row.getAttribute("data-pending")).toBe("cancel");
+    expect(within(row).getByRole("img", { name: "state: canceling" })).toBeTruthy();
+
+    // And a second cancel is refused with a reason rather than sent again.
+    openBy.rightClick(row);
+    const again = menuItem("Cancel run");
+    expect(again.hasAttribute("disabled")).toBe(true);
+    expect(again.textContent).toContain("already canceling");
+    fireEvent.keyDown(menu()!, { key: "Escape" });
+
+    await act(async () => {
+      release?.();
+      await held;
+    });
+    expect(state.posts).toHaveLength(1);
+  });
+
+  it("surfaces an API failure verbatim and keeps the selection (AC-4)", async () => {
+    state.builds = [
+      build({ id: "b-1", state: "failed", task_key: "MAIN-42" }),
+      build({
+        id: "b-2",
+        state: "failed",
+        task_key: "MAIN-43",
+        created_at: "2026-08-08T08:00:00Z",
+      }),
+    ];
+    state.postError = "only a failed or canceled job can be re-run";
+    renderRuns();
+    const rows = await screen.findAllByTestId("run-row");
+    fireEvent.click(rows[1]);
+    expect(screen.getAllByTestId("run-row")[1].getAttribute("aria-selected")).toBe("true");
+
+    openBy.rightClick(screen.getAllByTestId("run-row")[1]);
+    await act(async () => {
+      fireEvent.click(menuItem("Re-run"));
+    });
+
+    // The server's sentence, not a replacement for it.
+    expect(screen.getByTestId("run-failure").textContent).toContain(
+      "only a failed or canceled job can be re-run",
+    );
+    // The run that was acted on is still the open one.
+    expect(screen.getAllByTestId("run-row")[1].getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("drops a stale action from a menu that is already open (AC-5)", async () => {
+    state.builds = [build({ state: "running" })];
+    const qc = renderRuns();
+    openBy.rightClick((await screen.findAllByTestId("run-row"))[0]);
+    expect(menuLabels()).toContain("Cancel run");
+
+    // The run finishes underneath the open menu — the case a snapshot taken at
+    // right-click time gets wrong, and the only one this card calls out.
+    state.builds = [build({ state: "completed" })];
+    await jobChanged(qc);
+
+    await waitFor(() =>
+      expect(
+        screen.getAllByTestId("run-row")[0].querySelector(".runs-row-state")?.getAttribute("aria-label"),
+      ).toBe("state: done"),
+    );
+    expect(menu()).toBeTruthy();
+    expect(menuLabels()).not.toContain("Cancel run");
+    expect(menuLabels()).toContain("Re-run");
+  });
+
+  it("refuses a cancel chosen for a run that finished during the confirmation (AC-5)", async () => {
+    state.builds = [build({ state: "running" })];
+    const qc = renderRuns();
+    openBy.rightClick((await screen.findAllByTestId("run-row"))[0]);
+    await act(async () => {
+      fireEvent.click(menuItem("Cancel run"));
+    });
+
+    // The dialog is open for as long as somebody takes to read it.
+    state.builds = [build({ state: "completed" })];
+    await jobChanged(qc);
+    await waitFor(() => expect(screen.getByTestId("run-header").textContent).toContain("done"));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "cancel run" }));
+    });
+
+    expect(state.posts).toHaveLength(0);
+    expect(screen.getByTestId("run-failure").textContent).toContain("already finished");
+  });
+
+  it("keeps a refused re-run visible with its reason (AC-6)", async () => {
+    state.builds = [build({ state: "completed" })];
+    renderRuns();
+    openBy.rightClick((await screen.findAllByTestId("run-row"))[0]);
+    const rerun = menuItem("Re-run");
+    expect(rerun.hasAttribute("disabled")).toBe(true);
+    expect(rerun.textContent).toContain("only a failed or canceled run can be re-run");
+  });
+
+  it("opens, navigates and closes the menu from the keyboard (AC-8)", async () => {
+    state.builds = [build({ state: "running" })];
+    renderRuns();
+    const row = (await screen.findAllByTestId("run-row"))[0];
+    row.focus();
+
+    fireEvent.keyDown(document, { key: "F10", shiftKey: true });
+    expect(menu()).toBeTruthy();
+    fireEvent.keyDown(menu()!, { key: "ArrowDown" });
+    expect(document.activeElement?.textContent).toContain("Open");
+    fireEvent.keyDown(menu()!, { key: "ArrowDown" });
+    expect(document.activeElement?.textContent).toContain("Cancel run");
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    expect(menu()).toBeNull();
+    // Back where it came from, which is a node that still exists.
+    expect(document.activeElement).toBe(screen.getAllByTestId("run-row")[0]);
+
+    // The ContextMenu key is the other half of AC-8.
+    fireEvent.keyDown(document, { key: "ContextMenu" });
+    expect(menu()).toBeTruthy();
+  });
+
+  it("lands focus on the row after a cancel, never on a node that has gone (AC-8)", async () => {
+    state.builds = [build({ state: "running" })];
+    renderRuns();
+    openBy.rightClick((await screen.findAllByTestId("run-row"))[0]);
+    await act(async () => {
+      fireEvent.click(menuItem("Cancel run"));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "cancel run" }));
+    });
+    expect(document.activeElement).toBe(screen.getAllByTestId("run-row")[0]);
+    expect(document.body.contains(document.activeElement)).toBe(true);
+  });
+
+  it("reaches the card from a terminal build row, off the field the API sends (AC-2)", async () => {
+    // The plumbing, not the derivation. `runActions` was already proved to add
+    // `view-task` when handed a href; what this pins is that the panel HAS one
+    // to hand it. `WorkspaceBuildRun` sends `task_key` and no uuid, so a row
+    // reading `target_task_id` gets `undefined` and the action silently never
+    // appears — which every unit test still passed through.
+    state.builds = [build({ state: "completed", task_key: "MAIN-42" })];
+    renderRuns();
+    openBy.rightClick((await screen.findAllByTestId("run-row"))[0]);
+    expect(menuLabels()).toContain("View MAIN-42");
+
+    await act(async () => {
+      fireEvent.click(menuItem("View MAIN-42"));
+    });
+    // The KEY is the route parameter: `/loop/:id` resolves keys and uuids
+    // alike server-side (MAIN-209), which is what makes the key sufficient.
+    expect(path()).toBe("/loop/MAIN-42");
+  });
+
+  it("offers no card link on a build row whose card has gone", async () => {
+    // `task_key` is nullable — the card was deleted. No link is the honest
+    // rendering; a link to nowhere is not.
+    state.builds = [build({ state: "completed", task_key: null })];
+    renderRuns();
+    openBy.rightClick((await screen.findAllByTestId("run-row"))[0]);
+    expect(menuLabels().some((l) => l.startsWith("View "))).toBe(false);
+  });
+
+  it("reaches the pull request from a terminal review row (AC-2)", async () => {
+    // The same plumbing question for the other kind: the number is on the row,
+    // the URL comes from the repo's remote, and both have to arrive.
+    state.reviews = [review({ state: "completed", review_pr_number: 341 })];
+    state.workspace = { git_remote_url: "git@github.com:nook-os/nook-os.git" };
+    const opened = vi.spyOn(window, "open").mockImplementation(() => null);
+    renderRuns();
+    await waitFor(() => expect(screen.getAllByTestId("run-row")).toHaveLength(1));
+    openBy.rightClick(screen.getAllByTestId("run-row")[0]);
+    await waitFor(() => expect(menuLabels()).toContain("View PR #341"));
+
+    await act(async () => {
+      fireEvent.click(menuItem("View PR #341"));
+    });
+    expect(opened).toHaveBeenCalledWith(
+      "https://github.com/nook-os/nook-os/pull/341",
+      "_blank",
+      "noreferrer",
+    );
+    opened.mockRestore();
+  });
+
+  it("offers no PR link when the repo's remote is not one it can address", async () => {
+    state.reviews = [review({ state: "completed" })];
+    state.workspace = { git_remote_url: "/workspace/nook-dogfood.git" };
+    renderRuns();
+    openBy.rightClick((await screen.findAllByTestId("run-row"))[0]);
+    expect(menuLabels().some((l) => l.startsWith("View "))).toBe(false);
+  });
+
+  it("re-runs a failed run through the endpoint that takes it (AC-2)", async () => {
+    state.builds = [build({ state: "failed" })];
+    renderRuns();
+    openBy.rightClick((await screen.findAllByTestId("run-row"))[0]);
+    await act(async () => {
+      fireEvent.click(menuItem("Re-run"));
+    });
+    expect(state.posts).toEqual([{ path: "/api/v1/jobs/{id}/rerun", id: "job-b1" }]);
+    // No confirmation: re-run creates work, it does not destroy any.
+    expect(screen.queryByText(/Cancel build run/)).toBeNull();
+  });
+});
+
+describe("the selected run's header (MAIN-559 AC-7)", () => {
+  it("states what the run is, where it is, and when it started", async () => {
+    state.builds = [build({ state: "running" })];
+    renderRuns();
+    await screen.findAllByTestId("run-row");
+    const header = screen.getByTestId("run-header");
+    expect(within(header).getByRole("img", { name: "kind: build" })).toBeTruthy();
+    expect(within(header).getByRole("img", { name: "state: running" })).toBeTruthy();
+    expect(header.textContent).toContain("MAIN-42");
+    expect(within(header).getByTestId("run-header-started")).toBeTruthy();
+    // The exact instant behind the relative word, as on a row.
+    expect(within(header).getByTestId("run-header-started").getAttribute("title")).toBe(
+      "2026-08-08T09:00:00Z",
+    );
+    expect(within(header).getByTestId("run-header-elapsed").textContent).not.toBe("");
+  });
+
+  it("shows a review's head where a build shows its branch", async () => {
+    state.reviews = [review({ state: "running" })];
+    renderRuns();
+    await screen.findAllByTestId("run-row");
+    expect(screen.getByTestId("run-header-ref").textContent).toContain("abcdef1");
+  });
+
+  it("promotes ONE action and puts the rest behind an overflow", async () => {
+    state.builds = [build({ state: "running" })];
+    renderRuns();
+    await screen.findAllByTestId("run-row");
+    const primary = screen.getByTestId("run-primary-action");
+    expect(primary.textContent).toBe("Cancel run");
+    expect(primary.hasAttribute("disabled")).toBe(false);
+
+    fireEvent.click(screen.getByTestId("run-header-overflow"));
+    // The rest — and NOT the button already on screen beside it.
+    const labels = screen
+      .queryAllByRole("menuitem")
+      .map((i) => i.querySelector(".ctxmenu-label")?.textContent?.trim() ?? "");
+    expect(labels).toEqual(["Open", "Copy run ID", "Copy link"]);
+  });
+
+  it("disables the primary action with its reason where the API refuses it (AC-6)", async () => {
+    state.builds = [build({ state: "completed" })];
+    renderRuns();
+    await screen.findAllByTestId("run-row");
+    const primary = screen.getByTestId("run-primary-action");
+    expect(primary.textContent).toBe("Re-run");
+    expect(primary.hasAttribute("disabled")).toBe(true);
+    expect(primary.getAttribute("title")).toBe("only a failed or canceled run can be re-run");
+  });
+
+  it("does not repeat the branch the outcome strip is already showing", async () => {
+    // One fact, one place. `BuildOutcome` keeps the ticket and the PR; the
+    // header above it keeps the branch.
+    state.builds = [build({ state: "running" })];
+    renderRuns();
+    await screen.findAllByTestId("run-row");
+    expect(screen.queryAllByTestId("build-branch")).toHaveLength(0);
+  });
+});
+
+describe("the words and links an action needs", () => {
+  it("builds a review's PR link the way the control plane builds it", () => {
+    for (const remote of [
+      "git@github.com:nook-os/nook-os.git",
+      "https://github.com/nook-os/nook-os.git",
+      "https://github.com/nook-os/nook-os",
+      "ssh://git@github.com/nook-os/nook-os.git",
+    ]) {
+      expect(prWebUrl(remote, 341)).toBe("https://github.com/nook-os/nook-os/pull/341");
+    }
+    // Anything this cannot read an owner/repo out of gets NO link — the action
+    // is then absent rather than pointing at a 404.
+    expect(prWebUrl("git@gitlab.com:acme/app.git", 1)).toBeNull();
+    expect(prWebUrl("/workspace/nook-dogfood.git", 1)).toBeNull();
+    expect(prWebUrl(null, 1)).toBeNull();
+    expect(prWebUrl("git@github.com:a/b.git", null)).toBeNull();
+  });
+
+  it("copies a link that selects the run it came from", () => {
+    // A "Copy link" whose link did not open this run would be a lie; the run
+    // is in the URL precisely so it is not one.
+    const href = runHref("/workspaces/ws-1", "?kind=build", "job-b1");
+    const p = new URLSearchParams(href.slice(href.indexOf("?")));
+    expect(href.startsWith("/workspaces/ws-1?")).toBe(true);
+    expect(p.get("run")).toBe("job-b1");
+    expect(p.get("section")).toBe("runs");
+    expect(p.get("kind")).toBe("build");
+  });
+
+  it("says canceling only while this client's own cancel is out", () => {
+    expect(shownState("running", "cancel")).toBe("canceling");
+    // Not on a run that has already ended — the transition is over.
+    expect(shownState("completed", "cancel")).toBe("completed");
+    expect(shownState("running", "rerun")).toBe("running");
+    expect(shownState("running", undefined)).toBe("running");
+    // A word the loop never stores, so it is not in `jobStateMeta`'s set.
+    expect(runStateMeta("canceling")).toEqual({ label: "canceling", tone: "warn" });
+    expect(runStateMeta("running").label).toBe("running");
   });
 });

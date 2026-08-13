@@ -29,6 +29,7 @@ import React, {
   useContext,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -261,14 +262,16 @@ function buildFallback(target: EventTarget | null): ContextMenuItem[] {
 
 /** Walk up from a target: nearest region → its items, a native-owner → suppress,
  *  otherwise the fallback. Exported for tests. */
-export function resolveItems(
-  target: EventTarget | null,
-): ContextMenuItem[] | "native" {
+export function resolveItems(target: EventTarget | null): ItemSource | "native" {
   let el = target instanceof HTMLElement ? target : null;
   while (el) {
     if (el.hasAttribute(CTX_NATIVE_ATTR)) return "native";
     const region = regions.get(el);
-    if (region) return resolveSource(region());
+    // The GETTER, not what it returns right now (MAIN-559 AC-5). A region whose
+    // items are a function keeps a live source all the way into the open menu,
+    // so `refresh()` re-reads the region's current state rather than a snapshot
+    // taken at the instant of the right-click.
+    if (region) return () => resolveSource(region());
     el = el.parentElement;
   }
   return buildFallback(target);
@@ -278,12 +281,25 @@ export function resolveItems(
 interface OpenState {
   x: number;
   y: number;
-  items: ContextMenuItem[];
+  source: ItemSource;
 }
 
 interface ContextMenuApi {
-  /** Open at a point in viewport coordinates with an explicit item list. */
-  openAt(x: number, y: number, items: ContextMenuItem[]): void;
+  /**
+   * Open at a point in viewport coordinates. An array is a snapshot; a FUNCTION
+   * is a live source, re-read on every `refresh()` (MAIN-559 AC-5).
+   */
+  openAt(x: number, y: number, items: ItemSource): void;
+  /**
+   * Re-read the open menu's live source, because the state it was derived from
+   * has moved.
+   *
+   * Called by whoever owns that state — the menu cannot know. A run finishing
+   * under an open menu is not a React update the menu participates in: it
+   * repaints the list, which is a different subtree, and without this the menu
+   * would go on offering Cancel for a run that has already ended.
+   */
+  refresh(): void;
   close(): void;
 }
 
@@ -305,11 +321,24 @@ export function ContextMenuProvider({ children }: { children: React.ReactNode })
   // enabled state is correct from the first right-click.
   useEffect(() => probeClipboardRead(), []);
 
+  // Bumped by `refresh()`, and read only as a render trigger: the items
+  // themselves come from the source, so the tick's job is purely to say "look
+  // again".
+  const [tick, setTick] = useState(0);
+
   const close = useCallback(() => setOpen(null), []);
-  const openAt = useCallback((x: number, y: number, items: ContextMenuItem[]) => {
-    if (items.length === 0) return;
+  const openAt = useCallback((x: number, y: number, items: ItemSource) => {
+    if (resolveSource(items).length === 0) return;
     restoreFocus.current = document.activeElement as HTMLElement | null;
-    setOpen({ x, y, items });
+    setOpen({ x, y, source: items });
+  }, []);
+  // A no-op while nothing is open, which is almost always: `refresh()` is
+  // called from a list's repaint, and a repaint that re-rendered the whole app
+  // to tell a menu nobody opened would be a real cost for nothing.
+  const isOpen = useRef(false);
+  isOpen.current = !!open;
+  const refresh = useCallback(() => {
+    if (isOpen.current) setTick((n) => n + 1);
   }, []);
 
   // AC-1: one capture-phase listener, always preventDefault, resolves the menu.
@@ -416,7 +445,7 @@ export function ContextMenuProvider({ children }: { children: React.ReactNode })
     setOpen(null);
   }, [location.pathname]);
 
-  const api: ContextMenuApi = { openAt, close };
+  const api: ContextMenuApi = { openAt, refresh, close };
 
   return (
     <Ctx.Provider value={api}>
@@ -424,6 +453,7 @@ export function ContextMenuProvider({ children }: { children: React.ReactNode })
       {open && (
         <ContextMenu
           state={open}
+          tick={tick}
           onClose={() => {
             const el = restoreFocus.current;
             setOpen(null);
@@ -439,16 +469,23 @@ export function ContextMenuProvider({ children }: { children: React.ReactNode })
 // ── The menu itself (AC-2 / AC-5) ──────────────────────────────────────────
 function ContextMenu({
   state,
+  tick,
   onClose,
 }: {
   state: OpenState;
+  /** Changes when the source should be read again. Not otherwise used — the
+   *  re-render IS the effect. */
+  tick: number;
   onClose: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ x: state.x, y: state.y });
+  // `tick` is a render trigger, not data: it is in the dependencies because
+  // bumping it is precisely what says "read the source again".
+  const items = useMemo(() => resolveSource(state.source), [state.source, tick]);
   // Indices of activatable (non-separator, non-disabled) items, for arrow nav.
   // Parents (with children) ARE navigable — activating one opens its submenu.
-  const navigable = state.items
+  const navigable = items
     .map((it, i) => ({ it, i }))
     .filter(({ it }) => !it.separator && !it.disabled)
     .map(({ i }) => i);
@@ -478,6 +515,29 @@ function ContextMenu({
     ref.current?.focus();
   }, []);
 
+  // The other half of a live source (MAIN-559 AC-5/AC-8): when the item the
+  // keyboard was sitting on is no longer offered, React unmounts its button and
+  // focus falls to the document — where Escape no longer closes anything. It
+  // goes back to the menu itself instead, which is a node that still exists and
+  // where every key still works.
+  const navKey = navigable.join(",");
+  useEffect(() => {
+    if (active >= 0 && !navigable.includes(active)) {
+      setActive(-1);
+      setOpenSub(-1);
+      setSubActive(-1);
+      ref.current?.focus();
+    }
+    // `navKey` is the whole dependency: `navigable` is a fresh array each
+    // render and would re-run this every time.
+  }, [navKey]);
+
+  // A live source can empty out — the run the menu was about has left the list.
+  // An empty panel floating over the page is not a menu.
+  useEffect(() => {
+    if (items.length === 0) onClose();
+  }, [items.length, onClose]);
+
   // Dismiss on click-away and Escape; keyboard navigation within.
   useEffect(() => {
     // `mousedown` (not `click`): a listener added during the opening event would
@@ -498,7 +558,7 @@ function ContextMenu({
 
   // Open a top item's submenu and focus its first activatable child.
   const openSubmenu = (i: number) => {
-    const kids = state.items[i]?.children ?? [];
+    const kids = items[i]?.children ?? [];
     const first = kids.findIndex((k) => !k.separator && !k.disabled);
     setOpenSub(i);
     setSubActive(first);
@@ -514,7 +574,7 @@ function ContextMenu({
 
   // Activate the focused TOP item: a parent toggles its submenu, a leaf runs.
   const activateTop = (i: number) => {
-    const item = state.items[i];
+    const item = items[i];
     if (!item || item.disabled || item.separator) return;
     if (item.children?.length) {
       openSub === i ? closeSubmenu() : openSubmenu(i);
@@ -543,7 +603,7 @@ function ContextMenu({
   // Navigate within the open submenu's activatable children.
   const moveSub = (dir: 1 | -1) => {
     if (openSub < 0) return;
-    const kids = state.items[openSub]?.children ?? [];
+    const kids = items[openSub]?.children ?? [];
     const nav = kids
       .map((k, j) => ({ k, j }))
       .filter(({ k }) => !k.separator && !k.disabled)
@@ -579,7 +639,7 @@ function ContextMenu({
         inSub ? moveSub(-1) : moveTop(-1);
         break;
       case "ArrowRight":
-        if (!inSub && active >= 0 && state.items[active]?.children?.length) {
+        if (!inSub && active >= 0 && items[active]?.children?.length) {
           e.preventDefault();
           openSubmenu(active);
         }
@@ -603,7 +663,7 @@ function ContextMenu({
       case "Enter":
       case " ":
         e.preventDefault();
-        if (inSub) runLeaf(state.items[openSub]?.children?.[subActive]);
+        if (inSub) runLeaf(items[openSub]?.children?.[subActive]);
         else if (active >= 0) activateTop(active);
         break;
     }
@@ -631,7 +691,7 @@ function ContextMenu({
       onContextMenu={(e) => e.preventDefault()}
       onMouseDown={(e) => e.stopPropagation()}
     >
-      {state.items.map((item, i) => {
+      {items.map((item, i) => {
         if (item.separator) {
           return <div key={`sep-${i}`} className="ctxmenu-sep" role="separator" />;
         }
