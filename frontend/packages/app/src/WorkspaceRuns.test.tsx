@@ -21,22 +21,59 @@ const state = vi.hoisted(() => ({
   postError: null as string | null,
   /** The repo, which is where a review row's PR link comes from. */
   workspace: null as unknown,
+  /** What both listings refuse with, when they are made to refuse (MAIN-560
+   *  AC-5). Cleared to let a retry succeed. */
+  listError: null as string | null,
+  /** Run ids the job endpoint refuses — how a run the URL names is made to be
+   *  gone or unreadable (MAIN-560 AC-5). */
+  goneJobs: [] as string[],
+  /** Every page either listing was asked for, in order (MAIN-560 AC-1). */
+  pages: [] as { list: string; after?: string; limit?: number }[],
+  /** How long a listing takes to answer. Zero for every test but the one about
+   *  what the list shows WHILE a page is in flight. */
+  listDelay: 0,
 }));
 
 vi.mock("@nookos/api", () => ({
   api: {
-    GET: vi.fn(async (path: string) => {
+    GET: vi.fn(async (
+      path: string,
+      opts?: { params?: { query?: Record<string, unknown>; path?: { id?: string } } },
+    ) => {
       // Before the `/builds` arm: the repo itself, which the panel reads for
       // the remote a review's PR link is built from.
       if (path === "/api/v1/workspaces/{id}") return { data: state.workspace };
       // Both run listings answer the pagination contract's envelope
-      // (MAIN-557), not a bare array.
-      if (path.includes("/builds")) return { data: { rows: state.builds, next_cursor: null } };
-      if (path.includes("/reviews")) return { data: { rows: state.reviews, next_cursor: null } };
+      // (MAIN-557), and PAGE — a slice plus an opaque token that is non-null
+      // exactly when the slice came back FULL, which is the server's own rule.
+      // The token here is the offset, stringified: the client is forbidden to
+      // parse it (MAIN-557), so its shape is this fake's business.
+      if (path.includes("/builds") || path.includes("/reviews")) {
+        const list = path.includes("/builds") ? "builds" : "reviews";
+        const q = opts?.params?.query ?? {};
+        state.pages.push({
+          list,
+          after: q.after as string | undefined,
+          limit: q.limit as number | undefined,
+        });
+        if (state.listDelay) await new Promise((r) => setTimeout(r, state.listDelay));
+        if (state.listError) return { error: { error: state.listError } };
+        const limit = Number(q.limit ?? 50);
+        const from = Number(q.after ?? 0);
+        const rows = (list === "builds" ? state.builds : state.reviews).slice(from, from + limit);
+        return {
+          data: { rows, next_cursor: rows.length === limit ? String(from + limit) : null },
+        };
+      }
       // Before the `/jobs/` arm: a run's command list is a different endpoint
       // under the same prefix, and it answers a LIST (MAIN-530).
       if (path.endsWith("/commands")) return { data: [] };
-      if (path.includes("/jobs/")) return { data: { transcript: state.transcript } };
+      if (path.includes("/jobs/")) {
+        if (state.goneJobs.includes(opts?.params?.path?.id ?? "")) {
+          return { error: { error: "job not found" } };
+        }
+        return { data: { transcript: state.transcript } };
+      }
       return { data: null };
     }),
     POST: vi.fn(async (path: string, opts?: { params?: { path?: { id?: string } } }) => {
@@ -93,6 +130,10 @@ beforeEach(() => {
   state.posts = [];
   state.postError = null;
   state.workspace = null;
+  state.listError = null;
+  state.goneJobs = [];
+  state.pages = [];
+  state.listDelay = 0;
 });
 
 /** Rendered, and actually SEEN — a control hidden by its own style or by an
@@ -360,13 +401,30 @@ describe("filtering", () => {
     expect(rows.map(kindOf).sort()).toEqual(["build", "review"]);
   });
 
-  it("says so when the filters agree on nothing", async () => {
+  it("names the filters that emptied the list, and offers them back (MAIN-560 AC-6)", async () => {
     renderRuns();
     await screen.findAllByTestId("run-row");
     pickKind("Reviews");
     await pickState("running");
     expect(screen.queryAllByTestId("run-row")).toHaveLength(0);
-    expect(isVisible(await screen.findByText(/No run matches this filter/i))).toBe(true);
+
+    const said = await screen.findByTestId("runs-no-filters");
+    expect(isVisible(said)).toBe(true);
+    // Both narrowings, in the chip row's own words — the KIND included, which
+    // has no chip of its own (MAIN-558 AC-5) and is still a reason the list is
+    // empty. And not one word that could be read as "this repo has never run
+    // anything".
+    expect(said.textContent).toContain("Reviews");
+    expect(said.textContent).toContain("running");
+    expect(said.textContent).toContain("This repo has runs");
+    expect(screen.queryByTestId("runs-empty")).toBeNull();
+
+    // Wider than the chip row's `Clear all`, which keeps the kind: this is the
+    // way back to the unfiltered list (AC-6).
+    fireEvent.click(screen.getByTestId("runs-clear-filters"));
+    await waitFor(() => expect(screen.getAllByTestId("run-row")).toHaveLength(3));
+    expect(chosenKind()).toBe("All");
+    expect(chipTexts()).toEqual([]);
   });
 });
 
@@ -703,6 +761,338 @@ describe("the list is live (AC-8)", () => {
     await waitFor(() => expect(screen.queryAllByTestId("run-row")).toHaveLength(0));
     expect(chipTexts()).toEqual(["running×"]);
     expect(search()).toContain("state=running");
+  });
+});
+
+describe("scrolling the whole history (MAIN-560)", () => {
+  /** `n` builds and `n` reviews, interleaved an hour apart, so neither walk can
+   *  be paged without the other and the frontier is exercised for real. */
+  function history(n: number) {
+    state.builds = Array.from({ length: n }, (_, i) =>
+      build({
+        id: `b${String(i).padStart(3, "0")}`,
+        task_key: `MAIN-${900 - i}`,
+        created_at: new Date(Date.UTC(2026, 7, 8, 0, 0, 0) - i * 7200_000).toISOString(),
+      }),
+    );
+    state.reviews = Array.from({ length: n }, (_, i) =>
+      review({
+        id: `r${String(i).padStart(3, "0")}`,
+        review_pr_number: 900 - i,
+        created_at: new Date(Date.UTC(2026, 7, 8, 1, 0, 0) - i * 7200_000).toISOString(),
+      }),
+    );
+  }
+
+  const rowIds = () =>
+    screen.queryAllByTestId("run-row").map((r) => r.getAttribute("data-run-id") as string);
+
+  /** Keep pressing `load more` until the list states its end (AC-1, AC-4). */
+  async function walkToTheEnd() {
+    for (let guard = 0; guard < 30; guard += 1) {
+      if (screen.queryByTestId("runs-end")) return;
+      const more = screen.queryByTestId("runs-load-more");
+      if (!more) throw new Error("neither more to load nor an end to the history");
+      fireEvent.click(more);
+      await waitFor(() => expect(screen.queryByTestId("runs-loading-more")).toBeNull());
+    }
+    throw new Error("the walk never ended");
+  }
+
+  it("walks the whole set with no duplicate and no gap (AC-1)", async () => {
+    history(120);
+    renderRuns();
+    await screen.findAllByTestId("run-row");
+    // A cap would make an old run unreachable, which is the thing AC-1 forbids
+    // — so the first page really is a page, not the lot.
+    expect(rowIds().length).toBeLessThan(240);
+
+    await walkToTheEnd();
+
+    const seen = rowIds();
+    // No duplicate: the count and the set agree. No gap: every run, once.
+    expect(new Set(seen).size).toBe(seen.length);
+    expect(seen.length).toBe(240);
+    // And newest first the whole way down — across both kinds and across every
+    // page boundary either walk crossed. The reviews are an hour newer than the
+    // builds they interleave with, so this order is the merge doing its job and
+    // not two lists concatenated.
+    const expected = Array.from({ length: 120 }, (_, i) => [
+      `r${String(i).padStart(3, "0")}`,
+      `b${String(i).padStart(3, "0")}`,
+    ]).flat();
+    expect(seen).toEqual(expected);
+  });
+
+  it("asks each listing for a page, passing the cursor back verbatim (AC-1)", async () => {
+    history(120);
+    renderRuns();
+    await screen.findAllByTestId("run-row");
+    await walkToTheEnd();
+
+    const builds = state.pages.filter((p) => p.list === "builds");
+    expect(builds[0]).toMatchObject({ after: undefined, limit: 50 });
+    // The token the fake handed back, unparsed and unmodified.
+    expect(builds.map((p) => p.after)).toContain("50");
+  });
+
+  it("states the end of history exactly once, and only at the end (AC-4, AC-8)", async () => {
+    history(60);
+    renderRuns();
+    await screen.findAllByTestId("run-row");
+    expect(screen.queryByTestId("runs-end")).toBeNull();
+
+    await walkToTheEnd();
+    expect(screen.getAllByTestId("runs-end")).toHaveLength(1);
+    expect(screen.queryByTestId("runs-load-more")).toBeNull();
+  });
+
+  it("says so at the end of a short history, with nothing to load", async () => {
+    state.builds = [build()];
+    state.reviews = [review()];
+    renderRuns();
+    await screen.findAllByTestId("run-row");
+    expect(await screen.findByTestId("runs-end")).toBeTruthy();
+    expect(screen.queryByTestId("runs-load-more")).toBeNull();
+  });
+
+  it("shows an inline loading row and keeps the scroll where it was (AC-2)", async () => {
+    history(120);
+    renderRuns();
+    await screen.findAllByTestId("run-row");
+
+    // The scrolling box itself, not its offset: jsdom runs no layout, so what
+    // is provable here is that React keeps the same node and the same rows
+    // above the new ones — which is exactly what keeps `scrollTop` in a
+    // browser. A remount is the only way a repaint loses a scroll position.
+    const box = document.querySelector(".runs-list");
+    const before = rowIds();
+
+    // Slow enough that "while it is loading" is a state a test can be in.
+    state.listDelay = 40;
+    fireEvent.click(screen.getByTestId("runs-load-more"));
+    // The affordance is a ROW at the bottom, present WHILE the page is in
+    // flight, not an overlay or a spinner somewhere else.
+    expect(await screen.findByTestId("runs-loading-more")).toBeTruthy();
+    // Nothing above it moved to make room for it.
+    expect(rowIds().slice(0, before.length)).toEqual(before);
+    state.listDelay = 0;
+    await waitFor(() => expect(screen.queryByTestId("runs-loading-more")).toBeNull());
+
+    expect(document.querySelector(".runs-list")).toBe(box);
+    expect(rowIds().slice(0, before.length)).toEqual(before);
+    expect(rowIds().length).toBeGreaterThan(before.length);
+  });
+
+  it("pages itself when the bottom of the list comes into view (AC-1)", async () => {
+    const observers: { cb: (e: { isIntersecting: boolean }[]) => void }[] = [];
+    class FakeObserver {
+      constructor(cb: (e: { isIntersecting: boolean }[]) => void) {
+        observers.push({ cb });
+      }
+      observe() {}
+      disconnect() {}
+    }
+    vi.stubGlobal("IntersectionObserver", FakeObserver);
+    try {
+      history(120);
+      renderRuns();
+      await screen.findAllByTestId("run-row");
+      const before = rowIds().length;
+
+      // What a scroll to the bottom does: nothing is clicked.
+      await act(async () => {
+        observers[observers.length - 1].cb([{ isIntersecting: true }]);
+      });
+      await waitFor(() => expect(rowIds().length).toBeGreaterThan(before));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("takes a run raised mid-scroll without duplicating or reordering (AC-3)", async () => {
+    history(120);
+    const qc = renderRuns();
+    await screen.findAllByTestId("run-row");
+    fireEvent.click(screen.getByTestId("runs-load-more"));
+    await waitFor(() => expect(screen.queryByTestId("runs-loading-more")).toBeNull());
+    fireEvent.click(screen.getAllByTestId("run-row")[3]);
+    const chosen = new URLSearchParams(search()!).get("run");
+    const box = document.querySelector(".runs-list");
+    const before = rowIds();
+
+    // Raised at the top of the list, as a new run always is — which shifts
+    // every page boundary underneath it.
+    state.builds = [
+      build({ id: "b-new", task_key: "MAIN-999", created_at: "2026-08-09T00:00:00Z" }),
+      ...(state.builds as Record<string, unknown>[]),
+    ];
+    await jobChanged(qc);
+    await waitFor(() => expect(rowIds()).toContain("b-new"));
+
+    const after = rowIds();
+    expect(new Set(after).size).toBe(after.length);
+    expect(after[0]).toBe("b-new");
+    // Every row that survived is in the order it was already in, and the only
+    // rows that can leave are at the TAIL — a run raised at the top pushes the
+    // oldest fetched row of its own walk onto a page nobody has asked for yet,
+    // which is a row the client no longer holds rather than one it reordered.
+    const kept = after.filter((id) => before.includes(id));
+    expect(kept).toEqual(before.slice(0, kept.length));
+    // And the reader keeps what they had: the same run open, and the same
+    // scrolling node (AC-7).
+    expect(new URLSearchParams(search()!).get("run")).toBe(chosen);
+    expect(document.querySelector(".runs-list")).toBe(box);
+  });
+
+  it("keeps the selection and the filters across a page (AC-7)", async () => {
+    history(120);
+    renderRuns();
+    await screen.findAllByTestId("run-row");
+    await pickState("running");
+    typeSearch("MAIN");
+    fireEvent.click(screen.getAllByTestId("run-row")[0]);
+    const chosen = new URLSearchParams(search()!).get("run");
+    const box = document.querySelector(".runs-list");
+
+    fireEvent.click(screen.getByTestId("runs-load-more"));
+    await waitFor(() => expect(screen.queryByTestId("runs-loading-more")).toBeNull());
+
+    expect(new URLSearchParams(search()!).get("run")).toBe(chosen);
+    expect(searchBox().value).toBe("MAIN");
+    expect(chipTexts()).toEqual(["running×"]);
+    expect(document.querySelector(".runs-list")).toBe(box);
+  });
+});
+
+describe("when the list cannot be loaded (MAIN-560 AC-5)", () => {
+  it("says so, in the server's words, rather than showing an empty repo", async () => {
+    state.builds = [build()];
+    state.listError = "the control plane is unreachable";
+    renderRuns();
+
+    const said = await screen.findByTestId("runs-load-failed");
+    expect(said.textContent).toContain("the control plane is unreachable");
+    // The failure this replaces: `?? []` rendered a dead endpoint as a repo
+    // that has never run anything.
+    expect(screen.queryByTestId("runs-empty")).toBeNull();
+    expect(screen.queryAllByTestId("run-row")).toHaveLength(0);
+  });
+
+  it("retries only when asked, and then shows the list (NG-4)", async () => {
+    state.builds = [build()];
+    state.reviews = [review()];
+    state.listError = "the control plane is unreachable";
+    renderRuns();
+    await screen.findByTestId("runs-load-failed");
+
+    const asked = state.pages.length;
+    // Nothing on its own: a retry loop against a control plane that is down is
+    // what NG-4 forbids.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 30));
+    });
+    expect(state.pages.length).toBe(asked);
+
+    state.listError = null;
+    fireEvent.click(screen.getByTestId("runs-retry"));
+    await waitFor(() => expect(screen.getAllByTestId("run-row")).toHaveLength(2));
+  });
+
+  it("keeps the rows it has when a LATER page fails, and offers the retry there", async () => {
+    state.builds = Array.from({ length: 60 }, (_, i) =>
+      build({
+        id: `b${i}`,
+        created_at: new Date(Date.UTC(2026, 7, 8) - i * 3600_000).toISOString(),
+      }),
+    );
+    state.reviews = [];
+    renderRuns();
+    await screen.findAllByTestId("run-row");
+    const before = screen.getAllByTestId("run-row").length;
+
+    state.listError = "the control plane is unreachable";
+    fireEvent.click(screen.getByTestId("runs-load-more"));
+
+    const failed = await screen.findByTestId("runs-more-failed");
+    expect(failed.textContent).toContain("the control plane is unreachable");
+    // The rows already read are not taken away to show an error about the ones
+    // that were not.
+    expect(screen.getAllByTestId("run-row")).toHaveLength(before);
+  });
+});
+
+describe("the run the URL names is gone (MAIN-560 AC-5)", () => {
+  it("says so instead of quietly opening a different run", async () => {
+    state.builds = [build()];
+    state.reviews = [review()];
+    state.goneJobs = ["job-deleted"];
+    renderRuns("/workspaces/ws-1?section=runs&run=job-deleted");
+
+    const said = await screen.findByTestId("run-gone");
+    expect(isVisible(said)).toBe(true);
+    // The LIST is fine — this is about the pane beside it.
+    expect(screen.getAllByTestId("run-row")).toHaveLength(2);
+    expect(screen.queryByTestId("run-header")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("run-gone-newest"));
+    await waitFor(() => expect(screen.queryByTestId("run-gone")).toBeNull());
+    expect(new URLSearchParams(search()!).get("run")).toBeNull();
+    expect(screen.getByTestId("run-header")).toBeTruthy();
+  });
+
+  it("does not call a run gone merely because the list has not paged to it", async () => {
+    // The reason this asks the server rather than reading the rows on screen:
+    // once the list is paged, "not among the rows" is an ordinary state for a
+    // run that is perfectly real.
+    state.builds = Array.from({ length: 60 }, (_, i) =>
+      build({
+        id: `b${i}`,
+        created_at: new Date(Date.UTC(2026, 7, 8) - i * 3600_000).toISOString(),
+      }),
+    );
+    state.reviews = [];
+    renderRuns("/workspaces/ws-1?section=runs&run=b59");
+    await screen.findAllByTestId("run-row");
+
+    expect(
+      screen.queryAllByTestId("run-row").map((r) => r.getAttribute("data-run-id")),
+    ).not.toContain("b59");
+    await waitFor(() => expect(screen.getByTestId("run-header")).toBeTruthy());
+    expect(screen.queryByTestId("run-gone")).toBeNull();
+  });
+});
+
+describe("a search that matched nothing (MAIN-560 AC-5)", () => {
+  it("is its own state, not the empty repo and not the filters", async () => {
+    state.builds = [build()];
+    state.reviews = [review()];
+    renderRuns();
+    await screen.findAllByTestId("run-row");
+
+    typeSearch("MAIN-999");
+    const said = await screen.findByTestId("runs-no-search");
+    expect(said.textContent).toContain("MAIN-999");
+    expect(screen.queryByTestId("runs-empty")).toBeNull();
+    expect(screen.queryByTestId("runs-no-filters")).toBeNull();
+    // No filter is on, so nothing offers to clear one.
+    expect(screen.queryByTestId("runs-clear-filters")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("runs-clear-search"));
+    await waitFor(() => expect(screen.getAllByTestId("run-row")).toHaveLength(2));
+    expect(search()).not.toContain("q=");
+  });
+
+  it("names the filters as well when a search ran into them too", async () => {
+    state.builds = [build()];
+    state.reviews = [review()];
+    renderRuns();
+    await screen.findAllByTestId("run-row");
+
+    await pickState("running");
+    typeSearch("MAIN-999");
+    expect((await screen.findByTestId("runs-no-search-filters")).textContent).toContain("running");
+    expect(screen.getByTestId("runs-clear-filters")).toBeTruthy();
   });
 });
 
