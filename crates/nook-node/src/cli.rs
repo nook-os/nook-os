@@ -4414,3 +4414,103 @@ pub async fn builds_scale(workspace: &str, count: Option<&str>) -> Result<()> {
     }
     Ok(())
 }
+
+// ── issues: the board verbs a skill drives a card with (MAIN-138) ────────────
+
+/// `nook issues move <key> <state>` / `--column "<Name>"`.
+///
+/// Exactly one of the two, refused HERE as well as at the server, because a
+/// caller who typed neither should hear the rule rather than spend a round
+/// trip to be told it. The server's copy is the one that matters — a hand-built
+/// request can still reach it — and both say the same sentence.
+pub async fn issues_move(key: &str, state: Option<&str>, column: Option<&str>) -> Result<()> {
+    let (body, dest) = match (state, column) {
+        (Some(t), None) => (serde_json::json!({ "column_type": t }), t.to_string()),
+        (None, Some(name)) => (serde_json::json!({ "column": name }), format!("\"{name}\"")),
+        _ => bail!(
+            "give exactly one of <state> (backlog|unstarted|started|review|completed|canceled) \
+             or --column \"<exact name>\""
+        ),
+    };
+    let client = Client::from_config()?;
+    client
+        .post(&format!("/api/v1/tasks/{key}/move"), body)
+        .await?;
+    println!(
+        "{} moved {} to {dest}",
+        crate::style::ok_c("✓"),
+        crate::style::bold(key)
+    );
+    Ok(())
+}
+
+/// `nook issues release <key>` — hand a claimed card back to the queue.
+pub async fn issues_release(key: &str) -> Result<()> {
+    let client = Client::from_config()?;
+    client
+        .post(
+            &format!("/api/v1/tasks/{key}/release"),
+            serde_json::json!({}),
+        )
+        .await?;
+    println!(
+        "{} released {} — it is pickable again",
+        crate::style::ok_c("✓"),
+        crate::style::bold(key)
+    );
+    Ok(())
+}
+
+/// `nook issues prune-worktree <key>` — drop the checkout a finished card made.
+pub async fn issues_prune_worktree(key: &str) -> Result<()> {
+    let client = Client::from_config()?;
+    client
+        .post(
+            &format!("/api/v1/tasks/{key}/prune-worktree"),
+            serde_json::json!({}),
+        )
+        .await?;
+    println!(
+        "{} pruned {}'s worktree",
+        crate::style::ok_c("✓"),
+        crate::style::bold(key)
+    );
+    Ok(())
+}
+
+/// `nook issues set-parent <key> <EPIC|none>` — re-file under an epic, or detach.
+///
+/// `none` is the literal a shell can type; the wire form is a JSON `null`, and
+/// the tri-state PATCH field is what distinguishes it from "leave it alone".
+pub async fn issues_set_parent(key: &str, parent: &str) -> Result<()> {
+    let detach = parent.eq_ignore_ascii_case("none");
+    let body = serde_json::json!({
+        "parent": if detach { Value::Null } else { Value::String(parent.to_string()) }
+    });
+    let client = Client::from_config()?;
+    let (status, resp) = client
+        .patch_status(&format!("/api/v1/tasks/{key}"), body)
+        .await?;
+    if !(200..300).contains(&status) {
+        let msg = resp
+            .get("error")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| resp.to_string());
+        bail!("{status} /api/v1/tasks/{key}: {msg}");
+    }
+    if detach {
+        println!(
+            "{} detached {} from its epic",
+            crate::style::ok_c("✓"),
+            crate::style::bold(key)
+        );
+    } else {
+        println!(
+            "{} filed {} under {parent}",
+            crate::style::ok_c("✓"),
+            crate::style::bold(key)
+        );
+    }
+    Ok(())
+}

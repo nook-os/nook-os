@@ -6315,6 +6315,9 @@
                 }
               }
             }
+          },
+          "422": {
+            "description": "`column` and `column_type` together, or neither"
           }
         }
       }
@@ -12990,12 +12993,19 @@
       },
       "MoveTaskRequest": {
         "type": "object",
-        "required": [
-          "column"
-        ],
+        "description": "Where a card is going, named either way (MAIN-138).\n\n`column` is an exact column name; `column_type` is one of the six board\ntypes and resolves against the task's OWN board — the form a skill can\nwrite without knowing what a tenant renamed its columns to.\n\nExactly one is required. Both is two answers to one question and neither is\nnone, so both are refused rather than resolved by a precedence rule nobody\nwould remember: a silent winner is how a card lands in the wrong column.",
         "properties": {
           "column": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "column_type": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },

@@ -5702,8 +5702,20 @@ export interface components {
             tenants?: components["schemas"]["TenantMembership"][];
             user: components["schemas"]["User"];
         };
+        /**
+         * @description Where a card is going, named either way (MAIN-138).
+         *
+         *     `column` is an exact column name; `column_type` is one of the six board
+         *     types and resolves against the task's OWN board — the form a skill can
+         *     write without knowing what a tenant renamed its columns to.
+         *
+         *     Exactly one is required. Both is two answers to one question and neither is
+         *     none, so both are refused rather than resolved by a precedence rule nobody
+         *     would remember: a silent winner is how a card lands in the wrong column.
+         */
         MoveTaskRequest: {
-            column: string;
+            column?: string | null;
+            column_type?: string | null;
         };
         MoveTenantRequest: {
             /** Format: uuid */
@@ -13531,6 +13543,13 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["TaskItem"];
                 };
+            };
+            /** @description `column` and `column_type` together, or neither */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

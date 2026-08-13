@@ -504,7 +504,39 @@ pub async fn move_task(
 ) -> ApiResult<TaskItem> {
     let task = load_task(state, tenant, task_id).await?;
     let col = column_id(state, task.board_id, column, 0).await?;
-    let updated = state.tasks.set_column(task_id, col).await?;
+    land_in_column(state, tenant, task, col).await
+}
+
+/// The same move, naming the destination by column TYPE (MAIN-138).
+///
+/// The type resolves against the task's own board, so a tenant that renamed
+/// "In Progress" still receives a `started` move — which is what lets a skill
+/// say where a card is going without knowing that board's vocabulary. An
+/// unknown type is a 400 and a board with no such column a 409, both from
+/// [`crate::services::tasks::column_of_type`]; neither falls back to a
+/// position, because guessing a destination silently is worse than refusing.
+pub async fn move_task_to_type(
+    state: &AppState,
+    tenant: TenantId,
+    task_id: TaskId,
+    column_type: &str,
+) -> ApiResult<TaskItem> {
+    let task = load_task(state, tenant, task_id).await?;
+    let col =
+        crate::services::tasks::column_of_type(state.tasks.as_ref(), task.board_id, column_type)
+            .await?;
+    land_in_column(state, tenant, task, col).await
+}
+
+/// The write and the automation, shared by both ways of naming the column so
+/// the two cannot drift in what a move does once the destination is known.
+async fn land_in_column(
+    state: &AppState,
+    tenant: TenantId,
+    task: TaskItem,
+    col: ColumnId,
+) -> ApiResult<TaskItem> {
+    let updated = state.tasks.set_column(task.id, col).await?;
     fire_automation(state, tenant, &task, &updated).await;
     Ok(updated)
 }

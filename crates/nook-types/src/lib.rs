@@ -3631,9 +3631,21 @@ pub struct SubmitPrRequest {
     pub pr_url: Option<String>,
 }
 
+/// Where a card is going, named either way (MAIN-138).
+///
+/// `column` is an exact column name; `column_type` is one of the six board
+/// types and resolves against the task's OWN board — the form a skill can
+/// write without knowing what a tenant renamed its columns to.
+///
+/// Exactly one is required. Both is two answers to one question and neither is
+/// none, so both are refused rather than resolved by a precedence rule nobody
+/// would remember: a silent winner is how a card lands in the wrong column.
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct MoveTaskRequest {
-    pub column: String,
+    #[serde(default)]
+    pub column: Option<String>,
+    #[serde(default)]
+    pub column_type: Option<String>,
 }
 
 /// Outcome of a long-running git operation on a node.
