@@ -141,6 +141,16 @@ pub struct Registry {
     /// broadcast; the copies are equal and none of them is an owner, so no
     /// tunnel is stranded by the replica that opened it going away.
     tunnel_routes: DashMap<String, TunnelEntry>,
+    /// label → the tunnelled WebSockets THIS replica is pumping for it
+    /// (MAIN-10 AC-5).
+    ///
+    /// Local, where `tunnel_routes` is replicated, and necessarily so: a socket
+    /// is a pair of file descriptors on one machine, and only the replica
+    /// holding them can close them. What crosses the bus is the route's
+    /// withdrawal, which every replica then applies to its own sockets — so a
+    /// tunnel stopped anywhere drops its sockets everywhere, without any
+    /// replica knowing what the others hold.
+    tunnel_sockets: DashMap<String, HashSet<Uuid>>,
     /// Serialises label allocation — see [`Registry::open_tunnel_route`]. Held
     /// only across a pure derivation and one insert, never across an await.
     tunnel_open: std::sync::Mutex<()>,
@@ -209,6 +219,7 @@ impl Registry {
             pending_tunnels: DashMap::new(),
             remote_pending_tunnels: DashMap::new(),
             tunnel_routes: DashMap::new(),
+            tunnel_sockets: DashMap::new(),
             tunnel_open: std::sync::Mutex::new(()),
             spent_grants: DashMap::new(),
             remote_viewers: DashMap::new(),
@@ -589,6 +600,58 @@ impl Registry {
         self.remote_pending_tunnels.remove(&request_id);
     }
 
+    /// Record that this replica is pumping a WebSocket for `label`, or refuse
+    /// because the tunnel is already gone (MAIN-10 AC-5).
+    ///
+    /// The route entry is held across the insert deliberately: without it a
+    /// tunnel withdrawn between the check and the insert would leave a socket
+    /// registered under a label nothing will ever sweep, which is precisely
+    /// the leak AC-5 is about.
+    pub fn attach_socket(&self, label: &str, request_id: Uuid) -> bool {
+        let Some(_route) = self.tunnel_routes.get(label) else {
+            return false;
+        };
+        self.tunnel_sockets
+            .entry(label.to_string())
+            .or_default()
+            .insert(request_id);
+        true
+    }
+
+    /// One socket's pump has ended. Idempotent — the tunnel closing underneath
+    /// it took the whole set, and the pump then unwinds through here anyway.
+    pub fn detach_socket(&self, label: &str, request_id: Uuid) {
+        if let Some(mut ids) = self.tunnel_sockets.get_mut(label) {
+            ids.remove(&request_id);
+        }
+        self.tunnel_sockets
+            .remove_if(label, |_, ids| ids.is_empty());
+        self.close_tunnel(request_id);
+    }
+
+    /// Whether this replica is pumping any WebSocket for `label`.
+    pub fn has_sockets(&self, label: &str) -> bool {
+        self.tunnel_sockets
+            .get(label)
+            .is_some_and(|s| !s.is_empty())
+    }
+
+    /// Drop every socket riding a tunnel that has just stopped existing.
+    ///
+    /// Closing the in-flight entry is the whole mechanism: it drops the only
+    /// sender the pump's receiver has, the pump reads `None`, and its own
+    /// teardown is what closes the visitor's socket and tells the node to
+    /// release the upstream. One shutdown path, whether the tunnel was
+    /// stopped, swept, lost its session or lost its node.
+    fn close_sockets_for(&self, label: &str) {
+        let Some((_, ids)) = self.tunnel_sockets.remove(label) else {
+            return;
+        };
+        for id in ids {
+            self.close_tunnel(id);
+        }
+    }
+
     /// A frame arrived from a node: hand it to the local waiter, or relay it to
     /// the replica that issued the request (AC-4).
     ///
@@ -600,6 +663,7 @@ impl Registry {
             &frame,
             nook_proto::NodeToControl::TunnelFailed { .. }
                 | nook_proto::NodeToControl::TunnelChunk { last: true, .. }
+                | nook_proto::NodeToControl::TunnelWsClose { .. }
         );
 
         if let Some(entry) = self.pending_tunnels.get(&request_id) {
@@ -776,7 +840,15 @@ impl Registry {
     }
 
     fn take_tunnel_local(&self, label: &str) -> Option<Tunnel> {
-        self.tunnel_routes.remove(label).map(|(_, e)| e.tunnel)
+        // Every path that ends a tunnel — the API, the idle sweep, a session
+        // exiting, a node disconnecting, a peer's withdrawal off the bus —
+        // runs through here, so this is the one place the sockets riding it
+        // have to be dropped (MAIN-10 AC-5). The route goes first: a socket
+        // torn down while the label still resolves could be replaced by a
+        // reconnect that then outlives the tunnel.
+        let gone = self.tunnel_routes.remove(label).map(|(_, e)| e.tunnel);
+        self.close_sockets_for(label);
+        gone
     }
 
     fn announce_route(&self, label: String, tunnel: Option<Box<Tunnel>>) {
@@ -1097,6 +1169,9 @@ impl Registry {
                     nook_proto::NodeToControl::TunnelResponse { .. }
                         | nook_proto::NodeToControl::TunnelChunk { .. }
                         | nook_proto::NodeToControl::TunnelFailed { .. }
+                        | nook_proto::NodeToControl::TunnelUpgraded { .. }
+                        | nook_proto::NodeToControl::TunnelWsData { .. }
+                        | nook_proto::NodeToControl::TunnelWsClose { .. }
                 ) {
                     self.tunnel_frame(request_id, frame);
                 } else {
@@ -1281,7 +1356,13 @@ fn request_kind(msg: &ControlToNode) -> Option<(Uuid, RequestKind)> {
         | ControlToNode::InitProject { request_id, .. }
         | ControlToNode::CaptureSession { request_id, .. } => Some((*request_id, RequestKind::Op)),
         ControlToNode::GetGitStatus { request_id, .. } => Some((*request_id, RequestKind::Git)),
-        ControlToNode::TunnelRequest { request_id, .. } => Some((*request_id, RequestKind::Tunnel)),
+        // The upgrade opens the same kind of entry as a request and is the
+        // only WebSocket frame that needs one: everything after it travels on
+        // the mapping this establishes, and the terminal frame removes it.
+        ControlToNode::TunnelRequest { request_id, .. }
+        | ControlToNode::TunnelUpgrade { request_id, .. } => {
+            Some((*request_id, RequestKind::Tunnel))
+        }
         _ => None,
     }
 }

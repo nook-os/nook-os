@@ -339,6 +339,40 @@ pub enum NodeToControl {
         request_id: uuid::Uuid,
         message: String,
     },
+    /// The upstream accepted a [`crate::ControlToNode::TunnelUpgrade`]: the
+    /// visitor may now be told `101` (MAIN-10 AC-1).
+    ///
+    /// It carries the upstream's own handshake headers because one of them
+    /// decides whether the visitor's socket works at all — a browser that
+    /// asked for a subprotocol and is answered without one fails the
+    /// connection, and `vite-hmr` is exactly that case. The control plane
+    /// cannot invent the answer: only the app behind the tunnel knows which
+    /// subprotocol it speaks.
+    TunnelUpgraded {
+        request_id: uuid::Uuid,
+        #[serde(default = "crate::tunnel_v1")]
+        version: u16,
+        headers: Vec<crate::TunnelHeader>,
+    },
+    /// One frame the upstream sent, on its way to the visitor.
+    ///
+    /// Base64 even for text, like `SessionOutput`: a WebSocket payload is
+    /// bytes, and a binary frame that is not valid UTF-8 has nowhere to live
+    /// in a JSON string. `binary` preserves the distinction that survives the
+    /// encoding — an app that reads `Blob` from a text frame gets the wrong
+    /// type, which is a corruption of a different kind.
+    TunnelWsData {
+        request_id: uuid::Uuid,
+        data_b64: String,
+        binary: bool,
+    },
+    /// The upstream socket closed. Terminal, like `last` on a chunk: whoever
+    /// holds this request drops it on receipt.
+    TunnelWsClose {
+        request_id: uuid::Uuid,
+        code: Option<u16>,
+        reason: Option<String>,
+    },
 }
 
 /// What to do with a session's terminals (tmux windows/panes).
@@ -851,6 +885,40 @@ pub enum ControlToNode {
         /// Base64, because this frame is JSON and a body is not text.
         body_b64: String,
     },
+    /// Open a WebSocket to a port on this node (MAIN-10 AC-1).
+    ///
+    /// The upgrade half of [`ControlToNode::TunnelRequest`] — same
+    /// `request_id` convention, same loopback-only rule, same `version` — and
+    /// a variant of its own rather than a flag on it, because what follows is
+    /// different in kind: a run of frames in BOTH directions with no head to
+    /// wait for and no `last` to end it.
+    ///
+    /// `headers` has already had NookOS's credentials taken out of it, and the
+    /// node drops the handshake headers its own client owns; what is left is
+    /// what the app is entitled to see, `sec-websocket-protocol` included.
+    TunnelUpgrade {
+        #[serde(default = "tunnel_v1")]
+        version: u16,
+        request_id: uuid::Uuid,
+        port: u16,
+        path: String,
+        headers: Vec<TunnelHeader>,
+    },
+    /// One frame from the visitor, on its way to the upstream socket. See
+    /// [`NodeToControl::TunnelWsData`] for why it is base64 in both directions.
+    TunnelWsData {
+        request_id: uuid::Uuid,
+        data_b64: String,
+        binary: bool,
+    },
+    /// The visitor's end is gone — they closed it, or the tunnel it rode on
+    /// was stopped, expired or lost its session (MAIN-10 AC-4, AC-5). Either
+    /// way the node drops the upstream connection.
+    TunnelWsClose {
+        request_id: uuid::Uuid,
+        code: Option<u16>,
+        reason: Option<String>,
+    },
 }
 
 pub mod tunnel;
@@ -864,6 +932,12 @@ pub mod tunnel;
 /// the difference between degrading and misparsing: an unknown VARIANT is
 /// already skipped by the node's read loop, but a known variant with a meaning
 /// it does not share would otherwise be obeyed wrongly and silently.
+///
+/// MAIN-10's upgrade frames did NOT bump it, and that is the rule working
+/// rather than an oversight: they are new variants, so an older node skips
+/// `TunnelUpgrade` and the control plane gives up on the handshake, while its
+/// plain HTTP tunnels keep working. Bumping would have made every existing
+/// node refuse those too, to fix nothing.
 pub const TUNNEL_PROTOCOL_VERSION: u16 = 1;
 
 /// The default for a peer that predates the field — the first generation.

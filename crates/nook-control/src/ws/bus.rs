@@ -64,16 +64,18 @@ pub enum BusMessage {
     ///
     /// The single-shot pattern beside it — `OpReply`, `GitReply` — cannot carry
     /// this: those resolve one `oneshot` and are done, while a tunnel response
-    /// is a head frame followed by an unbounded run of chunks, and every one of
-    /// them has to find the same waiting request on a replica that never held
-    /// the node's socket.
+    /// is a head frame followed by an unbounded run of chunks — and a tunnelled
+    /// WebSocket is an unbounded run in both directions — and every one of them
+    /// has to find the same waiting request on a replica that never held the
+    /// node's socket.
     ///
     /// `frame` is a `NodeToControl` because that is what the node actually
     /// sent and re-encoding it here would be a second definition of the same
     /// thing (`SessionFrame` carries `AttachServerMessage` for the same
-    /// reason). Only the three tunnel variants are legal — `TunnelResponse`,
-    /// `TunnelChunk`, `TunnelFailed`; anything else is dropped by the receiver
-    /// rather than trusted.
+    /// reason). Only the tunnel variants are legal — the three of the HTTP
+    /// path plus MAIN-10's `TunnelUpgraded`, `TunnelWsData` and
+    /// `TunnelWsClose`; anything else is dropped by the receiver rather than
+    /// trusted.
     TunnelFrame {
         request_id: Uuid,
         frame: nook_proto::NodeToControl,

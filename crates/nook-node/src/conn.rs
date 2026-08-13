@@ -1,6 +1,9 @@
 //! The node's single outbound connection to the control plane, with
 //! jittered exponential backoff reconnect. No inbound ports, no SSH.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use nook_proto::{ControlToNode, NodeToControl};
@@ -506,6 +509,14 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
     // between a keystroke arriving and it reaching the PTY.
     let session_tx = sessions::Manager::spawn(out_tx.clone(), ctl_tx.clone());
 
+    // Tunnelled WebSockets this node is holding open, by request id (MAIN-10).
+    // Scoped to the CONNECTION: the control plane closes every tunnel on a
+    // node it loses (MAIN-404 AC-4), so a socket that outlived the reconnect
+    // would be an upstream connection nothing on either side still refers to.
+    // Dropping this table drops the senders, and every pump ends.
+    let ws_tunnels: Arc<Mutex<HashMap<uuid::Uuid, mpsc::Sender<ControlToNode>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
     while let Some(msg) = stream.next().await {
         let msg = match msg {
             Ok(Message::Text(t)) => t,
@@ -896,6 +907,49 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                         })
                         .await;
                 });
+            }
+            // Dial a WebSocket on a local port and pump it both ways (MAIN-10
+            // AC-1). Spawned for the same reason the HTTP proxy is: this is the
+            // read loop, and a socket that lives for hours cannot live in it.
+            ControlToNode::TunnelUpgrade {
+                version,
+                request_id,
+                port,
+                path,
+                headers,
+            } => {
+                let tx = ctl_tx.clone();
+                if version > nook_proto::TUNNEL_PROTOCOL_VERSION {
+                    let _ = tx
+                        .send(NodeToControl::TunnelFailed {
+                            request_id,
+                            message: format!(
+                                "tunnel frame v{version} is newer than this node's \
+                                 v{}; upgrade the node",
+                                nook_proto::TUNNEL_PROTOCOL_VERSION
+                            ),
+                        })
+                        .await;
+                    continue;
+                }
+                // Bounded, like every other lane to a pump on this node. A
+                // full one is not a frame to drop — dropping one corrupts the
+                // stream — so `forward_ws` ends the socket instead.
+                let (up_tx, up_rx) = mpsc::channel::<ControlToNode>(256);
+                ws_tunnels.lock().unwrap().insert(request_id, up_tx);
+                // WEAK, deliberately: the table is what ends every pump when
+                // the connection drops, and a pump holding it strongly would
+                // wait for a table waiting for the pump.
+                let table = Arc::downgrade(&ws_tunnels);
+                tokio::spawn(async move {
+                    tunnel_ws(request_id, port, path, headers, up_rx, tx).await;
+                    if let Some(table) = table.upgrade() {
+                        table.lock().unwrap().remove(&request_id);
+                    }
+                });
+            }
+            frame @ (ControlToNode::TunnelWsData { .. } | ControlToNode::TunnelWsClose { .. }) => {
+                forward_ws(&ws_tunnels, frame);
             }
             ControlToNode::GetGitStatus {
                 request_id,
@@ -1466,6 +1520,202 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
     Ok(())
 }
 
+/// Hand a frame to the pump holding that socket, or end the socket.
+///
+/// A full lane is the case worth naming: a WebSocket frame is not a chunk of a
+/// body, so skipping one does not shorten a stream, it corrupts it. Dropping
+/// the table entry drops the last sender, and the pump closes both ends —
+/// a socket that dies is recoverable, one that silently lies is not.
+fn forward_ws(
+    table: &Arc<Mutex<HashMap<uuid::Uuid, mpsc::Sender<ControlToNode>>>>,
+    frame: ControlToNode,
+) {
+    let request_id = match &frame {
+        ControlToNode::TunnelWsData { request_id, .. }
+        | ControlToNode::TunnelWsClose { request_id, .. } => *request_id,
+        _ => return,
+    };
+    let sender = table.lock().unwrap().get(&request_id).cloned();
+    let Some(sender) = sender else { return };
+    if sender.try_send(frame).is_err() {
+        tracing::warn!(%request_id, "tunnelled socket is not keeping up — closing it");
+        table.lock().unwrap().remove(&request_id);
+    }
+}
+
+/// Headers of the visitor's handshake this node's own client owns.
+///
+/// The key and the version are answered by the upstream against OUR handshake,
+/// not the visitor's, so forwarding theirs would make the accept-hash we verify
+/// the wrong one. Extensions are refused for a blunter reason: an upstream that
+/// selected `permessage-deflate` would frame its payloads in a way this client
+/// does not read, and never offering it is what keeps AC-2's bytes intact.
+const CLIENT_OWNED_HANDSHAKE: &[&str] = &[
+    "sec-websocket-key",
+    "sec-websocket-version",
+    "sec-websocket-extensions",
+    "connection",
+    "upgrade",
+];
+
+/// Dial the upstream WebSocket and carry frames until one end stops (MAIN-10).
+///
+/// Loopback only, exactly like the HTTP proxy beside it: a tunnel reaches
+/// something running on THIS machine, and letting the frame name a host would
+/// make every node an open proxy into its own network.
+async fn tunnel_ws(
+    request_id: uuid::Uuid,
+    port: u16,
+    path: String,
+    headers: Vec<nook_proto::TunnelHeader>,
+    mut inbound: mpsc::Receiver<ControlToNode>,
+    tx: mpsc::Sender<NodeToControl>,
+) {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let fail = |message: String| NodeToControl::TunnelFailed {
+        request_id,
+        message,
+    };
+
+    let mut request = match format!("ws://127.0.0.1:{port}{path}").into_client_request() {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = tx.send(fail(format!("bad upgrade target: {e}"))).await;
+            return;
+        }
+    };
+    for (name, value) in &headers {
+        if CLIENT_OWNED_HANDSHAKE
+            .iter()
+            .any(|owned| name.eq_ignore_ascii_case(owned))
+        {
+            continue;
+        }
+        let (Ok(name), Ok(value)) = (
+            tokio_tungstenite::tungstenite::http::HeaderName::from_bytes(name.as_bytes()),
+            tokio_tungstenite::tungstenite::http::HeaderValue::from_str(value),
+        ) else {
+            continue;
+        };
+        request.headers_mut().insert(name, value);
+    }
+
+    let (upstream, response) = match connect_async(request).await {
+        Ok(pair) => pair,
+        Err(e) => {
+            let _ = tx
+                .send(fail(format!("upstream websocket on port {port}: {e}")))
+                .await;
+            return;
+        }
+    };
+    // Only what the control plane can act on: the subprotocol it must echo in
+    // its own `101`. The rest of a handshake response describes THIS
+    // connection, and none of it is true of the visitor's.
+    let out_headers: Vec<nook_proto::TunnelHeader> = response
+        .headers()
+        .get_all("sec-websocket-protocol")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(|v| ("sec-websocket-protocol".to_string(), v.to_string()))
+        .collect();
+    if tx
+        .send(NodeToControl::TunnelUpgraded {
+            request_id,
+            version: nook_proto::TUNNEL_PROTOCOL_VERSION,
+            headers: out_headers,
+        })
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    let (mut sink, mut stream) = upstream.split();
+    loop {
+        tokio::select! {
+            frame = inbound.recv() => match frame {
+                Some(ControlToNode::TunnelWsData { data_b64, binary, .. }) => {
+                    let Ok(bytes) = b64.decode(&data_b64) else { break };
+                    let message = if binary {
+                        Message::Binary(bytes.into())
+                    } else {
+                        match String::from_utf8(bytes) {
+                            Ok(text) => Message::Text(text.into()),
+                            Err(_) => break,
+                        }
+                    };
+                    if sink.send(message).await.is_err() {
+                        break;
+                    }
+                }
+                Some(ControlToNode::TunnelWsClose { .. }) | None => {
+                    // The visitor closed, or the tunnel they rode on is gone
+                    // (AC-4, AC-5). Either way this connection is released —
+                    // which is the whole of "the node does not leave a socket
+                    // held open".
+                    let _ = sink.close().await;
+                    return;
+                }
+                Some(_) => continue,
+            },
+            message = stream.next() => match message {
+                Some(Ok(Message::Text(text))) => {
+                    if tx.send(NodeToControl::TunnelWsData {
+                        request_id,
+                        data_b64: b64.encode(text.as_bytes()),
+                        binary: false,
+                    }).await.is_err() {
+                        break;
+                    }
+                }
+                Some(Ok(Message::Binary(bytes))) => {
+                    if tx.send(NodeToControl::TunnelWsData {
+                        request_id,
+                        data_b64: b64.encode(&bytes),
+                        binary: true,
+                    }).await.is_err() {
+                        break;
+                    }
+                }
+                // tungstenite answers a ping itself; a raw frame is the
+                // unmasked view of something already delivered above.
+                Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => continue,
+                Some(Ok(Message::Close(frame))) => {
+                    let (code, reason) = match frame {
+                        Some(f) => (Some(u16::from(f.code)), Some(f.reason.to_string())),
+                        None => (None, None),
+                    };
+                    let _ = tx
+                        .send(NodeToControl::TunnelWsClose { request_id, code, reason })
+                        .await;
+                    // Answer the closing handshake rather than just dropping
+                    // the socket, so the app sees a close and not a reset.
+                    let _ = sink.close().await;
+                    return;
+                }
+                Some(Err(e)) => {
+                    let _ = tx.send(fail(format!("upstream socket on port {port}: {e}"))).await;
+                    return;
+                }
+                None => break,
+            },
+        }
+    }
+    // Fell out without the upstream saying so: tell the control plane the
+    // socket is over, since a stream that ends by going quiet is
+    // indistinguishable from one still waiting.
+    let _ = tx
+        .send(NodeToControl::TunnelWsClose {
+            request_id,
+            code: None,
+            reason: None,
+        })
+        .await;
+    let _ = sink.close().await;
+}
+
 // tokio-tungstenite re-exports http via tungstenite.
 mod axum_http {
     pub use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
@@ -1507,8 +1757,8 @@ async fn maybe_renew(server_fingerprints: &[String]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{checkout_root, next_outbound};
-    use nook_proto::NodeToControl;
+    use super::{checkout_root, next_outbound, tunnel_ws};
+    use nook_proto::{ControlToNode, NodeToControl};
     use nook_types::SessionId;
     use tokio::sync::mpsc;
 
@@ -1609,5 +1859,194 @@ mod tests {
             checkout_root(None, Some("hein"), SERVER),
             "~/.nook/workspace/hein"
         );
+    }
+
+    /// A WebSocket echo server on a loopback port, for the node's half of a
+    /// tunnelled upgrade. Returns the port and a handle that finishes when the
+    /// one connection it accepts has closed — which is how AC-4's "the node
+    /// releases the upstream connection" is actually observed rather than
+    /// assumed.
+    // The handshake callback's `Err` type is tungstenite's own HTTP response,
+    // which is over clippy's threshold and not ours to box.
+    #[allow(clippy::result_large_err)]
+    async fn echo_upstream() -> (u16, tokio::task::JoinHandle<()>) {
+        use futures_util::{SinkExt, StreamExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_hdr_async(
+                stream,
+                |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                 mut res: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                    // Answer the subprotocol, exactly as a Vite dev server does
+                    // — and assert the visitor's `Host` survived the hop, since
+                    // an app that vets it would otherwise refuse the handshake.
+                    assert_eq!(
+                        req.headers().get("host").unwrap().to_str().unwrap(),
+                        "hmr.tunnels.test"
+                    );
+                    if let Some(p) = req.headers().get("sec-websocket-protocol").cloned() {
+                        res.headers_mut().insert("sec-websocket-protocol", p);
+                    }
+                    Ok(res)
+                },
+            )
+            .await
+            .unwrap();
+            while let Some(Ok(msg)) = ws.next().await {
+                match msg {
+                    tokio_tungstenite::tungstenite::Message::Text(_)
+                    | tokio_tungstenite::tungstenite::Message::Binary(_) => {
+                        ws.send(msg).await.unwrap()
+                    }
+                    tokio_tungstenite::tungstenite::Message::Close(_) => break,
+                    _ => {}
+                }
+            }
+        });
+        (port, handle)
+    }
+
+    /// MAIN-10 AC-1 and AC-2, on the node: the upgrade reaches a real upstream,
+    /// its subprotocol comes back, and a payload that is not valid UTF-8 makes
+    /// the round trip byte for byte.
+    #[tokio::test]
+    async fn a_tunnelled_socket_carries_text_and_non_utf8_bytes_unchanged() {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let (port, upstream) = echo_upstream().await;
+        let (in_tx, in_rx) = mpsc::channel::<ControlToNode>(16);
+        let (out_tx, mut out_rx) = mpsc::channel::<NodeToControl>(16);
+        let request_id = uuid::Uuid::now_v7();
+
+        let pump = tokio::spawn(tunnel_ws(
+            request_id,
+            port,
+            "/hmr".into(),
+            vec![
+                ("host".into(), "hmr.tunnels.test".into()),
+                ("sec-websocket-protocol".into(), "vite-hmr".into()),
+                // The visitor's own handshake headers, which this node's client
+                // owns and must not copy — forwarding the key would make the
+                // accept-hash it verifies the wrong one.
+                ("sec-websocket-key".into(), "ZmFrZWtleWZha2VrZXk=".into()),
+                ("sec-websocket-version".into(), "13".into()),
+            ],
+            in_rx,
+            out_tx,
+        ));
+
+        let NodeToControl::TunnelUpgraded { headers, .. } = out_rx.recv().await.unwrap() else {
+            panic!("the upstream accepted, so the node reports an upgrade");
+        };
+        assert_eq!(
+            headers,
+            vec![("sec-websocket-protocol".to_string(), "vite-hmr".to_string())],
+            "the upstream's subprotocol is what the control plane must echo"
+        );
+
+        // Not valid UTF-8 anywhere in it: a lone continuation byte, a NUL and
+        // an unpaired surrogate's lead byte.
+        let raw: &[u8] = &[0xff, 0x00, 0xfe, 0x80, 0xed];
+        in_tx
+            .send(ControlToNode::TunnelWsData {
+                request_id,
+                data_b64: b64.encode(raw),
+                binary: true,
+            })
+            .await
+            .unwrap();
+        let NodeToControl::TunnelWsData {
+            data_b64, binary, ..
+        } = out_rx.recv().await.unwrap()
+        else {
+            panic!("the echo comes back as data");
+        };
+        assert!(binary, "a binary frame stays binary across the hop");
+        assert_eq!(b64.decode(&data_b64).unwrap(), raw);
+
+        in_tx
+            .send(ControlToNode::TunnelWsData {
+                request_id,
+                data_b64: b64.encode("hello"),
+                binary: false,
+            })
+            .await
+            .unwrap();
+        let NodeToControl::TunnelWsData {
+            data_b64, binary, ..
+        } = out_rx.recv().await.unwrap()
+        else {
+            panic!("the echo comes back as data");
+        };
+        assert!(!binary);
+        assert_eq!(b64.decode(&data_b64).unwrap(), b"hello");
+
+        // AC-4: the visitor's end going away releases the upstream. The echo
+        // server's task finishing is the proof — it only ends on a close.
+        in_tx
+            .send(ControlToNode::TunnelWsClose {
+                request_id,
+                code: Some(1000),
+                reason: None,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), upstream)
+            .await
+            .expect("the node releases the upstream connection")
+            .unwrap();
+        pump.await.unwrap();
+    }
+
+    /// AC-5's node half: the control plane dropping the lane — which is what a
+    /// stopped, swept or session-less tunnel does — closes the upstream too.
+    #[tokio::test]
+    async fn losing_the_control_plane_releases_the_upstream() {
+        let (port, upstream) = echo_upstream().await;
+        let (in_tx, in_rx) = mpsc::channel::<ControlToNode>(4);
+        let (out_tx, mut out_rx) = mpsc::channel::<NodeToControl>(4);
+        let request_id = uuid::Uuid::now_v7();
+
+        let pump = tokio::spawn(tunnel_ws(
+            request_id,
+            port,
+            "/hmr".into(),
+            vec![("host".into(), "hmr.tunnels.test".into())],
+            in_rx,
+            out_tx,
+        ));
+        assert!(matches!(
+            out_rx.recv().await,
+            Some(NodeToControl::TunnelUpgraded { .. })
+        ));
+
+        drop(in_tx);
+        tokio::time::timeout(std::time::Duration::from_secs(5), upstream)
+            .await
+            .expect("the upstream is released when the socket's lane closes")
+            .unwrap();
+        pump.await.unwrap();
+    }
+
+    /// An upstream that is not there is a named failure, not a hang: the
+    /// control plane turns this into the tunnel's 502 rather than leaving a
+    /// browser waiting on a handshake nobody will finish.
+    #[tokio::test]
+    async fn nothing_listening_fails_the_upgrade_by_name() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let (_in_tx, in_rx) = mpsc::channel::<ControlToNode>(4);
+        let (out_tx, mut out_rx) = mpsc::channel::<NodeToControl>(4);
+        let request_id = uuid::Uuid::now_v7();
+
+        tunnel_ws(request_id, port, "/".into(), Vec::new(), in_rx, out_tx).await;
+
+        let Some(NodeToControl::TunnelFailed { message, .. }) = out_rx.recv().await else {
+            panic!("a dead port is reported, not waited on");
+        };
+        assert!(message.contains(&port.to_string()), "{message}");
     }
 }

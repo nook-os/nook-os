@@ -2664,6 +2664,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tokio-rustls 0.26.4",
+ "tokio-tungstenite 0.26.2",
  "toml",
  "tower",
  "tower-http",

@@ -18,6 +18,11 @@
 //! `*.<TUNNEL_DOMAIN>` reads the one in-memory table, and splitting them would
 //! only mean two files that must not disagree.
 //!
+//! **The upgrade path (MAIN-10).** A request arriving with `Upgrade: websocket`
+//! takes [`proxy_upgrade`] instead of [`proxy`] — same access check, same
+//! stripped headers, same request id — and what follows it is [`pump`], a run
+//! of frames in both directions rather than a response with a body.
+//!
 //! The rules the host surface applies are in `crate::tunnels`, tested without a
 //! database, a node or wildcard DNS.
 
@@ -25,12 +30,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::extract::{Path, Query, Request, State};
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{FromRequestParts, Path, Query, Request, State};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::Json;
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
+use futures_util::{SinkExt, StreamExt};
 use nook_proto::{ControlToNode, NodeToControl};
 use serde::Deserialize;
 use uuid::Uuid;
@@ -43,7 +50,7 @@ use crate::tunnels::{
     self, Access, Credential, AUTHORIZE_PATH, GRANT_PATH, RESERVED_PREFIX, TUNNEL_COOKIE,
 };
 use crate::ws::registry::{Registry, Tunnel};
-use nook_types::{CreateTunnelRequest, TenantId, TunnelView, UserId};
+use nook_types::{CreateTunnelRequest, NodeId, TenantId, TunnelView, UserId};
 
 /// The most of a request body a tunnel will buffer.
 ///
@@ -55,8 +62,16 @@ const MAX_REQUEST_BODY: usize = 32 * 1024 * 1024;
 
 /// How long to wait for a node to produce a response HEAD before giving up.
 /// Only the head: once it arrives the body streams for as long as it takes, so
-/// this bounds "the node is not answering", not "the download is slow".
+/// this bounds "the node is not answering", not "the download is slow". A
+/// WebSocket handshake is bounded by the same number for the same reason — and
+/// it is also what an agent too old to know `TunnelUpgrade` costs a visitor,
+/// since such a node skips the frame in silence.
 const HEAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Keepalive on a tunnelled WebSocket, the same twenty seconds `ws::attach`
+/// uses and for the same reason: an idle socket is what an intermediary reaps,
+/// and an HMR channel is idle whenever nobody is typing.
+const WS_PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Answer a tunnel host, or hand the request on to the rest of the router.
 ///
@@ -115,6 +130,7 @@ async fn serve(state: AppState, label: String, req: Request) -> Response {
         };
     }
 
+    let upgrade = is_websocket_upgrade(req.headers());
     match access(&state, &tunnel, req.headers()).await {
         Access::Allow => {
             // What the idle sweep measures (MAIN-404 AC-3), counted here rather
@@ -124,13 +140,21 @@ async fn serve(state: AppState, label: String, req: Request) -> Response {
             if let Some(announce) = announce_interval(&state) {
                 state.registry.touch_tunnel(&tunnel.label, announce);
             }
-            proxy(&state, &tunnel, req).await
+            if upgrade {
+                proxy_upgrade(state, tunnel, req).await
+            } else {
+                proxy(&state, &tunnel, req).await
+            }
         }
         // Only a navigation is bounced. A 307 preserves the method, so
         // redirecting a POST would re-post the body to the apex's authorize
         // endpoint, which does not take one — and a fetch() that got a login
         // page back would be no clearer. Anything else is told, not moved.
-        Access::Authorize if req.method().is_safe() => {
+        //
+        // An upgrade is in that "anything else" despite being a GET: a
+        // WebSocket handshake does not follow redirects, so bouncing one costs
+        // the visitor the reason and gains them nothing (MAIN-10 AC-6).
+        Access::Authorize if req.method().is_safe() && !upgrade => {
             Redirect::temporary(&authorize_url(&state, &tunnel.label, &next_of(req.uri())))
                 .into_response()
         }
@@ -757,6 +781,298 @@ fn stream_response(
     builder
         .body(Body::from_stream(stream))
         .unwrap_or_else(|_| tunnels::page(StatusCode::BAD_GATEWAY, "Bad response", "unusable"))
+}
+
+// ── The upgrade path (MAIN-10) ─────────────────────────────────────────────
+
+/// The one thing that makes a request an upgrade rather than a request.
+///
+/// Only `Upgrade` is read here. The rest of the handshake — the `Connection`
+/// token, the version, the key — is [`WebSocketUpgrade`]'s to judge, and it
+/// judges it with the same rules that will produce the `101`.
+fn is_websocket_upgrade(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::UPGRADE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("websocket"))
+}
+
+/// Negotiate a WebSocket end to end: this server to the visitor, the node to
+/// whatever is listening on the port (AC-1).
+///
+/// The order is the whole design. The node dials FIRST and the `101` is only
+/// written once it has answered, for two reasons: a visitor told the upgrade
+/// succeeded and then handed a dead socket has no way to hear why, and the
+/// subprotocol in the `101` is the upstream's answer — which cannot be known
+/// before asking it.
+async fn proxy_upgrade(state: AppState, tunnel: Tunnel, req: Request) -> Response {
+    let (mut parts, _body) = req.into_parts();
+    let path = parts
+        .uri
+        .path_and_query()
+        .map(|p| p.as_str().to_string())
+        .unwrap_or_else(|| "/".to_string());
+    // The same stripping the HTTP path does, and the same reason: the app
+    // behind a tunnel must not be handed the credential that opens NookOS
+    // (MAIN-403 AC-4, restated for the handshake by AC-6).
+    let headers = tunnels::forwarded_headers(&parts.headers);
+
+    // Taken before the node is asked. A handshake this server could not
+    // complete is refused here rather than after an upstream socket exists
+    // with nobody to hand it to.
+    let upgrade = match WebSocketUpgrade::from_request_parts(&mut parts, &state).await {
+        Ok(u) => u,
+        Err(rejection) => return rejection.into_response(),
+    };
+
+    let request_id = Uuid::now_v7();
+    let mut rx = state.registry.open_tunnel(request_id);
+    // Live from here, not from the pump. Every way out of this function that
+    // is not a running socket — a refusal, a timeout, a visitor who vanished
+    // between the `101` and the upgrade completing — has to release the
+    // upstream the node may already hold (AC-4), and a guard is the only
+    // shape that covers the paths nobody remembered to write.
+    let guard = WsInFlight {
+        registry: state.registry.clone(),
+        node_id: tunnel.node_id,
+        request_id,
+        label: tunnel.label.clone(),
+        close: Some((None, None)),
+    };
+    let sent = state.registry.send_to_node(
+        tunnel.node_id,
+        ControlToNode::TunnelUpgrade {
+            version: nook_proto::TUNNEL_PROTOCOL_VERSION,
+            request_id,
+            port: tunnel.port,
+            path,
+            headers,
+        },
+    );
+    if !sent {
+        return bad_gateway(format!(
+            "Node {} is not connected to the control plane, so nothing can reach port {} \
+             on it.",
+            tunnel.node_name, tunnel.port
+        ));
+    }
+
+    let upstream = match tokio::time::timeout(HEAD_TIMEOUT, rx.recv()).await {
+        Ok(Some(NodeToControl::TunnelUpgraded { headers, .. })) => headers,
+        Ok(Some(NodeToControl::TunnelFailed { message, .. })) => {
+            return bad_gateway(format!(
+                "Nothing accepted a WebSocket on port {} on node {} — {message}.",
+                tunnel.port, tunnel.node_name
+            ))
+        }
+        Ok(_) => {
+            return bad_gateway(format!(
+                "Node {} ended the exchange for port {} without accepting the upgrade.",
+                tunnel.node_name, tunnel.port
+            ))
+        }
+        Err(_) => {
+            return tunnels::page(
+                StatusCode::GATEWAY_TIMEOUT,
+                "The node did not answer",
+                &format!(
+                    "Node {} was asked for a WebSocket to port {} and did not answer within \
+                     {} seconds. An agent older than this control plane answers no upgrade \
+                     at all — check its version.",
+                    tunnel.node_name,
+                    tunnel.port,
+                    HEAD_TIMEOUT.as_secs()
+                ),
+            )
+        }
+    };
+
+    // Registered before the `101`, so a tunnel stopped from this moment on
+    // finds the socket and drops it (AC-5). A tunnel stopped BEFORE it is why
+    // this can fail: there is no longer anything to upgrade into.
+    if !state.registry.attach_socket(&tunnel.label, request_id) {
+        return tunnels::page(
+            StatusCode::NOT_FOUND,
+            "No such tunnel",
+            "That tunnel ended while its WebSocket was being negotiated.",
+        );
+    }
+
+    // Echoing the upstream's subprotocol is not cosmetic: a browser that asked
+    // for one and is answered without it FAILS the handshake, which is exactly
+    // how a Vite HMR socket dies (AC-7). `protocols` still filters against
+    // what the visitor asked for, so an upstream naming something else is
+    // answered with nothing rather than with a protocol nobody offered.
+    let upgrade = match upstream
+        .into_iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("sec-websocket-protocol"))
+    {
+        Some((_, chosen)) => upgrade.protocols([chosen]),
+        None => upgrade,
+    };
+    let announce = announce_interval(&state);
+    upgrade.on_upgrade(move |socket| pump(socket, rx, guard, announce))
+}
+
+/// Carry frames between the visitor's socket and the node's, until one of them
+/// stops (AC-2, AC-4).
+///
+/// Nothing here is keyed by anything but `guard.request_id`, which is what
+/// keeps concurrent sockets apart (AC-3): each has its own receiver, registered
+/// under its own id, and neither this task nor the node ever consults a table
+/// that could confuse them.
+async fn pump(
+    socket: WebSocket,
+    mut rx: tokio::sync::mpsc::Receiver<NodeToControl>,
+    mut guard: WsInFlight,
+    announce: Option<Duration>,
+) {
+    let (mut sink, mut stream) = socket.split();
+    let mut ping = tokio::time::interval(WS_PING_INTERVAL);
+    ping.tick().await;
+
+    loop {
+        tokio::select! {
+            _ = ping.tick() => {
+                // A live socket has to hold its own tunnel open. The idle sweep
+                // measures REQUESTS (MAIN-404 AC-3) and an HMR channel makes
+                // none for hours, so without this the sweep closes the tunnel
+                // under the socket that is in use — and AC-5 then dutifully
+                // drops the socket.
+                if let Some(after) = announce {
+                    guard.registry.touch_tunnel(&guard.label, after);
+                }
+                if sink.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    break;
+                }
+            }
+            frame = rx.recv() => match frame {
+                Some(NodeToControl::TunnelWsData { data_b64, binary, .. }) => {
+                    let Some(msg) = visitor_message(&data_b64, binary) else { break };
+                    if sink.send(msg).await.is_err() {
+                        break;
+                    }
+                }
+                Some(NodeToControl::TunnelWsClose { code, reason, .. }) => {
+                    let _ = sink.send(Message::Close(close_frame(code, reason))).await;
+                    // The node ended it, so it needs telling nothing.
+                    guard.close = None;
+                    break;
+                }
+                Some(NodeToControl::TunnelFailed { message, .. }) => {
+                    tracing::debug!(label = %guard.label, message, "tunnelled socket failed");
+                    guard.close = None;
+                    break;
+                }
+                Some(_) => continue,
+                // Either the terminal frame was consumed above, or the tunnel
+                // itself has gone (AC-5). In the second case the guard still
+                // has a close to send, which is what releases the upstream —
+                // and the visitor is told properly rather than left to read a
+                // dropped connection as `1006`.
+                None => {
+                    let _ = sink.send(Message::Close(None)).await;
+                    break;
+                }
+            },
+            msg = stream.next() => match msg {
+                Some(Ok(Message::Text(text))) => {
+                    if !to_node(&guard, text.as_bytes(), false) {
+                        break;
+                    }
+                }
+                Some(Ok(Message::Binary(bytes))) => {
+                    if !to_node(&guard, &bytes, true) {
+                        break;
+                    }
+                }
+                // axum answers a ping itself, and a pong is the answer to ours.
+                Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+                Some(Ok(Message::Close(frame))) => {
+                    guard.close = Some(
+                        frame
+                            .map(|f| (Some(f.code), Some(f.reason.to_string())))
+                            .unwrap_or((None, None)),
+                    );
+                    break;
+                }
+                Some(Err(_)) | None => break,
+            },
+        }
+    }
+}
+
+/// One visitor frame, on its way to the node. `false` when the node is no
+/// longer reachable, which ends the socket rather than dropping the frame.
+fn to_node(guard: &WsInFlight, payload: &[u8], binary: bool) -> bool {
+    guard.registry.send_to_node(
+        guard.node_id,
+        ControlToNode::TunnelWsData {
+            request_id: guard.request_id,
+            data_b64: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, payload),
+            binary,
+        },
+    )
+}
+
+/// One node frame, as the visitor's socket will carry it — or `None` for a
+/// payload this socket cannot carry, which ends it.
+///
+/// Base64 in both directions is what keeps AC-2's binary case honest: bytes
+/// that are not valid UTF-8 survive the JSON frame untouched, and `binary`
+/// carries the distinction the encoding erases.
+fn visitor_message(data_b64: &str, binary: bool) -> Option<Message> {
+    let bytes =
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data_b64).ok()?;
+    Some(if binary {
+        Message::Binary(bytes.into())
+    } else {
+        // A text frame's payload is UTF-8 by definition. One that is not can
+        // only be a bug on the node, and breaking the socket says so where
+        // substituting replacement characters would hide it.
+        Message::Text(String::from_utf8(bytes).ok()?.into())
+    })
+}
+
+fn close_frame(code: Option<u16>, reason: Option<String>) -> Option<axum::extract::ws::CloseFrame> {
+    code.map(|code| axum::extract::ws::CloseFrame {
+        code,
+        reason: reason.unwrap_or_default().into(),
+    })
+}
+
+/// Releases BOTH ends of a tunnelled WebSocket, however the pump ended.
+///
+/// The mirror of [`InFlight`], and it has to do more: an HTTP exchange the
+/// control plane abandons is one the node finishes on its own, while a
+/// WebSocket the control plane abandons is an upstream connection the node
+/// holds open forever. So the close travels on the way out — from the pump
+/// ending, from a refusal above it, and from the upgrade never happening at
+/// all (AC-4).
+struct WsInFlight {
+    registry: Arc<Registry>,
+    node_id: NodeId,
+    request_id: Uuid,
+    label: String,
+    /// What to tell the node on the way out, or `None` once the node is the
+    /// one that ended it and needs telling nothing.
+    close: Option<(Option<u16>, Option<String>)>,
+}
+
+impl Drop for WsInFlight {
+    fn drop(&mut self) {
+        if let Some((code, reason)) = self.close.take() {
+            self.registry.send_to_node(
+                self.node_id,
+                ControlToNode::TunnelWsClose {
+                    request_id: self.request_id,
+                    code,
+                    reason,
+                },
+            );
+        }
+        self.registry.detach_socket(&self.label, self.request_id);
+    }
 }
 
 /// Releases the in-flight entry when the response body is dropped.

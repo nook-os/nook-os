@@ -762,11 +762,17 @@ async fn handle_message(
         // registry owns that routing; this arm only names the request.
         frame @ (NodeToControl::TunnelResponse { .. }
         | NodeToControl::TunnelChunk { .. }
-        | NodeToControl::TunnelFailed { .. }) => {
+        | NodeToControl::TunnelFailed { .. }
+        | NodeToControl::TunnelUpgraded { .. }
+        | NodeToControl::TunnelWsData { .. }
+        | NodeToControl::TunnelWsClose { .. }) => {
             let request_id = match &frame {
                 NodeToControl::TunnelResponse { request_id, .. }
                 | NodeToControl::TunnelChunk { request_id, .. }
-                | NodeToControl::TunnelFailed { request_id, .. } => *request_id,
+                | NodeToControl::TunnelFailed { request_id, .. }
+                | NodeToControl::TunnelUpgraded { request_id, .. }
+                | NodeToControl::TunnelWsData { request_id, .. }
+                | NodeToControl::TunnelWsClose { request_id, .. } => *request_id,
                 _ => unreachable!("the pattern above admits nothing else"),
             };
             state.registry.tunnel_frame(request_id, frame);
