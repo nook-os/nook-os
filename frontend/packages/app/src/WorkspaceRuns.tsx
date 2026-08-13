@@ -12,11 +12,11 @@
 // A run keeps a transcript — the same `loop_job_transcript` a spec keeps,
 // rendered through the same `ChatView`. There is deliberately no second
 // transcript mechanism.
-import React, { useCallback, useEffect, useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { Filter, GitBranch, MoreHorizontal, Search } from "lucide-react";
-import { api, type LoopJobTranscriptEntry } from "@nookos/api";
+import { api, type LoopJobTranscriptEntry, type Page } from "@nookos/api";
 import { ChatView, Empty, Panel, useAnchoredMenu } from "@nookos/ui";
 import { useAgentCommands } from "./agentCommands";
 import { BuildOutcome } from "./BuilderStrip";
@@ -38,6 +38,13 @@ import {
   type RunActionId,
 } from "./runActions";
 import {
+  compareRuns,
+  walksHaveMore,
+  walksToAdvance,
+  withinFrontier,
+  type RunWalk,
+} from "./runsPaging";
+import {
   activeRunsFilterCount,
   clearRunsFilters,
   filterRuns,
@@ -50,7 +57,15 @@ import {
   type KindFilter,
   type RunKind,
   type RunsFilter,
+  type RunsFilterChip,
 } from "./runsFilter";
+import {
+  RunGone,
+  RunsState,
+  runsPhase,
+  type RunFilterChip,
+  type RunsPhase,
+} from "./RunsStates";
 // The queue panel's duration words, not a second set of them: "5m" there and
 // "5 min" here would be two vocabularies for one idea, and the one thing a
 // reader must never have to do is work out whether they mean the same.
@@ -293,12 +308,32 @@ export function reviewRow(r: ReviewRun): RunRow {
 }
 
 /** Both kinds in one list, newest first (AC-3). The id breaks a tie so two runs
- *  raised in the same instant keep a stable order across repaints. */
+ *  raised in the same instant keep a stable order across repaints — the order
+ *  itself is `compareRuns`, shared with the paged merge so a page boundary
+ *  cannot sort differently from the list it lands in (MAIN-560). */
 export function mergeRuns(builds: BuildRun[], reviews: ReviewRun[]): RunRow[] {
-  return [...builds.map(buildRow), ...reviews.map(reviewRow)].sort((a, b) => {
-    const delta = Date.parse(b.createdAt) - Date.parse(a.createdAt);
-    return delta !== 0 ? delta : a.id.localeCompare(b.id);
-  });
+  return [...builds.map(buildRow), ...reviews.map(reviewRow)].sort(compareRuns);
+}
+
+/**
+ * What is narrowing the list, for a reader who has ended up with no rows at all
+ * (MAIN-560 AC-6).
+ *
+ * The chip row's dimensions in the chip row's own words, PLUS the kind — which
+ * MAIN-558 deliberately leaves off the chips because its segment always shows
+ * its own value, but which is still a reason the list is empty and so still has
+ * to be named here. The search is not in this list: it has a state of its own,
+ * quoting the term.
+ */
+export function narrowingRunFilters(
+  kind: KindFilter,
+  chips: RunsFilterChip[],
+): RunFilterChip[] {
+  const named = KIND_CHOICES.find((c) => c.value === kind);
+  return [
+    ...(kind === "all" || !named ? [] : [{ key: "kind", label: named.label }]),
+    ...chips.map((c) => ({ key: c.key, label: c.label })),
+  ];
 }
 
 /**
@@ -437,11 +472,144 @@ export function useLegacyRunsSectionRedirect(): void {
   }, [kind]);
 }
 
-// Both queries below repaint from the live `job_changed` event, which
-// `live.ts` turns into an invalidation of `["job"]` plus these two row keys
-// — the same mechanism the Loop panel rides, rather than a poll of its own.
-// The keys are unchanged by the merge, so the event still reaches both halves
-// and `BuildLoop` still shares the builds cache entry.
+/** How many runs one page of either walk asks for — the server's own default,
+ *  named here because the frontier below reasons about page boundaries. */
+const RUNS_PAGE_SIZE = 50;
+
+/** What the panel needs of the two walks: the merged rows, and everything the
+ *  bottom of the list has to say about them. */
+type PagedRuns = {
+  runs: RunRow[];
+  /** The FIRST page of either walk is in flight and nothing is renderable. */
+  loading: boolean;
+  /** What the server said, in its own words — null while both walks are well. */
+  error: string | null;
+  /** More history to reach, so the list has not ended (AC-4). */
+  hasMore: boolean;
+  loadingMore: boolean;
+  loadMore(): void;
+  retry(): void;
+};
+
+/**
+ * This repo's runs, both kinds, walked to wherever the reader has scrolled
+ * (AC-1).
+ *
+ * Two infinite queries rather than one, because the wire is two endpoints
+ * (MAIN-488) each with its own cursor (MAIN-557). `mergeRuns` puts them in one
+ * order, as it always has; `runsPaging` says how far down that order the two
+ * walks can vouch for, which is what stops a later page inserting rows above
+ * rows already on screen.
+ *
+ * The keys keep the `["workspace-builds"|"workspace-reviews", workspaceId]`
+ * prefix `live.ts` invalidates, so a `job_changed` frame still repaints this
+ * without knowing it has become paged. Invalidating an infinite query refetches
+ * every page it holds, in order, deriving each cursor from the page before it —
+ * which is exactly what keeps a run raised mid-scroll from duplicating a row or
+ * opening a gap (AC-3).
+ *
+ * `"paged"` on the end is not decoration: `useWorkspaceBuilds` and `BuildLoop`
+ * read the bare key expecting a plain `BuildRun[]`, and an infinite query's
+ * cache entry is pages. Two entries, one prefix, one invalidation — and this
+ * panel already mounts the un-paged one through `useBuildRunFacts`, so the
+ * split costs no request it was not already making.
+ */
+function usePagedRuns(workspaceId: string): PagedRuns {
+  const builds = useInfiniteQuery({
+    queryKey: ["workspace-builds", workspaceId, "paged"],
+    initialPageParam: undefined as string | undefined,
+    queryFn: async ({ pageParam }) => {
+      const { data, error } = await api.GET("/api/v1/workspaces/{id}/builds", {
+        params: {
+          path: { id: workspaceId },
+          query: { after: pageParam, limit: RUNS_PAGE_SIZE },
+        },
+      });
+      // THROWN, not defaulted. `openapi-fetch` hands a failure back as a
+      // data-less `{ error }`, and the `?? []` this replaces is precisely how a
+      // control plane that was down rendered as "this repo has never run
+      // anything" (AC-5).
+      if (error) throw new Error(apiFailureText(error));
+      return (data ?? { rows: [], next_cursor: null }) as Page<BuildRun>;
+    },
+    getNextPageParam: (last) => last.next_cursor ?? undefined,
+  });
+  const reviews = useInfiniteQuery({
+    queryKey: ["workspace-reviews", workspaceId, "paged"],
+    initialPageParam: undefined as string | undefined,
+    queryFn: async ({ pageParam }) => {
+      const { data, error } = await api.GET("/api/v1/workspaces/{id}/reviews", {
+        params: {
+          path: { id: workspaceId },
+          query: { after: pageParam, limit: RUNS_PAGE_SIZE },
+        },
+      });
+      if (error) throw new Error(apiFailureText(error));
+      return (data ?? { rows: [], next_cursor: null }) as Page<ReviewRun>;
+    },
+    getNextPageParam: (last) => last.next_cursor ?? undefined,
+  });
+
+  const buildRows = useMemo(
+    () => (builds.data?.pages ?? []).flatMap((p) => p.rows),
+    [builds.data],
+  );
+  const reviewRows = useMemo(
+    () => (reviews.data?.pages ?? []).flatMap((p) => p.rows),
+    [reviews.data],
+  );
+
+  /** How far each walk has been read. A walk that has not ANSWERED is not a
+   *  walk that has ENDED: `hasNextPage` is false before the first page lands,
+   *  and taking that for the end would let the frontier vouch for rows nothing
+   *  has read. */
+  const walks: RunWalk[] = useMemo(() => {
+    const tail = (rows: { id: string; created_at: string }[]) => {
+      const last = rows[rows.length - 1];
+      return last ? { id: last.id, createdAt: last.created_at } : null;
+    };
+    return [
+      { oldest: tail(buildRows), done: builds.isSuccess && !builds.hasNextPage },
+      { oldest: tail(reviewRows), done: reviews.isSuccess && !reviews.hasNextPage },
+    ];
+  }, [
+    buildRows,
+    reviewRows,
+    builds.isSuccess,
+    builds.hasNextPage,
+    reviews.isSuccess,
+    reviews.hasNextPage,
+  ]);
+
+  // ONE merge: `mergeRuns` decides the order and the row shape, and
+  // `withinFrontier` only cuts it. A second merge here would be a second order
+  // to keep in step with this one.
+  const runs = useMemo(
+    () => withinFrontier(mergeRuns(buildRows, reviewRows), walks),
+    [buildRows, reviewRows, walks],
+  );
+  const failure = builds.error ?? reviews.error;
+
+  return {
+    runs,
+    loading: builds.isPending || reviews.isPending,
+    error: failure ? failure.message : null,
+    hasMore: walksHaveMore(walks),
+    loadingMore: builds.isFetchingNextPage || reviews.isFetchingNextPage,
+    loadMore: () => {
+      for (const i of walksToAdvance(walks)) {
+        void (i === 0 ? builds : reviews).fetchNextPage();
+      }
+    },
+    // Both, unconditionally: the reader asked for the list, not for whichever
+    // half of it happened to fail.
+    retry: () => {
+      void builds.refetch();
+      void reviews.refetch();
+    },
+  };
+}
+
 export function WorkspaceRuns({
   workspaceId,
   workspaceName,
@@ -479,25 +647,20 @@ export function WorkspaceRuns({
   const filter = parseRunsFilter(params);
   const kind = filter.kind;
   const listRef = useRef<HTMLDivElement>(null);
+  /** The box that actually scrolls — the observer's root, and the node whose
+   *  `scrollTop` a page must not disturb (MAIN-560 AC-2). `listRef` is the
+   *  options container inside it, which is what focus is looked up through. */
+  const scrollRef = useRef<HTMLDivElement>(null);
+  /** The bottom of the list — what the observer watches to page it (AC-1).
+   *
+   *  State rather than a ref, because the observer has to be attached when this
+   *  node ARRIVES: it is mounted a render after the first page lands, and a
+   *  ref's mutation is not something an effect can depend on. With a ref this
+   *  read `null` on the one render whose dependencies changed, and then never
+   *  ran again — an infinite scroll that never scrolled. */
+  const [moreNode, setMoreNode] = useState<HTMLDivElement | null>(null);
 
-  const { data: builds } = useQuery({
-    queryKey: ["workspace-builds", workspaceId],
-    queryFn: async () =>
-      ((
-        await api.GET("/api/v1/workspaces/{id}/builds", {
-          params: { path: { id: workspaceId } },
-        })
-      ).data?.rows as BuildRun[] | undefined) ?? [],
-  });
-  const { data: reviews } = useQuery({
-    queryKey: ["workspace-reviews", workspaceId],
-    queryFn: async () =>
-      ((
-        await api.GET("/api/v1/workspaces/{id}/reviews", {
-          params: { path: { id: workspaceId } },
-        })
-      ).data?.rows as ReviewRun[] | undefined) ?? [],
-  });
+  const paged = usePagedRuns(workspaceId);
 
   // Shared key with `useBuildRunFacts`, so a panel that already resolved this
   // workspace pays nothing for it here. The remote is the only field wanted:
@@ -509,11 +672,11 @@ export function WorkspaceRuns({
         .data ?? null,
   });
 
-  const runs = builds && reviews ? mergeRuns(builds, reviews) : null;
+  const runs = paged.runs;
   // Read ONCE per render, so every row is judged against the same instant: a
   // relative range re-read per row could admit one and reject its neighbour.
   const now = Date.now();
-  const visible = runs ? filterRuns(runs, filter, now) : [];
+  const visible = filterRuns(runs, filter, now);
   const initiators = fieldValues(runs, "initiator", filter.initiator);
   const branches = fieldValues(runs, "branch", filter.branch);
   // The loop's own word for a state on the chip, not the stored value: a chip
@@ -775,19 +938,92 @@ export function WorkspaceRuns({
         | undefined,
   });
 
-  if (!runs) return null;
-  if (runs.length === 0) {
-    // ONE empty state for the repo, not one per kind (AC-9). No filters either:
-    // there is nothing here to narrow.
-    return (
-      <Panel title="Runs">
-        <Empty>
-          No run has happened in this repo yet. The control plane raises a review
-          per open pull request — and again when one is pushed to — and a build
-          when a card is enqueued.
-        </Empty>
-      </Panel>
+  // The run the URL names, when this list does not hold it. ASKED about rather
+  // than concluded from the rows on screen: once the list is paged, a run can
+  // be perfectly real and simply not walked to yet, so "not among the rows" is
+  // emphatically not "gone" (MAIN-560 AC-5). The server is the only thing that
+  // knows.
+  const unlisted = openId && !runs.some((r) => r.id === openId) ? openId : null;
+  const probe = useQuery({
+    queryKey: ["job", unlisted],
+    enabled: !!unlisted,
+    queryFn: async () => {
+      const { data, error } = await api.GET("/api/v1/jobs/{id}", {
+        params: { path: { id: unlisted as string } },
+      });
+      if (error) throw new Error(apiFailureText(error));
+      return data ?? null;
+    },
+  });
+  const goneRun = !!unlisted && probe.isError;
+
+  /** Auto-page as the bottom of the list comes into view (AC-1).
+   *
+   *  Held off while a page is already in flight and while one has FAILED: an
+   *  observer that re-fired on its own error is the infinite retry NG-4
+   *  forbids, and the failed row below offers the reader the retry instead. */
+  const loadMoreLive = useRef(paged.loadMore);
+  loadMoreLive.current = paged.loadMore;
+  const autoPage = paged.hasMore && !paged.loadingMore && !paged.error;
+  useEffect(() => {
+    // Guarded rather than polyfilled: jsdom has no observer, and the button
+    // inside the same row is the route that does not need one.
+    if (!moreNode || !autoPage || typeof IntersectionObserver === "undefined") return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) loadMoreLive.current();
+      },
+      { root: scrollRef.current },
     );
+    io.observe(moreNode);
+    return () => io.disconnect();
+  }, [moreNode, autoPage]);
+
+  // What is narrowing the list, when the answer to "why is this empty" has to
+  // be more than "it is" (AC-6).
+  const narrowing = narrowingRunFilters(kind, chips);
+  const phase: RunsPhase = runsPhase({
+    loading: paged.loading,
+    error: !!paged.error,
+    shown: visible.length,
+    search: filter.q,
+    filters: narrowing,
+  });
+
+  /** Back to the unfiltered list in one act (AC-6). Wider than the chip row's
+   *  `Clear all`, which keeps the kind and the search on purpose (MAIN-558
+   *  AC-5): a reader looking at an empty list wants the list back, and the kind
+   *  is one of the reasons it is empty. The search keeps its own control. */
+  const clearFilters = () => setFilter({ ...clearRunsFilters(filter), kind: "all" });
+  const clearSearch = () => setFilter({ ...filter, q: "" });
+
+  /** Out of the gone state: drop the run the URL names and let the ordinary
+   *  fallback take over. Not a jump to a chosen id — the newest run is whatever
+   *  the list says it is, and naming one here would go stale as it repaints. */
+  const showNewestRun = () => {
+    const p = new URLSearchParams(params);
+    p.delete("run");
+    setParams(p, { replace: true });
+  };
+
+  const listState = (
+    <RunsState
+      phase={phase}
+      search={filter.q}
+      filters={narrowing}
+      error={paged.error}
+      onRetry={paged.retry}
+      onClearSearch={clearSearch}
+      onClearFilters={clearFilters}
+    />
+  );
+
+  // Three states have no list to sit beside and no filter worth offering: the
+  // repo has never run anything, the load failed outright, or nothing has
+  // arrived yet. They take the whole panel, as the empty state always did —
+  // there is nothing here to narrow (MAIN-556 AC-9).
+  if (phase === "loading" || phase === "error" || phase === "empty") {
+    return <Panel title="Runs">{listState}</Panel>;
   }
 
   const pickKind = (next: KindFilter) => setFilter({ ...filter, kind: next });
@@ -939,9 +1175,9 @@ export function WorkspaceRuns({
               </button>
             </div>
           )}
-          <div className="runs-list">
+          <div className="runs-list" ref={scrollRef}>
             {visible.length === 0 ? (
-              <Empty>No run matches this filter.</Empty>
+              listState
             ) : (
               <div
                 className="runs-options"
@@ -1048,13 +1284,65 @@ export function WorkspaceRuns({
                 })}
               </div>
             )}
+            {/* The bottom of the history, which always says something (AC-2,
+                AC-4). Inside the scrolling box on purpose: it is what an
+                observer watches, and it is where a reader who has scrolled to
+                the end is looking. */}
+            {visible.length > 0 &&
+              (paged.error ? (
+                <div className="runs-more is-failed" role="alert" data-testid="runs-more-failed">
+                  <span className="runs-more-text">{paged.error}</span>
+                  <button
+                    type="button"
+                    className="btn small"
+                    data-testid="runs-retry"
+                    onClick={paged.retry}
+                  >
+                    try again
+                  </button>
+                </div>
+              ) : paged.hasMore ? (
+                <div className="runs-more" ref={setMoreNode} data-testid="runs-more">
+                  {paged.loadingMore ? (
+                    // A ROW, not an overlay: it is appended below what is
+                    // already rendered, so nothing above it moves and the scroll
+                    // position is the one the reader left (AC-2).
+                    <span className="runs-more-text" role="status" data-testid="runs-loading-more">
+                      loading more runs…
+                    </span>
+                  ) : (
+                    // The observer above clicks this by scrolling; the button is
+                    // what a keyboard, a screen reader, and a browser with no
+                    // IntersectionObserver have instead.
+                    <button
+                      type="button"
+                      className="runs-more-btn"
+                      data-testid="runs-load-more"
+                      onClick={() => paged.loadMore()}
+                    >
+                      load more
+                    </button>
+                  )}
+                </div>
+              ) : (
+                // STATED (AC-4). A list that merely stops is indistinguishable
+                // from one that has given up loading.
+                <div className="runs-end" data-testid="runs-end">
+                  That is every run this repo has kept.
+                </div>
+              ))}
           </div>
         </div>
         <div className="reviews-transcript" data-testid="run-transcript">
+          {/* The run the URL names is gone, so this pane says so rather than
+              quietly showing a different run's transcript under a header naming
+              it — which is how a stale shared link used to read as the loop
+              having run something nobody asked for (AC-5). */}
+          {goneRun && <RunGone onShowNewest={showNewestRun} />}
           {/* Above the transcript, not inside it (MAIN-387 AC-7): the branch and
               the PR are what the open run PRODUCED, and reading a log to find
               them is the thing this replaces. */}
-          {openRun && (
+          {!goneRun && openRun && (
             <RunHeader
               run={openRun}
               pending={busy[openRun.id]}
@@ -1071,7 +1359,7 @@ export function WorkspaceRuns({
               onOverflow={(el) => openMenuAt(openRun.id, el, "overflow")}
             />
           )}
-          {open && (
+          {!goneRun && open && (
             <BuildOutcome
               job={{ id: open, kind: openRun?.kind ?? "" }}
               workspaceId={workspaceId}
@@ -1080,7 +1368,7 @@ export function WorkspaceRuns({
               showBranch={false}
             />
           )}
-          {detail?.transcript?.length ? (
+          {goneRun ? null : detail?.transcript?.length ? (
             <>
               <div className="reviews-transcript-actions">
                 <TranscriptActions

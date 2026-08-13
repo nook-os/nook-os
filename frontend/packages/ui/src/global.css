@@ -7711,6 +7711,88 @@ button.chat-tool-line:hover { color: var(--nook-fg-dim); }
   overflow-wrap: anywhere;
 }
 
+/* ── The bottom of the runs history (MAIN-560 AC-2/AC-4) ───────────────────
+   Inside the scrolling box, below the last row, and never both at once: either
+   there is more to reach or there is not, and the list says which. A fixed
+   minimum height so the row a page is loading into does not appear from
+   nowhere and shift what is above it — the promise AC-2 makes about the scroll
+   position. */
+.runs-more,
+.runs-end {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 26px;
+  padding: 6px 8px;
+  font-size: 11px;
+  color: var(--nook-fg-faint);
+}
+/* Stated, and therefore drawn: a rule above the sentence separates the end of
+   the history from the last run in it, so "that is all of them" cannot be
+   misread as one more row. */
+.runs-end {
+  border-top: 1px solid var(--nook-border);
+  margin-top: 4px;
+}
+.runs-more.is-failed {
+  justify-content: space-between;
+  border: 1px solid var(--nook-err);
+  border-radius: var(--nook-radius);
+  margin: 4px 0;
+  color: var(--nook-fg);
+}
+.runs-more-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.runs-more-btn {
+  font: inherit;
+  font-size: 11px;
+  color: var(--nook-accent);
+  background: none;
+  border: 1px solid var(--nook-border);
+  border-radius: var(--nook-radius);
+  padding: 2px 12px;
+  cursor: pointer;
+}
+.runs-more-btn:hover {
+  border-color: var(--nook-accent);
+  background: var(--nook-bg-raised);
+}
+.runs-more-btn:focus-visible {
+  outline: 1px solid var(--nook-accent);
+  outline-offset: 1px;
+}
+
+/* One of the designed states the list shows instead of rows (MAIN-560 AC-5).
+   A column rather than `Empty`'s single centred line: each of these is a
+   sentence, sometimes a second one naming what is responsible, and a way out —
+   and a way out that wrapped mid-line with the sentence would not read as an
+   action. */
+.runs-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  max-width: 34ch;
+}
+.runs-state-line {
+  margin: 0;
+  color: var(--nook-fg-dim);
+}
+.runs-state-detail {
+  margin: 0;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.runs-state-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+}
+
 /* The open run's header (MAIN-559 AC-7). One line that wraps, not a grid: it
    sits above a transcript and its job is to stay short — a fixed grid would
    reserve width for facts a review run does not have. */
