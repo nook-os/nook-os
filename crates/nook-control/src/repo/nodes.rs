@@ -368,6 +368,16 @@ pub trait NodeRepository: Send + Sync {
     async fn owned_online_elsewhere(&self, tenant: TenantId, person: Uuid)
         -> ApiResult<(i64, i64)>;
 
+    /// Online nodes owned by a MEMBER of `tenant` and homed elsewhere, split by
+    /// consent (MAIN-576): `.0` consent to cross, `.1` have withdrawn it.
+    ///
+    /// The reason string's counterpart to the candidate query's new leg. Without
+    /// it the sentence still reports on the requester's own machines alone,
+    /// which after MAIN-576 is no longer what eligibility means — so a tenant
+    /// whose member machines were refused for some other gate entirely would
+    /// still be told "you have no node online".
+    async fn member_online_elsewhere(&self, tenant: TenantId) -> ApiResult<(i64, i64)>;
+
     /// This person's nodes with their last reported resource sample — the
     /// candidate set placement ranks (MAIN-292). The liveness filter is NOT here:
     /// "online" for scheduling means a live socket in the in-memory registry, not
@@ -1212,6 +1222,30 @@ impl NodeRepository for DbNodeRepository {
             )
             .await?;
         Ok((crossing, operators))
+    }
+
+    async fn member_online_elsewhere(&self, tenant: TenantId) -> ApiResult<(i64, i64)> {
+        let member_owned = format!(
+            "tenant_id <> $1 AND status = 'online' AND NOT {} \
+             AND owner_person_id IN (SELECT person_id FROM users \
+                                     WHERE tenant_id = $1 AND person_id IS NOT NULL)",
+            shared_operator_clause(self.db.engine())
+        );
+        let consenting: i64 = self
+            .db
+            .query_scalar(
+                &format!("SELECT count(*) FROM nodes WHERE {member_owned} AND cross_tenant"),
+                params![tenant],
+            )
+            .await?;
+        let declining: i64 = self
+            .db
+            .query_scalar(
+                &format!("SELECT count(*) FROM nodes WHERE {member_owned} AND NOT cross_tenant"),
+                params![tenant],
+            )
+            .await?;
+        Ok((consenting, declining))
     }
 
     async fn owned_with_resources(
@@ -2376,7 +2410,15 @@ impl NodeRepository for FakeNodeRepository {
         // whose OWNER is a member of `tenant`, never a shared operator, and
         // only with the owner's consent (MAIN-576) — the SQL's two legs.
         let member_of_tenant = |owner: Option<Uuid>| {
-            owner.is_some_and(|o| s.memberships.iter().any(|(t, p)| *t == tenant && *p == o))
+            owner.is_some_and(|o| {
+                // The requester is a member of the requesting tenant BY
+                // CONSTRUCTION: the real query reads `users`, and a person can
+                // only raise work in a tenant they have a row in. The fake owns
+                // no user table, so that guarantee has to be encoded here —
+                // without it the fake refuses the requester's OWN machine and
+                // diverges from the SQL on exactly MAIN-515's case.
+                o == person || s.memberships.iter().any(|(t, p)| *t == tenant && *p == o)
+            })
         };
         let reachable = |n: &FakeNode| {
             if n.node.tenant_id == tenant {
@@ -2498,6 +2540,35 @@ impl NodeRepository for FakeNodeRepository {
             }
         }
         Ok((crossing, operators))
+    }
+
+    async fn member_online_elsewhere(&self, tenant: TenantId) -> ApiResult<(i64, i64)> {
+        let s = self.inner.lock().unwrap();
+        let member = |o: Option<Uuid>| {
+            o.is_some_and(|o| s.memberships.iter().any(|(t, p)| *t == tenant && *p == o))
+        };
+        let is_operator = |n: &FakeNode| {
+            n.node
+                .capabilities
+                .get("shared_operator")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        };
+        let mut consenting = 0;
+        let mut declining = 0;
+        for n in s.nodes.iter().filter(|n| {
+            n.node.tenant_id != tenant
+                && n.node.status == "online"
+                && !is_operator(n)
+                && member(n.node.owner_person_id)
+        }) {
+            if n.node.cross_tenant {
+                consenting += 1;
+            } else {
+                declining += 1;
+            }
+        }
+        Ok((consenting, declining))
     }
 
     async fn owned_with_resources(

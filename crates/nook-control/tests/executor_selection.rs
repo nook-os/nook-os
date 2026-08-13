@@ -1223,6 +1223,117 @@ async fn a_node_whose_owner_is_a_stranger_is_still_unreachable() {
     bed.teardown().await;
 }
 
+/// MAIN-576 AC-4, against the case the widening actually introduced: a FELLOW
+/// MEMBER's cross-tenant machine. The existing gate tests all run through the
+/// requester's own node, which satisfied the OLD leg too — so they never
+/// exercised the new one.
+#[tokio::test]
+async fn every_gate_still_applies_to_a_fellow_members_cross_tenant_node() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, a, b, _in_a, _user, person, _job) = two_tenants(&bed).await;
+    // Owned by `person` (a member of B) but NOT authorized for the runtime.
+    let unauthorized = node(&bed, a, Some(person), "online", caps("pending", false)).await;
+
+    let (teammate, teammate_person) = bed.user(b, "member").await;
+    assert!(
+        state
+            .nodes
+            .eligible_loop_executors(b, teammate_person, "claude", "spec")
+            .await
+            .expect("candidates")
+            .is_empty(),
+        "membership opens the door; authorization is still a separate gate"
+    );
+
+    let target = target_task(&bed, b, teammate).await;
+    let theirs = queued_job(&bed, b, teammate, target).await;
+    let held = jobs::select_executor(&state, b, theirs)
+        .await
+        .expect("select");
+    assert_eq!(held.state, "queued");
+
+    // Authorize it and the same machine is placed — the gate was the only
+    // difference, not the tenancy.
+    // Whole-value assignment, not `jsonb_set`: that spelling is Postgres-only
+    // and this suite runs on both engines.
+    bed.db()
+        .exec(
+            "UPDATE nodes SET capabilities = $2 WHERE id = $1",
+            params![unauthorized, caps("authorized", false)],
+        )
+        .await
+        .expect("authorize");
+    let placed = jobs::select_executor(&state, b, theirs)
+        .await
+        .expect("again");
+    assert_eq!(placed.state, "claimed");
+    assert_eq!(placed.executor_node_id, Some(unauthorized));
+
+    bed.teardown().await;
+}
+
+/// MAIN-576 AC-8: the reason stops lying. A tenant whose member machines are
+/// online and have DECLINED is told exactly that — not "you have no node
+/// online", which is what the reader was looking at five of when this was
+/// reported.
+#[tokio::test]
+async fn the_reason_names_withdrawn_consent_rather_than_claiming_nothing_is_online() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, a, b, _in_a, _user, person, _job) = two_tenants(&bed).await;
+    let mine = node(&bed, a, Some(person), "online", caps("authorized", false)).await;
+    state
+        .nodes
+        .set_cross_tenant(mine, false)
+        .await
+        .expect("withdraw");
+
+    // The requester owns nothing, so every ownership-based count is zero —
+    // the exact shape that used to fall through to the misleading arm.
+    let (teammate, _teammate_person) = bed.user(b, "member").await;
+    let target = target_task(&bed, b, teammate).await;
+    let theirs = queued_job(&bed, b, teammate, target).await;
+
+    let held = jobs::select_executor(&state, b, theirs)
+        .await
+        .expect("select");
+    assert_eq!(held.state, "queued");
+    let reason = held.queued_reason.unwrap_or_default();
+    assert!(
+        reason.contains("withdrawn cross-tenant consent"),
+        "the reason names the consent, got: {reason}"
+    );
+    assert!(
+        !reason.contains("you have no node online"),
+        "and does not claim the fleet is empty, got: {reason}"
+    );
+
+    bed.teardown().await;
+}
+
+/// MAIN-576 AC-8's other half: whichever arm speaks, it says WHO the run was
+/// raised as, because "you" is the tenant's oldest owner and not the reader.
+#[tokio::test]
+async fn the_reason_names_the_identity_the_run_was_raised_as() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, _a, b, _in_a, _user, _person, job) = two_tenants(&bed).await;
+
+    let held = jobs::select_executor(&state, b, job).await.expect("select");
+    assert_eq!(held.state, "queued", "nothing is online at all here");
+    let reason = held.queued_reason.unwrap_or_default();
+    assert!(
+        reason.contains("this run was raised as"),
+        "the reason attributes itself, got: {reason}"
+    );
+
+    bed.teardown().await;
+}
+
 /// MAIN-576 AC-6: the widening is consented to, and the consent is withdrawable
 /// by the owner alone.
 #[tokio::test]
