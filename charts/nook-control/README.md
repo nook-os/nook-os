@@ -103,6 +103,81 @@ ingress:
   tls: { enabled: true }
 ```
 
+## Tunnels: the wildcard host (`ingress.tunnelHost`)
+
+`nook tunnel 3000` publishes a port in the fleet at `<label>.<zone>`, and that
+hostname has to be routed to the control plane by whatever is in front of it.
+Set the zone and the chart does both halves — the Ingress rule and the control
+plane's own `TUNNEL_DOMAIN`, from one value, so the router and the surface it
+routes to cannot disagree:
+
+```yaml
+ingress:
+  host: nook.example.com
+  tunnelHost: tunnels.example.com   # the ZONE, no leading "*."
+  tls: { enabled: true, secretName: nook-tls }
+```
+
+That renders a **second** rule, `*.tunnels.example.com`, whose `/` points at the
+**control-plane** Service — not `web`. Every path on a tunnel host belongs to the
+control plane: `host_dispatch` decides what the host means before routing, and
+`web`'s SPA fallback would answer every path `200` with the NookOS app shell
+instead, with nothing logging an error
+([`docs/tunnel-proxy.md`](../../docs/tunnel-proxy.md)). The apex rule is
+untouched — `ingress.host` still sends `/` to `web`.
+
+Leave `tunnelHost` empty and nothing changes: one rule, one TLS host, no
+`TUNNEL_DOMAIN`, and the tunnel surface stays off.
+
+**The wildcard certificate is yours to arrange.** The chart adds
+`*.<tunnelHost>` to `tls.hosts` and creates **no** cert-manager `Certificate` —
+issuers, solvers and DNS credentials are cluster policy. Two supported shapes:
+
+- **cert-manager with a DNS-01 solver.** A wildcard is only issuable over
+  DNS-01 (HTTP-01 cannot prove a name that does not resolve yet), so the
+  ClusterIssuer this chart's `cert-manager.io/cluster-issuer` annotation names
+  must have a DNS-01 solver — and it must cover **both** names, because they
+  are one certificate (below). Set `ingress.tls.secretName` as well: the chart
+  renders `secretName` only when you give it one, and cert-manager's
+  ingress-shim issues nothing for a `tls` entry that has none. Nothing resolves
+  `*.<tunnelHost>` during issuance, so you can hold the certificate before
+  pointing the wildcard record anywhere.
+- **A pre-provisioned Secret.** Create the TLS Secret yourself — covering both
+  names — and put it in `ingress.tls.secretName`; the chart references it and
+  issues nothing.
+
+**The apex and the wildcard share one `tls` entry, so they share one
+certificate.** That is what "joins `tls.hosts`" means, and it has two
+consequences worth knowing before you set the value. A DNS-01 solver scoped by
+`dnsZones` to the tunnel zone alone cannot answer for the apex name in the same
+order, and the issuance fails for **both**. And on an existing install whose
+apex certificate is issued over HTTP-01, adding `tunnelHost` makes that
+certificate un-renewable — a wildcard cannot be proven that way. Move the whole
+order to a DNS-01 issuer whose solver covers the apex and the tunnel zone, or
+give the zone its own front end.
+
+**A wildcard is one label deep.** `*.example.com` covers `a.example.com` and
+does **not** cover `a.b.example.com`, so `tunnelHost` must be exactly the zone
+tunnels are served under. Tunnel labels carry no dots, so one wildcard at that
+depth covers every tunnel. The chart refuses a `tunnelHost` stored *as* a
+wildcard (`*.tunnels.example.com`), and refuses one that is a **parent** of
+`ingress.host` — with `tunnelHost: example.com` under an apex of
+`nook.example.com` the control plane would read your own apex as a tunnel host
+and answer the whole application with its "No such tunnel" page.
+
+You still owe it a **wildcard DNS record** for `*.<tunnelHost>` pointing at the
+ingress — labels are minted at runtime, so there is no list of names to create
+records for.
+
+**Ingress controllers differ on wildcard hosts.** This was tested on
+**ingress-nginx** (`registry.k8s.io/ingress-nginx/controller:v1.11.3`, kind
+provider), where the wildcard rule routes `/` and deep paths on a tunnel host to
+the control-plane backend while the apex keeps going to `web`. ingress-nginx and
+Traefik's Ingress provider both support a wildcard `host:`; some controllers —
+notably older AWS ALB and GCE ingress builds — treat `host` as an exact match
+and silently route nothing. If yours is one of those, keep `tunnelHost` empty
+here and add the wildcard router in that controller's own configuration.
+
 ## Agent mTLS listener (`:8081`, opt-in)
 
 Nodes join the control plane over a **mutual-TLS** listener on `:8081`. Its TLS

@@ -328,6 +328,15 @@ ingress:
   className: ""
   # -- The external host that routes to this NookOS. REQUIRED for a real install.
   host: ""
+  # -- The zone tunnels are served under, e.g. "tunnels.example.com". Empty
+  #    leaves the deployment exactly as it was: no second rule, no wildcard TLS
+  #    host, and no TUNNEL_DOMAIN, so the tunnel surface stays off. Set it and
+  #    the Ingress gains a `*.<tunnelHost>` rule pointed at the CONTROL-PLANE
+  #    Service (never web — see the README), and the same value reaches the
+  #    control plane as TUNNEL_DOMAIN so the two cannot disagree.
+  #    Store the zone itself, with no leading `*.`: a wildcard is one label
+  #    deep, so this is the name `*.` is prefixed to.
+  tunnelHost: ""
   # -- Extra annotations (e.g. cert-manager.io/cluster-issuer, nginx tuning).
   annotations: {}
   tls:

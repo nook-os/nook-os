@@ -5,15 +5,15 @@
 up to whatever terminates TLS in front of the control plane, and on the routing
 rule you give it for the tunnel zone.
 
-**One shipped mode writes that rule for you** — Compose behind Traefik, when
-`nook server init` is given a tunnel domain (MAIN-511). It emits the wildcard
-router and sets `TUNNEL_DOMAIN`, which leaves you the DNS record and the
-certificate those assume. The Helm chart's ingress is the other proxy the
-contract *can* be satisfied on and still emits neither; automating it is its own
-card. So this page is for every deployment, not for "everyone else": on the
-chart you are adding a rule to a proxy that already exists, on the four modes
-with no proxy you are standing one up first, and on Traefik you are reading what
-was generated.
+**Two shipped modes write that rule for you.** Compose behind Traefik does,
+when `nook server init` is given a tunnel domain (MAIN-511): it emits the
+wildcard router and sets `TUNNEL_DOMAIN`. The Helm chart does, when
+`ingress.tunnelHost` is set (MAIN-512, `charts/nook-control/README.md`): it
+emits the wildcard ingress rule and sets `TUNNEL_DOMAIN` from that same value.
+Both leave you the DNS record and the certificate they assume, and the four
+remaining modes have no proxy at all. So this page is for every deployment, not
+for "everyone else": on those two you are reading what was generated, and on the
+rest you are standing a proxy up first.
 
 The failure when it is missing is quiet: `nook tunnel` hands back a URL and the
 URL does not resolve — or resolves to NookOS's own app shell instead of the app
@@ -114,9 +114,11 @@ commonly assumed the other way:
 
 ## Deployment modes and what each is missing
 
-A tunnel is a hostname something has to route. **No mode serves tunnels as
-shipped**, but they fail at different points: four have no proxy in front of the
-control plane at all, and two have one whose configuration stops at the apex.
+A tunnel is a hostname something has to route. **No mode serves tunnels with its
+default values**, and they fall short at different points: four have no proxy in
+front of the control plane at all, and the two that do — Compose behind Traefik
+and the Helm chart — write the rule only once you name the zone, each in its own
+place (the wizard's question, `ingress.tunnelHost`).
 
 | Mode | Tunnels | Why |
 | --- | --- | --- |
@@ -124,7 +126,7 @@ control plane at all, and two have one whose configuration stops at the apex.
 | Compose behind Traefik | **Generated, if you ask** | Traefik is the proxy, and `nook server init` writes the wildcard router when you give it a tunnel domain (MAIN-511). Leave that blank — the default — and the labels stop at the two apex routers, as below. |
 | `docker run` | **No proxy** | Same as direct Compose — `-p 8080:8080`, and whatever orchestrates it is expected to bring its own front end. |
 | systemd + native binary | **No proxy** | The binary binds its port on the host directly. |
-| Kubernetes (Helm chart) | Proxy yes, **rule no** | The ingress is the proxy, and its only rule is the apex. Add a wildcard rule yourself, pointed at the **control-plane** Service. |
+| Kubernetes (Helm chart) | **Yes**, once configured | `ingress.tunnelHost` renders a second ingress rule for `*.<zone>` pointed at the control-plane Service, and sets `TUNNEL_DOMAIN` from the same value. The wildcard certificate and DNS record remain yours. |
 | Desktop app (Tauri, SQLite) | **Never** | The bundled control plane is a sidecar on `127.0.0.1` at an OS-assigned port, backed by a SQLite file under the app-data directory. It is not reachable from another machine at all, let alone by hostname. |
 
 The first four are the `Deployment` variants the installer offers
@@ -132,20 +134,22 @@ The first four are the `Deployment` variants the installer offers
 spawning its own `nook-control` bound to loopback
 (`frontend/apps/desktop/src-tauri/src/lib.rs`).
 
-On Kubernetes the chart's own ingress rule sends the apex host entirely to the
-`web` Service, which proxies `/api` onward itself
+On Kubernetes the chart's apex rule sends that host entirely to the `web`
+Service, which proxies `/api` onward itself
 (`charts/nook-control/templates/ingress.yaml`). A wildcard rule copied from it
-inherits that backend and hits the SPA-fallback trap above, so point the tunnel
-host's rule at the control-plane Service directly.
+would inherit that backend and hit the SPA-fallback trap above, which is why the
+chart's tunnel rule points at the control-plane Service directly — and why one
+written by hand, for a controller the chart's `host:` wildcard does not suit,
+must too.
 
 **Only the desktop build is a permanent no.** Its control plane is deliberately
 local-only, and there is no hostname to route to a loopback sidecar on another
 person's laptop. Every other row becomes tunnel-capable once a proxy satisfying
 the contract above is in front of it and `TUNNEL_DOMAIN` is set — for the four
 no-proxy modes that means standing one up, which is what the nginx and Caddy
-examples below are for; for the chart it means one more rule on the proxy you
-already run; for Traefik it means answering the wizard's question, or pasting
-its labels into a deployment generated before it existed.
+examples below are for; for Traefik it means answering the wizard's question, or
+pasting its labels into a deployment generated before it existed; for the chart
+it means one value.
 
 Today `nook tunnel` returns a URL on all of these regardless. It does not detect
 that a deployment has no proxy or no wildcard rule, so the first sign of any of

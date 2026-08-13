@@ -235,6 +235,81 @@ for provider in database redis sqs; do
   fi
 done
 
+# ── Tunnel wildcard rule (MAIN-512) ──────────────────────────────────────────
+# Two states, and the ABSENT one is load-bearing: unset must render exactly the
+# manifests it rendered before this value existed — one rule, one TLS host, no
+# TUNNEL_DOMAIN — because every deployment that never wants tunnels is on that
+# path.
+need "one Ingress rule by default"   '^    - host: ' 1
+need "no wildcard host by default"   '^    - host: "\\*\\.' 0
+need "no TUNNEL_DOMAIN by default"   '^  TUNNEL_DOMAIN: ' 0
+
+tlsout="$(render "${min[@]}" --set ingress.tls.enabled=true --set ingress.tls.secretName=nook-tls)"
+if [ "$(grep -cE '^        - "' <<<"$tlsout")" -ne 1 ]; then
+  echo "  FAIL: default TLS render should carry exactly one host"
+  fail=1
+else
+  echo "  ok:   one TLS host by default"
+fi
+
+echo "==> helm template (ingress.tunnelHost)"
+tunout="$(render "${min[@]}" \
+  --set ingress.tunnelHost=tunnels.example.com \
+  --set ingress.tls.enabled=true --set ingress.tls.secretName=nook-tls)"
+
+tneed() {
+  local label="$1" pattern="$2" want="$3" got
+  got="$(grep -cE "$pattern" <<<"$tunout" || true)"
+  if [ "$got" -ne "$want" ]; then
+    echo "  FAIL: $label — expected $want, got $got"
+    fail=1
+  else
+    echo "  ok:   $label ($got)"
+  fi
+}
+
+tneed "two Ingress rules"        '^    - host: ' 2
+tneed "apex rule unchanged"      '^    - host: "nook\.example\.com"$' 1
+tneed "wildcard rule"            '^    - host: "\*\.tunnels\.example\.com"$' 1
+tneed "wildcard joins tls.hosts" '^        - "\*\.tunnels\.example\.com"$' 1
+tneed "apex still in tls.hosts"  '^        - "nook\.example\.com"$' 1
+tneed "TUNNEL_DOMAIN from the same value" '^  TUNNEL_DOMAIN: "tunnels\.example\.com"$' 1
+
+# The backend is the whole point: every path on a tunnel host is the control
+# plane's, and a wildcard rule copied from the apex inherits `web`, whose SPA
+# fallback answers 200 with the app shell on every path (docs/tunnel-proxy.md).
+if awk '/^    - host: "\*\.tunnels\.example\.com"$/,/^---$/' <<<"$tunout" \
+     | grep -q 'name: nook-nook-control-control'; then
+  echo "  ok:   the tunnel rule's backend is the control-plane Service"
+else
+  echo "  FAIL: the tunnel rule does not point at the control-plane Service"
+  fail=1
+fi
+if awk '/^    - host: "nook\.example\.com"$/,/^    - host: "\*/' <<<"$tunout" \
+     | grep -q 'name: nook-nook-control-web'; then
+  echo "  ok:   the apex rule still points at web"
+else
+  echo "  FAIL: the apex rule no longer points at web"
+  fail=1
+fi
+
+# A stored wildcard would render "*.*.zone"; a zone above the apex would make
+# the control plane read the apex as a tunnel. Both are refused by name.
+tunguard="$(render "${min[@]}" --set ingress.tunnelHost='*.tunnels.example.com' 2>&1 || true)"
+if grep -q 'must be the zone itself' <<<"$tunguard"; then
+  echo "  ok:   a wildcard-shaped tunnelHost is refused"
+else
+  echo "  FAIL: a wildcard-shaped tunnelHost was not refused"
+  fail=1
+fi
+parentguard="$(render "${min[@]}" --set ingress.tunnelHost=example.com 2>&1 || true)"
+if grep -q 'is a parent of ingress.host' <<<"$parentguard"; then
+  echo "  ok:   a tunnelHost above the apex is refused"
+else
+  echo "  FAIL: a tunnelHost above the apex was not refused"
+  fail=1
+fi
+
 # ── The fleet GitHub token (MAIN-448) ────────────────────────────────────────
 # The control plane reads this to size a repo's review loops to its open PRs.
 # Two assertions, and the ABSENCE one is the load-bearing half: a deployment
