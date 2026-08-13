@@ -1,7 +1,7 @@
 ---
 name: nook-spec
 description: "Interview the user about a raw idea until confident, then file a build-ready issue on the NookOS board. Use when asked to run the loop's spec interview, draft a queue-ready issue, or plan a feature. A human answers — live at the terminal, or asynchronously when run as a detached loop job; never fully unattended."
-version: 1.3.0
+version: 1.4.0
 author: NookOS
 license: MIT
 platforms: [linux, macos]
@@ -152,11 +152,64 @@ Rules for the draft:
 - Every acceptance criterion is an observable outcome with a stable `AC-N`
   id. Every non-goal has a stable `NG-N` id. These ids are the contract the
   build and review skills enforce.
-- No acceptance criterion may require a non-goal. If one does, resolve it
-  with the user before filing.
+- No acceptance criterion may require a non-goal. §3a is the step that
+  establishes that, on every draft, before anyone reads it.
 - Size the issue to one day of agent work or less. Bigger work becomes a
   chain of small issues, ordered so each is buildable using only merged
   code from the ones before it.
+
+### 3a. Cross-check every AC against every NG
+
+The rule above does not enforce itself, so this is the step that carries it out.
+Run it once the draft is assembled and **before** you show it (§4). Speccing is
+the only stage of the loop with no second pair of eyes: a contradiction caught
+here is a reworded draft nobody has acted on, and the same contradiction caught
+later is a paused build — or a silent pick, where the builder chooses a side and
+the reviewer then validates the diff against that same side. Both are internally
+consistent, and neither is what was specified.
+
+Take each `AC-N` in turn and compare it against **every** `NG-N` — the whole
+grid, not a skim of the prose. Judge meaning rather than wording: the question
+is whether that AC can be satisfied without violating that NG. Four shapes to
+look for:
+
+1. an AC requiring a change to a surface an NG freezes;
+2. an AC requiring behaviour an NG defers to a later ticket;
+3. an AC requiring data or schema an NG excludes;
+4. an AC whose only reasonable implementation crosses an NG, even though its
+   wording does not name it.
+
+**Report the result even when it is clean.** A clean grid is a finding, and
+saying so is what distinguishes a spec that passed the check from one that
+skipped it — silence must not be ambiguous. The line goes with the draft:
+
+> AC↔NG cross-check: no conflicts (AC-1…AC-5 × NG-1…NG-3).
+
+**On a conflict, stop and ask the human to rule.** Do not reword either side,
+drop one, or decide which wins — that is the product brain's call, and it is
+precisely the decision a confidently wrong build is made of. Do not show a
+filable draft until it is answered. Name the pair and state the contradiction:
+
+> AC↔NG cross-check: **conflict**. AC-3 ("the settings page gains a Loops
+> toggle") cannot be satisfied without violating NG-2 ("no UI changes in this
+> ticket"). Which holds — drop the toggle from AC-3, or narrow NG-2 so it does
+> not cover the settings page?
+
+Ask through the channel **How you ask** selected for this run: at a terminal,
+an ordinary question; in job mode, the same durable channel the interview
+rounds use —
+
+```bash
+nook interactions ask --wait "AC-3 requires the settings toggle NG-2 excludes. Which holds?" \
+  --choice "drop the toggle from AC-3" --choice "narrow NG-2"
+```
+
+Fold the ruling in, re-run the grid over the amended draft, then go to §4. A
+canceled or timed-out ask files nothing.
+
+The check and its result belong to this conversation and the job transcript —
+**never to the filed ticket body.** What §4 files is exactly §3's template,
+with no cross-check line, banner or section added to it.
 
 ## 4. Confirm and file
 
