@@ -231,6 +231,16 @@ pub trait NodeRepository: Send + Sync {
         optout: bool,
     ) -> ApiResult<Option<Node>>;
 
+    /// Set the owner's cross-tenant consent (MAIN-576).
+    ///
+    /// Deliberately UNSCOPED by tenant, unlike its neighbours: the whole point
+    /// is that the owner sets this from a tenant that is not the machine's
+    /// home. Ownership is the gate and it is checked at the route by
+    /// `auth::require_person_owns_node`, which is itself person-scoped and
+    /// tenant-blind (MAIN-353). A `tenant_id = $2` here would 404 exactly the
+    /// caller this exists for.
+    async fn set_cross_tenant(&self, id: NodeId, cross_tenant: bool) -> ApiResult<Option<Node>>;
+
     /// Replace a node's operator-set labels and taints (MAIN-314). Both are a
     /// full replacement — a partial update of a set cannot say what was deleted.
     async fn set_placement(
@@ -357,6 +367,16 @@ pub trait NodeRepository: Send + Sync {
     /// looking at was refused *because* of where it is joined.
     async fn owned_online_elsewhere(&self, tenant: TenantId, person: Uuid)
         -> ApiResult<(i64, i64)>;
+
+    /// Online nodes owned by a MEMBER of `tenant` and homed elsewhere, split by
+    /// consent (MAIN-576): `.0` consent to cross, `.1` have withdrawn it.
+    ///
+    /// The reason string's counterpart to the candidate query's new leg. Without
+    /// it the sentence still reports on the requester's own machines alone,
+    /// which after MAIN-576 is no longer what eligibility means — so a tenant
+    /// whose member machines were refused for some other gate entirely would
+    /// still be told "you have no node online".
+    async fn member_online_elsewhere(&self, tenant: TenantId) -> ApiResult<(i64, i64)>;
 
     /// This person's nodes with their last reported resource sample — the
     /// candidate set placement ranks (MAIN-292). The liveness filter is NOT here:
@@ -542,7 +562,7 @@ pub trait TenantCaRepository: Send + Sync {
 /// The `nodes` columns every read returns, in one place: the shape `Node`
 /// decodes from, and the reason two SELECTs cannot drift apart.
 const NODE_COLUMNS: &str = "id, tenant_id, name, hostname, platform, capabilities, resources, \
-     status, last_seen_at, owner_person_id, shared, created_at, updated_at, labels, taints, \
+     status, last_seen_at, owner_person_id, shared, cross_tenant, created_at, updated_at, labels, taints, \
      port_range_start, port_range_end, port_exclusions, operator_authorize_optout, \
      max_loop_jobs, cordon";
 
@@ -847,6 +867,21 @@ impl NodeRepository for DbNodeRepository {
             .await?)
     }
 
+    async fn set_cross_tenant(&self, id: NodeId, cross_tenant: bool) -> ApiResult<Option<Node>> {
+        Ok(self
+            .db
+            .query_opt(
+                &format!(
+                    "UPDATE nodes SET cross_tenant = $2, updated_at = {}
+                     WHERE id = $1
+                     RETURNING {NODE_COLUMNS}",
+                    type_mapping(self.db.engine()).now()
+                ),
+                params![id, cross_tenant],
+            )
+            .await?)
+    }
+
     async fn by_token_hash(&self, token_hash: &str) -> ApiResult<Option<NodeIdentity>> {
         let row: Option<(NodeId, TenantId, String)> = self
             .db
@@ -1044,10 +1079,20 @@ impl NodeRepository for DbNodeRepository {
         // a shared operator drops out of the candidate set for a `build` job
         // before anything it declared is even read.
         //
-        // The tenancy clause reads as two legs (MAIN-515). Inside `tenant`,
-        // unchanged: your node or the shared operator. Outside it, your node
-        // and never a shared operator — so a machine you own follows you into
-        // every org you belong to, and a machine a team shares stays theirs.
+        // The tenancy clause reads as two legs. Inside `tenant`, unchanged:
+        // your node or the shared operator.
+        //
+        // Outside it (MAIN-576, widening MAIN-515): any node whose OWNER is a
+        // member of `tenant`, never a shared operator, and only with the
+        // owner's `cross_tenant` consent. It is membership rather than
+        // requester-identity because a loop run is raised as the tenant's
+        // owner (`identity::tenant_owner_user_id`), which in a tenant with two
+        // owners is whoever joined first — so keying on `owner_person_id = $2`
+        // made placement depend on an accident of join order, and a team whose
+        // PM drafts the work could never run it on a member's machine.
+        //
+        // `person_id IS NOT NULL` matters: a user row without a person would
+        // otherwise make the IN-list match nodes whose owner is NULL.
         Ok(self
             .db
             .query_scalar_all(
@@ -1055,7 +1100,13 @@ impl NodeRepository for DbNodeRepository {
                     "SELECT id FROM nodes
                      WHERE status = 'online'
                        AND ( (tenant_id = $1 AND (owner_person_id = $2 OR {operator}))
-                             OR (owner_person_id = $2 AND NOT {operator}) )
+                             OR (tenant_id <> $1
+                                 AND NOT {operator}
+                                 AND cross_tenant
+                                 AND owner_person_id IN (
+                                       SELECT person_id FROM users
+                                       WHERE tenant_id = $1 AND person_id IS NOT NULL
+                                     )) )
                        AND NOT ($4 = 'build' AND {operator})
                        AND EXISTS (
                              SELECT 1
@@ -1171,6 +1222,30 @@ impl NodeRepository for DbNodeRepository {
             )
             .await?;
         Ok((crossing, operators))
+    }
+
+    async fn member_online_elsewhere(&self, tenant: TenantId) -> ApiResult<(i64, i64)> {
+        let member_owned = format!(
+            "tenant_id <> $1 AND status = 'online' AND NOT {} \
+             AND owner_person_id IN (SELECT person_id FROM users \
+                                     WHERE tenant_id = $1 AND person_id IS NOT NULL)",
+            shared_operator_clause(self.db.engine())
+        );
+        let consenting: i64 = self
+            .db
+            .query_scalar(
+                &format!("SELECT count(*) FROM nodes WHERE {member_owned} AND cross_tenant"),
+                params![tenant],
+            )
+            .await?;
+        let declining: i64 = self
+            .db
+            .query_scalar(
+                &format!("SELECT count(*) FROM nodes WHERE {member_owned} AND NOT cross_tenant"),
+                params![tenant],
+            )
+            .await?;
+        Ok((consenting, declining))
     }
 
     async fn owned_with_resources(
@@ -1697,6 +1772,10 @@ struct FakeSession {
 struct FakeNodeState {
     nodes: Vec<FakeNode>,
     sessions: Vec<FakeSession>,
+    /// `(tenant, person)` — who belongs where. The real query reads this from
+    /// `users`; the fake owns no user table, so a test that exercises
+    /// cross-tenant placement (MAIN-576) seeds it with `add_member`.
+    memberships: Vec<(TenantId, Uuid)>,
 }
 
 #[derive(Default)]
@@ -1707,6 +1786,16 @@ pub struct FakeNodeRepository {
 impl FakeNodeRepository {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Record that `person` is a member of `tenant` — what the real
+    /// `eligible_loop_executors` reads out of `users` (MAIN-576).
+    pub fn add_member(&self, tenant: TenantId, person: Uuid) {
+        self.inner
+            .lock()
+            .unwrap()
+            .memberships
+            .push((tenant, person));
     }
 
     /// Seed a node directly, for tests about reading rather than enrolling.
@@ -1726,6 +1815,8 @@ impl FakeNodeRepository {
                 last_seen_at: None,
                 owner_person_id: owner,
                 shared,
+                // Matches the column default: consent is granted until withdrawn.
+                cross_tenant: true,
                 created_at: now,
                 updated_at: now,
                 labels: serde_json::json!({}),
@@ -2105,6 +2196,17 @@ impl NodeRepository for FakeNodeRepository {
             }))
     }
 
+    async fn set_cross_tenant(&self, id: NodeId, cross_tenant: bool) -> ApiResult<Option<Node>> {
+        // No tenant predicate, mirroring the real impl: the setter is reached
+        // from whichever tenant the owner happens to be in.
+        let mut s = self.inner.lock().unwrap();
+        Ok(s.nodes.iter_mut().find(|n| n.node.id == id).map(|n| {
+            n.node.cross_tenant = cross_tenant;
+            n.node.updated_at = chrono::Utc::now();
+            n.node.clone()
+        }))
+    }
+
     async fn by_token_hash(&self, token_hash: &str) -> ApiResult<Option<NodeIdentity>> {
         Ok(self
             .inner
@@ -2151,6 +2253,7 @@ impl NodeRepository for FakeNodeRepository {
                 last_seen_at: None,
                 owner_person_id: node.owner_person_id,
                 shared: false,
+                cross_tenant: true,
                 labels: serde_json::json!({}),
                 taints: serde_json::json!([]),
                 operator_authorize_optout: false,
@@ -2303,14 +2406,25 @@ impl NodeRepository for FakeNodeRepository {
                 .and_then(|v| v.as_array())
                 .is_some_and(|ks| ks.iter().any(|k| k.as_str() == Some(kind)))
         };
-        // Inside `tenant`, yours or the shared operator; outside it, yours and
-        // never a shared operator (MAIN-515) — the SQL's two legs.
+        // Inside `tenant`, yours or the shared operator; outside it, a node
+        // whose OWNER is a member of `tenant`, never a shared operator, and
+        // only with the owner's consent (MAIN-576) — the SQL's two legs.
+        let member_of_tenant = |owner: Option<Uuid>| {
+            owner.is_some_and(|o| {
+                // The requester is a member of the requesting tenant BY
+                // CONSTRUCTION: the real query reads `users`, and a person can
+                // only raise work in a tenant they have a row in. The fake owns
+                // no user table, so that guarantee has to be encoded here —
+                // without it the fake refuses the requester's OWN machine and
+                // diverges from the SQL on exactly MAIN-515's case.
+                o == person || s.memberships.iter().any(|(t, p)| *t == tenant && *p == o)
+            })
+        };
         let reachable = |n: &FakeNode| {
-            let mine = n.node.owner_person_id == Some(person);
             if n.node.tenant_id == tenant {
-                mine || is_operator(n)
+                n.node.owner_person_id == Some(person) || is_operator(n)
             } else {
-                mine && !is_operator(n)
+                !is_operator(n) && n.node.cross_tenant && member_of_tenant(n.node.owner_person_id)
             }
         };
         let mut eligible: Vec<&FakeNode> = s
@@ -2426,6 +2540,35 @@ impl NodeRepository for FakeNodeRepository {
             }
         }
         Ok((crossing, operators))
+    }
+
+    async fn member_online_elsewhere(&self, tenant: TenantId) -> ApiResult<(i64, i64)> {
+        let s = self.inner.lock().unwrap();
+        let member = |o: Option<Uuid>| {
+            o.is_some_and(|o| s.memberships.iter().any(|(t, p)| *t == tenant && *p == o))
+        };
+        let is_operator = |n: &FakeNode| {
+            n.node
+                .capabilities
+                .get("shared_operator")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        };
+        let mut consenting = 0;
+        let mut declining = 0;
+        for n in s.nodes.iter().filter(|n| {
+            n.node.tenant_id != tenant
+                && n.node.status == "online"
+                && !is_operator(n)
+                && member(n.node.owner_person_id)
+        }) {
+            if n.node.cross_tenant {
+                consenting += 1;
+            } else {
+                declining += 1;
+            }
+        }
+        Ok((consenting, declining))
     }
 
     async fn owned_with_resources(

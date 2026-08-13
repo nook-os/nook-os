@@ -84,6 +84,7 @@ use utoipa::OpenApi;
         crate::routes::gitops::put_secret,
         crate::routes::nodes::list,
         crate::routes::nodes::set_shared,
+        crate::routes::nodes::set_cross_tenant,
         crate::routes::nodes::get_placement,
         crate::routes::nodes::set_placement,
         crate::routes::nodes::get_ports,

@@ -1313,6 +1313,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/nodes/{id}/cross-tenant": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/nodes/{id}/cross-tenant` — the owner's consent for this
+         *     machine to take work raised in a tenant that is not its home (MAIN-576).
+         * @description `require_person_owns_node` is the whole gate, and it is deliberately the
+         *     only one: it is person-scoped and tenant-blind (MAIN-353), which is what
+         *     lets an owner set this from whichever org they happen to be working in.
+         *     Note the repo write is unscoped for the same reason — routing this through
+         *     `visible_node` would 404 the exact caller the endpoint exists for.
+         */
+        post: operations["set_cross_tenant"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/nodes/{id}/leases/{holder}": {
         parameters: {
             query?: never;
@@ -6082,6 +6107,17 @@ export interface components {
             /** Format: date-time */
             created_at: string;
             /**
+             * @description Whether this machine accepts work raised in a tenant that is NOT its
+             *     home (MAIN-576). `shared` grants use WITHIN a tenant; this governs
+             *     crossing out of it, and is the owner's alone to set.
+             *
+             *     Defaults TRUE because MAIN-515 already placed a person's own node from
+             *     any tenant they belong to with no flag at all — a false default would
+             *     revoke shipped behaviour. Setting it false withdraws the machine from
+             *     every tenant but the one it joined.
+             */
+            cross_tenant: boolean;
+            /**
              * @description The name of this node's HOME tenant, set only when that is not the
              *     tenant you are acting in (MAIN-353) — your own machine, reached from
              *     another of your orgs. `None` for the ordinary case, so a UI can render
@@ -6708,6 +6744,17 @@ export interface components {
                 cordon?: unknown;
                 /** Format: date-time */
                 created_at: string;
+                /**
+                 * @description Whether this machine accepts work raised in a tenant that is NOT its
+                 *     home (MAIN-576). `shared` grants use WITHIN a tenant; this governs
+                 *     crossing out of it, and is the owner's alone to set.
+                 *
+                 *     Defaults TRUE because MAIN-515 already placed a person's own node from
+                 *     any tenant they belong to with no flag at all — a false default would
+                 *     revoke shipped behaviour. Setting it false withdraws the machine from
+                 *     every tenant but the one it joined.
+                 */
+                cross_tenant: boolean;
                 /**
                  * @description The name of this node's HOME tenant, set only when that is not the
                  *     tenant you are acting in (MAIN-353) — your own machine, reached from
@@ -7869,6 +7916,10 @@ export interface components {
             enabled?: boolean | null;
             /** @description A node id or name; `null` unpins. */
             node?: string | null;
+        };
+        /** @description The owner's cross-tenant consent for one machine (MAIN-576). */
+        SetCrossTenantRequest: {
+            cross_tenant: boolean;
         };
         /**
          * @description Point feedback at a repo and a branch. Separate from submitting, so the
@@ -11448,6 +11499,43 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["OpResponse"];
                 };
+            };
+        };
+    };
+    set_cross_tenant: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetCrossTenantRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Node"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

@@ -651,6 +651,15 @@ pub struct Node {
     /// shared node is VISIBLE to the whole team; it is not yet usable by them —
     /// session-start stays owner-only until a later unit of the epic.
     pub shared: bool,
+    /// Whether this machine accepts work raised in a tenant that is NOT its
+    /// home (MAIN-576). `shared` grants use WITHIN a tenant; this governs
+    /// crossing out of it, and is the owner's alone to set.
+    ///
+    /// Defaults TRUE because MAIN-515 already placed a person's own node from
+    /// any tenant they belong to with no flag at all — a false default would
+    /// revoke shipped behaviour. Setting it false withdraws the machine from
+    /// every tenant but the one it joined.
+    pub cross_tenant: bool,
     /// Operator-set labels, `{"key": "value"}` (MAIN-314). The DERIVED `os` and
     /// `arch` labels are not in here: they are computed from what the node
     /// reports, so storing them would let them drift from the truth.
@@ -1625,6 +1634,12 @@ pub struct SetSharedRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct SetOperatorAuthorizeOptoutRequest {
     pub optout: bool,
+}
+
+/// The owner's cross-tenant consent for one machine (MAIN-576).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SetCrossTenantRequest {
+    pub cross_tenant: bool,
 }
 
 // ── Skills ───────────────────────────────────────────────────────────────────

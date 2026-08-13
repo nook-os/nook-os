@@ -840,8 +840,12 @@ async fn online_node(
     id
 }
 
+/// The fake's crossing leg must agree with the SQL's (MAIN-576): membership of
+/// the requesting tenant, not ownership by the requester. The requester counts
+/// as a member by construction — they could not raise work in a tenant they
+/// have no user row in — which is why their own machine still crosses.
 #[tokio::test]
-async fn the_fake_lets_your_own_node_cross_tenants_and_nothing_else() {
+async fn the_fake_crosses_for_members_of_the_requesting_tenant() {
     let nodes = FakeNodeRepository::new();
     let (a, b) = (tenant(), tenant());
     let me = uuid::Uuid::now_v7();
@@ -867,6 +871,34 @@ async fn the_fake_lets_your_own_node_cross_tenants_and_nothing_else() {
             .unwrap(),
         vec![theirs_in_a],
         "…and the other person crossing gets THEIR machine, never mine"
+    );
+
+    // The widening, and the wall beside it: once the other person is a MEMBER
+    // of B, their machine serves B's work too — while a machine owned by
+    // nobody in B stays out of reach.
+    nodes.add_member(b, someone_else);
+    let mut both = nodes
+        .eligible_loop_executors(b, me, "claude", "spec")
+        .await
+        .unwrap();
+    both.sort();
+    let mut want = vec![mine_in_a, theirs_in_a];
+    want.sort();
+    assert_eq!(
+        both, want,
+        "a fellow member's machine is a candidate for the tenant's work"
+    );
+
+    let stranger = uuid::Uuid::now_v7();
+    let _stranger_node = online_node(&nodes, a, Some(stranger), false).await;
+    let mut still = nodes
+        .eligible_loop_executors(b, me, "claude", "spec")
+        .await
+        .unwrap();
+    still.sort();
+    assert_eq!(
+        still, want,
+        "and a machine whose owner belongs to neither tenant is still nobody's"
     );
 
     // At home in A, nothing changed: the operators are still the fallback.

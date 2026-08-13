@@ -11,7 +11,7 @@
 use axum::extract::{Path, State};
 use nook_control::auth::{AuthCtx, Principal};
 use nook_control::error::ApiError;
-use nook_control::routes::nodes::{get_one, list};
+use nook_control::routes::nodes::{get_one, list, set_cross_tenant};
 use nook_control::ws::registry::NodeHandle;
 use nook_db::{params, Db};
 use nook_proto::ControlToNode;
@@ -362,6 +362,132 @@ async fn a_foreign_node_you_do_not_own_is_a_404_not_a_403() {
         .await
         .expect_err("not their machine");
     assert!(matches!(err, ApiError::ForbiddenMsg(_)), "got {err:?}");
+
+    bed.teardown().await;
+}
+
+/// MAIN-576 AC-6: the cross-tenant consent switch is the OWNER's, and
+/// `require_person_owns_node` is the only thing standing between any
+/// authenticated user and flipping it on a machine they do not own. The repo
+/// write is deliberately unscoped by tenant, which is precisely why this gate
+/// needs a test of its own rather than being inferred from the scoping.
+#[tokio::test]
+async fn only_the_owner_may_set_cross_tenant_and_from_any_of_their_orgs() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let home = bed.tenant("xtc-home").await;
+    let other = bed.tenant("xtc-other").await;
+    let (_owner_here, person) = bed.user(home, "owner").await;
+    let owner_there = member(&bed, other, person, "member").await;
+    let mine = node(&bed, home, "mine", person, false).await;
+
+    let state = bed.app_state().await;
+
+    // The owner, acting from the OTHER org, may withdraw consent — the whole
+    // point of the setter being tenant-unscoped.
+    let updated = set_cross_tenant(
+        State(state.clone()),
+        ctx(owner_there, other),
+        Path(mine),
+        axum::Json(SetCrossTenantRequest {
+            cross_tenant: false,
+        }),
+    )
+    .await
+    .expect("the owner may set it from their other org");
+    assert!(!updated.0.cross_tenant, "consent is withdrawn");
+
+    // A stranger in that same org may not, even though the row is reachable.
+    let (outsider, _outsider_person) = bed.user(other, "owner").await;
+    let refused = set_cross_tenant(
+        State(state.clone()),
+        ctx(outsider, other),
+        Path(mine),
+        axum::Json(SetCrossTenantRequest { cross_tenant: true }),
+    )
+    .await;
+    assert!(
+        matches!(
+            refused,
+            Err(ApiError::Forbidden | ApiError::ForbiddenMsg(_) | ApiError::NotFound)
+        ),
+        "a non-owner is refused, whatever tenant they are in"
+    );
+
+    // And the refusal changed nothing.
+    let after = state
+        .nodes
+        .by_id_any_tenant_or_none(mine)
+        .await
+        .expect("read back")
+        .expect("node");
+    assert!(!after.cross_tenant, "still withdrawn");
+
+    bed.teardown().await;
+}
+
+/// MAIN-576's boundary, stated as a test because it is the whole basis of the
+/// widening being acceptable: a fellow member's machine may take this tenant's
+/// LOOP WORK, and may NOT be opened as a session by that member.
+///
+/// Placement and use are different gates and must stay different.
+/// `eligible_loop_executors` scopes by membership + consent (MAIN-576);
+/// `require_person_may_use_node` stays owner-or-shared-in-tenant, so a TUI or
+/// an ad-hoc chat on somebody else's hardware is still refused.
+#[tokio::test]
+async fn a_fellow_member_may_place_work_but_never_open_a_session() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let home = bed.tenant("xtd-home").await;
+    let team = bed.tenant("xtd-team").await;
+    let (_owner_home, person) = bed.user(home, "owner").await;
+    let _owner_in_team = member(&bed, team, person, "member").await;
+    let mine = node(&bed, home, "mine", person, false).await;
+
+    let state = bed.app_state().await;
+    // The node must look eligible to the loop: online + authorized + declaring.
+    bed.db()
+        .exec(
+            "UPDATE nodes SET capabilities = $2 WHERE id = $1",
+            params![
+                mine,
+                serde_json::json!({
+                    "loop_kinds": ["spec"],
+                    "runtime_auth": [{ "runtime": "claude", "state": "authorized" }]
+                })
+            ],
+        )
+        .await
+        .expect("caps");
+
+    let (teammate, teammate_person) = bed.user(team, "member").await;
+
+    // PLACEMENT: yes — this is what MAIN-576 opened.
+    assert_eq!(
+        state
+            .nodes
+            .eligible_loop_executors(team, teammate_person, "claude", "spec")
+            .await
+            .expect("candidates"),
+        vec![mine],
+        "the team's loop work may run on a member's machine"
+    );
+
+    // USE: no — and this is what must never follow from it.
+    let refused =
+        nook_control::auth::require_person_may_use_node(&state, team, Some(teammate), mine).await;
+    assert!(
+        refused.is_err(),
+        "a teammate may not open a session on a machine they do not own"
+    );
+
+    // The owner themselves still may, from the other org.
+    let owner_there = member(&bed, team, person, "member").await;
+    nook_control::auth::require_person_may_use_node(&state, team, Some(owner_there), mine)
+        .await
+        .expect("the owner may use their own machine from any of their orgs");
 
     bed.teardown().await;
 }

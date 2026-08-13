@@ -113,6 +113,7 @@ mod tests {
             last_seen_at: None,
             owner_person_id: None,
             shared: false,
+            cross_tenant: true,
             labels: serde_json::json!({}),
             taints: serde_json::json!([]),
             operator_authorize_optout: false,

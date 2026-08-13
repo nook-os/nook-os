@@ -1800,7 +1800,7 @@ pub async fn select_executor(
             // fleet rather than a gate, and a sixth variant meaning "some
             // other way" is a value no client could act on.
             (
-                no_executor_reason(state, tenant, person, &job.kind).await?,
+                no_executor_reason(state, tenant, person, job.requested_by, &job.kind).await?,
                 None,
             )
         };
@@ -2304,13 +2304,40 @@ async fn no_executor_reason(
     state: &AppState,
     tenant: TenantId,
     person: Uuid,
+    requested_by: UserId,
     kind: &str,
 ) -> ApiResult<String> {
     let owned_here: i64 = state.nodes.owned_online_count(tenant, person).await?;
     let (owned_elsewhere, operators_elsewhere) =
         state.nodes.owned_online_elsewhere(tenant, person).await?;
     let operator_online: i64 = state.nodes.shared_operator_online_count(tenant).await?;
+    let (members_consenting, members_declining) =
+        state.nodes.member_online_elsewhere(tenant).await?;
     let owned_online = owned_here + owned_elsewhere;
+
+    // Who the run belongs to, said out loud (MAIN-576 AC-8). A loop run is
+    // raised as the tenant's owner — the OLDEST owner row, not necessarily the
+    // human reading this — so every "you" below is about that person and not
+    // about the reader. Saying "you have no node online" to someone looking at
+    // five of their own was half the reported bug.
+    let raised_as = state
+        .identity
+        .get_user(requested_by)
+        .await?
+        .map(|u| u.email)
+        .unwrap_or_else(|| "the tenant's owner".into());
+    let whose = format!(" (this run was raised as {raised_as})");
+
+    // Consent withdrawn is its own sentence: the machines exist, they are
+    // online, and their owner declined — which no other arm can express, and
+    // which the reader can act on directly.
+    if owned_online == 0 && members_consenting == 0 && members_declining > 0 {
+        return Ok(format!(
+            "no eligible executor: {members_declining} online machine(s) belonging to members of \
+             this tenant have withdrawn cross-tenant consent, and nothing else is available. \
+             Set `cross_tenant` back on one of them, or join a node to this tenant{whose}"
+        ));
+    }
 
     // Gated on the person's own machines alone, NOT on whether this tenant also
     // has an operator: with an in-tenant operator that is merely ineligible,
@@ -2337,12 +2364,14 @@ async fn no_executor_reason(
     }
 
     Ok(match (owned_online, operator_online) {
-        (0, 0) => "no eligible executor: you have no node online and no shared operator is available".into(),
+        (0, 0) => format!(
+            "no eligible executor: you have no node online and no shared operator is available{whose}"
+        ),
         // Wherever an online node exists, "not authorized" is no longer the only
         // way to be ineligible — it may simply not accept this kind (MAIN-142).
         // The reason names both rather than asserting the one it cannot tell.
         (0, _) => format!(
-            "no eligible executor: you have no node online, and the shared operator is not authorized for the {LOOP_RUNTIME} runtime or does not accept {kind} jobs"
+            "no eligible executor: you have no node online, and the shared operator is not authorized for the {LOOP_RUNTIME} runtime or does not accept {kind} jobs{whose}"
         ),
         (_, 0) => format!(
             "no eligible executor: your online node(s) are not authorized for the {LOOP_RUNTIME} runtime or do not accept {kind} jobs, and no shared operator is available"
