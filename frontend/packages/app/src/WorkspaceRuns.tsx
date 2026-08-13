@@ -12,15 +12,31 @@
 // A run keeps a transcript — the same `loop_job_transcript` a spec keeps,
 // rendered through the same `ChatView`. There is deliberately no second
 // transcript mechanism.
-import React, { useEffect, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { useSearchParams } from "react-router-dom";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
+import { GitBranch, MoreHorizontal } from "lucide-react";
 import { api, type LoopJobTranscriptEntry } from "@nookos/api";
 import { ChatView, Empty, Panel } from "@nookos/ui";
 import { useAgentCommands } from "./agentCommands";
 import { BuildOutcome } from "./BuilderStrip";
+import { useBuildRunFacts } from "./buildLoop";
+import { ContextMenuRegion, useContextMenuApi, type ContextMenuItem } from "./contextMenu";
+import { askConfirm } from "./dialogs";
 import { transcriptMessages } from "./LoopPanel";
 import { agentActivityLabel, foldToolActivity, jobStateMeta } from "./loop";
+import {
+  CANCEL_ENDED_REFUSAL,
+  cancelPrompt,
+  cancelRefusal,
+  isTerminalRun,
+  overflowRunActions,
+  primaryRunAction,
+  rerunRefusal,
+  runActions,
+  type RunAction,
+  type RunActionId,
+} from "./runActions";
 // The queue panel's duration words, not a second set of them: "5m" there and
 // "5 min" here would be two vocabularies for one idea, and the one thing a
 // reader must never have to do is work out whether they mean the same.
@@ -48,6 +64,22 @@ export type RunRow = {
   /** When the run was raised. The list's only ordering, and the one field the
    *  two row shapes below have to agree on. */
   createdAt: string;
+  /**
+   * The card a build run is about, in whatever form the listing sends — which
+   * is the KEY (`MAIN-42`), because `WorkspaceBuildRun` carries no uuid.
+   *
+   * Named `taskRef` rather than `taskId` on purpose: `/loop/:id` resolves keys
+   * and uuids alike server-side (MAIN-209), so the route does not care which
+   * this is, and a field called `taskId` holding a key is how a reader ends up
+   * looking for an id that was never on the wire.
+   */
+  taskRef?: string | null;
+  /** The pull request a review run is about, as a number: the URL is built from
+   *  the workspace's remote, which a row does not carry. */
+  prNumber?: number | null;
+  /** The head a review run was raised for, short. Line 1 of the detail header
+   *  shows it where a build shows its branch (AC-7). */
+  commit?: string;
 };
 
 type BuildRun = {
@@ -113,9 +145,30 @@ export function stateGlyph(state: string): string {
       return "✕";
     case "canceled":
       return "⊘";
+    case CANCELING:
+      return "◌";
     default:
       return "•";
   }
+}
+
+/**
+ * The state a row shows while THIS client's cancel is in flight (AC-4).
+ *
+ * Not a server state and deliberately not added to `jobStateMeta`, which is the
+ * loop's own vocabulary: no run is ever stored in `canceling`. It is a
+ * transition this client knows about because it started it, and the honest
+ * rendering of "I have asked, and have not been told yet" is a word in the
+ * state column rather than a spinner somewhere else.
+ */
+export const CANCELING = "canceling";
+
+export function shownState(state: string, pending?: string): string {
+  return pending === "cancel" && !isTerminalRun(state) ? CANCELING : state;
+}
+
+export function runStateMeta(state: string): ReturnType<typeof jobStateMeta> {
+  return state === CANCELING ? { label: CANCELING, tone: "warn" } : jobStateMeta(state);
 }
 
 /** What a review run is ABOUT, in the words the panel can show without a
@@ -159,6 +212,12 @@ export function buildRow(r: BuildRun): RunRow {
     reason: queuedReason(r.state, r.queued_reason),
     reasonKind: r.queued_reason_kind?.kind,
     createdAt: r.created_at,
+    // The key is the whole join. `WorkspaceBuildRun` (nook-types) sends
+    // `id, state, task_key, queued_reason, queued_reason_kind, created_at` and
+    // nothing else, so reading a `target_task_id` off it would be a field that
+    // is `undefined` on every row — which is not a missing link, it is a link
+    // that silently never appears.
+    taskRef: r.task_key ?? null,
   };
 }
 
@@ -188,6 +247,8 @@ export function reviewRow(r: ReviewRun): RunRow {
     label: runLabel(r),
     meta: reviewMeta(r),
     createdAt: r.created_at,
+    prNumber: r.review_pr_number ?? null,
+    commit: shortHead(r.review_head_sha),
   };
 }
 
@@ -239,8 +300,12 @@ export const KIND_CHOICES: { value: KindFilter; label: string }[] = [
  *
  * `--nook-runs-min-pane` in `global.css` is the same number in the place that
  * can act on it; `WorkspaceRunsStyles.test.ts` fails if the two drift.
+ *
+ * MAIN-559 moved it: the row reserves a fourth track for its `…` button, and
+ * this number is the sum of what the row reserves. It grew by that track and
+ * its gap, not by a fresh guess.
  */
-export const RUNS_MIN_PANE_PX = 260;
+export const RUNS_MIN_PANE_PX = 284;
 
 /** How long ago a run was raised, or "" for a timestamp that will not parse —
  *  a row with a broken date should lose its age, not its whole line. */
@@ -252,6 +317,58 @@ export function runAge(createdAt: string, now: number): string {
 /** Line 2's full text, for the `title` a truncated cell needs (AC-3). */
 export function rowSecondary(row: RunRow): string {
   return [row.meta, row.reason].filter(Boolean).join(" · ");
+}
+
+/**
+ * The pull request a review run is about, as a URL a browser can open (AC-2).
+ *
+ * `https://github.com/{owner}/{repo}/pull/{n}` — the same literal the control
+ * plane builds every time it names a PR (`merge_reconcile::pr_web_url`,
+ * `pr_hygiene`, `jobs`). Mirrored here because no field carries the URL and
+ * NG-4 forbids adding one.
+ *
+ * Null for anything this cannot read a github.com owner/repo out of, and that
+ * is the point: the action is then absent rather than pointing somewhere that
+ * does not exist. A guessed path for some other forge would be a link that
+ * looks right and 404s.
+ */
+export function prWebUrl(remote: string | null | undefined, number?: number | null): string | null {
+  if (!remote || !number) return null;
+  const m = /^(?:https?:\/\/|ssh:\/\/git@|git@)github\.com[/:]([^/]+)\/(.+?)(?:\.git)?\/?$/.exec(
+    remote.trim(),
+  );
+  return m ? `https://github.com/${m[1]}/${m[2]}/pull/${number}` : null;
+}
+
+/** This run's own address, for Copy link (AC-2) — the section and the run, on
+ *  top of whatever the URL already carries. Relative: the caller puts the
+ *  origin in front, because only it knows which one. */
+export function runHref(pathname: string, search: string, id: string): string {
+  const p = new URLSearchParams(search);
+  p.set("section", RUNS_SECTION);
+  p.set("run", id);
+  return `${pathname}?${p.toString()}`;
+}
+
+/** When the run was raised, on the reader's clock (AC-7). The exact instant
+ *  stays on the `title`, as it does on a row. */
+export function runStarted(createdAt: string): string {
+  const at = new Date(createdAt);
+  return Number.isNaN(at.getTime()) ? "" : at.toLocaleTimeString();
+}
+
+/**
+ * What went wrong, in the server's own words (AC-4).
+ *
+ * The control plane's error body is `{"error": "..."}` and that sentence is the
+ * whole point of surfacing anything: "only a failed or canceled job can be
+ * re-run" tells a reader what to do, and a generic replacement does not. The
+ * status line is the fallback for a failure with no body at all.
+ */
+export function apiFailureText(error: unknown): string {
+  const said = (error as { error?: unknown } | null | undefined)?.error;
+  if (typeof said === "string" && said.trim()) return said;
+  return "the request failed";
 }
 
 /** The section id this panel lives under, and the two ids it replaced. */
@@ -296,12 +413,27 @@ export function WorkspaceRuns({
   workspaceName?: string;
 }) {
   const [params, setParams] = useSearchParams();
-  const [openId, setOpenId] = useState<string | null>(null);
+  const qc = useQueryClient();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { openAt, refresh } = useContextMenuApi();
+  // WHICH run is open lives in the URL now that a row can be copied as a link
+  // (AC-2): a "Copy link" whose link did not select the run would be a lie, and
+  // the only way to make it true is for the URL to be what selects.
+  const openId = params.get("run");
   // Where the KEYBOARD is in the list, which is not the same as which run is
   // open (AC-9): arrowing moves this, Enter is what opens. Null until somebody
   // arrows, so tabbing in lands on the run the pane is already showing rather
   // than at the top of a list they have scrolled away from.
   const [cursorId, setCursorId] = useState<string | null>(null);
+  // Requests this client has sent and not yet seen answered, by run (AC-4).
+  // A map rather than one slot: cancelling two runs is two independent waits,
+  // and a single slot would make the second one disable the first.
+  const [busy, setBusy] = useState<Record<string, "cancel" | "rerun">>({});
+  // The last refusal, in the server's own words (AC-4). Held until dismissed or
+  // superseded: an error that vanished on the next repaint would be an error
+  // nobody read.
+  const [failure, setFailure] = useState<string | null>(null);
   // The kind lives in the URL because an old link arrives carrying one; the
   // state filter is a glance at the list you are already looking at, so it
   // stays local rather than growing the URL a second knob nobody links to.
@@ -328,6 +460,16 @@ export function WorkspaceRuns({
       ).data as ReviewRun[] | undefined) ?? [],
   });
 
+  // Shared key with `useBuildRunFacts`, so a panel that already resolved this
+  // workspace pays nothing for it here. The remote is the only field wanted:
+  // it is what a review row's PR link is built from.
+  const { data: workspace } = useQuery({
+    queryKey: ["workspaces", workspaceId],
+    queryFn: async () =>
+      (await api.GET("/api/v1/workspaces/{id}", { params: { path: { id: workspaceId } } }))
+        .data ?? null,
+  });
+
   const runs = builds && reviews ? mergeRuns(builds, reviews) : null;
   // Offered from what actually ran, so the control never lists a state this
   // repo has no run in and the loop's vocabulary is not copied here.
@@ -348,6 +490,225 @@ export function WorkspaceRuns({
   // change — so this panel serves the surface without offering a box to type
   // prose into.
   const { commands, onCommand } = useAgentCommands("run", open);
+
+  // What a BUILD run's branch is (AC-7). Shared queries again — `BuildOutcome`
+  // below mounts the same hook, so the header and the strip cannot name
+  // different branches for one run.
+  const facts = useBuildRunFacts(openRun?.kind === "build" ? open : null, workspaceId);
+
+  // ── The live handle (AC-5) ────────────────────────────────────────────────
+  // A menu is built when it is READ, not when it was opened, and everything it
+  // reads comes through here. Held in a ref because an open menu is portalled
+  // out of this subtree: it does not re-render when the list repaints, so a
+  // closure captured at right-click time would go on describing a run that has
+  // since finished. This is the race AC-5 names.
+  const live = useRef({
+    runs: [] as RunRow[],
+    busy: {} as Record<string, "cancel" | "rerun">,
+    remote: null as string | null,
+    act: (async (_id: string, _action: RunActionId) => {}) as (
+      id: string,
+      action: RunActionId,
+    ) => void | Promise<void>,
+  });
+
+  /** Open a run: the URL is what selects, so this is a `replace` like the kind
+   *  filter — reading down a list is not a stack of navigations. */
+  const chooseRun = (id: string) => {
+    const p = new URLSearchParams(params);
+    p.set("run", id);
+    setParams(p, { replace: true });
+    setCursorId(id);
+  };
+
+  /**
+   * Put focus back on a run's row (AC-8).
+   *
+   * By id and through the DOM rather than by index, because the list re-sorts
+   * under an action: a re-run inserts a new row above this one, and an index
+   * remembered before the call would land on a different run. Falls back to the
+   * first row, and never to a node that has gone.
+   */
+  const focusRun = (id: string) => {
+    const rows = [...(listRef.current?.querySelectorAll<HTMLElement>("[data-run-id]") ?? [])];
+    (rows.find((n) => n.dataset.runId === id) ?? rows[0])?.focus();
+  };
+
+  const invalidate = () =>
+    Promise.all([
+      qc.invalidateQueries({ queryKey: ["workspace-builds", workspaceId] }),
+      qc.invalidateQueries({ queryKey: ["workspace-reviews", workspaceId] }),
+      qc.invalidateQueries({ queryKey: ["job"] }),
+    ]);
+
+  const send = async (id: string, action: "cancel" | "rerun") => {
+    setFailure(null);
+    setBusy((b) => ({ ...b, [id]: action }));
+    try {
+      const path = action === "cancel" ? "/api/v1/jobs/{id}/cancel" : "/api/v1/jobs/{id}/rerun";
+      const { error } = await api.POST(path, { params: { path: { id } } });
+      if (error) throw new Error(apiFailureText(error));
+      await invalidate();
+    } catch (e) {
+      // VERBATIM (AC-4). The server refuses in a sentence naming the reason;
+      // replacing it with "something went wrong" throws that away.
+      setFailure(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy((b) => {
+        const next = { ...b };
+        delete next[id];
+        return next;
+      });
+      // The selection is untouched by any of this — only focus moves, and it
+      // moves back to the row that was acted on.
+      focusRun(id);
+    }
+  };
+
+  const doCancel = async (id: string) => {
+    const row = live.current.runs.find((r) => r.id === id);
+    if (!row) return;
+    const stale = cancelRefusal(row.state, !!live.current.busy[id]);
+    if (stale) {
+      setFailure(stale);
+      focusRun(id);
+      return;
+    }
+    const { title, description } = cancelPrompt(row);
+    const go = await askConfirm({
+      title,
+      description,
+      confirmLabel: "cancel run",
+      danger: true,
+    });
+    if (!go) {
+      focusRun(id);
+      return;
+    }
+    // Asked AGAIN after the dialog: it was open for as long as somebody took to
+    // read it, and a run that finished in that time must not be cancelled on
+    // the strength of a question about a state it has left.
+    const now = live.current.runs.find((r) => r.id === id);
+    const after = now ? cancelRefusal(now.state, !!live.current.busy[id]) : CANCEL_ENDED_REFUSAL;
+    if (after) {
+      setFailure(after);
+      focusRun(id);
+      return;
+    }
+    await send(id, "cancel");
+  };
+
+  const doRerun = async (id: string) => {
+    const row = live.current.runs.find((r) => r.id === id);
+    if (!row) return;
+    const stale = rerunRefusal(row.state, !!live.current.busy[id]);
+    if (stale) {
+      setFailure(stale);
+      focusRun(id);
+      return;
+    }
+    await send(id, "rerun");
+  };
+
+  const copy = (text: string) => {
+    // Best effort: a browser that refuses the clipboard is not an error worth
+    // interrupting a list for, and there is nothing to retry.
+    void navigator.clipboard?.writeText?.(text);
+  };
+
+  const runAction = async (id: string, action: RunActionId) => {
+    const row = live.current.runs.find((r) => r.id === id);
+    if (!row) return;
+    switch (action) {
+      case "open":
+        chooseRun(id);
+        focusRun(id);
+        return;
+      case "copy-id":
+        copy(id);
+        return;
+      case "copy-link":
+        copy(window.location.origin + runHref(location.pathname, location.search, id));
+        return;
+      case "view-task":
+        if (row.taskRef) navigate(`/loop/${row.taskRef}`);
+        return;
+      case "view-pr": {
+        const url = prWebUrl(live.current.remote, row.prNumber);
+        if (url) window.open(url, "_blank", "noreferrer");
+        return;
+      }
+      case "cancel":
+        await doCancel(id);
+        return;
+      case "rerun":
+        await doRerun(id);
+        return;
+    }
+  };
+
+  live.current = {
+    runs: runs ?? [],
+    busy,
+    remote: workspace?.git_remote_url ?? null,
+    act: runAction,
+  };
+
+  /**
+   * One run's menu, as a LIVE source (AC-5).
+   *
+   * Returns a function, not a list: the context menu calls it every time it
+   * renders, so a run that finishes under an open menu drops Cancel from it
+   * rather than leaving an action that would now be refused. `only: "overflow"`
+   * is the detail header's menu, which is the same list minus the action the
+   * header is already showing as a button (AC-7).
+   *
+   * Stable across renders, and reads everything through `live` — so the two
+   * routes into a menu, the right-click region and the `…` button, hand over
+   * the very same source and cannot be one fresh and one stale.
+   */
+  const menuFor = useCallback(
+    (id: string, only?: "overflow") =>
+      (): ContextMenuItem[] => {
+        const l = live.current;
+        const row = l.runs.find((r) => r.id === id);
+        if (!row) return [];
+        const all = runActions(row, {
+          pending: !!l.busy[id],
+          taskHref: row.taskRef ? `/loop/${row.taskRef}` : null,
+          prHref: prWebUrl(l.remote, row.prNumber),
+        });
+        return (only === "overflow" ? overflowRunActions(all) : all).map((a) => ({
+          label: a.label,
+          danger: a.danger,
+          // An action the server would refuse is shown, disabled, WITH the
+          // reason (AC-6): leaving it out is indistinguishable from an
+          // oversight, and teaches nobody why it is not there.
+          disabled: !!a.refusal,
+          hint: a.refusal,
+          onSelect: () => void l.act(id, a.id),
+        }));
+      },
+    [],
+  );
+
+  const openMenuAt = (id: string, anchor: HTMLElement, only?: "overflow") => {
+    const r = anchor.getBoundingClientRect();
+    openAt(r.left, r.bottom, menuFor(id, only));
+  };
+
+  // Tell an OPEN menu that what it describes has moved (AC-5). The list
+  // repainting is not something a portalled menu hears about, so the panel that
+  // does hear it says so.
+  const liveSignature = [
+    (runs ?? []).map((r) => `${r.id}:${r.state}`).join(","),
+    Object.entries(busy)
+      .map(([k, v]) => `${k}:${v}`)
+      .join(","),
+  ].join("|");
+  useEffect(() => {
+    refresh();
+  }, [liveSignature, refresh]);
 
   const { data: detail } = useQuery({
     queryKey: ["job", open],
@@ -409,6 +770,9 @@ export function WorkspaceRuns({
   );
 
   const onListKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    // The `…` button is inside a row and owns its own keys: without this,
+    // Enter on it would open the menu AND open the run underneath.
+    if (e.target instanceof HTMLElement && e.target.closest(".runs-row-menu")) return;
     const step = e.key === "ArrowDown" ? 1 : e.key === "ArrowUp" ? -1 : 0;
     if (step) {
       e.preventDefault();
@@ -423,7 +787,7 @@ export function WorkspaceRuns({
       // two paths to one act, and only one of them would ever be tested.
       e.preventDefault();
       const row = visible[cursorAt];
-      if (row) setOpenId(row.id);
+      if (row) chooseRun(row.id);
     }
   };
 
@@ -471,6 +835,19 @@ export function WorkspaceRuns({
               ))}
             </select>
           </div>
+          {failure && (
+            <div className="runs-failure" role="alert" data-testid="run-failure">
+              <span className="runs-failure-text">{failure}</span>
+              <button
+                type="button"
+                className="btn small"
+                onClick={() => setFailure(null)}
+                aria-label="dismiss this error"
+              >
+                dismiss
+              </button>
+            </div>
+          )}
           <div className="runs-list">
             {visible.length === 0 ? (
               <Empty>No run matches this filter.</Empty>
@@ -487,61 +864,95 @@ export function WorkspaceRuns({
                   // a `muted` the design system spells `dim`. Mapped here
                   // rather than widened in the shared component, whose set is
                   // the design system's.
-                  const meta = jobStateMeta(r.state);
+                  // While this client's cancel is in flight the row says so,
+                  // in the state column, because that is where a reader looks
+                  // for what a run is doing (AC-4).
+                  const shown = shownState(r.state, busy[r.id]);
+                  const meta = runStateMeta(shown);
                   const tone = pillTone(meta.tone);
                   const secondary = rowSecondary(r);
                   return (
-                    <button
+                    // A region per row, not one for the list: the menu has to
+                    // know WHICH run was right-clicked, and the nearest-region
+                    // rule is what answers that without an event to inspect.
+                    // `display: contents` keeps the wrapper out of the grid.
+                    <ContextMenuRegion
                       key={r.id}
-                      type="button"
-                      role="option"
-                      aria-selected={r.id === open}
-                      tabIndex={i === cursorAt ? 0 : -1}
-                      className={`runs-row${r.id === open ? " is-open" : ""}`}
-                      onClick={() => {
-                        setOpenId(r.id);
-                        setCursorId(r.id);
-                      }}
-                      data-testid="run-row"
-                      data-kind={r.kind}
-                      data-reason-kind={r.reasonKind}
+                      items={menuFor(r.id)}
+                      style={{ display: "contents" }}
                     >
-                      {/* The kind is a WORD, not a colour: colour in this row
-                          is already the state's, and a second palette next to
-                          it would make two claims a reader has to tell apart.
-                          `role="img"` so the badge announces as one named thing
-                          — an aria-label on a bare span is not owed to anyone.  */}
-                      <span
-                        className="pill dim runs-row-kind"
-                        role="img"
-                        aria-label={`kind: ${r.kind}`}
+                      <div
+                        role="option"
+                        aria-selected={r.id === open}
+                        tabIndex={i === cursorAt ? 0 : -1}
+                        className={`runs-row${r.id === open ? " is-open" : ""}`}
+                        onClick={() => chooseRun(r.id)}
+                        data-testid="run-row"
+                        data-run-id={r.id}
+                        data-kind={r.kind}
+                        data-reason-kind={r.reasonKind}
+                        data-pending={busy[r.id]}
                       >
-                        {r.kind}
-                      </span>
-                      <span className="mono runs-row-id" title={r.label}>
-                        {r.label}
-                      </span>
-                      <span
-                        className={`pill ${tone} runs-row-state`}
-                        role="img"
-                        aria-label={`state: ${meta.label}`}
-                      >
-                        <span className="runs-row-glyph">{stateGlyph(r.state)}</span>
-                        {meta.label}
-                      </span>
-                      {/* Line 2 is ONE cell, whatever it holds: the outcome, the
-                          waiting sentence, or both. It is the row's only
-                          truncating text and the first thing a narrow pane
-                          takes away (AC-3, AC-8) — the row's height is the
-                          grid's, so losing it costs no rhythm. */}
-                      <span className="runs-row-meta" title={secondary || undefined}>
-                        {r.meta ? <span className="mono">{r.meta}</span> : null}
-                        {r.reason ? <span data-testid="run-reason">{r.reason}</span> : null}
-                      </span>
-                      <span className="runs-row-time" title={r.createdAt}>
-                        {runAge(r.createdAt, now)}
-                      </span>
-                    </button>
+                        {/* The kind is a WORD, not a colour: colour in this row
+                            is already the state's, and a second palette next to
+                            it would make two claims a reader has to tell apart.
+                            `role="img"` so the badge announces as one named thing
+                            — an aria-label on a bare span is not owed to anyone.  */}
+                        <span
+                          className="pill dim runs-row-kind"
+                          role="img"
+                          aria-label={`kind: ${r.kind}`}
+                        >
+                          {r.kind}
+                        </span>
+                        <span className="mono runs-row-id" title={r.label}>
+                          {r.label}
+                        </span>
+                        <span
+                          className={`pill ${tone} runs-row-state`}
+                          role="img"
+                          aria-label={`state: ${meta.label}`}
+                        >
+                          <span className="runs-row-glyph">{stateGlyph(shown)}</span>
+                          {meta.label}
+                        </span>
+                        {/* Line 2 is ONE cell, whatever it holds: the outcome, the
+                            waiting sentence, or both. It is the row's only
+                            truncating text and the first thing a narrow pane
+                            takes away (AC-3, AC-8) — the row's height is the
+                            grid's, so losing it costs no rhythm. */}
+                        <span className="runs-row-meta" title={secondary || undefined}>
+                          {r.meta ? <span className="mono">{r.meta}</span> : null}
+                          {r.reason ? <span data-testid="run-reason">{r.reason}</span> : null}
+                        </span>
+                        <span className="runs-row-time" title={r.createdAt}>
+                          {runAge(r.createdAt, now)}
+                        </span>
+                        {/* The same menu right-click opens, on a control that can
+                            be seen and clicked (AC-1). Right-click is never the
+                            only route to an action. It holds a reserved grid
+                            track, so revealing it on hover moves nothing — the
+                            row's shape is the same whether it is showing or not
+                            (MAIN-556 AC-1). `tabIndex={-1}` keeps the list one
+                            tab stop; Shift+F10 on the row is the keyboard's
+                            route (AC-8). */}
+                        <button
+                          type="button"
+                          className="runs-row-menu"
+                          tabIndex={-1}
+                          aria-haspopup="menu"
+                          aria-label={`actions for ${r.label}`}
+                          data-testid="run-actions"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            chooseRun(r.id);
+                            openMenuAt(r.id, e.currentTarget);
+                          }}
+                        >
+                          <MoreHorizontal size={12} />
+                        </button>
+                      </div>
+                    </ContextMenuRegion>
                   );
                 })}
               </div>
@@ -552,10 +963,30 @@ export function WorkspaceRuns({
           {/* Above the transcript, not inside it (MAIN-387 AC-7): the branch and
               the PR are what the open run PRODUCED, and reading a log to find
               them is the thing this replaces. */}
+          {openRun && (
+            <RunHeader
+              run={openRun}
+              pending={busy[openRun.id]}
+              // A build's branch, a review's head: the same slot, filled from
+              // whichever the kind actually has (AC-7).
+              gitRef={openRun.kind === "build" ? facts.branch : openRun.commit || null}
+              now={now}
+              actions={runActions(openRun, {
+                pending: !!busy[openRun.id],
+                taskHref: openRun.taskRef ? `/loop/${openRun.taskRef}` : null,
+                prHref: prWebUrl(workspace?.git_remote_url, openRun.prNumber),
+              })}
+              onAction={(a) => void runAction(openRun.id, a)}
+              onOverflow={(el) => openMenuAt(openRun.id, el, "overflow")}
+            />
+          )}
           {open && (
             <BuildOutcome
               job={{ id: open, kind: openRun?.kind ?? "" }}
               workspaceId={workspaceId}
+              // The header above owns the branch now; repeating it here would
+              // be one fact rendered twice, one line apart.
+              showBranch={false}
             />
           )}
           {detail?.transcript?.length ? (
@@ -601,5 +1032,99 @@ export function WorkspaceRuns({
         </div>
       </div>
     </Panel>
+  );
+}
+
+/**
+ * The open run's header (AC-7): what it is, what state it is in, what it is
+ * working on, when it started — and the ONE action that state permits, with
+ * everything else behind an overflow.
+ *
+ * Compact on purpose. It sits above a transcript, which is the thing somebody
+ * came here to read; a header that grew a row of buttons would push it down the
+ * screen to say what a row already said. Copy and Export stay where they were,
+ * below this and beside the transcript they act on.
+ */
+function RunHeader({
+  run,
+  pending,
+  gitRef,
+  now,
+  actions,
+  onAction,
+  onOverflow,
+}: {
+  run: RunRow;
+  pending?: "cancel" | "rerun";
+  /** The branch a build is on, or the head a review was raised for. */
+  gitRef: string | null;
+  now: number;
+  actions: RunAction[];
+  onAction(action: RunActionId): void;
+  onOverflow(anchor: HTMLElement): void;
+}) {
+  const shown = shownState(run.state, pending);
+  const meta = runStateMeta(shown);
+  const primary = primaryRunAction(actions);
+  const elapsed = runAge(run.createdAt, now);
+  const started = runStarted(run.createdAt);
+  return (
+    <div className="run-header" data-testid="run-header">
+      <span className="pill dim runs-row-kind" role="img" aria-label={`kind: ${run.kind}`}>
+        {run.kind}
+      </span>
+      <span className="mono bright run-header-id" title={run.label}>
+        {run.label}
+      </span>
+      <span className={`pill ${pillTone(meta.tone)}`} role="img" aria-label={`state: ${meta.label}`}>
+        <span className="runs-row-glyph">{stateGlyph(shown)}</span>
+        {meta.label}
+      </span>
+      {gitRef && (
+        <span className="mono faint small" data-testid="run-header-ref" title={gitRef}>
+          <GitBranch size={11} /> {gitRef}
+        </span>
+      )}
+      {started && (
+        <span className="faint small" data-testid="run-header-started" title={run.createdAt}>
+          started {started}
+        </span>
+      )}
+      {elapsed && (
+        <span
+          className="faint small"
+          data-testid="run-header-elapsed"
+          title={`${elapsed} since this run was raised`}
+        >
+          {elapsed}
+        </span>
+      )}
+      <span className="run-header-actions">
+        {primary && (
+          <button
+            type="button"
+            className={`btn small${primary.danger ? "" : " primary"}`}
+            // Disabled with its reason on the button rather than absent, for
+            // the same reason the menu keeps it (AC-6).
+            disabled={!!primary.refusal}
+            title={primary.refusal ?? undefined}
+            data-testid="run-primary-action"
+            onClick={() => onAction(primary.id)}
+          >
+            {primary.label}
+          </button>
+        )}
+        <button
+          type="button"
+          className="btn small"
+          aria-haspopup="menu"
+          aria-label={`more actions for ${run.label}`}
+          data-testid="run-header-overflow"
+          onClick={(e) => onOverflow(e.currentTarget)}
+        >
+          <MoreHorizontal size={12} />
+        </button>
+      </span>
+    </div>
   );
 }

@@ -7353,8 +7353,10 @@ button.chat-tool-line:hover { color: var(--nook-fg-dim); }
      two drift. It is the sum of the row grid's reserved tracks below, plus a
      floor for the identifier: at exactly this width nothing on line 1
      truncates. The old floor was 150px, which was narrower than one row's
-     content and is what let the state word disappear. */
-  --nook-runs-min-pane: 260px;
+     content and is what let the state word disappear. MAIN-559 added the
+     actions track, so it grew by that track plus its gap: the floor is the sum
+     of what the row reserves, and reserving more moves it. */
+  --nook-runs-min-pane: 284px;
   display: grid;
   grid-template-columns: minmax(var(--nook-runs-min-pane), 300px) minmax(0, 1fr);
   gap: 12px;
@@ -7397,6 +7399,11 @@ button.chat-tool-line:hover { color: var(--nook-fg-dim); }
      make one row taller than its neighbours. Two of these, always, is what
      makes every row the same height whatever it holds (AC-1). */
   --nook-runs-line-h: 18px;
+  /* RESERVED for the row's `…` button (MAIN-559 AC-1). A track rather than an
+     overlay, and present on every row whether or not the button is showing:
+     revealing it on hover then costs no reflow, which is the promise MAIN-556
+     made about this list. */
+  --nook-runs-menu-col: 18px;
 
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
@@ -7498,7 +7505,8 @@ button.chat-tool-line:hover { color: var(--nook-fg-dim); }
   grid-template-columns:
     var(--nook-runs-kind-col)
     minmax(0, 1fr)
-    var(--nook-runs-state-col);
+    var(--nook-runs-state-col)
+    var(--nook-runs-menu-col);
   grid-template-rows: repeat(2, var(--nook-runs-line-h));
   align-items: center;
   column-gap: 6px;
@@ -7560,6 +7568,38 @@ button.chat-tool-line:hover { color: var(--nook-fg-dim); }
 .runs-row-meta > span + span {
   margin-left: 6px;
 }
+/* Both lines of the row, at its right edge: one button for the whole row
+   rather than one per line. HIDDEN, not transparent — an invisible button that
+   still takes clicks is a trap, and `visibility` is what a test can read. */
+.runs-row-menu {
+  grid-area: 1 / 4 / 3 / 5;
+  visibility: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: none;
+  border: 0;
+  border-radius: var(--nook-radius);
+  color: var(--nook-fg-dim);
+  cursor: pointer;
+}
+/* Hover, focus and selection — the three states AC-1 names. `focus-within`
+   covers both the row having focus and the button itself having it. */
+.runs-row:hover .runs-row-menu,
+.runs-row:focus-within .runs-row-menu,
+.runs-row.is-open .runs-row-menu {
+  visibility: visible;
+}
+.runs-row-menu:hover {
+  background: var(--nook-bg);
+  color: var(--nook-fg);
+}
+.runs-row-menu:focus-visible {
+  outline: 1px solid var(--nook-accent);
+  outline-offset: -1px;
+  visibility: visible;
+}
 .runs-row-time {
   grid-area: 2 / 3;
   justify-self: end;
@@ -7575,7 +7615,7 @@ button.chat-tool-line:hover { color: var(--nook-fg-dim); }
    The number is `--nook-runs-min-pane`, repeated because a container query
    condition cannot read a custom property — the same constraint the
    breakpoint tokens carry. */
-@container runs-browser (max-width: 259px) {
+@container runs-browser (max-width: 283px) {
   .runs-row-meta {
     display: none;
   }
@@ -7594,6 +7634,53 @@ button.chat-tool-line:hover { color: var(--nook-fg-dim); }
 .runs-row:focus-visible {
   outline: 1px solid var(--nook-accent);
   outline-offset: -1px;
+}
+
+/* What a refused action said, in the server's words (MAIN-559 AC-4). Between
+   the toolbar and the list rather than inside a row: the run it is about may
+   have scrolled away, and an error nobody can see is not surfaced. */
+.runs-failure {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px;
+  padding: 4px 7px;
+  border: 1px solid var(--nook-err);
+  border-radius: var(--nook-radius);
+  background: var(--nook-bg-raised);
+  color: var(--nook-fg);
+  font-size: 11px;
+}
+.runs-failure-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* The open run's header (MAIN-559 AC-7). One line that wraps, not a grid: it
+   sits above a transcript and its job is to stay short — a fixed grid would
+   reserve width for facts a review run does not have. */
+.run-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--nook-border);
+}
+.run-header-id {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Pushed to the end, so the primary action is always in the same place
+   whatever the header before it had to say. */
+.run-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
 }
 
 /* The copy/export row above a run transcript (MAIN-471). */

@@ -88,11 +88,16 @@ export function prLabel(url: string): string {
 export function BuildOutcome({
   job,
   workspaceId,
+  showBranch = true,
 }: {
   job: { id: string; kind: string; workspace_id?: string | null } | null | undefined;
   /** The repo, when the caller already knows it — the branch is resolved
    *  through its checkouts. Falls back to the job's own. */
   workspaceId?: string | null;
+  /** Off where the caller is ALREADY showing the branch (MAIN-559 AC-7): the
+   *  runs panel's header carries it, and one fact rendered twice a line apart
+   *  reads as two. */
+  showBranch?: boolean;
 }) {
   const isBuild = job?.kind === "build";
   const facts = useBuildRunFacts(
@@ -101,13 +106,14 @@ export function BuildOutcome({
   );
   if (!isBuild) return null;
   const outcome = buildOutcomeWords(facts.outcome);
-  if (!facts.taskKey && !facts.branch && !facts.prUrl && !outcome) return null;
+  const branch = showBranch ? facts.branch : null;
+  if (!facts.taskKey && !branch && !facts.prUrl && !outcome) return null;
   return (
     <span className="build-facts" data-testid="build-outcome">
       <Facts
         taskId={facts.taskId}
         taskKey={facts.taskKey}
-        branch={facts.branch}
+        branch={branch}
         prUrl={facts.prUrl}
       />
       {outcome && (

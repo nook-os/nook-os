@@ -80,14 +80,14 @@ describe("the runs browser's stylesheet (MAIN-556)", () => {
     expect(rule(".runs-row-state")).not.toContain("overflow: hidden");
     // Below the designed minimum the SECONDARY line is what goes — and only it.
     const collapse = runsBlock().slice(
-      runsBlock().indexOf("@container runs-browser (max-width: 259px)"),
+      runsBlock().indexOf("@container runs-browser (max-width: 283px)"),
     );
     expect(collapse.slice(0, collapse.indexOf("}\n}") + 3)).toBe(
-      "@container runs-browser (max-width: 259px) {\n  .runs-row-meta {\n    display: none;\n  }\n}",
+      "@container runs-browser (max-width: 283px) {\n  .runs-row-meta {\n    display: none;\n  }\n}",
     );
-    // 259 is "below --nook-runs-min-pane": a container query cannot read a
+    // 283 is "below --nook-runs-min-pane": a container query cannot read a
     // custom property, so the two are checked against each other here.
-    expect(RUNS_MIN_PANE_PX - 1).toBe(259);
+    expect(RUNS_MIN_PANE_PX - 1).toBe(283);
     expect(rule(".runs-browser")).toContain("container-type: inline-size;");
   });
 
@@ -99,6 +99,26 @@ describe("the runs browser's stylesheet (MAIN-556)", () => {
     expect(rule(".runs-row-state")).toContain("grid-area: 1 / 3;");
     expect(rule(".runs-row-meta")).toContain("grid-area: 2 / 1 / 3 / 3;");
     expect(rule(".runs-row-time")).toContain("grid-area: 2 / 3;");
+  });
+
+  it("reserves a track for the row's actions button, and hides it until asked (MAIN-559)", () => {
+    // A TRACK, not an overlay: revealing the button on hover must not reflow
+    // the row, which is the whole promise MAIN-556 made about this list.
+    const tracks = rule(".runs-row");
+    expect(tracks).toContain("var(--nook-runs-menu-col)");
+    expect(rule(".runs-browser")).toMatch(/--nook-runs-menu-col: \d+px;/);
+    expect(rule(".runs-row-menu")).toContain("grid-area: 1 / 4 / 3 / 5;");
+    // `visibility`, not `opacity`: a transparent button still takes clicks, and
+    // an invisible thing that can be clicked is a trap.
+    expect(rule(".runs-row-menu")).toContain("visibility: hidden;");
+    const block = runsBlock();
+    for (const on of [
+      ".runs-row:hover .runs-row-menu",
+      ".runs-row:focus-within .runs-row-menu",
+      ".runs-row.is-open .runs-row-menu",
+    ]) {
+      expect(block).toContain(on);
+    }
   });
 
   it("marks the selected row with a background AND an edge (AC-5)", () => {
