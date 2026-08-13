@@ -250,12 +250,15 @@ fn sqlite_args(
 /// engine-agnostic; the SQLite arm is its only user today (Postgres binds the
 /// array directly and never calls this).
 ///
-/// An empty list renders `IN (NULL)` / `NOT IN (NULL)` — always-unknown, so a
-/// `= ANY(empty)` still matches nothing, exactly as Postgres. (Its dual
-/// `!= ALL(empty)` is vacuously *true* in Postgres — matching everything — which
-/// `NOT IN (NULL)` does not reproduce; no call site binds an empty list to an
-/// `ALL` predicate, and MAIN-196, where SQLite is actually executed, owns that
-/// edge if one ever arises.)
+/// An empty list renders SQLite's EMPTY list — `IN ()` / `NOT IN ()` — which is
+/// the one form reproducing both Postgres duals: `= ANY(empty)` is false and
+/// `!= ALL(empty)` is vacuously *true*, matching every row, and SQLite defines
+/// its empty list to be exactly that for any left operand, NULL included.
+/// `NOT IN (NULL)` was the earlier rendering and is always-UNKNOWN instead, so
+/// an empty `ALL` matched nothing and — because unknown is not an error — a
+/// node reporting zero checkouts tombstoned zero rows and returned `Ok`
+/// (MAIN-547). The empty list is a SQLite extension over SQL92; Postgres binds
+/// its array directly and never reaches this function.
 fn expand_lists(sql: &str, params: Vec<DbValue>) -> (String, Vec<DbValue>) {
     if !params.iter().any(DbValue::is_list) {
         return (sql.to_owned(), params);
@@ -332,9 +335,17 @@ fn rewrite_membership(sql: &str, groups: &[Vec<usize>], is_list: &[bool]) -> Str
         if is_list[n - 1] {
             // The `<op> ANY(` / `<op> ALL(` opening this placeholder is
             // already in `out`; convert it to `IN (` / `NOT IN (`.
-            open_membership(&mut out);
+            let membership = open_membership(&mut out);
             if g.is_empty() {
-                out.push_str("NULL");
+                // Inside a membership test the empty list is written empty, and
+                // means what Postgres means (see this module's `expand_lists`
+                // doc). Everywhere else the `(` opened something that is not a
+                // membership test — `cardinality(CAST($1 AS text[]))` — where
+                // an empty operand list is no operand at all, so the value the
+                // expression reads is NULL.
+                if !membership {
+                    out.push_str("NULL");
+                }
             } else {
                 let joined = g.iter().map(|i| format!("${i}")).collect::<Vec<_>>();
                 out.push_str(&joined.join(", "));
@@ -350,10 +361,12 @@ fn rewrite_membership(sql: &str, groups: &[Vec<usize>], is_list: &[bool]) -> Str
 /// `out` ends with the opening of a Postgres array-membership test that wraps a
 /// list placeholder — `<op> ANY(` or `<op> ALL(`, with `<op>` one of `=`, `!=`,
 /// `<>` and any whitespace between the tokens. Rewrite that tail in place to
-/// SQLite's `IN (` (for `ANY`) or `NOT IN (` (for `ALL`). If the tail is not a
-/// recognised membership open — which never happens for the generated SQL — the
-/// buffer is left exactly as it was.
-fn open_membership(out: &mut String) {
+/// SQLite's `IN (` (for `ANY`) or `NOT IN (` (for `ALL`), reporting whether it
+/// did. If the tail is not a recognised membership open the buffer is left
+/// exactly as it was and this reports `false` — the caller needs that answer to
+/// render an empty list, which is written empty inside a membership test and
+/// `NULL` anywhere else.
+fn open_membership(out: &mut String) -> bool {
     // Decide on a read-only view, then mutate once (MAIN-435). Both early
     // returns used to `truncate(original_len)` AFTER `pop()`ing the '(' — and
     // truncate can only SHORTEN a string, so it could never put that character
@@ -362,7 +375,7 @@ fn open_membership(out: &mut String) {
     // names `AS` — a token nowhere near the cause.
     let head = out.trim_end();
     let Some(head) = head.strip_suffix('(') else {
-        return;
+        return false;
     };
     let head = head.trim_end();
     let negated = if ends_with_ci(head, "ALL") {
@@ -370,7 +383,7 @@ fn open_membership(out: &mut String) {
     } else if ends_with_ci(head, "ANY") {
         false
     } else {
-        return;
+        return false;
     };
     let head = head[..head.len() - 3].trim_end(); // drop ANY / ALL
     let head = head
@@ -382,6 +395,7 @@ fn open_membership(out: &mut String) {
     out.truncate(keep);
     out.push(' ');
     out.push_str(if negated { "NOT IN (" } else { "IN (" });
+    true
 }
 
 /// ASCII-case-insensitive suffix test on the raw bytes (the keyword is ASCII, so
@@ -1037,15 +1051,30 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_list_becomes_in_null() {
+    fn an_empty_list_becomes_an_empty_in_list() {
         let (sql, params) = expand_lists(
             "SELECT * FROM t WHERE id = ANY($1)",
             vec![DbValue::UuidList(vec![])],
         );
-        // `IN (NULL)` is valid SQLite and matches nothing, exactly as an empty
-        // `= ANY` does in Postgres.
-        assert_eq!(sql, "SELECT * FROM t WHERE id IN (NULL)");
+        // SQLite's empty list is FALSE for every left operand, exactly as an
+        // empty `= ANY` is in Postgres.
+        assert_eq!(sql, "SELECT * FROM t WHERE id IN ()");
         assert_eq!(params.len(), 0);
+    }
+
+    /// MAIN-547: the dual. An empty list bound to `!= ALL($n)` must match EVERY
+    /// row, as it does in Postgres — the rendering used to be `NOT IN (NULL)`,
+    /// which is unknown for every row and so matched none of them, silently.
+    #[test]
+    fn an_empty_list_under_all_becomes_an_empty_not_in_list() {
+        for sql in [
+            "UPDATE t SET m = 1 WHERE path != ALL($1)",
+            "UPDATE t SET m = 1 WHERE path <> ALL($1)",
+        ] {
+            let (out, params) = expand_lists(sql, vec![DbValue::TextList(vec![])]);
+            assert_eq!(out, "UPDATE t SET m = 1 WHERE path NOT IN ()");
+            assert_eq!(params.len(), 0);
+        }
     }
 
     #[test]
@@ -1141,6 +1170,88 @@ mod tests {
         assert_eq!(operand_params.len(), 3);
         assert_eq!(column, "SET k = $1");
         assert_eq!(column_params.len(), 1);
+    }
+
+    // ── against a real database (MAIN-547) ────────────────────────────────
+    //
+    // The tests above pin what `expand_lists` RENDERS. What MAIN-547 got wrong
+    // was not the rendering but what SQLite does with it: `NOT IN (NULL)` is
+    // unknown for every row, and unknown is not an error, so a statement built
+    // from an empty list reported success having changed nothing. Only the
+    // engine can answer that, so these execute. In memory — the claim is about
+    // the operator, which does not care where the file is.
+
+    async fn three_rows() -> crate::DbPool {
+        let db = crate::connect("sqlite::memory:", 1)
+            .await
+            .expect("an in-memory sqlite database");
+        db.exec("CREATE TABLE t (k TEXT)", vec![])
+            .await
+            .expect("create");
+        // The NULL is deliberate: it is the operand the two candidate
+        // renderings disagree about most, and `node_workspaces.path` has
+        // nullable siblings a future call site could bind.
+        db.exec("INSERT INTO t (k) VALUES ('a'), ('b'), (NULL)", vec![])
+            .await
+            .expect("insert");
+        db
+    }
+
+    /// AC-1, at the seam it broke: `tombstone_checkouts_except`'s statement,
+    /// with the empty list a node reporting zero checkouts binds. Every row,
+    /// exactly as Postgres.
+    #[tokio::test]
+    async fn an_empty_all_matches_every_row_on_sqlite() {
+        let db = three_rows().await;
+        let n = db
+            .exec(
+                "UPDATE t SET k = 'gone' WHERE k != ALL($1)",
+                vec![DbValue::TextList(vec![])],
+            )
+            .await
+            .expect("an empty ALL is valid sqlite");
+        assert_eq!(n, 3, "every row, the NULL one included");
+    }
+
+    /// AC-2: the dual is not collapsed with it. An empty `= ANY` still matches
+    /// nothing — which is what makes the fix a fix rather than an inversion.
+    #[tokio::test]
+    async fn an_empty_any_matches_no_row_on_sqlite() {
+        let db = three_rows().await;
+        let n = db
+            .exec(
+                "UPDATE t SET k = 'gone' WHERE k = ANY($1)",
+                vec![DbValue::TextList(vec![])],
+            )
+            .await
+            .expect("an empty ANY is valid sqlite");
+        assert_eq!(n, 0, "no row, the NULL one included");
+    }
+
+    /// A populated list is unchanged by the empty-list handling — both
+    /// operators still select exactly their side.
+    #[tokio::test]
+    async fn a_populated_list_still_selects_its_side_on_sqlite() {
+        let db = three_rows().await;
+        let matched = db
+            .exec(
+                "UPDATE t SET k = 'hit' WHERE k = ANY($1)",
+                vec![DbValue::TextList(vec!["a".into()])],
+            )
+            .await
+            .expect("ANY");
+        assert_eq!(matched, 1, "only 'a'");
+
+        // `NOT IN ('hit')` is unknown for the NULL row on SQLite and false in
+        // Postgres — both exclude it, so 'b' alone is the answer here too.
+        let unmatched = db
+            .exec(
+                "UPDATE t SET k = 'miss' WHERE k != ALL($1)",
+                vec![DbValue::TextList(vec!["hit".into()])],
+            )
+            .await
+            .expect("ALL");
+        assert_eq!(unmatched, 1, "only 'b'");
     }
 
     /// AC-4: the sibling list types stay operand-only, and that is safe for a
