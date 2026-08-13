@@ -123,12 +123,29 @@ jobs:
         image: softwaremill/elasticmq-native:1.6.11
         ports: ["9324:9324"]
     env:
+      # See the "Fast linker" step. An env var so it reaches every cargo
+      # invocation in the job, and so `rust-cache` keys on it — a linker change
+      # is a build-input change and the cache should know.
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
       DATABASE_URL: ${{ matrix.database_url }}
       NOOK_REQUIRE_DB: "1"
       NOOK_TEST_REDIS_URL: redis://localhost:6379
       NOOK_TEST_SQS_ENDPOINT: http://localhost:9324
     steps:
       - uses: actions/checkout@v4
+      # LLD (MAIN-578). `crates/nook-control/tests` holds 147 files, and every
+      # `.rs` directly under `tests/` is its OWN binary — so a run links 147
+      # executables, each pulling the full crate graph. Linking, not compiling,
+      # is what makes `Test (postgres)` 10m31s of a 13m job, and that job is the
+      # entire CI wall clock: a `merge_group` build runs only three jobs and
+      # still takes 11m, because everything it drops is ≤2m and parallel.
+      #
+      # Installed and applied in CI ONLY, via RUSTFLAGS rather than a checked-in
+      # `.cargo/config.toml`: a config file would demand every developer and
+      # every container have lld installed or their build breaks, which is a
+      # steep price for a CI problem.
+      - name: Fast linker
+        run: sudo apt-get update && sudo apt-get install -y lld
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -151,6 +168,8 @@ jobs:
       - name: Source guards
         if: matrix.engine == 'postgres'
         run: |
+          ./scripts/check-case-collisions.sh
+          ./scripts/check-case-collisions.test.sh
           ./scripts/check-inline-sql.sh
           ./scripts/check-inline-sql.test.sh
           ./scripts/check-sqlx-signatures.sh

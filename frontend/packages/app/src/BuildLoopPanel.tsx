@@ -31,7 +31,7 @@ import {
   whyWords,
   type BuildLoopSettings,
   type BuildRunRow,
-} from "./buildLoop";
+} from "./buildRuns";
 
 /** The label the escalation ladder raises when a card stops being the loop's
  *  business — the claim reaper's cap, and a PR closed unmerged. */
