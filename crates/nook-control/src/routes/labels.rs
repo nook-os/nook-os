@@ -97,29 +97,19 @@ pub async fn add(
     // human reads to see what happened.
     if res > 0 {
         record(&state, &auth, task, &label, "task.label.added").await;
-        // The build loop's EVENT trigger (MAIN-458): approving a card is the
-        // moment work exists, and waiting for the next poll would make the
-        // human's "go" feel ignored. Spawned so labeling never blocks on a
-        // convergence, and gated on the SAME tenant switch as the poll — the
-        // convergence itself re-checks everything else (claim, dedupe,
-        // ceiling), so this is only a nudge, never a second rulebook.
-        if label.eq_ignore_ascii_case("agent-ready") {
-            if let Ok(Some(row)) = state.tasks.get_row(auth.tenant_id, task).await {
-                if let Some(ws) = row.workspace_id {
-                    let (state, tenant, user) = (state.clone(), auth.tenant_id, auth.user_id);
-                    tokio::spawn(async move {
-                        if !crate::services::loops::enabled(&*state.settings, tenant).await {
-                            return;
-                        }
-                        if let Err(e) =
-                            crate::services::jobs::converge_builds(&state, tenant, user, ws, None)
-                                .await
-                        {
-                            tracing::warn!(workspace = %ws, error = %e, "agent-ready nudge failed");
-                        }
-                    });
-                }
-            }
+        // The build loop's EVENT triggers (MAIN-458, extended by MAIN-385
+        // AC-6): the two labels that make work available are the moment it
+        // exists, and waiting for the next sweep would make the human's "go"
+        // feel ignored. `agent-ready` is a fresh pick; `loop-changes-requested`
+        // is a repair. The nudge re-checks every gate — the switch, the claim,
+        // the dedupe, the ceiling — so it is only an earlier occasion, never a
+        // second rulebook, and it never fires as the labeller: an auto-fired
+        // run is requested by the person who enabled the loop (AC-2).
+        if ["agent-ready", "loop-changes-requested"]
+            .iter()
+            .any(|l| label.eq_ignore_ascii_case(l))
+        {
+            crate::services::build_loop::nudge(&state, auth.tenant_id, task, "label");
         }
     }
     labels_of(&state, task).await.map(Json)

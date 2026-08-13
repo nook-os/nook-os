@@ -126,6 +126,14 @@ pub async fn on_column_change(
     // and a reap only some of them fire is one that misses the common case.
     if let Some(col_type) = col_type.as_deref() {
         crate::services::stack_reaper::on_terminal_column(state, tenant, task_id, col_type);
+        // MAIN-385 AC-6: a card arriving in an unstarted column is work
+        // becoming available — the card a human dragged back out of In
+        // Progress, or the one a release returned to Todo — so the workspace
+        // is evaluated now rather than at the next sweep. Same reason this
+        // hangs off the column change: every mover funnels through here.
+        if col_type == "unstarted" {
+            crate::services::build_loop::nudge(state, tenant, task_id, "unstarted column");
+        }
     }
     if let Err(e) = run(state, tenant, task_id, board_id, col_type).await {
         // A failure to even LOAD the rules (bad column, unreadable config) is

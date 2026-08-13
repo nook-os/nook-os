@@ -1059,27 +1059,11 @@ pub async fn pass(state: &AppState, clones: &CloneThrottle) -> crate::error::Api
                 }
             }
 
-            // The build loop's POLL trigger (MAIN-458). Gated on the tenant's
-            // `loops.enabled` alone — owner ruling 2026-08-08, option (a):
-            // every workspace in a loops-on tenant converges its agent-ready
-            // cards; MAIN-385's per-workspace switch refines this later.
-            if loops_on {
-                match crate::services::jobs::converge_builds(state, tenant, owner, ws.id, None)
-                    .await
-                {
-                    Ok(c) if c.raised > 0 || c.withheld > 0 => tracing::info!(
-                        workspace = %ws.id,
-                        raised = c.raised,
-                        live = c.live,
-                        withheld = c.withheld,
-                        "raised build runs"
-                    ),
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::warn!(workspace = %ws.id, error = %e, "build run reconcile failed")
-                    }
-                }
-            }
+            // The build loop's poll trigger used to live HERE (MAIN-458),
+            // firing for every workspace of a loops-on tenant. MAIN-385 moved
+            // it to `services::build_loop`, behind the per-workspace switch:
+            // a repo's owner enables their repo, and one sweep of the enabled
+            // ones replaces a convergence attached to every session pass.
 
             // A PR the loop cannot see is a PR that sits (MAIN-476): a
             // CONFLICTING PR re-enters the repair queue, and a verdict label
@@ -2898,6 +2882,9 @@ mod tests {
             git_credential_id: None,
             review_loop_max_replicas: Some(ceiling),
             build_max_replicas: None,
+            build_loop_enabled: false,
+            build_loop_node_id: None,
+            build_loop_enabled_by: None,
             created_at: now,
             updated_at: now,
         }

@@ -188,6 +188,10 @@ pub fn build_router(state: AppState) -> Router {
             get(workspaces::get_build_loop).put(workspaces::set_build_loop),
         )
         .route(
+            "/workspaces/{id}/build-loop-settings",
+            get(workspaces::get_build_loop_settings).put(workspaces::set_build_loop_settings),
+        )
+        .route(
             "/workspaces/{id}/build-loop-status",
             get(workspaces::build_loop_status),
         )

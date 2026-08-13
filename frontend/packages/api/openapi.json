@@ -8179,6 +8179,86 @@
         }
       }
     },
+    "/api/v1/workspaces/{id}/build-loop-settings": {
+      "get": {
+        "tags": [
+          "crate::routes::workspaces"
+        ],
+        "summary": "`GET /api/v1/workspaces/{id}/build-loop-settings` — the per-workspace build\nloop switch (MAIN-385 AC-8): is the control plane firing runs for this repo\nby itself, where are they pinned, how many at once, and who said so.",
+        "operationId": "get_build_loop_settings",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BuildLoopSettings"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "crate::routes::workspaces"
+        ],
+        "summary": "`PUT /api/v1/workspaces/{id}/build-loop-settings` — turn the loop on or\noff, pin or unpin a node, set the concurrency (MAIN-385 AC-8).",
+        "description": "Every field is optional and an absent one leaves that setting alone, so\n`{\"enabled\": true}` is a complete request. Turning it ON records the CALLER\nas the identity auto-fired runs are requested by (AC-2) — which is why a\nnode credential is refused here: a job requested by a machine resolves to\nno person, and no node would ever be eligible for it.",
+        "operationId": "set_build_loop_settings",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetBuildLoopSettingsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BuildLoopSettings"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/workspaces/{id}/build-loop-status": {
       "get": {
         "tags": [
@@ -10097,6 +10177,54 @@
               "null"
             ],
             "format": "int32"
+          }
+        }
+      },
+      "BuildLoopSettings": {
+        "type": "object",
+        "description": "The per-workspace build-loop switch (MAIN-385 AC-8): whether the control\nplane fires build runs for this repo by itself, where they are pinned, how\nmany at once, and who said so.\n\nSeparate from `BuildLoopDeclaration`, which is the ceiling alone and is what\n`nook builds scale` has always written. `concurrency` appears in both\nbecause it IS the same column — reported here so one read answers \"what is\nthis repo's build loop doing\", written by either.",
+        "required": [
+          "enabled",
+          "concurrency"
+        ],
+        "properties": {
+          "concurrency": {
+            "type": "integer",
+            "format": "int32",
+            "description": "`build_max_replicas` resolved the way `converge_builds` reads it:\nunset is one, and 0 is this repo's kill switch.",
+            "minimum": 0
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "enabled_by": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/UserId",
+                "description": "The user auto-fired runs are requested by. `None` only on a workspace\nnobody has ever enabled."
+              }
+            ]
+          },
+          "node_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NodeId",
+                "description": "The pinned node, if any. `None` is placement over the enabler's own\neligible nodes, which is the ordinary case."
+              }
+            ]
+          },
+          "node_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The pin's name, so a caller can print it without a second lookup.\n`None` when nothing is pinned, or when the pinned node is gone."
           }
         }
       },
@@ -16445,6 +16573,33 @@
           }
         }
       },
+      "SetBuildLoopSettingsRequest": {
+        "type": "object",
+        "description": "`PUT /api/v1/workspaces/{id}/build-loop-settings` (MAIN-385 AC-8). Every\nfield is optional and an ABSENT one leaves that setting alone — a caller\nturning the loop on must not have to restate a pin it does not care about.\n\n`node` and `concurrency` are three-state on purpose: absent leaves the\nsetting, `null` clears it (unpin / back to the default ceiling), and a\nvalue sets it. That is `double_option`'s whole job — a plain\n`Option<T>` applies a JSON `null` to the option itself, so \"clear it\" and\n\"leave it alone\" would arrive identical and `--node none` would silently\ndo nothing.",
+        "properties": {
+          "concurrency": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The ceiling on in-flight build runs; `null` returns it to unset, which\nis the default of one."
+          },
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "node": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A node id or name; `null` unpins."
+          }
+        }
+      },
       "SetFeedbackTargetRequest": {
         "type": "object",
         "description": "Point feedback at a repo and a branch. Separate from submitting, so the\ntarget can be changed at any time rather than only on the first send.",
@@ -19028,13 +19183,39 @@
           "updated_at"
         ],
         "properties": {
+          "build_loop_enabled": {
+            "type": "boolean",
+            "description": "Does the control plane fire build runs for this repo by itself\n(MAIN-385)? Off for every workspace including on upgrade (NG-4) — a\nhuman enables a repo, and until they do the loop reads nothing here."
+          },
+          "build_loop_enabled_by": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/UserId",
+                "description": "Who turned the switch on — the identity an auto-fired job is requested\nby (MAIN-385 AC-2), which is what makes it placeable: node ownership\nkeys on the requester's person, so this decides which machines are\ncandidates at all."
+              }
+            ]
+          },
+          "build_loop_node_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NodeId",
+                "description": "The node auto-fired runs are PINNED to, if the enabler named one\n(MAIN-385 AC-4). A pin never fails over: a job waits queued while its\nnode is dark rather than starting somewhere else."
+              }
+            ]
+          },
           "build_max_replicas": {
             "type": [
               "integer",
               "null"
             ],
             "format": "int32",
-            "description": "The ceiling on this repo's build runs (MAIN-461) — same three states as\n`review_loop_max_replicas`: unset = default 1, 0 = off, n = at most n."
+            "description": "The ceiling on this repo's build runs (MAIN-461) — same three states as\n`review_loop_max_replicas`: unset = default 1, 0 = off, n = at most n.\nAlso the build loop's CONCURRENCY (MAIN-385 AC-1): how many of this\nrepo's cards the sweep may have in flight at once."
           },
           "created_at": {
             "type": "string",
