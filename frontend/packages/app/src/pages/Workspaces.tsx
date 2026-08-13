@@ -5,6 +5,7 @@ import { Eye, EyeOff, FolderGit2, Lock, Plus, Sparkles, Trash2 } from "lucide-re
 import { api, type WorkspaceDetail as WsDetail } from "@nookos/api";
 import { Empty, PagedPanel, Panel, Pill, RowAction, RowActions, StatusDot, statusTone, type DataColumn } from "@nookos/ui";
 import { ActivityFeed } from "./Activity";
+import { BuildLoopPanel } from "../BuildLoopPanel";
 import { NotesPanel } from "./Notes";
 import { createSpecDraft } from "../newspec";
 import { useNewWork } from "../newwork";
@@ -740,6 +741,19 @@ export function WorkspaceDetail() {
         "card", "ticket", "transcript", "verdict", "outcome", "agent",
       ],
       render: () => (id ? <WorkspaceRuns workspaceId={id} workspaceName={ws.name} /> : null),
+    },
+    {
+      // Beside Sessions and Ports on purpose (AC-1): all three answer "what
+      // runs in this repo, and where" — this is the one that runs without
+      // anybody asking.
+      id: "build-loop",
+      title: "Build loop",
+      group: "Work",
+      keywords: [
+        "build", "loop", "switch", "auto", "automatic", "pin", "node",
+        "concurrency", "agent-ready", "queued", "backoff", "escalated",
+      ],
+      render: () => (id ? <BuildLoopPanel workspaceId={id} /> : null),
     },
     {
       id: "policy",
