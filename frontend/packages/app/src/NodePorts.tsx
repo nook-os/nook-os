@@ -1,8 +1,9 @@
 // A machine's port range and who is holding what (MAIN-301 AC-5/AC-6).
 //
 // Two worktrees of one app used to fight over a hardcoded port, so only one
-// could run. Sessions lease ports from this range instead, one per listener the
-// WORKSPACE declared, each delivered as the env var that workspace named. This
+// could run. Sessions — and a card's build stack (MAIN-552) — lease ports from
+// this range instead, one per listener the WORKSPACE declared, each delivered as
+// the env var that workspace named. This
 // surface exists because the moment a human needs it — a range that is wrong
 // for the machine, a lease that looks stuck — they need to see and change it
 // without editing a config file on a box they may not have a shell on.
@@ -105,13 +106,13 @@ export function NodePorts({
     refresh();
   };
 
-  // No confirmation: releasing is not destructive — the session keeps running
-  // and the port is immediately re-leasable. A dialog here would be ceremony
-  // in front of the one action a stuck lease needs.
-  const release = async (sessionId: string) => {
+  // No confirmation: releasing is not destructive — the session (or the build's
+  // stack) keeps running and the port is immediately re-leasable. A dialog here
+  // would be ceremony in front of the one action a stuck lease needs.
+  const release = async (holderId: string) => {
     setBusy(true);
-    await api.DELETE("/api/v1/nodes/{id}/leases/{session}", {
-      params: { path: { id: nodeId, session: sessionId } },
+    await api.DELETE("/api/v1/nodes/{id}/leases/{holder}", {
+      params: { path: { id: nodeId, holder: holderId } },
     });
     setBusy(false);
     refresh();
@@ -263,11 +264,11 @@ export function NodePorts({
             leases · {leases.length}
           </div>
           {leases.length === 0 && <span className="faint small">none held</span>}
-          {/* Keyed on session AND port: one session holds one lease per declared
-              listener now, so the session id alone is no longer unique here. */}
+          {/* Keyed on holder AND port: one holder takes one lease per declared
+              listener, so the holder id alone is no longer unique here. */}
           {leases.map((l) => (
             <div
-              key={`${l.session_id}:${l.port}`}
+              key={`${l.holder_id}:${l.port}`}
               style={{ display: "flex", gap: 8, alignItems: "center", padding: "2px 0" }}
             >
               <span className="mono">{l.port}</span>
@@ -276,16 +277,19 @@ export function NodePorts({
               <Pill>{l.name}</Pill>
               <span className="mono faint small">{l.env}</span>
               <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>
-                {l.session_name}
+                {l.holder_name}
               </span>
+              {/* A session's status, or the word `build` — a build's stack
+                  holds ports too (MAIN-552) and has no session lifecycle of its
+                  own, so this column says which kind of holder it is. */}
               <span className="faint small">{l.status}</span>
               {canEdit && (
                 <button
                   className="btn small"
                   disabled={busy}
-                  title="hand this session's ports back without ending it"
+                  title="hand these ports back without stopping what holds them"
                   aria-label={`release ${l.port}`}
-                  onClick={() => release(l.session_id)}
+                  onClick={() => release(l.holder_id)}
                 >
                   release
                 </button>

@@ -393,6 +393,22 @@ pub async fn prune_worktree(
         }
     };
 
+    // The tree is gone (or is about to be, on a node's next report), so its
+    // stack is over and the ports it bound come back (MAIN-552 AC-3). Released
+    // even when the node was unreachable, for the same reason the record is
+    // cleared: a machine that is down must not hold a port hostage on a card
+    // nobody can prune any other way.
+    if let Err(e) = state
+        .sessions
+        .release_leases_by_holder(node_id, task_id.0)
+        .await
+    {
+        tracing::warn!(
+            task = %task_id.0, node = %node_id.0, error = %e,
+            "the card's worktree was pruned but its port leases would not release"
+        );
+    }
+
     let updated = state.tasks.clear_worktree(task_id).await?;
 
     events::record(

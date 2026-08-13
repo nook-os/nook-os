@@ -817,6 +817,26 @@ pub enum ControlToNode {
         /// `NOOK_JOB_SEED` and typed alongside the skill command.
         #[serde(default)]
         seed: Option<String>,
+        /// The ports this run's workspace declared, leased from the node's
+        /// range (MAIN-552), each exported into the run's environment as the
+        /// variable that workspace named.
+        ///
+        /// Without these a build's `docker compose up` took
+        /// `docker-compose.yml`'s `${VAR:-default}` fallbacks and collided with
+        /// every other stack on the machine — including the human sessions that
+        /// have leased since MAIN-301. Empty when the node advertises no range
+        /// or the workspace declares nothing for this runtime, which is a
+        /// working run without ports rather than a failure.
+        #[serde(default)]
+        ports: Vec<nook_types::LeasedPort>,
+        /// Declared listeners that went unleased, in declaration order — only
+        /// ever OPTIONAL ones, since a required one keeps the job queued
+        /// instead. Exported as `NOOK_PORTS_UNSATISFIED`, the same name and the
+        /// same reason as a session's (MAIN-377): an absent variable otherwise
+        /// reads as "cloned outside nook, use your default", which is the
+        /// shared literal everything else also falls back to.
+        #[serde(default)]
+        unsatisfied_ports: Vec<String>,
     },
     /// An unsolicited steering message from a human to a running loop job
     /// (MAIN-231). Pushed to the executor, which types it into the job's live

@@ -893,13 +893,24 @@ pub struct LeasedPort {
     pub port: i32,
 }
 
-/// One held port: which session has it, which requirement it satisfies, and
-/// enough about that session for a human to decide whether releasing it is
-/// safe.
+/// One held port: who has it, which requirement it satisfies, and enough about
+/// the holder for a human to decide whether releasing it is safe.
+///
+/// The holder is a session OR a card's build stack (MAIN-552), so it is
+/// described rather than typed: a caller reading this list wants to render it
+/// and to hand one back, and neither needs to know which kind it is. `holder_id`
+/// is what the release route takes, whichever it names.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PortLease {
-    pub session_id: SessionId,
-    pub session_name: String,
+    /// The session id, or the card id of the build worktree whose stack holds
+    /// it. What `DELETE /nodes/{id}/leases/{holder}` takes.
+    pub holder_id: Uuid,
+    /// `session` | `build`.
+    pub holder_kind: String,
+    /// The session's name, or the card's key.
+    pub holder_name: String,
+    /// The session's status, or `build` — a build's lease has no lifecycle of
+    /// its own beyond the stack it belongs to.
     pub status: String,
     /// The requirement's name and env var — so the UI can say *which* listener
     /// holds the port rather than just that something does.
@@ -3711,6 +3722,17 @@ pub enum QueuedReason {
     NoRoleLabel {
         /// The selector key that matched nothing, e.g. `role/build`.
         label: String,
+    },
+    /// A build's workspace declares a REQUIRED listener and the chosen node
+    /// could not lease it (MAIN-552). The run waits rather than starting on
+    /// compose's `${VAR:-default}` fallbacks and colliding with whatever else
+    /// on that machine took the same literal.
+    PortsUnavailable {
+        /// The listener that went unsatisfied, and the variable it would have
+        /// arrived as — which is what makes the wait actionable: widen the
+        /// node's range, or free a lease on the Nodes page.
+        listener: String,
+        env: String,
     },
     /// The chosen node refused this kind at the claim (MAIN-142): a shared
     /// operator asked to build, or a node that does not declare the kind.

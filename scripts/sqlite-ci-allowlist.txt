@@ -39,8 +39,13 @@
 # Measured on two full runs of `cargo test --workspace --no-fail-fast` under
 # sqlite://, which produced identical failure sets — nothing here is flaky.
 #
-# 153 test binaries: 132 COVERED, 20 pending below, 1 deliberately Postgres-only —
+# 163 test binaries: 141 COVERED, 21 pending below, 1 deliberately Postgres-only —
 # the numbers check-sqlite-ci.sh itself reports, not arithmetic on this file.
+# (Read off the leg's own verdict by MAIN-552, which added
+# `build_port_leases_placement`. It said 153/132/20 before, and arithmetic on
+# that line would have given 154/132/21 — wrong on both totals again, because
+# nine binaries had become COVERED since it was last measured and nothing said
+# so. Do not add one to what is here; run the gate and copy its sentence.)
 # (Re-read from a real run by MAIN-478, which re-diagnosed every pending line
 # and deleted none: nothing here passes yet. It said 147/126/20 before.)
 # (Re-read from a real run by MAIN-509, which added `dispatch_order`. It said
@@ -128,6 +133,22 @@ task_checkout_ids          # MEASURED (MAIN-478): `no such function: now` — th
 # the endpoint keeping a private copy of placement's rule to stay engine-clean.
 # It is deleted with the two above, by the same fix, in one edit.
 workspace_build_loop_status # `no such column: e`, with executor_selection (MAIN-268)
+
+# A FOURTH line for the same one query, added by MAIN-552 and measured the same
+# way. A build now leases the ports its stack binds, and the gate that decides a
+# build WAITS rather than fails when a required listener has no port lives in
+# `select_executor` — so testing it means asking `eligible_loop_executors`, and
+# inheriting its break. All 4 tests, 2026-08-13:
+#
+#   Db(Query(Database(SqliteError { code: 1, message: "no such column: e" })))
+#
+# The card's OWN sql — the widened `session_port_leases`, its two conflict
+# targets, the holder-scoped reads and deletes, the reclaim's blindness to a
+# build — is in `build_port_leases`, which is COVERED and passes on both
+# engines. Only the placement half is here, which is why it is a separate
+# binary rather than one suite excused whole. Deleted with the three above, by
+# the same fix, in one edit.
+build_port_leases_placement # `no such column: e`, with executor_selection (MAIN-546)
 
 # ── the MAIN-423 residue, and what MEASURING it found (MAIN-472) ──
 #

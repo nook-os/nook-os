@@ -628,19 +628,25 @@ pub async fn set_capacity(
     Ok(Json(crate::services::loop_capacity::of(&node)))
 }
 
-/// `DELETE /api/v1/nodes/{id}/leases/{session}` — hand a port back without
-/// ending its session (AC-6).
+/// `DELETE /api/v1/nodes/{id}/leases/{holder}` — hand a port back without
+/// ending what holds it (AC-6).
 ///
-/// The escape hatch, not the mechanism: a lease normally frees itself when its
-/// session stops being live. This is for the one a human can see is stuck.
-#[utoipa::path(delete, path = "/api/v1/nodes/{id}/leases/{session}",
+/// The escape hatch, not the mechanism: a session's lease normally frees itself
+/// when the session stops being live, and a build's when its stack comes down
+/// (MAIN-552). This is for the one a human can see is stuck.
+///
+/// The holder is a session id OR a card id, and this deliberately does not ask
+/// which: both are what `PortLease::holder_id` reported, both are uuids, and a
+/// caller that has to classify a lease before releasing it is a caller that can
+/// get it wrong.
+#[utoipa::path(delete, path = "/api/v1/nodes/{id}/leases/{holder}",
     operation_id = "release_node_lease",
-    params(("id" = String, Path,), ("session" = String, Path,)),
+    params(("id" = String, Path,), ("holder" = String, Path,)),
     responses((status = 200, body = NodePorts), (status = 403), (status = 404)))]
 pub async fn release_lease(
     State(state): State<AppState>,
     auth: AuthCtx,
-    Path((id, session)): Path<(NodeId, SessionId)>,
+    Path((id, holder)): Path<(NodeId, uuid::Uuid)>,
 ) -> ApiResult<Json<NodePorts>> {
     auth.require_user()?;
     let node = visible_node(&state, &auth, id).await?;
@@ -648,10 +654,13 @@ pub async fn release_lease(
 
     // Bound to the node in the PATH, not merely to the tenant (MAIN-301
     // review). The caller was authorized as THIS machine's owner; scoping the
-    // delete by session id alone let that owner free a port held on somebody
+    // delete by holder id alone let that owner free a port held on somebody
     // else's machine in the same tenant — a cross-owner collision, granted by
     // an authorization check that had passed for a different node.
-    state.sessions.release_leases(node.id, session).await?;
+    state
+        .sessions
+        .release_leases_by_holder(node.id, holder)
+        .await?;
     Ok(Json(ports_of(&state, &node).await?))
 }
 
