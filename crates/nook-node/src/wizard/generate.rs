@@ -47,6 +47,11 @@ pub struct ServerAnswers {
     /// AC-6). `None` is both the default and a fully working deployment — chat
     /// just has no GIF button — so nothing here nags about it being unset.
     pub giphy_key: Option<String>,
+    /// The zone tunnels are served under, e.g. `tunnels.example.com`
+    /// (MAIN-511). `None` is the norm and the default: a tunnel host needs a
+    /// wildcard DNS record and a wildcard certificate, and this generator can
+    /// create neither — so it is asked for, never inferred from `public_url`.
+    pub tunnel_domain: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +83,43 @@ impl ServerAnswers {
     pub fn agent_host(&self) -> String {
         Self::host_of(&self.agent_url)
     }
+
+    /// The tunnel zone, normalised exactly the way the control plane
+    /// normalises `TUNNEL_DOMAIN` (`nook_infra::config`): trimmed, undotted at
+    /// both ends, lowercase. Same normalisation on both sides is what lets the
+    /// router and the surface agree on which hosts are tunnels; a blank answer
+    /// is `None`, not an empty zone, because an empty one would generate a rule
+    /// matching every single-label host on the internet.
+    pub fn tunnel_zone(&self) -> Option<String> {
+        self.tunnel_domain
+            .as_deref()
+            .map(|d| d.trim().trim_matches('.').to_ascii_lowercase())
+            .filter(|d| !d.is_empty())
+    }
+}
+
+/// The regular expression matching exactly one label beneath `zone`.
+///
+/// `HostRegexp`, because Traefik has no wildcard `Host()`. One label, with no
+/// dot in the character class, is what keeps the apex out (MAIN-511 AC-4):
+/// `zone` itself has nothing in front of it and cannot match, so the generated
+/// web and API routers keep answering for it. `[a-z0-9-]` is the whole
+/// alphabet a tunnel label can be built from (`nook_proto::tunnel::slug_label`).
+fn tunnel_host_regexp(zone: &str) -> String {
+    format!(r"^[a-z0-9-]+\.{}$", zone.replace('.', r"\."))
+}
+
+/// A value as it must be WRITTEN into the compose file, because two readers get
+/// to it before Traefik does.
+///
+/// YAML halves a backslash inside a double-quoted scalar, so a lone `\.` would
+/// arrive as `.` — matching any character and widening the rule past the zone
+/// it names. Compose then interpolates `$`: v2 leaves a stray one alone, but
+/// v1 — which this wizard still offers to drive — refuses the whole file with
+/// "Invalid interpolation format", so the end anchor is written as compose's
+/// `$$` escape and reaches Traefik as one `$`.
+fn compose_escape(value: &str) -> String {
+    value.replace('\\', r"\\").replace('$', "$$")
 }
 
 /// The `.env` the control plane reads. Written 0600 by the caller.
@@ -175,6 +217,10 @@ pub fn env_file(a: &ServerAnswers) -> String {
 /// `docker-compose.yml`.
 pub fn compose_file(a: &ServerAnswers) -> String {
     let traefik = a.deployment == Deployment::ComposeTraefik;
+    // Traefik only (MAIN-511 NG-1): the other compose mode publishes ports and
+    // has nothing routing by host, so a `TUNNEL_DOMAIN` there would advertise
+    // a surface no request could ever arrive at.
+    let tunnel_zone = if traefik { a.tunnel_zone() } else { None };
     let v = &a.version;
     let mut s = String::new();
 
@@ -205,6 +251,13 @@ pub fn compose_file(a: &ServerAnswers) -> String {
         "  control-plane:\n    image: ghcr.io/nook-os/nook-control:{v}"
     );
     s.push_str("    restart: unless-stopped\n    env_file: .env\n");
+    if let Some(zone) = &tunnel_zone {
+        s.push_str("    environment:\n");
+        s.push_str("      # Beside the router below, so the two cannot name different zones:\n");
+        s.push_str("      # the router decides which hosts arrive, this decides which the\n");
+        s.push_str("      # control plane treats as tunnels.\n");
+        let _ = writeln!(s, "      TUNNEL_DOMAIN: {zone}");
+    }
     s.push_str(
         "    volumes:\n      # The agent listener's certificate. Nodes pin its fingerprint.\n",
     );
@@ -237,6 +290,37 @@ pub fn compose_file(a: &ServerAnswers) -> String {
         s.push_str("      - \"traefik.tcp.routers.nook-agent.entrypoints=websecure\"\n");
         s.push_str("      - \"traefik.tcp.routers.nook-agent.tls.passthrough=true\"\n");
         s.push_str("      - \"traefik.tcp.services.nook-agent.loadbalancer.server.port=8081\"\n");
+        if let Some(zone) = &tunnel_zone {
+            s.push_str("      # Tunnels (MAIN-511). Every path of every host one label beneath\n");
+            s.push_str("      # the zone, to the control plane — deliberately NOT to `web`,\n");
+            s.push_str("      # whose SPA fallback would answer a tunnel host with the\n");
+            s.push_str("      # application instead of NookOS's own \"no such tunnel\" page.\n");
+            let _ = writeln!(
+                s,
+                "      - \"traefik.http.routers.nook-tunnels.rule=HostRegexp(`{}`)\"",
+                compose_escape(&tunnel_host_regexp(zone))
+            );
+            s.push_str("      - \"traefik.http.routers.nook-tunnels.entrypoints=websecure\"\n");
+            s.push_str("      # The apex router's service, reused rather than declared again:\n");
+            s.push_str("      # it already points at 8080, and a second HTTP service on this\n");
+            s.push_str("      # container would leave `nook-api`'s own router ambiguous.\n");
+            s.push_str("      - \"traefik.http.routers.nook-tunnels.service=nook-api\"\n");
+            s.push_str("      - \"traefik.http.routers.nook-tunnels.tls=true\"\n");
+            s.push_str("      # A wildcard certificate has to be ASKED for. Given only a rule,\n");
+            s.push_str("      # Traefik requests one per host — impossible for a name invented\n");
+            s.push_str("      # when a tunnel opens — and serves TRAEFIK DEFAULT CERT instead.\n");
+            s.push_str("      # A wildcard means DNS-01, so the entrypoint's resolver must be\n");
+            s.push_str("      # a DNS-01 one; HTTP-01 cannot answer for `*`.\n");
+            let _ = writeln!(
+                s,
+                "      - \"traefik.http.routers.nook-tunnels.tls.domains[0].main=*.{zone}\""
+            );
+            s.push_str("      # Below the apex routers (20 and 10). They cannot both match a\n");
+            s.push_str("      # request, so this decides nothing today — it is here so that if\n");
+            s.push_str("      # one ever does, precedence is a number somebody wrote rather\n");
+            s.push_str("      # than Traefik's rule-length default.\n");
+            s.push_str("      - \"traefik.http.routers.nook-tunnels.priority=5\"\n");
+        }
     } else {
         s.push_str("    ports:\n      - \"8080:8080\"\n      - \"8081:8081\"\n");
     }
@@ -485,7 +569,131 @@ mod tests {
             dev_auth: false,
             tenant_name: "acme".into(),
             giphy_key: None,
+            tunnel_domain: None,
         }
+    }
+
+    /// The generated file, byte for byte, as it read before tunnels existed
+    /// (MAIN-511 AC-6). Produced by the generator at the commit this branch
+    /// started from, so "unchanged" is a comparison rather than a claim.
+    const COMPOSE_TRAEFIK_BEFORE_TUNNELS: &str =
+        include_str!("testdata/compose-traefik.golden.yml");
+
+    /// No tunnel domain has to mean no diff at all — not a router with an empty
+    /// host, not `TUNNEL_DOMAIN=`, which the control plane would read as a zone
+    /// and which Traefik would parse as a rule matching nothing. Most
+    /// deployments will never set this, and none of them should be able to tell
+    /// the question was added.
+    #[test]
+    fn without_a_tunnel_domain_the_compose_file_is_unchanged() {
+        let mut a = answers(Deployment::ComposeTraefik);
+        assert_eq!(compose_file(&a), COMPOSE_TRAEFIK_BEFORE_TUNNELS);
+
+        // Blank and whitespace are how the prompt's "leave it empty" arrives.
+        for blank in ["", "   ", ".", " . "] {
+            a.tunnel_domain = Some(blank.into());
+            assert_eq!(
+                compose_file(&a),
+                COMPOSE_TRAEFIK_BEFORE_TUNNELS,
+                "{blank:?} is no zone"
+            );
+        }
+
+        let c = compose_file(&answers(Deployment::ComposeTraefik));
+        assert!(!c.contains("nook-tunnels"));
+        assert!(!c.contains("TUNNEL_DOMAIN"));
+    }
+
+    /// The router, the wildcard certificate and the surface's own zone, all
+    /// from the one answer (MAIN-511 AC-2/AC-3/AC-5).
+    #[test]
+    fn a_tunnel_domain_routes_the_wildcard_to_the_control_plane() {
+        let mut a = answers(Deployment::ComposeTraefik);
+        a.tunnel_domain = Some("Tunnels.Example.COM.".into());
+        let c = compose_file(&a);
+
+        assert!(
+            c.contains(
+                "traefik.http.routers.nook-tunnels.rule=HostRegexp(`^[a-z0-9-]+\\\\.tunnels\\\\.example\\\\.com$$`)"
+            ),
+            "{c}"
+        );
+        // 8080, by reusing the API router's service — the web service's SPA
+        // fallback would answer a tunnel host with the application.
+        assert!(c.contains("traefik.http.routers.nook-tunnels.service=nook-api"));
+        assert!(c.contains("traefik.http.services.nook-api.loadbalancer.server.port=8080"));
+        assert!(!c.contains("traefik.http.routers.nook-tunnels.service=nook-web"));
+
+        // A wildcard certificate is requested, not hoped for.
+        assert!(c.contains(
+            "traefik.http.routers.nook-tunnels.tls.domains[0].main=*.tunnels.example.com"
+        ));
+        assert!(c.contains("traefik.http.routers.nook-tunnels.tls=true"));
+
+        // And the surface is switched on with the same zone the router matches.
+        assert!(
+            c.contains("\n      TUNNEL_DOMAIN: tunnels.example.com\n"),
+            "{c}"
+        );
+
+        // Below the apex routers, so precedence is stated rather than inherited.
+        assert!(c.contains("traefik.http.routers.nook-tunnels.priority=5"));
+        assert!(c.contains("traefik.http.routers.nook-api.priority=20"));
+        assert!(c.contains("traefik.http.routers.nook-web.priority=10"));
+    }
+
+    /// AC-4, checked with a regex engine rather than by reading the pattern
+    /// twice. Traefik v3 compiles `HostRegexp` with Go's RE2, which agrees with
+    /// this crate on every construct the rule uses.
+    ///
+    /// The apex is the case that matters: if the tunnel rule matched it, the
+    /// whole application would be answered by the tunnel surface's "no such
+    /// tunnel" page.
+    #[test]
+    fn the_tunnel_rule_never_matches_the_apex() {
+        let re = regex::Regex::new(&tunnel_host_regexp("tunnels.example.com")).unwrap();
+
+        for label in ["web-main-3000", "api", "x", "a-2", &"n".repeat(63)] {
+            assert!(
+                re.is_match(&format!("{label}.tunnels.example.com")),
+                "{label} is a label NookOS can mint"
+            );
+        }
+
+        for host in [
+            "tunnels.example.com",              // the zone itself
+            "nook.example.com",                 // the apex
+            "example.com",                      // the parent
+            "web.tunnels.example.net",          // a different TLD
+            "web.tunnelsxexample.com",          // the dots are literal, not `.`
+            "evil.com/x.tunnels.example.com",   // not anchored at the front
+            "web.tunnels.example.com.evil.com", // nor at the back
+        ] {
+            assert!(!re.is_match(host), "{host} must not be a tunnel host");
+        }
+    }
+
+    /// The rule has to survive YAML and compose interpolation before it is a
+    /// regular expression: a halved backslash leaves `.` matching any
+    /// character, and a bare `$` is what Compose v1 rejects the whole file for.
+    #[test]
+    fn the_rule_is_escaped_for_the_file_it_is_written_into() {
+        assert_eq!(
+            compose_escape(&tunnel_host_regexp("tunnels.example.com")),
+            r"^[a-z0-9-]+\\.tunnels\\.example\\.com$$"
+        );
+    }
+
+    /// NG-1: only the mode with a proxy in front of it. Emitting `TUNNEL_DOMAIN`
+    /// where nothing routes by host would advertise a URL that resolves to a
+    /// deployment unable to answer it.
+    #[test]
+    fn tunnels_reach_only_the_traefik_mode() {
+        let mut a = answers(Deployment::Compose);
+        a.tunnel_domain = Some("tunnels.example.com".into());
+        let c = compose_file(&a);
+        assert!(!c.contains("TUNNEL_DOMAIN"), "{c}");
+        assert!(!c.contains("nook-tunnels"), "{c}");
     }
 
     /// MAIN-171 AC-6/NG-3: Giphy is offered, never required. Skipping it must

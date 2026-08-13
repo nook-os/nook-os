@@ -140,6 +140,24 @@ pub fn init(opts: InitOptions) -> Result<()> {
         .trim_end_matches('/')
         .to_string();
 
+    // ---- tunnels (MAIN-511)
+    //
+    // Only under Traefik, which is the one generated mode with something that
+    // can route by host. Blank is the expected answer: a router is all this can
+    // contribute, and the wildcard DNS record and certificate it needs are the
+    // operator's to create (AC-1, NG-3).
+    let tunnel_domain = if deployment == Deployment::ComposeTraefik {
+        t.say("");
+        t.say("Tunnels publish a port from one of your machines at <label>.<zone>.");
+        t.say("Leave this blank unless you have a zone to give them: it needs a");
+        t.say("wildcard DNS record and a wildcard certificate, and neither can be");
+        t.say("created from here. Give it a zone of its own, beside the public URL");
+        t.say("rather than above it.");
+        t.optional("Tunnel domain, e.g. tunnels.example.com (blank for none)")?
+    } else {
+        None
+    };
+
     // ---- database
     let (postgres_password, database_url) = match deployment {
         Deployment::Compose | Deployment::ComposeTraefik => (Some(secret()), None),
@@ -224,6 +242,7 @@ pub fn init(opts: InitOptions) -> Result<()> {
         dev_auth,
         tenant_name,
         giphy_key,
+        tunnel_domain,
     };
 
     // ---- write
@@ -312,6 +331,24 @@ pub fn init(opts: InitOptions) -> Result<()> {
         ));
         t.say("  the generated router passes the stream through untouched, and anything");
         t.say("  that opens it breaks node authentication.");
+    }
+    // The two prerequisites the generated router assumes and cannot create
+    // (MAIN-511 AC-7). Said here rather than left to be discovered from a
+    // tunnel URL that resolves nowhere.
+    if let Some(zone) = answers.tunnel_zone() {
+        t.say("");
+        t.say(&format!(
+            "  Tunnels are routed to *.{zone}. Two things are yours to add:"
+        ));
+        t.say(&format!(
+            "    · a wildcard DNS record, *.{zone}, pointing at this host"
+        ));
+        t.say(&format!(
+            "    · a certificate for *.{zone} — the router asks Traefik for it, so"
+        ));
+        t.say("      that entrypoint's resolver must be a DNS-01 one. DNS-01 proves the");
+        t.say("      zone, not each host, so the certificate can be issued before the");
+        t.say("      wildcard record exists — but no tunnel resolves until it does.");
     }
     t.say("");
     t.say(&format!(

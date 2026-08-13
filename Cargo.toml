@@ -104,6 +104,9 @@ rand = "0.9"
 dotenvy = "0.15"
 toml = "0.8"
 walkdir = "2"
+# Test-only so far: the installer asserts its generated Traefik rule against a
+# real engine rather than a second reading of the same pattern (MAIN-511).
+regex = "1"
 cookie = { version = "0.18", features = ["key-expansion"] }
 # Outbound SMTP. rustls, not native-tls, to match the rest of the tree (no
 # OpenSSL). Async through tokio; builder for composing the message; no pooling
