@@ -36,6 +36,8 @@ ARG COPILOT_VERSION=1.0.75
 # HERMES_REF is the single pin lever. Pinned to an immutable release TAG — never
 # a movable ref like `stable`/`main` — so the shipped build is reproducible
 # (NousResearch/hermes-agent releases). Override to bump.
+# Currently UNUSED — hermes is not installed (see below). Kept so restoring it
+# is a one-line change rather than an archaeology exercise.
 ARG HERMES_REF=v2026.7.20
 
 # Base tools: the node image's set (ca-certificates, curl, git, tmux, bash,
@@ -57,36 +59,35 @@ RUN npm install -g \
       "@openai/codex@${CODEX_VERSION}" \
       "@github/copilot@${COPILOT_VERSION}" \
     && npm cache clean --force
-# Hermes is installed BEST-EFFORT, and that is deliberate. It is a third-party
-# install script that runs its own `npm install`, and when that timed out on
-# 2026-08-13 it failed the operator-node image and with it the whole v0.6.9
-# RELEASE — an optional agent runtime taking the release down with it.
+# HERMES IS NOT INSTALLED, and that is a decision rather than an omission.
 #
-# Absence is already a state this system models correctly:
-# `capabilities::detect_runtimes` (crates/nook-node/src/capabilities.rs:59)
-# probes the PATH and advertises only the runtimes actually present, so a node
-# without hermes simply never offers it and the picker never shows it. Given
-# that, failing the build is the wrong response to somebody else's bad minute.
+# Its installer is a third-party script that resolves a `uv.lock` and then runs
+# `npm install`. As of 2026-08-13 that lockfile is stale upstream:
 #
-# Three attempts, because the observed failure was a timeout rather than a
-# refusal. If it still does not land the build continues and the image ships
-# without hermes — visible in `nook get nodes` under capabilities.runtimes,
-# which is where you would look anyway.
-RUN for attempt in 1 2 3; do \
-      echo "hermes install: attempt $attempt/3"; \
-      if curl -fsSL --max-time 300 https://hermes-agent.nousresearch.com/install.sh \
-           | HERMES_REF="${HERMES_REF}" bash; then \
-        break; \
-      fi; \
-      echo "hermes install: attempt $attempt failed"; \
-      sleep 15; \
-    done; \
-    if command -v hermes >/dev/null 2>&1; then \
-      echo "hermes: installed"; \
-    else \
-      echo "WARNING: hermes did not install; this image ships without that runtime."; \
-      echo "         The node will not advertise it, which is a supported state."; \
-    fi
+#   error: The lockfile at `uv.lock` needs to be updated, but `--locked` was provided
+#   ⚠ uv.lock sync failed, falling back to PyPI resolve...
+#   ✗ npm install failed or timed out
+#
+# It failed FOUR consecutive release builds — v0.6.9 twice and v0.6.10 twice,
+# including once with three retries and a 300s cap per attempt — so it is broken
+# upstream, not flaky. An optional agent runtime was blocking every release of
+# everything else.
+#
+# Best-effort installation was tried and REVERTED, because it contradicted the
+# invariant below: this image deliberately refuses to ship a silently-degraded
+# node, and an image whose contents depend on whether a third party was up that
+# minute is exactly that. Determinism is the property worth keeping.
+#
+# Nothing else has to change for this to be safe. `capabilities::detect_runtimes`
+# (crates/nook-node/src/capabilities.rs:59) probes the PATH and advertises only
+# the runtimes actually present, so this node simply never offers hermes and the
+# picker never shows it. `hermes` stays in KNOWN_RUNTIMES — a machine that has it
+# installed by other means still works.
+#
+# TO RESTORE: put `hermes` back in the PATH check below, and reinstate
+#   RUN curl -fsSL https://hermes-agent.nousresearch.com/install.sh \
+#         | HERMES_REF="${HERMES_REF}" bash
+# once upstream's installer resolves again.
 
 # `gh`. The review loop IS a `gh` client: `nook-review` opens by requiring
 # `gh auth status` to pass and then drives `gh pr list/view/checks`. Without the
@@ -126,7 +127,7 @@ RUN chmod +x /usr/local/bin/node-entrypoint.sh
 # The whole point of this image is that the toolchain is present. Fail the build
 # — loudly, at build time — if any expected binary is missing from PATH, so a
 # renamed package or a failed installer never ships as a silently-degraded node.
-RUN set -eux; for bin in git tmux ssh gh claude hermes copilot codex nook; do \
+RUN set -eux; for bin in git tmux ssh gh claude copilot codex nook; do \
       command -v "$bin" >/dev/null || { echo "FATAL: '$bin' not on PATH"; exit 1; }; \
     done
 
