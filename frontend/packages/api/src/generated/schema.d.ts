@@ -3564,6 +3564,13 @@ export interface paths {
          *     tenant's verdicts post as one identity and the control plane holds a
          *     credential with reach into every tenant's forge. The workspace token
          *     OUTRANKS the fleet variable everywhere a forge is spoken to.
+         *
+         *     **The token is exercised before it is sealed (MAIN-469).** A token that
+         *     cannot authenticate, cannot see the repository, or cannot perform the writes
+         *     verdict delivery performs is refused with a 400 naming what is missing —
+         *     because both under-configurations otherwise fail late and silently: a dead
+         *     token makes the demand poll read as "no PRs", and a read-only one runs a
+         *     whole review before dying at `POST issues/comments`.
          */
         put: operations["set_workspace_gh_token"];
         post?: never;
@@ -5425,6 +5432,24 @@ export interface components {
             workspace_id?: null | components["schemas"]["WorkspaceId"];
             workspace_name?: string | null;
         };
+        /**
+         * @description Why a workspace's forge poll last failed (MAIN-469).
+         *
+         *     The two are reported apart because only one of them is anybody's to fix. A
+         *     rejected credential is a silence nothing recovers from — the poll fails, the
+         *     count reads as "no PRs", and the loop is indistinguishable from a quiet repo
+         *     until somebody re-issues the token. Everything else is GitHub having a bad
+         *     minute, which the last-known count already carries the loop through.
+         */
+        ForgeTrouble: {
+            detail: string;
+            /** @enum {string} */
+            kind: "credential_rejected";
+        } | {
+            detail: string;
+            /** @enum {string} */
+            kind: "unreachable";
+        };
         /** @description Commit everything in a checkout, from the git panel. */
         GitCommitRequest: {
             message: string;
@@ -7126,6 +7151,7 @@ export interface components {
              * @description How many nodes match the selector and tolerate the taints.
              */
             eligible: number;
+            forge_trouble?: null | components["schemas"]["ForgeTrouble"];
             /**
              * @description `loops.enabled` for the tenant. The review loop is agent work, so it
              *     answers to this as well.

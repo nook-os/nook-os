@@ -8385,7 +8385,7 @@
           "crate::routes::workspaces"
         ],
         "summary": "`PUT /api/v1/workspaces/{id}/gh-token` — set or clear the workspace's own\nforge token (MAIN-456). Sealed with the same vault the git credentials use.",
-        "description": "Multi-tenant is the reason this exists: one fleet-wide token means every\ntenant's verdicts post as one identity and the control plane holds a\ncredential with reach into every tenant's forge. The workspace token\nOUTRANKS the fleet variable everywhere a forge is spoken to.",
+        "description": "Multi-tenant is the reason this exists: one fleet-wide token means every\ntenant's verdicts post as one identity and the control plane holds a\ncredential with reach into every tenant's forge. The workspace token\nOUTRANKS the fleet variable everywhere a forge is spoken to.\n\n**The token is exercised before it is sealed (MAIN-469).** A token that\ncannot authenticate, cannot see the repository, or cannot perform the writes\nverdict delivery performs is refused with a 400 naming what is missing —\nbecause both under-configurations otherwise fail late and silently: a dead\ntoken makes the demand poll read as \"no PRs\", and a read-only one runs a\nwhole review before dying at `POST issues/comments`.",
         "operationId": "set_workspace_gh_token",
         "parameters": [
           {
@@ -12373,6 +12373,49 @@
           }
         }
       },
+      "ForgeTrouble": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "GitHub refused the token: 401, or a 403 that is not a rate limit.",
+            "required": [
+              "detail",
+              "kind"
+            ],
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "credential_rejected"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Asked, and not answered — a timeout, a 5xx, a spent rate limit.",
+            "required": [
+              "detail",
+              "kind"
+            ],
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "unreachable"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Why a workspace's forge poll last failed (MAIN-469).\n\nThe two are reported apart because only one of them is anybody's to fix. A\nrejected credential is a silence nothing recovers from — the poll fails, the\ncount reads as \"no PRs\", and the loop is indistinguishable from a quiet repo\nuntil somebody re-issues the token. Everything else is GitHub having a bad\nminute, which the last-known count already carries the loop through."
+      },
       "GitCommitRequest": {
         "type": "object",
         "description": "Commit everything in a checkout, from the git panel.",
@@ -15813,6 +15856,17 @@
             "format": "int32",
             "description": "How many nodes match the selector and tolerate the taints.",
             "minimum": 0
+          },
+          "forge_trouble": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ForgeTrouble",
+                "description": "What the forge poll last said, when what it said was a failure\n(MAIN-469). `None` is the healthy case AND the no-forge one: a\nworkspace with no GitHub remote never polls, and has nothing to report."
+              }
+            ]
           },
           "loops_enabled": {
             "type": "boolean",

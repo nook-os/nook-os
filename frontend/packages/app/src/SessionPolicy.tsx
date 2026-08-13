@@ -689,6 +689,30 @@ export function reviewLoopSummary(max: number | null): {
 
 type ReviewStatus = Schemas["ReviewLoopStatus"];
 
+/** What the forge poll last said, when it failed (MAIN-469).
+ *
+ *  A rejected credential renders as a WARNING rather than as detail, because it
+ *  is the failure that looks like success: the poll fails, the count reads as
+ *  "no PRs", and the loop sits quiet in exactly the way a repo with nothing open
+ *  does. Everything else is GitHub having a bad minute — the last known count
+ *  carries the loop through it — so it is said, and said quietly. */
+export function forgeTroubleText(
+  status: ReviewStatus | null | undefined,
+): { tone: "warn" | "dim"; text: string } | null {
+  const trouble = status?.forge_trouble;
+  if (!trouble) return null;
+  if (trouble.kind === "credential_rejected") {
+    return {
+      tone: "warn",
+      text: `forge credential rejected — GitHub refused this workspace's token (${trouble.detail}). No PR is being reviewed until it is replaced under forge token.`,
+    };
+  }
+  return {
+    tone: "dim",
+    text: `forge unreachable (${trouble.detail}) — holding the last known demand.`,
+  };
+}
+
 /** Which tenant switch is stopping this, named the way the person can fix it.
  *
  *  Reported in the order `pass()` checks them: reconciling is the outer gate,
@@ -765,6 +789,7 @@ export function ReviewLoop({ workspaceId }: { workspaceId: string }) {
   const loaded = decl !== undefined;
   const max = decl ? ((decl as { max_replicas?: number | null }).max_replicas ?? null) : null;
   const gate = reviewLoopGate(status);
+  const forge = forgeTroubleText(status);
   const summary = reviewLoopSummary(max);
   const editing = draft !== null;
 
@@ -840,6 +865,16 @@ export function ReviewLoop({ workspaceId }: { workspaceId: string }) {
           <button className="btn small" disabled={busy} onClick={() => setDraft(null)}>
             cancel
           </button>
+        </div>
+      )}
+
+      {forge && (
+        <div
+          className="small"
+          data-testid="review-loop-forge"
+          style={forge.tone === "warn" ? { color: "var(--nook-err)" } : undefined}
+        >
+          {forge.text}
         </div>
       )}
 

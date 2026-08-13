@@ -23,6 +23,7 @@ const state = vi.hoisted(() => ({
     port_capped: false,
     blocked: [] as { node_id: string; node_name: string; reason: string }[],
     eligible: 1,
+    forge_trouble: null as { kind: string; detail: string } | null,
   },
   putError: null as unknown,
 }));
@@ -40,7 +41,12 @@ vi.mock("@nookos/api", () => ({
   },
 }));
 
-import { ReviewLoop, reviewLoopGate, reviewLoopSummary } from "./SessionPolicy";
+import {
+  ReviewLoop,
+  forgeTroubleText,
+  reviewLoopGate,
+  reviewLoopSummary,
+} from "./SessionPolicy";
 
 beforeEach(() => {
   cleanup();
@@ -54,6 +60,7 @@ beforeEach(() => {
     port_capped: false,
     blocked: [],
     eligible: 1,
+    forge_trouble: null,
   };
   state.putError = null;
   put.mockReset();
@@ -113,6 +120,32 @@ describe("reviewLoopGate — which switch is off", () => {
   });
 });
 
+describe("forgeTroubleText — a dead token does not read as a quiet repo", () => {
+  it("says nothing while the forge is answering", () => {
+    expect(forgeTroubleText({ forge_trouble: null } as never)).toBeNull();
+  });
+
+  it("names the CREDENTIAL when GitHub refused it, and warns (AC-3)", () => {
+    // The prod failure of 2026-08-08: the poll 401s, the count reads as "no
+    // PRs", and nothing distinguishes that from a repo with nothing open.
+    const t = forgeTroubleText({
+      forge_trouble: { kind: "credential_rejected", detail: "Bad credentials" },
+    } as never);
+    expect(t?.tone).toBe("warn");
+    expect(t?.text).toMatch(/forge credential rejected/);
+    expect(t?.text).toMatch(/Bad credentials/);
+  });
+
+  it("does not dress an outage as a credential problem", () => {
+    const t = forgeTroubleText({
+      forge_trouble: { kind: "unreachable", detail: "503 Server Error" },
+    } as never);
+    expect(t?.tone).toBe("dim");
+    expect(t?.text).not.toMatch(/credential/);
+    expect(t?.text).toMatch(/holding the last known demand/);
+  });
+});
+
 describe("ReviewLoop", () => {
   it("shows the unset state on a fresh workspace", async () => {
     renderControl();
@@ -166,6 +199,17 @@ describe("ReviewLoop", () => {
     await userEvent.click(screen.getByRole("button", { name: /^save$/i }));
     expect((await screen.findByTestId("review-loop-refusal")).textContent).toMatch(
       /max_replicas/,
+    );
+  });
+
+  it("shows a rejected forge credential on the panel (AC-3)", async () => {
+    state.status = {
+      ...state.status,
+      forge_trouble: { kind: "credential_rejected", detail: "Bad credentials" },
+    };
+    renderControl();
+    expect((await screen.findByTestId("review-loop-forge")).textContent).toMatch(
+      /forge credential rejected/,
     );
   });
 

@@ -75,9 +75,25 @@ repositories the fleet reviews, granting only:
 
 | Permission      | Level          | Why                                          |
 |-----------------|----------------|----------------------------------------------|
-| Pull requests   | Read and write | Read the diff; post the verdict; set `loop-*` labels |
+| Issues          | Read and write | Post the `Loop review of <sha>` comment and the `loop-*` labels — a PR's comments and labels are ISSUE endpoints, which is why this row exists |
+| Pull requests   | Read and write | List the open PRs and read the diff          |
 | Contents        | Read-only      | Read the tree the PR changes                 |
 | Metadata        | Read-only      | Mandatory; GitHub grants it implicitly       |
+
+**A classic PAT needs `repo`** — there is no narrower classic scope that can
+comment on a private repository's pull requests. Prefer the fine-grained table
+above; `repo` is the broad credential the warning below is about.
+
+**The Issues row is the one people miss, and it fails LATE.** A fine-grained
+PAT is read-only by default, so an under-scoped token authenticates, lists PRs,
+and lets a run review a whole pull request before dying at `POST
+issues/comments` with *"Resource not accessible by personal access token"* —
+which the run then retries identically on every backoff. Two failures on prod
+(2026-08-08) cost five burned passes before a human read the transcript. Since
+MAIN-469 the loop names both: the delivery error says the token lacks
+Issues/Pull requests write, and a **dead** token (401) surfaces on the
+workspace's review-loop panel as *forge credential rejected* rather than as a
+repo with nothing open.
 
 **Epic-run passes need one elevation** (MAIN-144): the epic-runner is the
 loop's merge authority, and merging a pull request requires **Contents: Read
@@ -97,6 +113,22 @@ repositories.
 The token is never written to a chart value or a committed file; it exists only
 in the Secret, and `scripts/check-secrets-untracked.test.sh` is what keeps that
 true.
+
+### Per-workspace tokens outrank this one (MAIN-456)
+
+A workspace can hold its **own** forge token — Workspaces → *forge token* in the
+UI, or `PUT /api/v1/workspaces/{id}/gh-token` — and where one is set it is used
+instead of `NOOK_GH_TOKEN` for everything above: the demand poll, the verdict
+comment and labels, and the `GH_TOKEN` a run's `gh` sees. It is the multi-tenant
+answer: one fleet token would post every tenant's verdicts as one identity.
+
+**The requirement is the same table**, scoped to that one repository: Issues
+write, Pull requests write, Contents read, Metadata read (classic: `repo`). The
+control plane **exercises a pasted token before sealing it** — it reads the
+workspace's repository and probes the two writes with bodies GitHub is certain
+to reject, so nothing is created — and refuses the paste with a message naming
+the permission that is missing. A token that cannot post a verdict never
+reaches the vault.
 
 ## Persistence (AC-5)
 
