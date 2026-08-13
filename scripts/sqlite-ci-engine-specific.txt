@@ -10,3 +10,17 @@
 # problem went away.
 
 nook_db:lib  # dialect.rs `pg_*` tests execute the POSTGRES arm against a real Postgres connection (pool.pg()) — asserting Postgres behaviour is their entire purpose
+
+# ── the cross-instance bus (MAIN-549, owner ruling 2026-08-12) ──
+#
+# SQLite is SINGLE-INSTANCE by design: one control plane per file, which
+# MAIN-197's lock already enforces. Multi-instance coordination is therefore a
+# Postgres CAPABILITY, not a SQLite gap, and this line is permanent rather than
+# a work item — which is why it is here and not in the allow-list it came from.
+#
+# A polling substitute was considered and explicitly REFUSED: building
+# distributed coordination on a single-file database is the wrong trade.
+#
+# Staleness still applies, and means something specific here — if this binary
+# ever PASSES on SQLite, the classification above is what was wrong.
+multi_instance  # ws/bus.rs publishes with `pg_notify` and subscribes with `PgListener`; SQLite has no cross-process notification channel and, being single-instance, needs none

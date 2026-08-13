@@ -12,6 +12,13 @@
 //!
 //! Each test owns a private database (MAIN-156 TestBed) and writes only its own
 //! ledger rows.
+//!
+//! The re-stamp itself is Postgres-only by design (MAIN-420 AC-3), so the tests
+//! that call it directly gate on the bed's engine via [`restamp_applies`]; what
+//! survives on both legs is the boot path's dev/prod split, which is a property
+//! of every engine. The migrator is therefore selected by engine too — naming
+//! `nook_control::MIGRATOR` on a SQLite bed drives the Postgres track against
+//! the wrong schema history (MAIN-549).
 
 use nook_db::restamp::{parse_manifest, restamp, Restamp, RestampError, SquashManifest};
 use nook_db::{params, Db, EnginePool};
@@ -54,11 +61,31 @@ async fn ledger(db: &EnginePool) -> Vec<(i64, Vec<u8>)> {
     .expect("read ledger")
 }
 
+/// Whether the re-stamp is a meaningful operation on this bed.
+///
+/// It rescues a database that applied a *previous* Postgres migration set; a
+/// SQLite file has no such history, so `restamp` answers `EngineUnsupported`
+/// there rather than a quiet `Ok` — asserted head-on in
+/// [`sqlite_refuses_the_restamp_and_says_so`]. Every test below that drives a
+/// ledger through it is asking a Postgres question, so it skips instead of
+/// re-asserting the refusal five more times.
+async fn restamp_applies(bed: &mut TestBed) -> bool {
+    if bed.is_postgres() {
+        return true;
+    }
+    eprintln!("skipping — the squash re-stamp is Postgres-only by design (MAIN-420 AC-3)");
+    bed.teardown().await;
+    false
+}
+
 #[tokio::test]
 async fn collapses_a_matching_pre_squash_ledger_to_the_single_row() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
+    if !restamp_applies(&mut bed).await {
+        return;
+    }
     let m = manifest(28);
     set_ledger(&bed.db(), &m.old).await;
 
@@ -85,6 +112,9 @@ async fn a_second_boot_is_a_no_op() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
+    if !restamp_applies(&mut bed).await {
+        return;
+    }
     let m = manifest(28);
     set_ledger(&bed.db(), &m.old).await;
 
@@ -110,6 +140,9 @@ async fn post_squash_migrations_do_not_look_like_a_mismatch() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
+    if !restamp_applies(&mut bed).await {
+        return;
+    }
     let m = manifest(28);
     set_ledger(
         &bed.db(),
@@ -141,6 +174,9 @@ async fn an_unrecognised_ledger_is_refused_and_left_untouched() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
+    if !restamp_applies(&mut bed).await {
+        return;
+    }
     let m = manifest(28);
 
     // (1) An extra version — the classic unmerged-branch row on a shared dev DB.
@@ -184,6 +220,9 @@ async fn a_virgin_database_and_a_build_with_no_squash_both_pass_through() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
+    if !restamp_applies(&mut bed).await {
+        return;
+    }
 
     // No manifest embedded: the whole step is skipped.
     assert_eq!(
@@ -248,11 +287,29 @@ fn the_shipped_manifests_are_parseable() {
 /// rather than run against a schema history it cannot account for; dev must warn
 /// and carry on, because there the cause is nearly always a colleague's unmerged
 /// branch and bricking every checkout was the MAIN-224 outage.
+///
+/// Runs on both engines, but they assert different halves of it, and the SQLite
+/// half is the weaker one. Postgres asserts LEDGER RECOGNITION: the re-stamp
+/// reads `bogus`, finds a ledger it cannot account for, and refuses. On SQLite
+/// `restamp` answers `EngineUnsupported` before it ever looks at a manifest, so
+/// `bogus` is inert there and a VALID manifest would produce the same run; what
+/// the SQLite arm asserts is the PROPAGATION — that a declining re-stamp is
+/// fatal in production, tolerated in dev, and touches the ledger in neither.
+///
+/// That arm is also a path production never takes: `run_boot_migrations_for`
+/// dispatches on engine and never calls `run_boot_migrations` for a SQLite pool.
+/// Its value is that the split holds *if* something ever does.
+///
+/// What must be selected by engine either way is the MIGRATOR — the second half
+/// of `run_boot_migrations` is a real migration run, and the Postgres track
+/// against a SQLite bed is `VersionMissing(38)`, that track's solo migration
+/// (MAIN-549 AC-2).
 #[tokio::test]
 async fn production_refuses_an_unrecognised_ledger_where_dev_proceeds() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
+    let migrator = nook_control::migrator_for(bed.engine());
     // A manifest that describes a squash this database is NOT a candidate for:
     // TestBed's ledger is the real, fully-migrated set.
     let bogus = "\
@@ -264,7 +321,7 @@ old 2 2222
     let before = ledger(&bed.db()).await;
 
     let err = nook_db::migrate::run_boot_migrations(
-        &nook_control::MIGRATOR,
+        migrator,
         &bed.db(),
         true, // production
         bogus,
@@ -273,7 +330,7 @@ old 2 2222
     .expect_err("production refuses a ledger the manifest does not describe");
     assert!(
         matches!(err, nook_db::migrate::BootMigrateError::Restamp(_)),
-        "the refusal names the ledger, not the schema: {err}"
+        "the refusal comes from the re-stamp, not the schema: {err}"
     );
     assert_eq!(
         ledger(&bed.db()).await,
@@ -283,7 +340,7 @@ old 2 2222
 
     // Same database, same bogus manifest, dev: the re-stamp declines, says so,
     // and the boot proceeds through the migrator as normal.
-    nook_db::migrate::run_boot_migrations(&nook_control::MIGRATOR, &bed.db(), false, bogus)
+    nook_db::migrate::run_boot_migrations(migrator, &bed.db(), false, bogus)
         .await
         .expect("dev proceeds past an unrecognised ledger");
     assert_eq!(
@@ -332,8 +389,11 @@ async fn sqlite_refuses_the_restamp_and_says_so() {
     ));
 
     // The question, answered honestly rather than refused.
-    let orphans = nook_db::migrate::orphan_versions(&nook_control::MIGRATOR, &sqlite)
-        .await
-        .expect("orphan_versions answers on SQLite");
+    let orphans = nook_db::migrate::orphan_versions(
+        nook_control::migrator_for(nook_db::Engine::Sqlite),
+        &sqlite,
+    )
+    .await
+    .expect("orphan_versions answers on SQLite");
     assert!(orphans.is_empty(), "{orphans:?}");
 }
