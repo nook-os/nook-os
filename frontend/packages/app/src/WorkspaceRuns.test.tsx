@@ -32,13 +32,18 @@ vi.mock("@nookos/api", () => ({
 }));
 
 import {
+  KIND_CHOICES,
   mergeRuns,
   parseKind,
   pillTone,
   queuedReason,
   reviewMeta,
+  rowSecondary,
+  runAge,
   runLabel,
+  RUNS_MIN_PANE_PX,
   shortHead,
+  stateGlyph,
   useLegacyRunsSectionRedirect,
   WorkspaceRuns,
 } from "./WorkspaceRuns";
@@ -82,7 +87,13 @@ function isVisible(el: Element | null): boolean {
 }
 
 function Search() {
-  return <span data-testid="search">{useLocation().search}</span>;
+  const loc = useLocation();
+  return (
+    <>
+      <span data-testid="search">{loc.search}</span>
+      <span data-testid="path">{loc.pathname}</span>
+    </>
+  );
 }
 
 function renderRuns(url = "/workspaces/ws-1") {
@@ -108,7 +119,16 @@ async function jobChanged(qc: QueryClient) {
 }
 
 const search = () => screen.getByTestId("search").textContent;
+const path = () => screen.getByTestId("path").textContent;
 const kindOf = (row: HTMLElement) => row.getAttribute("data-kind");
+
+/** The segmented kind selector (MAIN-556 AC-7), which replaced the detached
+ *  `<select>` these tests used to drive. */
+const kindSegment = (label: string) => screen.getByRole("radio", { name: label });
+const pickKind = (label: string) => fireEvent.click(kindSegment(label));
+const chosenKind = () =>
+  screen.getAllByRole("radio").find((b) => b.getAttribute("aria-checked") === "true")
+    ?.textContent;
 
 describe("row identity", () => {
   it("names the pull request a review owns", () => {
@@ -226,11 +246,11 @@ describe("one list, both kinds", () => {
     state.reviews = [review()];
     renderRuns();
     await screen.findAllByTestId("run-row");
-    const kind = screen.getByLabelText("filter by kind") as HTMLSelectElement;
+    const kind = screen.getByRole("radiogroup", { name: "filter by kind" });
     const runState = screen.getByLabelText("filter by state") as HTMLSelectElement;
     expect(isVisible(kind)).toBe(true);
     expect(isVisible(runState)).toBe(true);
-    expect(kind.value).toBe("all");
+    expect(chosenKind()).toBe("All");
     expect(runState.value).toBe("all");
     expect(search()).toBe("");
   });
@@ -245,20 +265,20 @@ describe("filtering", () => {
   it("narrows to one kind and records the choice in the URL", async () => {
     renderRuns();
     await screen.findAllByTestId("run-row");
-    fireEvent.change(screen.getByLabelText("filter by kind"), { target: { value: "build" } });
+    pickKind("Builds");
     let rows = await screen.findAllByTestId("run-row");
     expect(rows).toHaveLength(2);
     expect(rows.every((r) => kindOf(r) === "build")).toBe(true);
     expect(search()).toContain("kind=build");
 
-    fireEvent.change(screen.getByLabelText("filter by kind"), { target: { value: "review" } });
+    pickKind("Reviews");
     rows = await screen.findAllByTestId("run-row");
     expect(rows).toHaveLength(1);
     expect(kindOf(rows[0])).toBe("review");
     expect(search()).toContain("kind=review");
 
     // Back to all: the default is the ABSENCE of the param, not a third value.
-    fireEvent.change(screen.getByLabelText("filter by kind"), { target: { value: "all" } });
+    pickKind("All");
     expect(await screen.findAllByTestId("run-row")).toHaveLength(3);
     expect(search()).not.toContain("kind=");
   });
@@ -268,7 +288,7 @@ describe("filtering", () => {
     const rows = await screen.findAllByTestId("run-row");
     expect(rows).toHaveLength(1);
     expect(kindOf(rows[0])).toBe("review");
-    expect((screen.getByLabelText("filter by kind") as HTMLSelectElement).value).toBe("review");
+    expect(chosenKind()).toBe("Reviews");
   });
 
   it("narrows by state, across both kinds", async () => {
@@ -283,7 +303,7 @@ describe("filtering", () => {
   it("says so when the two filters agree on nothing", async () => {
     renderRuns();
     await screen.findAllByTestId("run-row");
-    fireEvent.change(screen.getByLabelText("filter by kind"), { target: { value: "review" } });
+    pickKind("Reviews");
     fireEvent.change(screen.getByLabelText("filter by state"), { target: { value: "running" } });
     expect(screen.queryAllByTestId("run-row")).toHaveLength(0);
     expect(isVisible(await screen.findByText(/No run matches this filter/i))).toBe(true);
@@ -541,5 +561,271 @@ describe("the links the two old sections left behind (AC-6)", () => {
   it("leaves every other section alone", () => {
     renderRedirect("/workspaces/ws-1?section=checkouts");
     expect(search()).toBe("?section=checkouts");
+  });
+});
+
+// One stable row shape, and a toolbar that does not scroll away (MAIN-556).
+//
+// jsdom runs no layout engine, so nothing here can measure a pixel. The split
+// is deliberate and it is the whole method: the SHAPE a height guarantee needs
+// — same cells, same order, same grid areas, nothing conditional — is asserted
+// on the DOM below, and the geometry that turns that shape into equal heights
+// is asserted on the stylesheet in `WorkspaceRunsStyles.test.ts`. Either half
+// alone would pass while the list still jumped.
+describe("one stable row shape (MAIN-556)", () => {
+  /** The row's cells, in the order the grid places them. */
+  const CELLS = [
+    "runs-row-kind",
+    "runs-row-id",
+    "runs-row-state",
+    "runs-row-meta",
+    "runs-row-time",
+  ];
+
+  const cellsOf = (row: HTMLElement) =>
+    [...row.children].map((c) => CELLS.find((k) => c.classList.contains(k)));
+
+  /** Four rows that between them cover every way content used to change a
+   *  row's height: an outcome, a bare review, a queued run with a sentence for
+   *  a reason, and a run with nothing to say on line 2 at all. */
+  function mixedContent() {
+    state.builds = [
+      build({ id: "b-out", state: "completed", build_outcome: "pr_opened" }),
+      build({ id: "b-bare", state: "running", build_outcome: null, created_at: "2026-08-08T07:00:00Z" }),
+      build({
+        id: "b-wait",
+        state: "queued",
+        created_at: "2026-08-08T06:00:00Z",
+        queued_reason:
+          "waiting for node builder-2, which holds this card's worktree. Prune the worktree from the card to release it.",
+        queued_reason_kind: { kind: "pinned_node_unavailable" },
+      }),
+    ];
+    state.reviews = [review()];
+  }
+
+  it("gives every row the same cells in the same order, whatever it holds (AC-1, AC-4)", async () => {
+    mixedContent();
+    renderRuns();
+    const rows = await screen.findAllByTestId("run-row");
+    expect(rows).toHaveLength(4);
+    for (const row of rows) {
+      // Not "contains these" — EQUALS. A row that dropped its empty secondary
+      // cell would be a row the grid lays out with one line, which is the bug.
+      expect(cellsOf(row)).toEqual(CELLS);
+    }
+  });
+
+  it("keeps the waiting sentence on line 2 instead of growing a third line (AC-1)", async () => {
+    mixedContent();
+    renderRuns();
+    await screen.findAllByTestId("run-row");
+    const reason = screen.getByTestId("run-reason");
+    // Inside the ONE secondary cell — the old row gave the reason a line of its
+    // own, which is precisely what made a queued row taller than its
+    // neighbours.
+    expect(reason.parentElement!.classList.contains("runs-row-meta")).toBe(true);
+  });
+
+  it("shows the whole state word at the width the browser is designed for (AC-2, AC-8)", async () => {
+    // The pane width is the SCENARIO; jsdom cannot lay it out. What is asserted
+    // here is that the label reaching the DOM is the full one — no abbreviation
+    // and no conditional rendering — for the longest state the loop has.
+    // `WorkspaceRunsStyles.test.ts` asserts the column reserved to hold it.
+    state.builds = [build({ state: "waiting_on_human" })];
+    render(
+      <MemoryRouter>
+        <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+          <div style={{ width: RUNS_MIN_PANE_PX }}>
+            <WorkspaceRuns workspaceId="ws-1" />
+          </div>
+        </QueryClientProvider>
+      </MemoryRouter>,
+    );
+    const badge = await screen.findByRole("img", { name: "state: waiting on human" });
+    expect(isVisible(badge)).toBe(true);
+    expect(badge.textContent).toContain("waiting on human");
+  });
+
+  it("offers the full text of everything that can truncate, on hover (AC-3)", async () => {
+    mixedContent();
+    renderRuns();
+    const rows = await screen.findAllByTestId("run-row");
+    for (const row of rows) {
+      const id = row.querySelector(".runs-row-id")!;
+      expect(id.getAttribute("title")).toBe(id.textContent);
+    }
+    const waiting = rows.find((r) => r.getAttribute("data-reason-kind"))!;
+    expect(waiting.querySelector(".runs-row-meta")!.getAttribute("title")).toContain(
+      "Prune the worktree",
+    );
+    // Nothing to truncate, no tooltip: an empty `title` is a tooltip that pops
+    // up saying nothing.
+    const bare = rows.find((r) => !r.querySelector(".runs-row-meta")!.textContent)!;
+    expect(bare.querySelector(".runs-row-meta")!.getAttribute("title")).toBeNull();
+  });
+
+  it("joins the outcome and the waiting sentence into one secondary value", () => {
+    expect(rowSecondary({ meta: "pr_opened", reason: "" } as never)).toBe("pr_opened");
+    expect(rowSecondary({ meta: "", reason: "at capacity" } as never)).toBe("at capacity");
+    expect(rowSecondary({ meta: "abcdef1", reason: "at capacity" } as never)).toBe(
+      "abcdef1 · at capacity",
+    );
+  });
+
+  it("tells the states apart by SHAPE as well as colour (AC-5)", () => {
+    // Greyscale is the test: strip the palette and `failed`, `running` and the
+    // two waiting states must still be four different marks.
+    const states = [
+      "queued",
+      "claimed",
+      "running",
+      "waiting_on_human",
+      "completed",
+      "failed",
+      "canceled",
+    ];
+    const glyphs = states.map(stateGlyph);
+    expect(new Set(glyphs).size).toBe(states.length);
+    expect(glyphs.every((g) => g.length > 0)).toBe(true);
+    // An unknown state still gets a mark rather than a hole in the badge.
+    expect(stateGlyph("martian")).toBe("•");
+  });
+
+  it("carries the shape into the row, beside the state word", async () => {
+    state.builds = [build({ state: "failed" })];
+    renderRuns();
+    const rows = await screen.findAllByTestId("run-row");
+    expect(rows[0].querySelector(".runs-row-glyph")!.textContent).toBe(stateGlyph("failed"));
+  });
+
+  it("marks the open run with a class the accent edge hangs off (AC-5)", async () => {
+    mixedContent();
+    renderRuns();
+    const rows = await screen.findAllByTestId("run-row");
+    expect(rows.filter((r) => r.classList.contains("is-open"))).toHaveLength(1);
+    fireEvent.click(rows[2]);
+    const after = screen.getAllByTestId("run-row");
+    expect(after[2].classList.contains("is-open")).toBe(true);
+    expect(after[0].classList.contains("is-open")).toBe(false);
+  });
+
+  it("keeps the toolbar out of the box that scrolls (AC-6)", async () => {
+    mixedContent();
+    renderRuns();
+    await screen.findAllByTestId("run-row");
+    const toolbar = document.querySelector(".runs-toolbar")!;
+    const list = document.querySelector(".runs-list")!;
+    // Not "the toolbar is above the list" — that a stylesheet could still undo.
+    // The toolbar is not INSIDE the scroller, so there is no scroll offset that
+    // can move it.
+    expect(list.contains(toolbar)).toBe(false);
+    expect(toolbar.parentElement).toBe(list.parentElement);
+    expect(toolbar.parentElement!.classList.contains("runs-browser")).toBe(true);
+    // And every row is in the scroller, so scrolling it is what moves them.
+    for (const row of screen.getAllByTestId("run-row")) expect(list.contains(row)).toBe(true);
+  });
+
+  it("filters from the toolbar without navigating (AC-7)", async () => {
+    mixedContent();
+    renderRuns("/workspaces/ws-1?section=runs");
+    await screen.findAllByTestId("run-row");
+    const group = screen.getByRole("radiogroup", { name: "filter by kind" });
+    // In the toolbar, not in the panel's upper-right corner.
+    expect(document.querySelector(".runs-toolbar")!.contains(group)).toBe(true);
+    expect(group.querySelectorAll("a")).toHaveLength(0);
+
+    const before = path();
+    pickKind("Reviews");
+    expect(screen.getAllByTestId("run-row")).toHaveLength(1);
+    expect(path()).toBe(before);
+    expect(search()).toBe("?section=runs&kind=review");
+  });
+
+  it("names the three segments the card names, wired to the existing parse (AC-7)", () => {
+    expect(KIND_CHOICES.map((c) => c.label)).toEqual(["All", "Builds", "Reviews"]);
+    expect(KIND_CHOICES.map((c) => c.value)).toEqual(["all", "build", "review"]);
+    for (const c of KIND_CHOICES) expect(parseKind(c.value === "all" ? null : c.value)).toBe(c.value);
+  });
+
+  it("moves the kind with the arrows, as one tab stop (AC-7)", async () => {
+    mixedContent();
+    renderRuns();
+    await screen.findAllByTestId("run-row");
+    const group = screen.getByRole("radiogroup", { name: "filter by kind" });
+    const tabbable = screen
+      .getAllByRole("radio")
+      .filter((b) => b.getAttribute("tabindex") === "0");
+    expect(tabbable).toHaveLength(1);
+    expect(tabbable[0].textContent).toBe("All");
+
+    fireEvent.keyDown(group, { key: "ArrowRight" });
+    expect(chosenKind()).toBe("Builds");
+    fireEvent.keyDown(group, { key: "ArrowLeft" });
+    expect(chosenKind()).toBe("All");
+    // Wraps, so the last segment is one key from the first.
+    fireEvent.keyDown(group, { key: "ArrowLeft" });
+    expect(chosenKind()).toBe("Reviews");
+  });
+
+  it("arrows the selection down the list and opens with Enter (AC-9)", async () => {
+    mixedContent();
+    renderRuns();
+    const rows = await screen.findAllByTestId("run-row");
+    const list = screen.getByRole("listbox", { name: "runs" });
+    // One tab stop for the whole list, landing on what the pane already shows.
+    expect(rows.filter((r) => r.getAttribute("tabindex") === "0")).toHaveLength(1);
+    expect(rows[0].getAttribute("tabindex")).toBe("0");
+    expect(rows[0].getAttribute("aria-selected")).toBe("true");
+
+    fireEvent.keyDown(list, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(screen.getAllByTestId("run-row")[1]);
+    // Arrowing MOVES; it does not open. The transcript still belongs to row 0.
+    expect(screen.getAllByTestId("run-row")[0].getAttribute("aria-selected")).toBe("true");
+
+    fireEvent.keyDown(list, { key: "Enter" });
+    expect(screen.getAllByTestId("run-row")[1].getAttribute("aria-selected")).toBe("true");
+    expect(screen.getAllByTestId("run-row")[0].getAttribute("aria-selected")).toBe("false");
+  });
+
+  it("stops at the ends of the list rather than wrapping past them (AC-9)", async () => {
+    mixedContent();
+    renderRuns();
+    const rows = await screen.findAllByTestId("run-row");
+    const list = screen.getByRole("listbox", { name: "runs" });
+    fireEvent.keyDown(list, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(rows[0]);
+    for (let i = 0; i < rows.length + 2; i++) fireEvent.keyDown(list, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(screen.getAllByTestId("run-row")[rows.length - 1]);
+  });
+
+  it("names the kind and state badges for a reader who cannot see them (AC-9)", async () => {
+    state.builds = [build({ state: "running" })];
+    renderRuns();
+    await screen.findAllByTestId("run-row");
+    expect(isVisible(screen.getByRole("img", { name: "kind: build" }))).toBe(true);
+    expect(isVisible(screen.getByRole("img", { name: "state: running" }))).toBe(true);
+  });
+
+  it("ages a run in the queue panel's words, and loses only the age to a bad date", () => {
+    const now = Date.parse("2026-08-08T12:00:00Z");
+    expect(runAge("2026-08-08T11:55:00Z", now)).toBe("5m");
+    expect(runAge("2026-08-07T10:00:00Z", now)).toBe("1d");
+    // Clock skew: a run raised "after" now is not negative time.
+    expect(runAge("2026-08-08T12:30:00Z", now)).toBe("just now");
+    expect(runAge("not a date", now)).toBe("");
+  });
+
+  it("puts an age and its exact instant on every row (AC-1)", async () => {
+    mixedContent();
+    renderRuns();
+    const rows = await screen.findAllByTestId("run-row");
+    for (const row of rows) {
+      const time = row.querySelector(".runs-row-time")!;
+      expect(time.textContent).not.toBe("");
+      // The relative word is the glance; the timestamp behind it is the answer
+      // to "when exactly", without spending a column on it.
+      expect(time.getAttribute("title")).toMatch(/^2026-08-0\d/);
+    }
   });
 });
