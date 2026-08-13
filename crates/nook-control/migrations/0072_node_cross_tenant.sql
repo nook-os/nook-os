@@ -1,0 +1,13 @@
+-- MAIN-576: whether this machine accepts work raised in a tenant that is NOT
+-- its home. The cross-tenant sibling of `shared` (0017), which grants use
+-- WITHIN a tenant; this one governs crossing out of it.
+--
+-- DEFAULT true, deliberately. MAIN-515 already placed a person's OWN node from
+-- any tenant they belong to, with no flag at all — defaulting false would
+-- REVOKE behaviour that already ships. True preserves it exactly and extends
+-- the same reach to fellow members of the requesting tenant.
+--
+-- Idempotent and additive: a NOT NULL column with a safe default, no existing
+-- column touched. Consent is the owner's, so the route gates on
+-- `require_person_owns_node`; the column itself is just a flag.
+ALTER TABLE public.nodes ADD COLUMN IF NOT EXISTS cross_tenant boolean NOT NULL DEFAULT true;

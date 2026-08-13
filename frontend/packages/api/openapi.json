@@ -2713,6 +2713,54 @@
         }
       }
     },
+    "/api/v1/nodes/{id}/cross-tenant": {
+      "post": {
+        "tags": [
+          "crate::routes::nodes"
+        ],
+        "summary": "`POST /api/v1/nodes/{id}/cross-tenant` — the owner's consent for this\nmachine to take work raised in a tenant that is not its home (MAIN-576).",
+        "description": "`require_person_owns_node` is the whole gate, and it is deliberately the\nonly one: it is person-scoped and tenant-blind (MAIN-353), which is what\nlets an owner set this from whichever org they happen to be working in.\nNote the repo write is unscoped for the same reason — routing this through\n`visible_node` would 404 the exact caller the endpoint exists for.",
+        "operationId": "set_cross_tenant",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetCrossTenantRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Node"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/nodes/{id}/leases/{holder}": {
       "delete": {
         "tags": [
@@ -13889,6 +13937,7 @@
           "resources",
           "status",
           "shared",
+          "cross_tenant",
           "labels",
           "taints",
           "created_at",
@@ -13902,6 +13951,10 @@
           "created_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "cross_tenant": {
+            "type": "boolean",
+            "description": "Whether this machine accepts work raised in a tenant that is NOT its\nhome (MAIN-576). `shared` grants use WITHIN a tenant; this governs\ncrossing out of it, and is the owner's alone to set.\n\nDefaults TRUE because MAIN-515 already placed a person's own node from\nany tenant they belong to with no flag at all — a false default would\nrevoke shipped behaviour. Setting it false withdraws the machine from\nevery tenant but the one it joined."
           },
           "home_tenant": {
             "type": [
@@ -15224,6 +15277,7 @@
                 "resources",
                 "status",
                 "shared",
+                "cross_tenant",
                 "labels",
                 "taints",
                 "created_at",
@@ -15237,6 +15291,10 @@
                 "created_at": {
                   "type": "string",
                   "format": "date-time"
+                },
+                "cross_tenant": {
+                  "type": "boolean",
+                  "description": "Whether this machine accepts work raised in a tenant that is NOT its\nhome (MAIN-576). `shared` grants use WITHIN a tenant; this governs\ncrossing out of it, and is the owner's alone to set.\n\nDefaults TRUE because MAIN-515 already placed a person's own node from\nany tenant they belong to with no flag at all — a false default would\nrevoke shipped behaviour. Setting it false withdraws the machine from\nevery tenant but the one it joined."
                 },
                 "home_tenant": {
                   "type": [
@@ -17169,6 +17227,18 @@
               "null"
             ],
             "description": "A node id or name; `null` unpins."
+          }
+        }
+      },
+      "SetCrossTenantRequest": {
+        "type": "object",
+        "description": "The owner's cross-tenant consent for one machine (MAIN-576).",
+        "required": [
+          "cross_tenant"
+        ],
+        "properties": {
+          "cross_tenant": {
+            "type": "boolean"
           }
         }
       },

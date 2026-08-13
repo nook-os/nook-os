@@ -1082,6 +1082,10 @@ fn columns(resource: &str, first: &Value) -> Vec<&'static str> {
             // machine, and it was previously answerable only by ssh-ing to it
             // and reading its unit file (MAIN-508).
             "capacity",
+            // "why did MY tenant's work not land on MY machine" is the third
+            // (MAIN-576): a node that has withdrawn its cross-tenant consent is
+            // online, uncordoned and idle, and every other column agrees.
+            "cross_tenant",
             // And "why is NOTHING building on it" is the other half (MAIN-505):
             // a node draining before an agent restart is online with free
             // capacity and still takes no work, which every other column on

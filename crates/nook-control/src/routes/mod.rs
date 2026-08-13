@@ -388,6 +388,7 @@ pub fn build_router(state: AppState) -> Router {
             "/nodes/{id}/operator-authorize-optout",
             post(nodes::set_operator_authorize_optout),
         )
+        .route("/nodes/{id}/cross-tenant", post(nodes::set_cross_tenant))
         // The sessionless replacement (MAIN-290). Coexists with the line
         // above until C5 retires it.
         .route("/runtime-auth", post(runtime_auth::start))

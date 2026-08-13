@@ -1148,25 +1148,34 @@ async fn your_own_node_in_another_tenant_runs_your_job_here() {
     bed.teardown().await;
 }
 
-/// AC-3, the edge the whole card turns on: crossing is OWNER-only. A teammate
-/// in B — or in A, for that matter — reaches nothing of yours.
+/// MAIN-576 AC-3, REVERSING MAIN-515's owner-only rule deliberately.
+///
+/// A loop run is raised as the tenant's owner (`tenant_owner_user_id`), which
+/// in a tenant with two owners is whoever joined first. Owner-only crossing
+/// therefore made placement depend on an accident of join order: a team whose
+/// PM drafts the work could never run it on a member's machine, and the queued
+/// reason said "you have no node online" to a person looking at five.
+///
+/// The boundary is now MEMBERSHIP, not requester-identity — see
+/// `a_node_whose_owner_is_a_stranger_is_still_unreachable` for the wall that
+/// replaced it.
 #[tokio::test]
-async fn a_teammate_in_the_other_tenant_gets_nothing_from_your_machine() {
+async fn a_teammate_reaches_a_fellow_members_machine() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
     let (state, a, b, _in_a, _user, person, _job) = two_tenants(&bed).await;
-    node(&bed, a, Some(person), "online", caps("authorized", false)).await;
+    let mine = node(&bed, a, Some(person), "online", caps("authorized", false)).await;
 
     let (teammate, teammate_person) = bed.user(b, "member").await;
-    assert!(
+    assert_eq!(
         state
             .nodes
             .eligible_loop_executors(b, teammate_person, "claude", "spec")
             .await
-            .expect("candidates")
-            .is_empty(),
-        "a personal machine is not made reachable to the other members of either tenant"
+            .expect("candidates"),
+        vec![mine],
+        "the owner is a member of B, so their machine serves B's work"
     );
 
     let target = target_task(&bed, b, teammate).await;
@@ -1174,8 +1183,75 @@ async fn a_teammate_in_the_other_tenant_gets_nothing_from_your_machine() {
     let placed = jobs::select_executor(&state, b, theirs)
         .await
         .expect("select");
-    assert_eq!(placed.state, "queued");
-    assert_eq!(placed.executor_node_id, None);
+    assert_eq!(placed.state, "claimed", "this is the reported bug");
+    assert_eq!(placed.executor_node_id, Some(mine));
+
+    bed.teardown().await;
+}
+
+/// MAIN-576 AC-3's wall: membership is the boundary, and a stranger's machine
+/// is still nobody's to take. This is what stops the widening from being
+/// "any node anywhere".
+#[tokio::test]
+async fn a_node_whose_owner_is_a_stranger_is_still_unreachable() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, a, b, _in_a, _user, _person, _job) = two_tenants(&bed).await;
+    // A person who belongs to A alone — never a member of B.
+    let (_outsider, outsider_person) = bed.user(a, "member").await;
+    node(
+        &bed,
+        a,
+        Some(outsider_person),
+        "online",
+        caps("authorized", false),
+    )
+    .await;
+
+    let (_teammate, teammate_person) = bed.user(b, "member").await;
+    assert!(
+        state
+            .nodes
+            .eligible_loop_executors(b, teammate_person, "claude", "spec")
+            .await
+            .expect("candidates")
+            .is_empty(),
+        "a machine whose owner does not belong to B is not B's to run work on"
+    );
+
+    bed.teardown().await;
+}
+
+/// MAIN-576 AC-6: the widening is consented to, and the consent is withdrawable
+/// by the owner alone.
+#[tokio::test]
+async fn an_owner_can_withdraw_cross_tenant_consent() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, a, b, _in_a, _user, person, job) = two_tenants(&bed).await;
+    let mine = node(&bed, a, Some(person), "online", caps("authorized", false)).await;
+
+    state
+        .nodes
+        .set_cross_tenant(mine, false)
+        .await
+        .expect("withdraw");
+    let held = jobs::select_executor(&state, b, job).await.expect("select");
+    assert_eq!(
+        held.state, "queued",
+        "a machine that declined is not a candidate, even for its own owner"
+    );
+
+    state
+        .nodes
+        .set_cross_tenant(mine, true)
+        .await
+        .expect("restore");
+    let placed = jobs::select_executor(&state, b, job).await.expect("again");
+    assert_eq!(placed.state, "claimed", "consent is the whole difference");
+    assert_eq!(placed.executor_node_id, Some(mine));
 
     bed.teardown().await;
 }

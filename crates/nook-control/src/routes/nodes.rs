@@ -746,6 +746,44 @@ pub async fn set_operator_authorize_optout(
     Ok(Json(node))
 }
 
+/// `POST /api/v1/nodes/{id}/cross-tenant` — the owner's consent for this
+/// machine to take work raised in a tenant that is not its home (MAIN-576).
+///
+/// `require_person_owns_node` is the whole gate, and it is deliberately the
+/// only one: it is person-scoped and tenant-blind (MAIN-353), which is what
+/// lets an owner set this from whichever org they happen to be working in.
+/// Note the repo write is unscoped for the same reason — routing this through
+/// `visible_node` would 404 the exact caller the endpoint exists for.
+#[utoipa::path(post, path = "/api/v1/nodes/{id}/cross-tenant",
+    operation_id = "set_cross_tenant",
+    params(("id" = String, Path,)),
+    request_body = SetCrossTenantRequest,
+    responses((status = 200, body = Node), (status = 403), (status = 404)))]
+pub async fn set_cross_tenant(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<NodeId>,
+    Json(req): Json<SetCrossTenantRequest>,
+) -> ApiResult<Json<Node>> {
+    auth.require_user()?;
+    crate::auth::require_person_owns_node(&state, auth.tenant_id, Some(auth.user_id), id).await?;
+    let node = state
+        .nodes
+        .set_cross_tenant(id, req.cross_tenant)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    crate::events::record(
+        &state,
+        auth.tenant_id,
+        crate::events::EventDraft::new("node.cross_tenant")
+            .actor("user", auth.user_id.0)
+            .node(id)
+            .payload(serde_json::json!({ "cross_tenant": req.cross_tenant })),
+    )
+    .await;
+    Ok(Json(node))
+}
+
 /// `POST /api/v1/nodes/{id}/authorize` — launch a runtime's login flow in a
 /// session on the node so it can be device-authorized from the UI (MAIN-126).
 ///
@@ -930,6 +968,7 @@ mod tests {
             last_seen_at: None,
             owner_person_id: None,
             shared: false,
+            cross_tenant: true,
             labels,
             taints: serde_json::json!([]),
             operator_authorize_optout: false,
