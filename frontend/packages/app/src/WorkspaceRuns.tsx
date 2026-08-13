@@ -15,9 +15,9 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
-import { GitBranch, MoreHorizontal } from "lucide-react";
+import { Filter, GitBranch, MoreHorizontal, Search } from "lucide-react";
 import { api, type LoopJobTranscriptEntry } from "@nookos/api";
-import { ChatView, Empty, Panel } from "@nookos/ui";
+import { ChatView, Empty, Panel, useAnchoredMenu } from "@nookos/ui";
 import { useAgentCommands } from "./agentCommands";
 import { BuildOutcome } from "./BuilderStrip";
 import { useBuildRunFacts } from "./buildLoop";
@@ -37,14 +37,25 @@ import {
   type RunAction,
   type RunActionId,
 } from "./runActions";
+import {
+  activeRunsFilterCount,
+  clearRunsFilters,
+  filterRuns,
+  KIND_CHOICES,
+  parseRunsFilter,
+  RAISED_PRESETS,
+  RUN_STATES,
+  runsFilterChips,
+  writeRunsFilter,
+  type KindFilter,
+  type RunKind,
+  type RunsFilter,
+} from "./runsFilter";
 // The queue panel's duration words, not a second set of them: "5m" there and
 // "5 min" here would be two vocabularies for one idea, and the one thing a
 // reader must never have to do is work out whether they mean the same.
 import { shortAge } from "./QueuePanel";
 import { fileSlug, TranscriptActions } from "./transcriptExport";
-
-/** What raised a run. The word a row shows, and the value the URL carries. */
-export type RunKind = "build" | "review";
 
 /** What every run row can say about itself, whatever kind produced it. */
 export type RunRow = {
@@ -80,6 +91,19 @@ export type RunRow = {
   /** The head a review run was raised for, short. Line 1 of the detail header
    *  shows it where a build shows its branch (AC-7). */
   commit?: string;
+  /**
+   * The three fields R1 (MAIN-557) added to the listings, carried so search can
+   * match on them (MAIN-558 AC-2). Read by `filterRuns` and rendered by
+   * NOTHING: the row's shape is R2's and this card does not touch it (NG-4).
+   *
+   * The commit is the FULL sha, unlike `commit` above, because AC-2 wants a
+   * short prefix and the whole thing to find the same row — and a substring
+   * search over the full one does both, where a search over the short one
+   * cannot do the second.
+   */
+  commitSha?: string | null;
+  branch?: string | null;
+  initiator?: string | null;
 };
 
 type BuildRun = {
@@ -94,6 +118,11 @@ type BuildRun = {
   build_outcome?: string | null;
   queued_reason?: string | null;
   queued_reason_kind?: { kind: string } | null;
+  // MAIN-557's three joins. Optional because they genuinely are: a loop-raised
+  // build records no branch, and a fresh build has no commit to name.
+  branch?: string | null;
+  initiator?: string | null;
+  commit_sha?: string | null;
 };
 
 type ReviewRun = {
@@ -108,6 +137,11 @@ type ReviewRun = {
   // review row in every other respect, so without this it reads as a review
   // that happened.
   review_verdict_source?: string | null;
+  // A review run's branch is always null today (MAIN-557 says why); it is read
+  // here anyway, so the day the forge starts reporting one it is searchable
+  // without a second change.
+  branch?: string | null;
+  initiator?: string | null;
 };
 
 /** The loop's state tones, in the design system's words. */
@@ -218,6 +252,9 @@ export function buildRow(r: BuildRun): RunRow {
     // is `undefined` on every row — which is not a missing link, it is a link
     // that silently never appears.
     taskRef: r.task_key ?? null,
+    commitSha: r.commit_sha ?? null,
+    branch: r.branch ?? null,
+    initiator: r.initiator ?? null,
   };
 }
 
@@ -249,6 +286,9 @@ export function reviewRow(r: ReviewRun): RunRow {
     createdAt: r.created_at,
     prNumber: r.review_pr_number ?? null,
     commit: shortHead(r.review_head_sha),
+    commitSha: r.review_head_sha ?? null,
+    branch: r.branch ?? null,
+    initiator: r.initiator ?? null,
   };
 }
 
@@ -261,27 +301,25 @@ export function mergeRuns(builds: BuildRun[], reviews: ReviewRun[]): RunRow[] {
   });
 }
 
-/** The kind filter's value, where "all" is the absence of a filter. */
-export type KindFilter = RunKind | "all";
-
-export function parseKind(raw: string | null): KindFilter {
-  return raw === "build" || raw === "review" ? raw : "all";
+/**
+ * The values a repo's runs actually carry for one searchable field, as the
+ * options its filter offers (MAIN-558 AC-3).
+ *
+ * From the rows rather than from a registry, so the control never lists a
+ * person or a branch this repo has no run for. `current` is added back in case
+ * the rows moved under a filter that is already set: a URL naming an initiator
+ * must still show that initiator selected, and its chip must still be
+ * removable, even after the last run of theirs left the list.
+ */
+export function fieldValues(
+  rows: RunRow[] | null,
+  field: "initiator" | "branch",
+  current: string,
+): string[] {
+  const seen = new Set((rows ?? []).map((r) => r[field]).filter((v): v is string => !!v));
+  if (current) seen.add(current);
+  return [...seen].sort();
 }
-
-export function filterRuns(rows: RunRow[], kind: KindFilter, state: string): RunRow[] {
-  return rows.filter(
-    (r) => (kind === "all" || r.kind === kind) && (state === "all" || r.state === state),
-  );
-}
-
-/** The segments of the kind selector, in the order they are shown (AC-7).
- *  Plural words, because each names a set of rows rather than one row's kind —
- *  the badge in a row is the singular. */
-export const KIND_CHOICES: { value: KindFilter; label: string }[] = [
-  { value: "all", label: "All" },
-  { value: "build", label: "Builds" },
-  { value: "review", label: "Reviews" },
-];
 
 /**
  * The narrowest pane the runs browser is DESIGNED for (MAIN-556 AC-8).
@@ -434,11 +472,12 @@ export function WorkspaceRuns({
   // superseded: an error that vanished on the next repaint would be an error
   // nobody read.
   const [failure, setFailure] = useState<string | null>(null);
-  // The kind lives in the URL because an old link arrives carrying one; the
-  // state filter is a glance at the list you are already looking at, so it
-  // stays local rather than growing the URL a second knob nobody links to.
-  const [stateFilter, setStateFilter] = useState("all");
-  const kind = parseKind(params.get("kind"));
+  // EVERY dimension lives in the URL (AC-7), not just the kind an old link
+  // arrives carrying: a filtered view that cannot be refreshed or pasted to
+  // somebody else exists only in the tab it was made in. It is also what makes
+  // AC-8 free — a live repaint cannot reset a filter that was never state.
+  const filter = parseRunsFilter(params);
+  const kind = filter.kind;
   const listRef = useRef<HTMLDivElement>(null);
 
   const { data: builds } = useQuery({
@@ -471,14 +510,16 @@ export function WorkspaceRuns({
   });
 
   const runs = builds && reviews ? mergeRuns(builds, reviews) : null;
-  // Offered from what actually ran, so the control never lists a state this
-  // repo has no run in and the loop's vocabulary is not copied here.
-  const states = [...new Set((runs ?? []).map((r) => r.state))].sort();
-  // A state nothing is in any more is no filter at all. Held rather than reset
-  // because the list is LIVE: a run leaving `running` must not silently leave
-  // the list empty under a control still reading "running".
-  const stateOf = states.includes(stateFilter) ? stateFilter : "all";
-  const visible = runs ? filterRuns(runs, kind, stateOf) : [];
+  // Read ONCE per render, so every row is judged against the same instant: a
+  // relative range re-read per row could admit one and reject its neighbour.
+  const now = Date.now();
+  const visible = runs ? filterRuns(runs, filter, now) : [];
+  const initiators = fieldValues(runs, "initiator", filter.initiator);
+  const branches = fieldValues(runs, "branch", filter.branch);
+  // The loop's own word for a state on the chip, not the stored value: a chip
+  // reading `waiting_on_human` beside a pill reading "waiting on human" would
+  // be two vocabularies for one idea.
+  const chips = runsFilterChips(filter, (st) => jobStateMeta(st).label);
   // The open run if the filter still shows it, else the newest one that is —
   // so narrowing the list never leaves the transcript of a hidden run beside it.
   const openRun = visible.find((r) => r.id === openId) ?? visible[0] ?? null;
@@ -512,8 +553,21 @@ export function WorkspaceRuns({
     ) => void | Promise<void>,
   });
 
-  /** Open a run: the URL is what selects, so this is a `replace` like the kind
-   *  filter — reading down a list is not a stack of navigations. */
+  /**
+   * Narrow the list (AC-6, AC-7). One writer for all six dimensions, so they
+   * cannot drift into six ways of not clearing each other, and so a change to
+   * one leaves the run selection and every other dimension exactly as they were.
+   *
+   * `replace` for the same reason `chooseRun` is: narrowing a list in place is
+   * not a navigation, and typing six characters into the search box must not
+   * cost six presses of the back button to undo.
+   */
+  const setFilter = (next: RunsFilter) => {
+    setParams(writeRunsFilter(new URLSearchParams(params), next), { replace: true });
+  };
+
+  /** Open a run: the URL is what selects, so this is a `replace` like the
+   *  filters — reading down a list is not a stack of navigations. */
   const chooseRun = (id: string) => {
     const p = new URLSearchParams(params);
     p.set("run", id);
@@ -736,16 +790,7 @@ export function WorkspaceRuns({
     );
   }
 
-  const pickKind = (next: KindFilter) => {
-    const p = new URLSearchParams(params);
-    // Absence IS "all": the default belongs in the code, not in every URL.
-    if (next === "all") p.delete("kind");
-    else p.set("kind", next);
-    // `replace`, so picking a kind is not a navigation (AC-7): the list is
-    // being narrowed in place, and three clicks through the segments must not
-    // cost three presses of the back button to undo.
-    setParams(p, { replace: true });
-  };
+  const pickKind = (next: KindFilter) => setFilter({ ...filter, kind: next });
 
   // Roving focus inside the segmented control, which is what makes a
   // radiogroup one tab stop instead of three.
@@ -791,8 +836,6 @@ export function WorkspaceRuns({
     }
   };
 
-  const now = Date.now();
-
   return (
     <Panel title="Runs">
       <div className="reviews-split">
@@ -801,39 +844,87 @@ export function WorkspaceRuns({
             track, and the transcript beside them. */}
         <div className="runs-browser">
           <div className="runs-toolbar">
-            <div
-              className="runs-kinds"
-              role="radiogroup"
-              aria-label="filter by kind"
-              onKeyDown={onKindKey}
-            >
-              {KIND_CHOICES.map((c) => (
-                <button
-                  key={c.value}
-                  type="button"
-                  role="radio"
-                  aria-checked={kind === c.value}
-                  tabIndex={kind === c.value ? 0 : -1}
-                  className={`runs-kind${kind === c.value ? " is-on" : ""}`}
-                  onClick={() => pickKind(c.value)}
-                >
-                  {c.label}
-                </button>
-              ))}
+            {/* Full width and first (AC-1): search is what somebody reaches for
+                when they know WHICH run they want, and it filters as it is
+                typed — there is no submit, because a list that only narrows
+                when asked twice is a list nobody searches. */}
+            <div className="runs-search">
+              <Search size={12} aria-hidden="true" />
+              <input
+                className="input small runs-search-input"
+                type="search"
+                aria-label="search runs"
+                placeholder="Search runs…"
+                value={filter.q}
+                onChange={(e) => setFilter({ ...filter, q: e.target.value })}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") setFilter({ ...filter, q: "" });
+                }}
+              />
             </div>
-            <select
-              className="input small runs-state"
-              aria-label="filter by state"
-              value={stateOf}
-              onChange={(e) => setStateFilter(e.target.value)}
-            >
-              <option value="all">all states</option>
-              {states.map((s) => (
-                <option key={s} value={s}>
-                  {jobStateMeta(s).label}
-                </option>
-              ))}
-            </select>
+            <div className="runs-controls">
+              <div
+                className="runs-kinds"
+                role="radiogroup"
+                aria-label="filter by kind"
+                onKeyDown={onKindKey}
+              >
+                {KIND_CHOICES.map((c) => (
+                  <button
+                    key={c.value}
+                    type="button"
+                    role="radio"
+                    aria-checked={kind === c.value}
+                    tabIndex={kind === c.value ? 0 : -1}
+                    className={`runs-kind${kind === c.value ? " is-on" : ""}`}
+                    onClick={() => pickKind(c.value)}
+                  >
+                    {c.label}
+                  </button>
+                ))}
+              </div>
+              <RunsFilters
+                value={filter}
+                onChange={setFilter}
+                initiators={initiators}
+                branches={branches}
+              />
+            </div>
+            {/* Beneath the toolbar's controls and inside its region (AC-5), so
+                a chip appearing never pushes the list into a grid track of its
+                own — the browser's second track is the only box that scrolls
+                and it must stay the list. */}
+            {chips.length > 0 && (
+              <div className="runs-chips" data-testid="run-filter-chips">
+                {chips.map((c) => (
+                  <button
+                    key={c.key}
+                    type="button"
+                    className="task-chip filter-chip on"
+                    aria-label={`remove filter: ${c.label}`}
+                    title="remove this filter"
+                    onClick={() => setFilter(c.next)}
+                  >
+                    {c.label}
+                    <span className="filter-chip-x" aria-hidden="true">
+                      ×
+                    </span>
+                  </button>
+                ))}
+                {/* Only past one (AC-5): with a single chip it would do exactly
+                    what the chip beside it already does, under a second name. */}
+                {chips.length > 1 && (
+                  <button
+                    type="button"
+                    className="btn small"
+                    data-testid="run-filters-clear"
+                    onClick={() => setFilter(clearRunsFilters(filter))}
+                  >
+                    Clear all
+                  </button>
+                )}
+              </div>
+            )}
           </div>
           {failure && (
             <div className="runs-failure" role="alert" data-testid="run-failure">
@@ -1032,6 +1123,184 @@ export function WorkspaceRuns({
         </div>
       </div>
     </Panel>
+  );
+}
+
+/**
+ * Everything that is not the kind or the search text, behind one button
+ * (MAIN-558 AC-3).
+ *
+ * A popover rather than four more controls in the toolbar: the browser column
+ * is 284px at its designed minimum (`RUNS_MIN_PANE_PX`) and four dropdowns do
+ * not fit across it — but more than that, state, initiator, branch and a date
+ * range are the questions somebody asks OCCASIONALLY, and a toolbar that shows
+ * every occasional control is what MAIN-556 took the detached dropdowns out of.
+ * What is always visible instead is the COUNT (AC-4) and the chips (AC-5), so a
+ * closed popover never hides that a filter is on.
+ *
+ * The same shape, and the same classes, as the board's filter strip (MAIN-110):
+ * one popover, `task-chip` toggles inside it, a `filter-badge` on the trigger.
+ */
+function RunsFilters({
+  value,
+  onChange,
+  initiators,
+  branches,
+}: {
+  value: RunsFilter;
+  onChange(next: RunsFilter): void;
+  /** Offered from what actually ran — see `fieldValues`. */
+  initiators: string[];
+  branches: string[];
+}) {
+  const [open, setOpen] = useState(false);
+  const close = useCallback(() => setOpen(false), []);
+  // Anchored out of the browser column, which scrolls and would clip it.
+  const { hostRef, portal } = useAnchoredMenu(open, close, { height: 360, width: 300 });
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open]);
+
+  const count = activeRunsFilterCount(value);
+  const toggleState = (s: string) =>
+    onChange({
+      ...value,
+      states: value.states.includes(s)
+        ? value.states.filter((x) => x !== s)
+        : [...value.states, s],
+    });
+  // The range is ONE dimension in two shapes, so choosing either clears the
+  // other — see `RunsFilter.since`.
+  const pickSince = (since: string) => onChange({ ...value, since, from: "", to: "" });
+  const pickDay = (edge: "from" | "to", day: string) =>
+    onChange({ ...value, [edge]: day, since: "" });
+
+  return (
+    <>
+      <div ref={hostRef} className="runs-filters-host">
+        <button
+          type="button"
+          className="btn small"
+          aria-expanded={open}
+          aria-haspopup="dialog"
+          data-testid="run-filters"
+          onClick={() => setOpen((o) => !o)}
+        >
+          <Filter size={11} /> Filters
+          {count > 0 && (
+            <span className="filter-badge" data-testid="run-filter-count">
+              {count}
+            </span>
+          )}
+        </button>
+      </div>
+      {portal(
+        <div
+          className="filters-popover"
+          role="dialog"
+          aria-label="run filters"
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <div className="filters-group">
+            <span className="faint small">state</span>
+            {/* Several at once (AC-3), OR&apos;d: "what is queued or running"
+                is one question, and asking it twice is not the same thing. */}
+            <div className="filters-chips">
+              {RUN_STATES.map((s) => {
+                const on = value.states.includes(s);
+                return (
+                  <button
+                    key={s}
+                    type="button"
+                    className={`task-chip${on ? " on" : ""}`}
+                    aria-pressed={on}
+                    onClick={() => toggleState(s)}
+                  >
+                    {jobStateMeta(s).label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="filters-group filters-row">
+            <label className="filters-field">
+              <span className="faint small">initiator</span>
+              <select
+                className="task-select"
+                value={value.initiator}
+                onChange={(e) => onChange({ ...value, initiator: e.target.value })}
+              >
+                <option value="">anyone</option>
+                {initiators.map((i) => (
+                  <option key={i} value={i}>
+                    {i}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="filters-field">
+              <span className="faint small">branch</span>
+              <select
+                className="task-select"
+                value={value.branch}
+                onChange={(e) => onChange({ ...value, branch: e.target.value })}
+              >
+                <option value="">any branch</option>
+                {branches.map((b) => (
+                  <option key={b} value={b}>
+                    {b}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <div className="filters-group">
+            <span className="faint small">raised</span>
+            <div className="filters-chips">
+              {RAISED_PRESETS.map((p) => (
+                <button
+                  key={p.value}
+                  type="button"
+                  className={`task-chip${value.since === p.value ? " on" : ""}`}
+                  aria-pressed={value.since === p.value}
+                  onClick={() => pickSince(value.since === p.value ? "" : p.value)}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+            <div className="filters-row">
+              <label className="filters-field">
+                <span className="faint small">raised after</span>
+                <input
+                  className="input small"
+                  type="date"
+                  value={value.from}
+                  onChange={(e) => pickDay("from", e.target.value)}
+                />
+              </label>
+              <label className="filters-field">
+                <span className="faint small">raised before</span>
+                <input
+                  className="input small"
+                  type="date"
+                  value={value.to}
+                  onChange={(e) => pickDay("to", e.target.value)}
+                />
+              </label>
+            </div>
+          </div>
+        </div>,
+        "filters-popover-host",
+      )}
+    </>
   );
 }
 
