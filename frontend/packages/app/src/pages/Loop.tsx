@@ -26,6 +26,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Ban, ExternalLink, RotateCcw } from "lucide-react";
 import { api, type LoopJob, type LoopJobTranscriptEntry } from "@nookos/api";
 import { ChatView, Empty, Panel, type ChatViewMessage } from "@nookos/ui";
+import { useAgentCommands } from "../agentCommands";
 import type { StuckCause } from "../loop";
 import {
   agentActivityLabel,
@@ -389,6 +390,11 @@ export function LoopPage() {
     return send.mutate(body);
   };
 
+  // This run's commands (MAIN-530 AC-6). Keyed on the run, so a page with no
+  // job yet offers no palette — there is nothing for `/status` to be about
+  // until something is running.
+  const { commands, onCommand } = useAgentCommands("run", latest?.id);
+
   // Why a queued run is not moving, and where its fix lives (MAIN-297).
   const loopsEnabled = useLoopsEnabled();
   const stuck = stuckCause(latest, loopsEnabled);
@@ -480,6 +486,9 @@ export function LoopPage() {
                 variant="transcript"
                 messages={loopMessages(transcript, asks)}
                 onSend={onSend}
+                commands={commands}
+                onCommand={onCommand}
+                conversationId={latest?.id}
                 hideComposer={mode === "readonly" || !taskId}
                 disabled={sending || (mode === "seed" && seedAction.disabled)}
                 sendLabel={mode === "seed" ? seedAction.label : "Send"}

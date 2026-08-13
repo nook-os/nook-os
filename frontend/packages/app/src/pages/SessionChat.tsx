@@ -14,6 +14,7 @@ import React, { useMemo } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type SessionMessage } from "@nookos/api";
 import { ChatView, type ChatViewMessage } from "@nookos/ui";
+import { useAgentCommands } from "../agentCommands";
 import { foldToolActivity, looksLikeMarkdown, stripAnsi } from "../loop";
 
 /** The query key `live.ts` invalidates on a `session_message` nudge. */
@@ -133,12 +134,21 @@ export function SessionChat({ sessionId }: { sessionId: string }) {
     onSettled: () => qc.invalidateQueries({ queryKey: sessionMessagesKey(sessionId) }),
   });
 
+  // The commands this session offers (MAIN-530 AC-6). The SERVER's list, handed
+  // to the composer as data — this component adds nothing to it and implements
+  // none of it, so `/nook-spec …` is still a message and still reaches the
+  // agent verbatim (AC-7).
+  const { commands, onCommand } = useAgentCommands("session", sessionId);
+
   return (
     <div className="session-chat" data-testid="session-chat">
       <ChatView
         variant="transcript"
         messages={chatMessages(conversation)}
         onSend={(body) => send.mutate(body)}
+        commands={commands}
+        onCommand={onCommand}
+        conversationId={sessionId}
         disabled={send.isPending || !!pending}
         placeholder={
           pending

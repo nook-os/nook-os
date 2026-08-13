@@ -1221,6 +1221,18 @@ pub async fn get(
     detail(state, job).await
 }
 
+/// The job as this viewer may see it, without paying for its transcript
+/// (MAIN-530). The same gate `get` and `post_message` apply — a caller who may
+/// not read the run is refused exactly as sending to it refuses them.
+pub async fn visible(
+    state: &AppState,
+    tenant: TenantId,
+    viewer: UserId,
+    id: JobId,
+) -> ApiResult<LoopJob> {
+    Ok(load_visible(state, tenant, viewer, id).await?.0)
+}
+
 /// Every loop job on a ticket, newest first (MAIN-128) — what the ticket's Loop
 /// panel lists to find the active/latest run and offer re-run on a failed one.
 /// Visibility-gated on the target card (a private card's jobs stay private,

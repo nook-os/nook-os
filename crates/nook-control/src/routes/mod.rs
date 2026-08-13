@@ -476,6 +476,12 @@ pub fn build_router(state: AppState) -> Router {
         .route("/jobs/{id}/rerun", post(jobs::rerun))
         // MAIN-231: unsolicited human → agent steering on a live run.
         .route("/jobs/{id}/messages", post(jobs::message))
+        // The agent surfaces' command endpoints (MAIN-530): the same pair, and
+        // the same DTOs, nook-chat serves for a channel.
+        .route(
+            "/jobs/{id}/commands",
+            get(jobs::commands).post(jobs::run_command),
+        )
         .route("/tasks/{task_id}/jobs", get(jobs::list_for_task))
         .route(
             "/interactions",
@@ -508,6 +514,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/sessions/{id}/messages",
             get(sessions::messages).post(sessions::post_message),
+        )
+        .route(
+            "/sessions/{id}/commands",
+            get(sessions::commands).post(sessions::run_command),
         )
         .route(
             "/sessions/{id}/permissions/{request_id}",

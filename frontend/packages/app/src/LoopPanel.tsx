@@ -26,6 +26,7 @@ import {
   type FoldedTranscriptEntry,
 } from "./loop";
 import { ChatView, type ChatViewMessage } from "@nookos/ui";
+import { useAgentCommands } from "./agentCommands";
 import { answerInteraction, useTaskInteractions } from "./Interactions";
 import { fileSlug, TranscriptActions } from "./transcriptExport";
 import { useLive } from "./live";
@@ -119,6 +120,9 @@ function LoopJobView({
   // than pulling the whole map, so a turn starting on some other ticket's job
   // does not re-render this panel.
   const turn = useLive((s) => s.jobTurn[jobId]);
+  // This run's commands (MAIN-530 AC-6) — the server's list, wired to the same
+  // two endpoints every other agent surface uses.
+  const { commands, onCommand } = useAgentCommands("run", jobId);
 
   const { data: detail } = useQuery({
     queryKey: jobKey(jobId),
@@ -218,6 +222,9 @@ function LoopJobView({
         onSend={(body) => {
           if (ask) void answerInteraction(qc, ask, body);
         }}
+        commands={commands}
+        onCommand={onCommand}
+        conversationId={jobId}
         beforeComposer={
           ask ? (
             <div className="loop-ask">

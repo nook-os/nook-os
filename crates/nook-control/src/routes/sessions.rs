@@ -34,6 +34,7 @@ async fn session_for_content(
 use crate::auth::AuthCtx;
 use crate::error::{ApiError, ApiResult};
 use crate::events::{self, EventDraft};
+use crate::services::agent_commands;
 use crate::services::session_queries;
 use crate::state::AppState;
 
@@ -770,4 +771,135 @@ pub async fn decide_permission(
     )
     .await;
     Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// `GET /api/v1/sessions/{id}/commands` — the commands the caller may run in
+/// this session (MAIN-530 AC-1).
+///
+/// Gated on session-content access, like execution: a caller who may not read
+/// the conversation is refused rather than handed a menu of things they cannot
+/// run.
+#[utoipa::path(get, path = "/api/v1/sessions/{id}/commands",
+    operation_id = "list_session_commands",
+    params(("id" = String, Path,)),
+    responses((status = 200, body = [ChatCommand]), (status = 403), (status = 404)))]
+pub async fn commands(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<SessionId>,
+) -> ApiResult<Json<Vec<ChatCommand>>> {
+    session_for_content(&state, &auth, id).await?;
+    Ok(Json(agent_commands::catalog()))
+}
+
+/// `POST /api/v1/sessions/{id}/commands` — run one of them (AC-1).
+///
+/// The same gate `post_message` applies, so a caller with no claim to the
+/// session is refused exactly as sending to it is refused (AC-2).
+#[utoipa::path(post, path = "/api/v1/sessions/{id}/commands",
+    operation_id = "run_session_command",
+    params(("id" = String, Path,)),
+    request_body = RunChatCommand,
+    responses((status = 200, body = ChatCommandResult), (status = 400), (status = 403), (status = 404)))]
+pub async fn run_command(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<SessionId>,
+    Json(req): Json<RunChatCommand>,
+) -> ApiResult<Json<ChatCommandResult>> {
+    let session = session_for_content(&state, &auth, id).await?;
+    Ok(Json(
+        agent_commands::run(&req, || status_text(&state, &session)).await?,
+    ))
+}
+
+/// What `/status` says about a chat session (AC-4): where it is running, what
+/// state it is in, and whether the agent is mid-turn.
+///
+/// Every line is read from what is already recorded (NG-6) — the session row,
+/// its checkout, and the conversation itself. A lookup that fails is reported
+/// as unknown rather than aborting the command: a `/status` that answers four
+/// of five questions is worth more than one that refuses because a node row
+/// went missing.
+async fn status_text(state: &AppState, session: &Session) -> ApiResult<String> {
+    let node = state
+        .nodes
+        .name_of(session.node_id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| session.node_id.0.to_string());
+
+    let workspace = match session.workspace_id {
+        Some(id) => state
+            .workspaces
+            .get(session.tenant_id, id)
+            .await
+            .ok()
+            .flatten()
+            .map(|w| w.name)
+            .unwrap_or_else(|| id.0.to_string()),
+        // Not a gap: an ad-hoc terminal genuinely has no repo behind it, and
+        // saying so is the honest answer to "where am I".
+        None => "none — this session has no repo behind it".into(),
+    };
+
+    let mut hydrated = session.clone();
+    session_queries::hydrate_checkouts(&*state.workspaces, std::slice::from_mut(&mut hydrated))
+        .await?;
+    let checkout = match &hydrated.checkout {
+        Some(c) => {
+            let branch = c.branch.as_deref().unwrap_or("no branch");
+            format!("{} on {branch} ({})", c.path, c.kind)
+        }
+        None => "none".into(),
+    };
+
+    let messages = crate::services::session_chat::messages(state, session.id).await?;
+    Ok(format!(
+        "Session: {}\nNode: {node}\nWorkspace: {workspace}\nCheckout: {checkout}\nAgent: {}",
+        session.status,
+        agent_activity(state, session, &messages),
+    ))
+}
+
+/// Whether the agent in this session is working right now, in words.
+///
+/// Three already-recorded signals (NG-6 — none of them is new state), read in
+/// order of how directly each answers the question:
+///
+/// 1. An unanswered permission request. The agent is not working, it is
+///    BLOCKED, and on the reader — telling them it is busy would leave them
+///    waiting for something only they can unblock.
+/// 2. The registry's `agent-state`, which a runtime with the hooks installed
+///    reports about itself. It is the same signal the tenant's spinners come
+///    from, so a session that has one cannot say two different things in two
+///    places.
+/// 3. The conversation. A chat session's agent reports nothing — there is no
+///    tmux and no hook in that path — so the transcript answers instead: a turn
+///    the agent has not yet replied to IS the agent working, which is exactly
+///    what the person who just sent a message is asking.
+fn agent_activity(state: &AppState, session: &Session, messages: &[SessionMessage]) -> String {
+    if messages
+        .iter()
+        .any(|m| m.role == "permission" && m.decision.is_none())
+    {
+        return "waiting for you to answer a permission request".into();
+    }
+    let reported = state
+        .registry
+        .agent_states_for(session.tenant_id)
+        .into_iter()
+        .find(|(id, _, _)| *id == session.id)
+        .map(|(_, _, s)| s);
+    match reported.as_deref() {
+        Some("running") => return "working".into(),
+        Some("waiting") => return "waiting for you".into(),
+        _ => {}
+    }
+    match messages.last() {
+        Some(last) if last.role == "human" => "working".into(),
+        Some(_) => "not working — it is your turn".into(),
+        None => "nothing said yet".into(),
+    }
 }
