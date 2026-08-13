@@ -85,6 +85,10 @@ fn every_variant() -> Vec<QueuedReason> {
         QueuedReason::KindWallRefusal {
             kind: "build".into(),
         },
+        QueuedReason::PortsUnavailable {
+            listener: "web".into(),
+            env: "NOOK_WEB_PORT".into(),
+        },
     ]
 }
 

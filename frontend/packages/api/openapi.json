@@ -2609,13 +2609,13 @@
         }
       }
     },
-    "/api/v1/nodes/{id}/leases/{session}": {
+    "/api/v1/nodes/{id}/leases/{holder}": {
       "delete": {
         "tags": [
           "crate::routes::nodes"
         ],
-        "summary": "`DELETE /api/v1/nodes/{id}/leases/{session}` — hand a port back without\nending its session (AC-6).",
-        "description": "The escape hatch, not the mechanism: a lease normally frees itself when its\nsession stops being live. This is for the one a human can see is stuck.",
+        "summary": "`DELETE /api/v1/nodes/{id}/leases/{holder}` — hand a port back without\nending what holds it (AC-6).",
+        "description": "The escape hatch, not the mechanism: a session's lease normally frees itself\nwhen the session stops being live, and a build's when its stack comes down\n(MAIN-552). This is for the one a human can see is stuck.\n\nThe holder is a session id OR a card id, and this deliberately does not ask\nwhich: both are what `PortLease::holder_id` reported, both are uuids, and a\ncaller that has to classify a lease before releasing it is a caller that can\nget it wrong.",
         "operationId": "release_node_lease",
         "parameters": [
           {
@@ -2627,7 +2627,7 @@
             }
           },
           {
-            "name": "session",
+            "name": "holder",
             "in": "path",
             "required": true,
             "schema": {
@@ -15076,10 +15076,11 @@
       },
       "PortLease": {
         "type": "object",
-        "description": "One held port: which session has it, which requirement it satisfies, and\nenough about that session for a human to decide whether releasing it is\nsafe.",
+        "description": "One held port: who has it, which requirement it satisfies, and enough about\nthe holder for a human to decide whether releasing it is safe.\n\nThe holder is a session OR a card's build stack (MAIN-552), so it is\ndescribed rather than typed: a caller reading this list wants to render it\nand to hand one back, and neither needs to know which kind it is. `holder_id`\nis what the release route takes, whichever it names.",
         "required": [
-          "session_id",
-          "session_name",
+          "holder_id",
+          "holder_kind",
+          "holder_name",
           "status",
           "name",
           "env",
@@ -15089,6 +15090,19 @@
           "env": {
             "type": "string"
           },
+          "holder_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The session id, or the card id of the build worktree whose stack holds\nit. What `DELETE /nodes/{id}/leases/{holder}` takes."
+          },
+          "holder_kind": {
+            "type": "string",
+            "description": "`session` | `build`."
+          },
+          "holder_name": {
+            "type": "string",
+            "description": "The session's name, or the card's key."
+          },
           "name": {
             "type": "string",
             "description": "The requirement's name and env var — so the UI can say *which* listener\nholds the port rather than just that something does."
@@ -15097,14 +15111,9 @@
             "type": "integer",
             "format": "int32"
           },
-          "session_id": {
-            "$ref": "#/components/schemas/SessionId"
-          },
-          "session_name": {
-            "type": "string"
-          },
           "status": {
-            "type": "string"
+            "type": "string",
+            "description": "The session's status, or `build` — a build's lease has no lifecycle of\nits own beyond the stack it belongs to."
           }
         }
       },
@@ -15328,6 +15337,30 @@
               "label": {
                 "type": "string",
                 "description": "The selector key that matched nothing, e.g. `role/build`."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A build's workspace declares a REQUIRED listener and the chosen node\ncould not lease it (MAIN-552). The run waits rather than starting on\ncompose's `${VAR:-default}` fallbacks and colliding with whatever else\non that machine took the same literal.",
+            "required": [
+              "listener",
+              "env",
+              "kind"
+            ],
+            "properties": {
+              "env": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "ports_unavailable"
+                ]
+              },
+              "listener": {
+                "type": "string",
+                "description": "The listener that went unsatisfied, and the variable it would have\narrived as — which is what makes the wait actionable: widen the\nnode's range, or free a lease on the Nodes page."
               }
             }
           },

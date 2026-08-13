@@ -19,7 +19,7 @@
 
 use async_trait::async_trait;
 use nook_db::dialect::{ci_match, time_math, type_mapping};
-use nook_db::{params, Db, DbPool};
+use nook_db::{params, Db, DbPool, DbValue};
 use nook_types::*;
 
 use crate::error::ApiResult;
@@ -233,6 +233,19 @@ pub trait SessionRepository: Send + Sync {
     /// Every port a session holds, in requirement-name order.
     async fn leases_of(&self, session: SessionId) -> ApiResult<Vec<LeasedPort>>;
 
+    /// The same for a card's build stack (MAIN-552). Keyed on the CARD, not the
+    /// run: the worktree outlives the run (MAIN-480), so a repair pass asking
+    /// this question gets the numbers its stack is still bound to.
+    ///
+    /// Scoped to the NODE as well, which `leases_of` has no need to be: a
+    /// session belongs to one machine, and a card does not. Without it, a card
+    /// holding rows on node A and placing on node B would have A's numbers
+    /// handed back as "already held" — so the run would bind ports nothing on
+    /// B holds, and B's allocator would give the same ones to the next asker.
+    /// That is the collision this card removes, reintroduced through the reuse
+    /// path.
+    async fn build_leases_of(&self, node: NodeId, task: TaskId) -> ApiResult<Vec<LeasedPort>>;
+
     /// Every live lease on a node, lowest port first — what the UI lists.
     async fn leases_on(&self, node: NodeId) -> ApiResult<Vec<PortLease>>;
 
@@ -243,6 +256,29 @@ pub trait SessionRepository: Send + Sync {
     /// was authorized as that node's owner, so letting the session id alone
     /// decide would have let one machine's owner free a port on another's.
     async fn release_leases(&self, node: NodeId, id: SessionId) -> ApiResult<u64>;
+
+    /// The same, by whichever id holds it — a session or a card (MAIN-552).
+    ///
+    /// One method rather than a second typed one, because the two callers that
+    /// need it do not know the kind: the release route is handed a uuid off a
+    /// path, and the stack reaper knows only that this card's stack has come
+    /// down. Holder ids are uuids and globally unique, so a single delete
+    /// cannot reach the wrong row.
+    async fn release_leases_by_holder(&self, node: NodeId, holder: uuid::Uuid) -> ApiResult<u64>;
+
+    /// Drop exactly the named leases of one holder on one node (MAIN-552).
+    ///
+    /// The undo for a part-finished allocation. Named rather than wholesale
+    /// because a repair pass can be refused on a listener ADDED to the
+    /// declaration since its stack came up: dropping that card's whole set
+    /// would free ports its running containers are still bound to, which is
+    /// the failure this card exists to prevent.
+    async fn release_lease_names(
+        &self,
+        node: NodeId,
+        holder: uuid::Uuid,
+        names: &[String],
+    ) -> ApiResult<u64>;
 
     // ── chat messages (MAIN-502) ────────────────────────────────────────────
 
@@ -303,10 +339,30 @@ impl NewSessionMessage {
     }
 }
 
+/// Who holds a lease (MAIN-552). Exactly one of the two, which the table's own
+/// CHECK also says — a row with neither would be a port nothing could ever hand
+/// back, and a row with both would have two answers to "whose is this".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaseHolder {
+    Session(SessionId),
+    /// The card whose build worktree the stack belongs to.
+    Build(TaskId),
+}
+
+impl LeaseHolder {
+    /// The id as the release route and the UI see it, whichever kind it is.
+    pub fn id(&self) -> uuid::Uuid {
+        match self {
+            LeaseHolder::Session(s) => s.0,
+            LeaseHolder::Build(t) => t.0,
+        }
+    }
+}
+
 /// A lease to record.
 #[derive(Debug, Clone)]
 pub struct NewPortLease {
-    pub session: SessionId,
+    pub holder: LeaseHolder,
     pub node: NodeId,
     pub name: String,
     pub env: String,
@@ -637,9 +693,17 @@ impl SessionRepository for DbSessionRepository {
             .await?)
     }
     async fn reclaim_and_held_ports(&self, node: NodeId) -> ApiResult<Vec<i32>> {
-        // The reclaim, and the only thing that ever frees a lease. A session
-        // that ended, was killed or was reaped left its rows behind on purpose;
-        // they go now, so the ports they held are free to the read below.
+        // The reclaim, and the only thing that frees a SESSION's lease. A
+        // session that ended, was killed or was reaped left its rows behind on
+        // purpose; they go now, so the ports they held are free to the read
+        // below.
+        //
+        // A BUILD's lease is not reachable from here and must not be
+        // (MAIN-552 AC-4): its row has no `session_id`, so the subquery never
+        // matches it. That is the whole point — a build's stack outlives its
+        // run by design, and a port freed while something is still bound to it
+        // is worse than one never leased. It is handed back by `stack_reaper`
+        // when the stack actually comes down.
         self.db
             .exec(
                 &format!(
@@ -662,23 +726,38 @@ impl SessionRepository for DbSessionRepository {
     }
 
     async fn add_lease(&self, lease: NewPortLease) -> ApiResult<bool> {
-        // A unique violation here is the RACE, not a bug: another session took
+        // A unique violation here is the RACE, not a bug: another holder took
         // the port between the read and this write. Reported as `false` so the
         // caller picks again.
         //
-        // The `(session, name)` index makes a re-lease of the same requirement
-        // idempotent — a restart replaces its own row rather than stacking a
-        // second one — so that conflict updates while a port conflict refuses.
+        // The `(holder, name)` index makes a re-lease of the same requirement
+        // idempotent — a restart, or a repair pass on the same card, replaces
+        // its own row rather than stacking a second one — so that conflict
+        // updates while a port conflict refuses. Two indexes because the two
+        // holder columns are separately nullable, so the conflict TARGET is
+        // whichever one this row fills.
+        //
+        // The build target carries `node_id` and the session target does not,
+        // because a session belongs to one machine and a card does not: without
+        // it, a card leasing on a second node would UPDATE the first node's row
+        // to a port out of the second's range, leaving a row that describes
+        // neither machine.
+        let (holder_column, conflict, holder) = match lease.holder {
+            LeaseHolder::Session(id) => ("session_id", "(session_id, name)", id.0),
+            LeaseHolder::Build(id) => ("task_id", "(task_id, node_id, name)", id.0),
+        };
         match self
             .db
             .exec(
-                "INSERT INTO session_port_leases (id, session_id, node_id, name, env, port)
-                 VALUES ($1, $2, $3, $4, $5, $6)
-                 ON CONFLICT (session_id, name)
-                 DO UPDATE SET port = EXCLUDED.port, env = EXCLUDED.env",
+                &format!(
+                    "INSERT INTO session_port_leases (id, {holder_column}, node_id, name, env, port)
+                     VALUES ($1, $2, $3, $4, $5, $6)
+                     ON CONFLICT {conflict}
+                     DO UPDATE SET port = EXCLUDED.port, env = EXCLUDED.env"
+                ),
                 params![
                     uuid::Uuid::new_v4(),
-                    lease.session,
+                    holder,
                     lease.node,
                     lease.name,
                     lease.env,
@@ -708,13 +787,44 @@ impl SessionRepository for DbSessionRepository {
             .collect())
     }
 
-    async fn leases_on(&self, node: NodeId) -> ApiResult<Vec<PortLease>> {
-        let rows: Vec<(SessionId, String, String, String, String, i32)> = self
+    async fn build_leases_of(&self, node: NodeId, task: TaskId) -> ApiResult<Vec<LeasedPort>> {
+        let rows: Vec<(String, String, i32)> = self
             .db
             .query_all(
-                "SELECT s.id, s.name, s.status, l.name, l.env, l.port
+                "SELECT name, env, port FROM session_port_leases
+                  WHERE task_id = $1 AND node_id = $2 ORDER BY name",
+                params![task, node],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(name, env, port)| LeasedPort { name, env, port })
+            .collect())
+    }
+
+    async fn leases_on(&self, node: NodeId) -> ApiResult<Vec<PortLease>> {
+        // LEFT joins on both sides, because a row fills exactly one of them
+        // (MAIN-552). An inner join on `sessions` would have made every build's
+        // lease invisible on the Nodes page — the surface whose whole job is
+        // answering "what is holding 4103".
+        let rows: Vec<(
+            Option<SessionId>,
+            Option<String>,
+            Option<String>,
+            Option<TaskId>,
+            Option<String>,
+            Option<i32>,
+            String,
+            String,
+            i32,
+        )> = self
+            .db
+            .query_all(
+                "SELECT s.id, s.name, s.status, t.id, b.key, t.number, l.name, l.env, l.port
                    FROM session_port_leases l
-                   JOIN sessions s ON s.id = l.session_id
+                   LEFT JOIN sessions s ON s.id = l.session_id
+                   LEFT JOIN tasks t ON t.id = l.task_id
+                   LEFT JOIN boards b ON b.id = t.board_id
                   WHERE l.node_id = $1
                   ORDER BY l.port",
                 params![node],
@@ -722,14 +832,49 @@ impl SessionRepository for DbSessionRepository {
             .await?;
         Ok(rows
             .into_iter()
-            .map(
-                |(session_id, session_name, status, name, env, port)| PortLease {
+            .filter_map(
+                |(
                     session_id,
                     session_name,
                     status,
+                    task_id,
+                    board_key,
+                    number,
                     name,
                     env,
                     port,
+                )| {
+                    let (holder_id, holder_kind, holder_name, status) = match (session_id, task_id)
+                    {
+                        (Some(s), _) => (
+                            s.0,
+                            "session",
+                            session_name.unwrap_or_default(),
+                            status.unwrap_or_default(),
+                        ),
+                        (None, Some(t)) => (
+                            t.0,
+                            "build",
+                            match (board_key, number) {
+                                (Some(k), Some(n)) => format!("{k}-{n}"),
+                                _ => t.0.to_string(),
+                            },
+                            "build".to_string(),
+                        ),
+                        // The CHECK forbids it; a row that got here anyway is
+                        // held by nothing, and listing it would offer a release
+                        // button that names no one.
+                        (None, None) => return None,
+                    };
+                    Some(PortLease {
+                        holder_id,
+                        holder_kind: holder_kind.to_string(),
+                        holder_name,
+                        status,
+                        name,
+                        env,
+                        port,
+                    })
                 },
             )
             .collect())
@@ -741,6 +886,37 @@ impl SessionRepository for DbSessionRepository {
             .exec(
                 "DELETE FROM session_port_leases WHERE session_id = $1 AND node_id = $2",
                 params![id, node],
+            )
+            .await?)
+    }
+
+    async fn release_leases_by_holder(&self, node: NodeId, holder: uuid::Uuid) -> ApiResult<u64> {
+        Ok(self
+            .db
+            .exec(
+                "DELETE FROM session_port_leases
+                  WHERE node_id = $1 AND (session_id = $2 OR task_id = $2)",
+                params![node, holder],
+            )
+            .await?)
+    }
+
+    async fn release_lease_names(
+        &self,
+        node: NodeId,
+        holder: uuid::Uuid,
+        names: &[String],
+    ) -> ApiResult<u64> {
+        if names.is_empty() {
+            return Ok(0);
+        }
+        Ok(self
+            .db
+            .exec(
+                "DELETE FROM session_port_leases
+                  WHERE node_id = $1 AND (session_id = $2 OR task_id = $2)
+                    AND name = ANY($3)",
+                params![node, holder, DbValue::TextList(names.to_vec())],
             )
             .await?)
     }
@@ -805,7 +981,7 @@ impl SessionRepository for DbSessionRepository {
 /// One row of the fake's lease table.
 #[derive(Debug, Clone)]
 struct FakeLease {
-    session: SessionId,
+    holder: LeaseHolder,
     node: NodeId,
     name: String,
     env: String,
@@ -857,6 +1033,34 @@ impl FakeSessionRepository {
 
     pub fn count(&self) -> usize {
         self.inner.lock().unwrap().len()
+    }
+
+    /// The two lease reads and the two lease deletes differ only in the holder,
+    /// so they share one body here — the same thing the real side gets from a
+    /// column name and a `$2` used twice.
+    fn held_by_on(&self, holder: LeaseHolder, node: Option<NodeId>) -> ApiResult<Vec<LeasedPort>> {
+        let mut out: Vec<LeasedPort> = self
+            .leases
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.holder == holder)
+            .filter(|l| node.is_none_or(|n| l.node == n))
+            .map(|l| LeasedPort {
+                name: l.name.clone(),
+                env: l.env.clone(),
+                port: l.port,
+            })
+            .collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(out)
+    }
+
+    fn drop_leases(&self, node: NodeId, holder: uuid::Uuid) -> ApiResult<u64> {
+        let mut leases = self.leases.lock().unwrap();
+        let before = leases.len();
+        leases.retain(|l| !(l.holder.id() == holder && l.node == node));
+        Ok((before - leases.len()) as u64)
     }
 }
 
@@ -1189,7 +1393,15 @@ impl SessionRepository for FakeSessionRepository {
         let mut leases = self.leases.lock().unwrap();
         // The lazy reclaim, same as the real one: a lease whose session is no
         // longer live simply goes, and nothing had to call anything to free it.
-        leases.retain(|l| l.node != node || live.contains(&l.session));
+        // A BUILD's lease is untouched here, exactly as the real query leaves it
+        // (MAIN-552 AC-4) — the sweep is over sessions, and a build has none.
+        leases.retain(|l| {
+            l.node != node
+                || match l.holder {
+                    LeaseHolder::Session(s) => live.contains(&s),
+                    LeaseHolder::Build(_) => true,
+                }
+        });
         let mut held: Vec<i32> = leases
             .iter()
             .filter(|l| l.node == node)
@@ -1201,18 +1413,18 @@ impl SessionRepository for FakeSessionRepository {
 
     async fn add_lease(&self, lease: NewPortLease) -> ApiResult<bool> {
         let mut leases = self.leases.lock().unwrap();
-        // `(node, port)` refuses; `(session, name)` replaces. Both indexes, in
+        // `(node, port)` refuses; `(holder, name)` replaces. Both indexes, in
         // the same critical section as the write, exactly as the table has them.
         if leases.iter().any(|l| {
             l.node == lease.node
                 && l.port == lease.port
-                && !(l.session == lease.session && l.name == lease.name)
+                && !(l.holder == lease.holder && l.name == lease.name)
         }) {
             return Ok(false);
         }
-        leases.retain(|l| !(l.session == lease.session && l.name == lease.name));
+        leases.retain(|l| !(l.holder == lease.holder && l.name == lease.name));
         leases.push(FakeLease {
-            session: lease.session,
+            holder: lease.holder,
             node: lease.node,
             name: lease.name,
             env: lease.env,
@@ -1222,20 +1434,11 @@ impl SessionRepository for FakeSessionRepository {
     }
 
     async fn leases_of(&self, session: SessionId) -> ApiResult<Vec<LeasedPort>> {
-        let mut out: Vec<LeasedPort> = self
-            .leases
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|l| l.session == session)
-            .map(|l| LeasedPort {
-                name: l.name.clone(),
-                env: l.env.clone(),
-                port: l.port,
-            })
-            .collect();
-        out.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(out)
+        self.held_by_on(LeaseHolder::Session(session), None)
+    }
+
+    async fn build_leases_of(&self, node: NodeId, task: TaskId) -> ApiResult<Vec<LeasedPort>> {
+        self.held_by_on(LeaseHolder::Build(task), Some(node))
     }
 
     async fn leases_on(&self, node: NodeId) -> ApiResult<Vec<PortLease>> {
@@ -1247,11 +1450,21 @@ impl SessionRepository for FakeSessionRepository {
             .iter()
             .filter(|l| l.node == node)
             .filter_map(|l| {
-                let s = rows.iter().find(|x| x.id == l.session)?;
+                let (holder_kind, holder_name, status) = match l.holder {
+                    LeaseHolder::Session(id) => {
+                        let s = rows.iter().find(|x| x.id == id)?;
+                        ("session", s.name.clone(), s.status.clone())
+                    }
+                    // No board join in the fake, so the card's id stands in for
+                    // its key — the field is a label, and every caller test
+                    // asserts on the holder id.
+                    LeaseHolder::Build(id) => ("build", id.0.to_string(), "build".to_string()),
+                };
                 Some(PortLease {
-                    session_id: l.session,
-                    session_name: s.name.clone(),
-                    status: s.status.clone(),
+                    holder_id: l.holder.id(),
+                    holder_kind: holder_kind.to_string(),
+                    holder_name,
+                    status,
                     name: l.name.clone(),
                     env: l.env.clone(),
                     port: l.port,
@@ -1263,9 +1476,22 @@ impl SessionRepository for FakeSessionRepository {
     }
 
     async fn release_leases(&self, node: NodeId, id: SessionId) -> ApiResult<u64> {
+        self.drop_leases(node, id.0)
+    }
+
+    async fn release_leases_by_holder(&self, node: NodeId, holder: uuid::Uuid) -> ApiResult<u64> {
+        self.drop_leases(node, holder)
+    }
+
+    async fn release_lease_names(
+        &self,
+        node: NodeId,
+        holder: uuid::Uuid,
+        names: &[String],
+    ) -> ApiResult<u64> {
         let mut leases = self.leases.lock().unwrap();
         let before = leases.len();
-        leases.retain(|l| !(l.session == id && l.node == node));
+        leases.retain(|l| !(l.holder.id() == holder && l.node == node && names.contains(&l.name)));
         Ok((before - leases.len()) as u64)
     }
 

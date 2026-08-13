@@ -1300,8 +1300,45 @@ pub async fn transition(
     // through this one write path.
     if is_terminal(to) {
         crate::services::build_handback::on_run_concluded(state, tenant, &updated).await;
+        release_ports_of_stackless_build(state, tenant, &updated).await;
     }
     Ok(updated)
+}
+
+/// Hand back a build's ports when its run ended without ever making a tree
+/// (MAIN-552).
+///
+/// AC-3 is that a lease outlives its run, and the thing it outlives the run FOR
+/// is the stack. A run that failed at dispatch, was refused by the node, or died
+/// before it reported a worktree left no stack behind — nothing is bound to
+/// those ports and nothing ever will be, so holding them is a leak that only a
+/// card deletion would clear. The recorded worktree is the test, and it is the
+/// same one every other "does this card own a tree" decision uses.
+///
+/// Here rather than in `finish`, for the reason the handback above is: this is
+/// the one write path every ending comes through.
+async fn release_ports_of_stackless_build(state: &AppState, tenant: TenantId, job: &LoopJob) {
+    if job.kind != BUILD_KIND {
+        return;
+    }
+    let (Some(task), Some(node)) = (job.target_task_id, job.executor_node_id) else {
+        return;
+    };
+    match state.tasks.get_row(tenant, task).await {
+        // A recorded tree means a stack that may still be up; the reaper owns
+        // those ports now.
+        Ok(Some(t)) if t.worktree_path.is_some() => return,
+        Ok(_) => {}
+        Err(e) => {
+            // Unreadable is not "no tree": keeping a lease costs a port, and
+            // dropping one a live stack is bound to costs a collision.
+            tracing::warn!(job = %job.id, task = %task.0, error = %e, "could not read a concluded build's card");
+            return;
+        }
+    }
+    if let Err(e) = state.sessions.release_leases_by_holder(node, task.0).await {
+        tracing::warn!(job = %job.id, task = %task.0, error = %e, "could not release a stackless build's ports");
+    }
 }
 
 /// Pause a RUNNING job on a human interaction (MAIN-162): `running →
@@ -1781,6 +1818,30 @@ pub async fn select_executor(
         .await;
     }
 
+    // The last gate, and the newest (MAIN-552 AC-6): a build boots the dev
+    // stack in its worktree, so it must hold the ports that stack binds before
+    // it starts — otherwise compose falls back to `${VAR:-default}` and the run
+    // collides with every other stack on the machine, human sessions included.
+    //
+    // Placed BEFORE the claim, because the answer to "no free port" is to WAIT,
+    // and a queued job is what waiting looks like. Failing the run would spend
+    // the card's strike budget on a shortage that clears itself.
+    if let Some(refusal) = lease_build_ports(state, tenant, &job, node).await? {
+        return set_queued_reason(
+            state,
+            job_id,
+            &format!(
+                "waiting for a port on {}: {refusal}",
+                node_name(state, node).await
+            ),
+            Some(QueuedReason::PortsUnavailable {
+                listener: refusal.listener,
+                env: refusal.env,
+            }),
+        )
+        .await;
+    }
+
     // Atomic claim: only the caller that flips `queued` -> `claimed` wins.
     let claimed: Option<LoopJob> = state.jobs.claim_for_executor(job_id, node).await?;
 
@@ -1793,6 +1854,51 @@ pub async fn select_executor(
         // Lost the race — another consumer claimed it. Return the current row.
         None => load(state, tenant, job_id).await,
     }
+}
+
+/// Take the ports this build's stack will bind, on the node it is about to be
+/// placed on (MAIN-552). `Some(refusal)` is a REQUIRED listener that could not
+/// be satisfied — the job stays queued.
+///
+/// Held by the CARD, not the run: a build worktree outlives its run (MAIN-480),
+/// so a repair pass on the same card finds the leases already there and gets the
+/// same numbers back — which is the only correct answer, since the containers
+/// its stack left running are still bound to them.
+///
+/// Only a `build`. A spec or decompose run reads and writes a board; a review
+/// run reads a PR. Neither boots a stack, and leasing eleven ports for one would
+/// be the capacity cost of this card with none of its benefit.
+async fn lease_build_ports(
+    state: &AppState,
+    tenant: TenantId,
+    job: &LoopJob,
+    node: NodeId,
+) -> ApiResult<Option<crate::services::port_leases::Refusal>> {
+    if job.kind != BUILD_KIND {
+        return Ok(None);
+    }
+    let Some(task) = job.target_task_id else {
+        return Ok(None);
+    };
+    Ok(
+        crate::services::port_leases::lease_for_build(state, tenant, node, job.workspace_id, task)
+            .await?
+            .err(),
+    )
+}
+
+/// A node's name for a message, falling back to its id — the same shape the
+/// pinned-node reason uses, and for the same reason: a uuid in a sentence a
+/// human is meant to act on is not an answer.
+async fn node_name(state: &AppState, node: NodeId) -> String {
+    state
+        .nodes
+        .by_id_any_tenant_or_none(node)
+        .await
+        .ok()
+        .flatten()
+        .map(|n| n.name)
+        .unwrap_or_else(|| node.0.to_string())
 }
 
 /// How many of a tenant's queued jobs one pass will try to place.
@@ -2305,6 +2411,12 @@ pub async fn dispatch_to_node(state: &AppState, tenant: TenantId, job: &LoopJob)
     };
     let target_task_key = task_key(state, tenant, job.target_task_id).await?;
 
+    // Read back rather than threaded from placement (MAIN-552 AC-2/AC-5). The
+    // lease is a row on the card, so a repair pass — a different job, the same
+    // worktree, the same running containers — reads the same numbers without
+    // anything having to remember them across runs.
+    let (ports, unsatisfied_ports) = build_ports(state, tenant, job, node).await?;
+
     let sent = state.registry.send_to_node(
         node,
         nook_proto::ControlToNode::RunLoopJob {
@@ -2340,6 +2452,8 @@ pub async fn dispatch_to_node(state: &AppState, tenant: TenantId, job: &LoopJob)
             repo_url,
             branch,
             seed: job.seed.clone(),
+            ports,
+            unsatisfied_ports,
         },
     );
     if !sent {
@@ -2356,6 +2470,38 @@ pub async fn dispatch_to_node(state: &AppState, tenant: TenantId, job: &LoopJob)
         .ok();
     transition(state, tenant, job.id, "running").await?;
     Ok(())
+}
+
+/// What this run should export, from what its card holds (MAIN-552).
+///
+/// The unsatisfied half is DERIVED rather than stored, by the same function a
+/// restarting session uses: a declared optional listener the card holds no lease
+/// for is one it did not get. Required listeners never appear — the job would
+/// still be queued.
+async fn build_ports(
+    state: &AppState,
+    tenant: TenantId,
+    job: &LoopJob,
+    node: NodeId,
+) -> ApiResult<(Vec<nook_types::LeasedPort>, Vec<String>)> {
+    use crate::services::port_leases;
+    if job.kind != BUILD_KIND {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let Some(task) = job.target_task_id else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+    let ports = state.sessions.build_leases_of(node, task).await?;
+    let unsatisfied = port_leases::unsatisfied_on_restart(
+        state,
+        tenant,
+        node,
+        job.workspace_id,
+        port_leases::BUILD_RUNTIME,
+        &ports,
+    )
+    .await?;
+    Ok((ports, unsatisfied))
 }
 
 /// Apply a node's `JobFinished` (AC-2/AC-4): `completed` on success, else

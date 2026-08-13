@@ -1248,7 +1248,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/nodes/{id}/leases/{session}": {
+    "/api/v1/nodes/{id}/leases/{holder}": {
         parameters: {
             query?: never;
             header?: never;
@@ -1259,10 +1259,16 @@ export interface paths {
         put?: never;
         post?: never;
         /**
-         * `DELETE /api/v1/nodes/{id}/leases/{session}` — hand a port back without
-         *     ending its session (AC-6).
-         * @description The escape hatch, not the mechanism: a lease normally frees itself when its
-         *     session stops being live. This is for the one a human can see is stuck.
+         * `DELETE /api/v1/nodes/{id}/leases/{holder}` — hand a port back without
+         *     ending what holds it (AC-6).
+         * @description The escape hatch, not the mechanism: a session's lease normally frees itself
+         *     when the session stops being live, and a build's when its stack comes down
+         *     (MAIN-552). This is for the one a human can see is stuck.
+         *
+         *     The holder is a session id OR a card id, and this deliberately does not ask
+         *     which: both are what `PortLease::holder_id` reported, both are uuids, and a
+         *     caller that has to classify a lease before releasing it is a caller that can
+         *     get it wrong.
          */
         delete: operations["release_node_lease"];
         options?: never;
@@ -6679,12 +6685,26 @@ export interface components {
             field: string;
         };
         /**
-         * @description One held port: which session has it, which requirement it satisfies, and
-         *     enough about that session for a human to decide whether releasing it is
-         *     safe.
+         * @description One held port: who has it, which requirement it satisfies, and enough about
+         *     the holder for a human to decide whether releasing it is safe.
+         *
+         *     The holder is a session OR a card's build stack (MAIN-552), so it is
+         *     described rather than typed: a caller reading this list wants to render it
+         *     and to hand one back, and neither needs to know which kind it is. `holder_id`
+         *     is what the release route takes, whichever it names.
          */
         PortLease: {
             env: string;
+            /**
+             * Format: uuid
+             * @description The session id, or the card id of the build worktree whose stack holds
+             *     it. What `DELETE /nodes/{id}/leases/{holder}` takes.
+             */
+            holder_id: string;
+            /** @description `session` | `build`. */
+            holder_kind: string;
+            /** @description The session's name, or the card's key. */
+            holder_name: string;
             /**
              * @description The requirement's name and env var — so the UI can say *which* listener
              *     holds the port rather than just that something does.
@@ -6692,8 +6712,10 @@ export interface components {
             name: string;
             /** Format: int32 */
             port: number;
-            session_id: components["schemas"]["SessionId"];
-            session_name: string;
+            /**
+             * @description The session's status, or `build` — a build's lease has no lifecycle of
+             *     its own beyond the stack it belongs to.
+             */
             status: string;
         };
         PortRange: {
@@ -6847,6 +6869,16 @@ export interface components {
             kind: "no_role_label";
             /** @description The selector key that matched nothing, e.g. `role/build`. */
             label: string;
+        } | {
+            env: string;
+            /** @enum {string} */
+            kind: "ports_unavailable";
+            /**
+             * @description The listener that went unsatisfied, and the variable it would have
+             *     arrived as — which is what makes the wait actionable: widen the
+             *     node's range, or free a lease on the Nodes page.
+             */
+            listener: string;
         } | {
             /**
              * @description Renamed on the wire only: `kind` is the internal tag, and a variant
@@ -10850,7 +10882,7 @@ export interface operations {
             header?: never;
             path: {
                 id: string;
-                session: string;
+                holder: string;
             };
             cookie?: never;
         };

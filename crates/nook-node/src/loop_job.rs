@@ -68,6 +68,18 @@ pub struct LoopJob {
     /// as its initiator. Without it `nook` inside the agent reads this machine's
     /// login file and acts as whoever last logged in here, in THEIR tenant.
     pub nook_token: Option<String>,
+    /// The ports the control plane leased this run (MAIN-552), each exported as
+    /// the variable the WORKSPACE named — so `./scripts/dev-up.sh` in the
+    /// worktree binds them instead of `docker-compose.yml`'s `${VAR:-default}`
+    /// fallbacks, which every other stack on this machine also falls back to.
+    ///
+    /// This end recognises none of the names and must not: it exports what it
+    /// was handed, exactly as `tmux::spawn` does for a session.
+    pub ports: Vec<nook_types::LeasedPort>,
+    /// Optional listeners that went unleased, exported as
+    /// `NOOK_PORTS_UNSATISFIED` — the same name a session gets (MAIN-377), so a
+    /// consumer telling "not leased" from "not under nook" reads one variable.
+    pub unsatisfied_ports: Vec<String>,
 }
 
 /// Worktree directory names of jobs running on this node right now, so
@@ -1448,6 +1460,8 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
         workspace_id,
         ssh_key,
         nook_token,
+        ports,
+        unsatisfied_ports,
     } = job;
     // A review run keeps ONE working directory per (workspace, PR), and a
     // build run one per (workspace, card) — the agent-session bucket is keyed
@@ -1756,6 +1770,8 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
                 review_forced,
                 build_task: (kind == "build").then_some(target_task_key.as_str()),
                 warm_session: warm.as_ref().map(|(_, sid)| sid.as_str()),
+                ports: &ports,
+                unsatisfied_ports: &unsatisfied_ports,
             },
             AgentIdentity {
                 token: nook_token.as_deref(),
@@ -1879,6 +1895,12 @@ struct RunBrief<'a> {
     /// and the worktree cannot disagree by construction. `None` is a per-job
     /// session.
     warm_session: Option<&'a str>,
+    /// The ports the control plane leased this run (MAIN-552), each under the
+    /// variable the WORKSPACE named. Exported verbatim: this end recognises
+    /// none of the names and must not, exactly as `tmux::spawn` does not.
+    ports: &'a [nook_types::LeasedPort],
+    /// Optional listeners that went unleased, under `NOOK_PORTS_UNSATISFIED`.
+    unsatisfied_ports: &'a [String],
 }
 
 fn drive_streaming(
@@ -1896,6 +1918,8 @@ fn drive_streaming(
         review_forced,
         build_task,
         warm_session,
+        ports,
+        unsatisfied_ports,
     } = brief;
     use crate::job_adapter;
 
@@ -1969,6 +1993,26 @@ fn drive_streaming(
     if let Some(t) = identity.token.filter(|t| !t.trim().is_empty()) {
         env.push(("NOOK_TOKEN", t));
         env.push(("NOOK_SERVER", identity.server));
+    }
+    // The ports this run leased (MAIN-552), each under the variable the
+    // WORKSPACE named — so `dev-up.sh` in the worktree binds them instead of
+    // compose's `${VAR:-default}` fallbacks, which every other stack on this
+    // machine also falls back to. Nothing here recognises any of the names, the
+    // same property that lets `tmux::spawn` serve a Next.js app and a Rust
+    // backend without learning either.
+    let port_values: Vec<(String, String)> = ports
+        .iter()
+        .map(|p| (p.env.clone(), p.port.to_string()))
+        .collect();
+    for (env_name, value) in &port_values {
+        env.push((env_name.as_str(), value.as_str()));
+    }
+    // An ABSENT variable has two opposite meanings — "cloned outside nook, use
+    // your default" and "the node ran out" — and only this distinguishes them
+    // (MAIN-377). Same name a session gets, so a consumer reads one variable.
+    let skipped = unsatisfied_ports.join(",");
+    if !skipped.is_empty() {
+        env.push(("NOOK_PORTS_UNSATISFIED", &skipped));
     }
     // The streaming adapter spawns the agent directly and never touches tmux,
     // so it never inherited what `tmux.rs` exports. `nook get workspace git-ssh`

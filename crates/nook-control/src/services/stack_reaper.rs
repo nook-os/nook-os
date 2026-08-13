@@ -154,7 +154,27 @@ pub async fn reap_for_task_with(
     }
 
     let reaped = match ops.stack_down(node_id, &projects).await {
-        Ok(reaped) => reaped,
+        Ok(reaped) => {
+            // The stack is down, so the ports it bound are genuinely free
+            // (MAIN-552 AC-3). Here and not at the end of the run: a build's
+            // stack outlives its run by design, and handing a port back while
+            // containers are still listening on it is worse than never leasing
+            // it — the next holder would be told a number that is already busy.
+            //
+            // After the down and not before: a failed `down` returns above with
+            // the worktree kept, and the leases have to be kept with it.
+            if let Err(e) = state
+                .sessions
+                .release_leases_by_holder(node_id, task_id.0)
+                .await
+            {
+                tracing::warn!(
+                    task = %task_id.0, node = %node_id.0, error = %e,
+                    "the card's build stack came down but its port leases would not release"
+                );
+            }
+            reaped
+        }
         Err(e) => {
             // AC-3. Leaving a worktree behind wastes disk and is recoverable;
             // removing it would leave a stack whose name is derived from this

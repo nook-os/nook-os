@@ -363,7 +363,7 @@ pub fn build_router(state: AppState) -> Router {
             axum::routing::put(nodes::set_port_exclusions),
         )
         .route(
-            "/nodes/{id}/leases/{session}",
+            "/nodes/{id}/leases/{holder}",
             delete_route(nodes::release_lease),
         )
         // The port range's twin (MAIN-508): the other half of sizing a machine,
