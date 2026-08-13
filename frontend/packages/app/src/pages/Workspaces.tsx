@@ -17,6 +17,7 @@ import { RUNS_SECTION, useLegacyRunsSectionRedirect, WorkspaceRuns } from "../Wo
 import { WorkspaceLocations } from "../WorkspaceLocations";
 import { WorkspacePorts } from "../WorkspacePorts";
 import { WorkspaceScale } from "../WorkspaceScale";
+import { WorkspaceTunnels } from "../WorkspaceTunnels";
 import { SectionedPage, type PageSection } from "../SectionedPage";
 import { askChoice, askConfirm, askForm, askText, notify } from "../dialogs";
 import { requireAppPassword, useAppPassword } from "../apppassword";
@@ -764,6 +765,19 @@ export function WorkspaceDetail() {
             </div>
           </div>
         ) : null,
+    },
+    {
+      // Directly after Ports & scale, because it is the same question one step
+      // further out: those are the ports a session binds on a machine, this is
+      // which of them anything outside the fleet can reach.
+      id: "tunnels",
+      title: "Tunnels",
+      group: "Work",
+      keywords: [
+        "tunnel", "tunnels", "url", "public", "expose", "share", "ngrok",
+        "domain", "subdomain", "idle", "sweep",
+      ],
+      render: () => (id ? <WorkspaceTunnels workspaceId={id} /> : null),
     },
     {
       id: "notes",
