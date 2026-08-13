@@ -15,6 +15,7 @@
 use nook_control::repo::sessions::DbSessionRepository;
 use nook_control::repo::workspaces::DbWorkspaceRepository;
 use nook_control::services::{discovery, session_queries};
+use nook_db::dialect::{json, time_math, type_mapping};
 use nook_db::{params, Db, EnginePool};
 use nook_proto::DiscoveredWorkspace;
 use nook_testkit::TestBed;
@@ -82,14 +83,18 @@ async fn seed_checkout(
     discovered_secs_ago: i64,
     missing: bool,
 ) {
+    let discovered = time_math(bed.engine()).now_minus_scaled("$8", "1 second");
+    let now = type_mapping(bed.engine()).now();
     bed.db()
         .exec(
-            "INSERT INTO node_workspaces
+            &format!(
+                "INSERT INTO node_workspaces
            (id, tenant_id, node_id, workspace_id, path, git_branch, git_status, kind,
             discovered_at, missing_at)
-         VALUES ($1,$2,$3,$4,$5,$6,'{}',$7,
-                 now() - ($8 * interval '1 second'),
-                 CASE WHEN $9 THEN now() ELSE NULL END)",
+         VALUES ($1,$2,$3,$4,$5,$6,'{{}}',$7,
+                 {discovered},
+                 CASE WHEN $9 THEN {now} ELSE NULL END)"
+            ),
             params![
                 id,
                 f.tenant,
@@ -183,11 +188,20 @@ async fn backfill_converts_worktree_jsonb_to_kind() {
     mk("/legacy/primary", false).await;
     mk("/legacy/feature", true).await;
 
-    // The migration's backfill statement, verbatim.
+    // The migration's backfill statement, with its `->>`-and-cast routed through
+    // the seams — Postgres still renders the original `(git_status ->>
+    // 'worktree')::boolean` character for character.
+    let e = bed.engine();
+    let is_worktree = type_mapping(e).cast(
+        &format!("({})", json(e).get_text("git_status", "worktree")),
+        "boolean",
+    );
     bed.db()
         .exec(
-            "UPDATE node_workspaces SET kind = 'worktree'
-         WHERE kind = 'clone' AND (git_status ->> 'worktree')::boolean IS TRUE",
+            &format!(
+                "UPDATE node_workspaces SET kind = 'worktree'
+         WHERE kind = 'clone' AND {is_worktree} IS TRUE"
+            ),
             params![],
         )
         .await
@@ -388,9 +402,10 @@ async fn restart_reuses_the_bound_checkout_then_falls_back_when_it_is_gone() {
 
     // Prune the worktree → the binding resolves to nothing → fall back to the
     // deterministic clone pick (AC-4's NULL/missing fallback).
+    let now = type_mapping(bed.engine()).now();
     bed.db()
         .exec(
-            "UPDATE node_workspaces SET missing_at = now() WHERE id = $1",
+            &format!("UPDATE node_workspaces SET missing_at = {now} WHERE id = $1"),
             params![wt],
         )
         .await

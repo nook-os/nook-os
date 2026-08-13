@@ -157,8 +157,13 @@ async fn tenant_user(bed: &TestBed) -> (TenantId, UserId, AuthCtx) {
     bed.db()
         .exec(
             "INSERT INTO users (id, tenant_id, person_id, display_name, email)
-         VALUES ($1, $2, gen_random_uuid(), 'Op', $3)",
-            params![user, tenant, format!("op-{}@example.test", user.0.simple())],
+         VALUES ($1, $2, $3, 'Op', $4)",
+            params![
+                user,
+                tenant,
+                Uuid::now_v7(),
+                format!("op-{}@example.test", user.0.simple())
+            ],
         )
         .await
         .unwrap();
@@ -194,8 +199,8 @@ async fn read_endpoints_require_node_manage() {
     bed.db()
         .exec(
             "INSERT INTO role_bindings (id, subject_type, subject_id, role_key, scope_type, scope_id)
-         VALUES (gen_random_uuid(), 'user', $1, 'operator', 'deployment', NULL)",
-            params![user.0],
+         VALUES ($1, 'user', $2, 'operator', 'deployment', NULL)",
+            params![Uuid::now_v7(), user.0],
         )
         .await
         .unwrap();

@@ -14,6 +14,7 @@ use nook_control::routes::gitops;
 use nook_control::services::schedule::{clone_hosts, pick, Placement};
 use nook_control::state::AppState;
 use nook_control::ws::registry::NodeHandle;
+use nook_db::dialect::{json, type_mapping};
 use nook_db::{params, Db};
 use nook_proto::ControlToNode;
 use nook_testkit::TestBed;
@@ -24,11 +25,14 @@ use uuid::Uuid;
 /// candidate (the seam `dispatch_ownership` uses).
 async fn online_node(state: &AppState, tenant: TenantId, owner: Uuid) -> NodeId {
     let id = NodeId::new();
+    let resources = json(state.db.engine()).literal(r#"{"mem_total": 32}"#);
     state
         .db
         .exec(
-            "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status, owner_person_id, resources)
-         VALUES ($1, $2, $3, $4, 'online', $5, '{\"mem_total\": 32}'::jsonb)",
+            &format!(
+                "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status, owner_person_id, resources)
+         VALUES ($1, $2, $3, $4, 'online', $5, {resources})"
+            ),
             params![
                 id,
                 tenant,
@@ -97,10 +101,13 @@ async fn checkout(
     missing: bool,
 ) -> NodeWorkspaceId {
     let id = NodeWorkspaceId::new();
+    let now = type_mapping(bed.engine()).now();
     bed.db()
         .exec(
-            "INSERT INTO node_workspaces (id, tenant_id, node_id, workspace_id, path, kind, missing_at)
-         VALUES ($1, $2, $3, $4, $5, $6, CASE WHEN $7 THEN now() ELSE NULL END)",
+            &format!(
+                "INSERT INTO node_workspaces (id, tenant_id, node_id, workspace_id, path, kind, missing_at)
+         VALUES ($1, $2, $3, $4, $5, $6, CASE WHEN $7 THEN {now} ELSE NULL END)"
+            ),
             params![id, tenant, node, ws, path, kind, missing],
         )
     .await

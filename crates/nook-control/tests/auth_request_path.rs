@@ -12,6 +12,7 @@ use axum::Json;
 use nook_control::auth::{AuthCtx, Principal};
 use nook_control::error::ApiError;
 use nook_control::state::AppState;
+use nook_db::dialect::time_math;
 use nook_db::{params, Db, EnginePool};
 use nook_testkit::TestBed;
 use nook_types::{AuthSessionId, SwitchTenantRequest, TenantId, UserId};
@@ -72,10 +73,13 @@ async fn revoke(bed: &TestBed, tenant: TenantId, user: UserId) {
 
 async fn seed_session(bed: &TestBed, user: UserId, tenant: TenantId) -> Uuid {
     let sid = Uuid::new_v4();
+    let expires = time_math(bed.engine()).now_plus("1 hour");
     bed.db()
         .exec(
-            "INSERT INTO sessions_auth (id, user_id, tenant_id, expires_at)
-         VALUES ($1, $2, $3, now() + interval '1 hour')",
+            &format!(
+                "INSERT INTO sessions_auth (id, user_id, tenant_id, expires_at)
+         VALUES ($1, $2, $3, {expires})"
+            ),
             params![sid, user, tenant],
         )
         .await
@@ -131,9 +135,10 @@ async fn one_query_keeps_401_no_session_distinct_from_403_revoked_grant() {
     );
 
     // An expired session → 401 (the `expires_at > now()` guard survived the fold).
+    let past = time_math(bed.engine()).now_minus("1 minute");
     bed.db()
         .exec(
-            "UPDATE sessions_auth SET expires_at = now() - interval '1 minute' WHERE id = $1",
+            &format!("UPDATE sessions_auth SET expires_at = {past} WHERE id = $1"),
             params![sid],
         )
         .await

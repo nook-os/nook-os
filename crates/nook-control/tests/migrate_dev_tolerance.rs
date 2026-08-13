@@ -35,9 +35,9 @@ async fn insert_orphan(db: &EnginePool, table: &str, version: i64) {
     db.exec(
         &format!(
             "INSERT INTO {table} (version, description, success, checksum, execution_time)
-         VALUES ($1, 'synthetic orphan (MAIN-224 test)', true, '\\x00'::bytea, 0)"
+         VALUES ($1, 'synthetic orphan (MAIN-224 test)', true, $2, 0)"
         ),
-        params![version],
+        params![version, vec![0u8]],
     )
     .await
     .expect("insert synthetic ledger row");
@@ -94,8 +94,8 @@ async fn dev_tolerance_does_not_mask_a_modified_migration() {
     // (NG-1: this survives a stray row, it never rewrites the ledger).
     bed.db()
         .exec(
-            "UPDATE _sqlx_migrations SET checksum = '\\xdeadbeef'::bytea WHERE version = 1",
-            params![],
+            "UPDATE _sqlx_migrations SET checksum = $1 WHERE version = 1",
+            params![vec![0xdeu8, 0xad, 0xbe, 0xef]],
         )
         .await
         .expect("corrupt an applied checksum");
@@ -119,6 +119,12 @@ async fn orphan_query_reads_the_ledger_on_the_pools_search_path() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
+    // Schemas and `search_path` are Postgres's; SQLite has neither, so there is
+    // no chat ledger to point a pool at and nothing to assert.
+    if !bed.is_postgres() {
+        bed.teardown().await;
+        return;
+    }
     let Ok(base_url) = std::env::var("DATABASE_URL") else {
         return;
     };
@@ -200,6 +206,12 @@ async fn heal_script_lists_and_deletes_only_the_orphan() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
+    // The script speaks psql to a Postgres URL, and the row it deletes is
+    // schema-qualified — nothing here has a SQLite reading.
+    if !bed.is_postgres() {
+        bed.teardown().await;
+        return;
+    }
     // The script drives psql; where it is absent (the dev container, some hosts)
     // skip the end-to-end run — the guard test above still covers the safety path.
     if Command::new("psql").arg("--version").output().is_err() {

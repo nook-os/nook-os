@@ -100,8 +100,13 @@ async fn a_user(bed: &TestBed, tenant: TenantId) -> UserId {
     bed.db()
         .exec(
             "INSERT INTO users (id, tenant_id, person_id, display_name, email)
-         VALUES ($1, $2, gen_random_uuid(), 'U', $3)",
-            params![user, tenant, format!("u-{}@example.test", user.0.simple())],
+         VALUES ($1, $2, $3, 'U', $4)",
+            params![
+                user,
+                tenant,
+                Uuid::now_v7(),
+                format!("u-{}@example.test", user.0.simple())
+            ],
         )
         .await
         .unwrap();

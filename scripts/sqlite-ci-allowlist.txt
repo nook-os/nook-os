@@ -39,8 +39,13 @@
 # Measured on two full runs of `cargo test --workspace --no-fail-fast` under
 # sqlite://, which produced identical failure sets — nothing here is flaky.
 #
-# 166 test binaries: 143 COVERED, 22 pending below, 1 deliberately Postgres-only —
+# 168 test binaries: 155 COVERED, 12 pending below, 1 deliberately Postgres-only —
 # the numbers check-sqlite-ci.sh itself reports, not arithmetic on this file.
+# (Read off the leg's own verdict by MAIN-545, which deleted ten lines. It said
+# 166/143/22 before, and adding ten to that would have given 166/153/12 — right
+# only about the pending count, because two more binaries arrived while this
+# branch was open and both came in COVERED. Deleting a line is the one number
+# you CAN predict; the other two have to be measured.)
 # (Re-read from a real run by MAIN-385, which added `build_loop_pin`. It said
 # 163/141/21 before, and this branch still carried the pre-#442 line — 153/132/20
 # — until the rebase took main's. Two binaries arrived and one of them is
@@ -97,6 +102,13 @@
 #             `now()`, `gen_random_uuid()`, `::` casts, `CREATE SCHEMA`, and
 #             `UPDATE <table> <alias>` without the `AS` SQLite requires (the
 #             class MAIN-472 already fixed once, in node_owner).
+#             LANDED 2026-08-12. Ten of its thirteen went green and their lines
+#             are deleted. The other three each turned out to have a SECOND
+#             cause behind the fixture, which only converting the fixture could
+#             reveal — re-measured and re-tagged in place below, and the one
+#             with no owner (`job_reaper`) got MAIN-564 filed for it. That is
+#             the header's warning working as intended for once: a tag moved
+#             only after the binary was re-run.
 #   MAIN-546  PRODUCTION: `eligible_loop_executors` reads `json_each`'s alias
 #             as a column.
 #   MAIN-547  PRODUCTION: `!= ALL($n)` bound an EMPTY list matches nothing on
@@ -105,25 +117,15 @@
 #   MAIN-548  the one line where the old reason was TRUE: still raw sqlx.
 #   MAIN-549  the mechanism under test does not exist on SQLite; needs a ruling
 #             before it needs code.
-auth_request_path          # MEASURED (MAIN-478): `near "'1 hour'": syntax error` — `now() + interval '1 hour'` in the test's session fixtures at :78, :136 (MAIN-545)
-board_automation           # MEASURED (MAIN-478): `no such function: gen_random_uuid` — the test's membership fixture at :103 (MAIN-545)
-bulk_tasks                 # MEASURED (MAIN-478): `no such function: gen_random_uuid` — the test's membership fixture at :44 (MAIN-545)
-checkout_kind              # MEASURED (MAIN-478): `near "'1 second'": syntax error` at :91, and `unrecognized token: ":"` from `(git_status ->> 'worktree')::boolean` at :190 — both in the test (MAIN-545)
 dispatch_ownership         # MEASURED (MAIN-478): `EnginePool::pg() on a SQLite pool` — `sqlx::query(…).execute(state.db.pg())` at :27. The ONLY line where "raw sqlx in the test itself" was still true (MAIN-548)
 executor_selection         # MEASURED (MAIN-478): `no such column: e` — production `repo/nodes.rs:1006` reads `json_each(…) e`'s fields off the alias. 0 passed, 29 failed, one error (MAIN-546)
 dispatch_order             # MEASURED (MAIN-478): the same `no such column: e`, swallowed into "no eligible executor" so every placement assertion reads `left: None`. Deletable only together with executor_selection (MAIN-546)
-invite_registration        # MEASURED (MAIN-478): `near "'14 days'": syntax error` at :29 and `'1 hour'` at :242, :429 — interval literals in the test's invite/session fixtures (MAIN-545)
-job_reaper                 # MEASURED (MAIN-478): `near "'1 second'": syntax error` — `$5::bigint * interval '1 second'` in the test's node fixture at :56 (MAIN-545)
-loops_switch               # MEASURED (MAIN-478): `unrecognized token: ":"` — `'true'::jsonb` at :118 and a `::jsonb` capabilities literal at :187, both in the test (MAIN-545)
-managed_content            # MEASURED (MAIN-478): `no such function: gen_random_uuid` — the test's fixtures at :160, :197 (MAIN-545)
-migrate_dev_tolerance      # MEASURED (MAIN-478): `unrecognized token: ":"` from `'\x00'::bytea` at :40, and `near "SCHEMA": syntax error` from `CREATE SCHEMA` at :132 — SQLite has no schemas (MAIN-545)
+job_reaper                 # MEASURED (MAIN-545, 2026-08-12, after its three fixtures were converted): `near "j": syntax error` — production `repo/jobs.rs:1367` is `UPDATE loop_jobs j … FROM nodes n`, and its `RETURNING n.last_seen_at` names the joined table SQLite cannot return from. 3 passed, 6 failed (MAIN-564)
+loops_switch               # MEASURED (MAIN-545, 2026-08-12, after both `::jsonb` literals were converted): `no such column: e` — the same production `eligible_loop_executors` executor_selection and dispatch_order hit, reached through `select_executor`. 3 passed, 1 failed (MAIN-546)
+migrate_dev_tolerance      # MEASURED (MAIN-545, 2026-08-12, after the bytea literals were bound and the two schema/psql tests gated): `VersionMissing(38)` and an empty orphan list — the Postgres MIGRATOR driven at a SQLite bed, and `orphan_versions` returning empty there BY DESIGN. Same signature as squash_restamp; needs the same ruling. 3 passed, 3 failed (MAIN-549)
 multi_instance             # MEASURED (MAIN-478): "instance A never started listening" — production `ws/bus.rs:204` is `PgListener` + `pg_notify`, so the bus task dies on a SQLite pool. Needs a ruling, not a sweep (MAIN-549)
-placement_and_gitops_auth  # MEASURED (MAIN-478): `unrecognized token: ":"` from a `::jsonb` resources literal at :31, and `no such function: now` at :103 — both in the test (MAIN-545)
 reconcile_tombstones       # MEASURED (MAIN-478): three assertions fail with NO SQL error — production `path != ALL($2)` bound an empty list tombstones 0 rows and returns Ok. Its fourth failure is a fixture `interval '1 second'` at :246 (MAIN-547)
-repo_completeness          # MEASURED (MAIN-478): `near "w": syntax error` — `UPDATE workspaces w SET …` in the test at :144, missing the `AS` Postgres treats as optional (MAIN-545)
-review_column              # MEASURED (MAIN-478): `near "c": syntax error` — `UPDATE board_columns c SET …` in the test at :70, same missing `AS` (MAIN-545)
 squash_restamp             # MEASURED (MAIN-478): `EngineUnsupported` — `nook_db::restamp` refuses a non-Postgres pool BY DESIGN, and the test unwraps it at :190. Also drives the Postgres MIGRATOR on a SQLite bed (`VersionMissing(38)` at :288). Needs a ruling (MAIN-549)
-task_checkout_ids          # MEASURED (MAIN-478): `no such function: now` — the test's checkout fixture at :32 (MAIN-545)
 
 # A THIRD line for the same one query, added by MAIN-495 and measured the same
 # way: `/build-loop-status` reports the capacity of the set `select_executor`

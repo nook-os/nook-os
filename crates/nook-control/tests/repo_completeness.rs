@@ -131,7 +131,9 @@ async fn backfill_adopts_agreeing_remotes_and_leaves_disagreeing_null() {
     )
     .await;
 
-    // The migration's backfill statement, verbatim.
+    // The migration's backfill statement, with `AS w` rather than a bare `w`:
+    // SQLite's UPDATE grammar requires the keyword and Postgres accepts it
+    // either way, so one spelling reads on both engines (MAIN-472).
     bed.db()
         .exec(
             "WITH agreed AS (
@@ -141,7 +143,7 @@ async fn backfill_adopts_agreeing_remotes_and_leaves_disagreeing_null() {
              GROUP BY workspace_id
              HAVING count(DISTINCT git_remote_url) = 1
          )
-         UPDATE workspaces w
+         UPDATE workspaces AS w
          SET git_remote_url = a.url
          FROM agreed a
          WHERE w.id = a.workspace_id AND w.git_remote_url IS NULL",
