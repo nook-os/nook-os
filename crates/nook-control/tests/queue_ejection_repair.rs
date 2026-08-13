@@ -653,14 +653,15 @@ async fn an_ejection_row_and_a_conflict_row_are_told_apart_in_the_listing() {
 
     let listed = state
         .jobs
-        .list_reviews_for_workspace(f.tenant, f.ws, 50)
+        .list_reviews_for_workspace(f.tenant, f.ws, &nook_testkit::first_page(50))
         .await
-        .expect("listing");
+        .expect("listing")
+        .rows;
     let source_of = |pr: i64| -> Option<String> {
         listed
             .iter()
-            .find(|j| j.review_pr_number == Some(pr) && j.review_verdict_source.is_some())
-            .and_then(|j| j.review_verdict_source.clone())
+            .find(|r| r.job.review_pr_number == Some(pr) && r.job.review_verdict_source.is_some())
+            .and_then(|r| r.job.review_verdict_source.clone())
     };
     assert_eq!(
         source_of(PR as i64).as_deref(),
@@ -673,8 +674,8 @@ async fn an_ejection_row_and_a_conflict_row_are_told_apart_in_the_listing() {
     assert!(
         listed
             .iter()
-            .any(|j| j.review_verdict.as_deref() == Some("approved")
-                && j.review_verdict_source.is_none()),
+            .any(|r| r.job.review_verdict.as_deref() == Some("approved")
+                && r.job.review_verdict_source.is_none()),
         "and the agent's own verdict claims no cause at all"
     );
 

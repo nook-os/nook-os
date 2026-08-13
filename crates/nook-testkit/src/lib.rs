@@ -507,6 +507,21 @@ pub async fn deadline<T>(secs: u64, fut: impl std::future::Future<Output = T>) -
     }
 }
 
+/// The first page of `limit` rows in a list's default order — what a caller
+/// that passes no cursor gets. Sortless and searchless, so it fits any list's
+/// allowlist including an empty one.
+pub fn first_page(limit: i64) -> nook_db::paging::PageArgs {
+    nook_db::paging::PageArgs::parse(None, None, Some(limit), None, None, &[])
+        .expect("a bare limit is valid against every allowlist")
+}
+
+/// The page that CONTINUES `cursor`, at the same size. Panics on a token the
+/// codec refuses — a test that walks its own `next_cursor` never produces one.
+pub fn page_after(cursor: &str, limit: i64) -> nook_db::paging::PageArgs {
+    nook_db::paging::PageArgs::parse(None, Some(cursor), Some(limit), None, None, &[])
+        .expect("a cursor this walk was handed")
+}
+
 impl Drop for TestBed {
     fn drop(&mut self) {
         // Safety net: if the test skipped `teardown().await` (or panicked before

@@ -1495,6 +1495,85 @@ pub struct WorkspaceBuildRun {
     #[serde(default)]
     pub queued_reason_kind: Option<QueuedReason>,
     pub created_at: DateTime<Utc>,
+    /// Last lifecycle movement (MAIN-557 AC-1), which for a finished run is
+    /// when it finished. `created_at` alone cannot say how long a row has been
+    /// where it is, so a console showing elapsed time had to invent one.
+    pub updated_at: DateTime<Utc>,
+    /// The branch the run acted on, from its card's record (MAIN-557 AC-2).
+    ///
+    /// `None` is the ordinary case for a loop-raised build TODAY and that is
+    /// not an oversight: `record_loop_worktree` stamps the worktree and
+    /// deliberately not the branch (MAIN-480), the branch itself is created
+    /// inside the run by the build skill, and nothing reports it back. A card a
+    /// human started with start-work carries one. A name assembled from the key
+    /// would be a guess — the skill appends a free-form slug — so the field is
+    /// null rather than synthesised.
+    ///
+    /// VIEWER-GATED exactly as `task_key` is: `start-work` defaults the branch
+    /// to the card's slugified TITLE, so a private card's branch is the same
+    /// secret as its key and is withheld from a non-owner the same way.
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// Who the run was requested by, by display name (MAIN-557 AC-3) — the
+    /// join a console would otherwise pay per row.
+    ///
+    /// It does NOT say whether a human or the converger raised the run, because
+    /// nothing recorded here can: an auto-raised run is requested by the person
+    /// who enabled the loop, which is the same kind of value a hand-raised one
+    /// carries. Naming them all alike is the honest reading; labelling them
+    /// would be inventing a distinction the data does not hold.
+    ///
+    /// VIEWER-GATED like `task_key` and `branch` (MAIN-557 AC-3a, owner
+    /// ruling): a non-owner must not learn WHO has a private card building in
+    /// this repo. Its review-listing twin is deliberately ungated — a review
+    /// run has no card, so there is nothing there to withhold.
+    #[serde(default)]
+    pub initiator: Option<String>,
+    /// The commit the run acted on (MAIN-557 AC-4): a REPAIR run is raised at
+    /// the head its verdict was written for, and that head is what this is.
+    ///
+    /// `None` for a fresh build, whose `build_fingerprint` is a fingerprint of
+    /// the CARD's contract and not a commit at all — presenting that as a sha
+    /// is exactly what AC-4 forbids.
+    #[serde(default)]
+    pub commit_sha: Option<String>,
+}
+
+/// One row of a workspace's Reviews listing (MAIN-557): the run, plus the two
+/// joins a console would otherwise pay per row.
+///
+/// The job is FLATTENED rather than narrowed to the handful of fields a panel
+/// reads today — the endpoint has always returned a whole [`LoopJob`], and a
+/// listing card is no place to decide which of its fields somebody stopped
+/// needing. So this is a strict superset: every existing key, plus `branch` and
+/// `initiator`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WorkspaceReviewRun {
+    #[serde(flatten)]
+    pub job: LoopJob,
+    /// The PR's head ref. Always `None` today, and the reason is worth stating
+    /// rather than leaving as an empty column: the forge read a review run is
+    /// raised from (`forge::PullRequest`) carries the PR's number, head sha and
+    /// labels, and nothing else — no head ref reaches this side, at raise time
+    /// or after. The run's commit is `review_head_sha`, which is real; the
+    /// branch that commit sat on is not recorded anywhere, and deriving it from
+    /// the PR number would mean a forge call per row.
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// Who the run was requested by, by display name — the same field, with the
+    /// same caveat, as [`WorkspaceBuildRun::initiator`].
+    #[serde(default)]
+    pub initiator: Option<String>,
+}
+
+impl nook_db::FromDbRow for WorkspaceReviewRun {
+    fn from_db_row(row: &nook_db::DbRow) -> Result<Self, nook_db::DbError> {
+        Ok(WorkspaceReviewRun {
+            job: LoopJob::from_db_row(row)?,
+            branch: nook_db::FromDbColumn::from_db_column(row, "branch")?,
+            initiator: nook_db::FromDbColumn::from_db_column(row, "initiator")?,
+        })
+    }
 }
 
 /// Toggle a node's `shared` designation (MAIN-135). Owner-only at the route.

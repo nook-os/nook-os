@@ -218,9 +218,10 @@ async fn the_builds_listing_names_the_card_by_key() {
 
     let rows = state
         .jobs
-        .list_builds_for_workspace(tenant, user, ws, 50)
+        .list_builds_for_workspace(tenant, user, ws, &nook_testkit::first_page(50))
         .await
-        .expect("list");
+        .expect("list")
+        .rows;
     assert_eq!(rows.len(), 1, "build kind + this workspace only");
     let key = rows[0].task_key.as_deref().expect("the card has a key");
     assert_eq!(
@@ -236,8 +237,14 @@ async fn the_builds_listing_names_the_card_by_key() {
 /// owner's — its build run lists KEYLESS to a non-owner, keyed to the owner.
 /// The run row itself stays: the workspace's history is not the secret, the
 /// card's identity is.
+///
+/// The BRANCH is the same secret wearing a different hat (MAIN-557):
+/// `start-work` defaults it to `slugify(title)`, so leaking it would leak more
+/// than the key this test was written to withhold. The INITIATOR joins them by
+/// owner ruling (AC-3a): a row naming nobody must not start naming WHO has a
+/// private card building here.
 #[tokio::test]
-async fn a_private_cards_key_is_withheld_from_a_non_owner() {
+async fn a_private_cards_key_branch_and_initiator_are_withheld_from_a_non_owner() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
@@ -286,6 +293,15 @@ async fn a_private_cards_key_is_withheld_from_a_non_owner() {
         )
         .await
         .expect("private card");
+    // The branch a `start-work` on this card would have written: the card's
+    // title, slugified. Nothing else in the fixture sets one.
+    bed.db()
+        .exec(
+            "UPDATE tasks SET branch = $2 WHERE id = $1",
+            nook_db::params![secret.id, "hidden"],
+        )
+        .await
+        .expect("branch");
     state
         .jobs
         .create(nook_control::repo::jobs::NewLoopJob {
@@ -307,23 +323,43 @@ async fn a_private_cards_key_is_withheld_from_a_non_owner() {
 
     let to_bob = state
         .jobs
-        .list_builds_for_workspace(tenant, bob, ws, 50)
+        .list_builds_for_workspace(tenant, bob, ws, &nook_testkit::first_page(50))
         .await
-        .expect("list as bob");
+        .expect("list as bob")
+        .rows;
     assert_eq!(to_bob.len(), 1, "the run row is workspace history");
     assert!(
         to_bob[0].task_key.is_none(),
         "…but the private card's key is withheld from a non-owner"
     );
+    assert!(
+        to_bob[0].branch.is_none(),
+        "…and so is its branch, which carries the card's title verbatim"
+    );
+    assert!(
+        to_bob[0].initiator.is_none(),
+        "…and so is its initiator: who has a private card building is the \
+         card's secret too (AC-3a)"
+    );
 
     let to_alice = state
         .jobs
-        .list_builds_for_workspace(tenant, alice, ws, 50)
+        .list_builds_for_workspace(tenant, alice, ws, &nook_testkit::first_page(50))
         .await
-        .expect("list as alice");
+        .expect("list as alice")
+        .rows;
     assert!(
         to_alice[0].task_key.is_some(),
         "the owner still sees their card named"
+    );
+    assert_eq!(
+        to_alice[0].branch.as_deref(),
+        Some("hidden"),
+        "the owner still sees their card's branch"
+    );
+    assert!(
+        to_alice[0].initiator.is_some(),
+        "the owner still sees who raised the run"
     );
 
     bed.teardown().await;

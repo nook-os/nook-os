@@ -30,10 +30,40 @@
 
 use async_trait::async_trait;
 use nook_db::dialect::{time_math, type_mapping};
+use nook_db::paging::{DbPage, ListSpec, PageArgs};
 use nook_db::{params, Db, DbPool};
 use nook_types::*;
 
 use crate::error::ApiResult;
+
+/// The sort allowlist both run listings publish — EMPTY, and that is the
+/// contract rather than an omission (MAIN-557 AC-5).
+///
+/// An empty allowlist leaves exactly one order: the pagination module's default
+/// `id DESC`, which is newest-first because job ids are UUID v7. That order is
+/// total (ids are unique), and its cursor is a keyset on the id — so a run
+/// raised in the middle of a walk lands ahead of the first page and can neither
+/// duplicate a row already returned nor push one past the cursor unseen. The
+/// module's other mechanism, an OFFSET under a named column sort, drifts under
+/// exactly that insert; not declaring a sortable column is what keeps it
+/// unreachable here.
+pub const RUN_PAGE_SORTS: &[(&str, &str)] = &[];
+
+/// The commit a build run acted on, out of `build_fingerprint` (MAIN-557 AC-4).
+///
+/// A REPAIR run's fingerprint is `repair:<head sha>` — the head its verdict was
+/// written for — so the sha is there to be taken. Every other fingerprint is a
+/// UUID v5 of the card's contract, which is not a commit; this yields NULL for
+/// those rather than dressing one up as a sha. `'repair:'` is seven characters,
+/// so the sha starts at 8 on both engines.
+///
+/// The prefix test is `SUBSTR(…, 1, 7) = 'repair:'` and NOT `LIKE 'repair:%'`,
+/// which is the one spelling of it the two engines disagree on: Postgres' LIKE
+/// is case-sensitive and SQLite's is not, so `LIKE` would match a `Repair:`
+/// fingerprint on one engine only. Equality is case-sensitive on both, and it
+/// is what the in-memory fake's `strip_prefix("repair:")` already means.
+const COMMIT_FROM_FINGERPRINT: &str = "CASE WHEN SUBSTR(j.build_fingerprint, 1, 7) = 'repair:'
+                 THEN SUBSTR(j.build_fingerprint, 8) END AS commit_sha";
 
 /// A job to enqueue.
 #[derive(Debug, Clone)]
@@ -408,14 +438,15 @@ pub trait LoopJobRepository: Send + Sync {
     ) -> ApiResult<Option<JobId>>;
 
     /// A workspace's review runs, newest first — what the workspace's review
-    /// surface reads. Bounded, because a busy repo accumulates one per push per
-    /// PR and a page does not want all of them.
+    /// surface reads. On the pagination contract (MAIN-557 AC-5): a busy repo
+    /// accumulates one run per push per PR, and a lone `LIMIT` made the rest of
+    /// that history unreachable rather than merely un-fetched.
     async fn list_reviews_for_workspace(
         &self,
         tenant: TenantId,
         workspace: WorkspaceId,
-        limit: i64,
-    ) -> ApiResult<Vec<LoopJob>>;
+        args: &PageArgs,
+    ) -> ApiResult<DbPage<nook_types::WorkspaceReviewRun>>;
 
     /// The Builds panel's rows (MAIN-461 AC-2): each build run with its card
     /// named by KEY — joined here because `LoopJob` never carries the key and
@@ -427,8 +458,8 @@ pub trait LoopJobRepository: Send + Sync {
         tenant: TenantId,
         viewer: nook_types::UserId,
         workspace: WorkspaceId,
-        limit: i64,
-    ) -> ApiResult<Vec<nook_types::WorkspaceBuildRun>>;
+        args: &PageArgs,
+    ) -> ApiResult<DbPage<nook_types::WorkspaceBuildRun>>;
 
     /// The states of a workspace's LIVE build runs (MAIN-495) — every run that
     /// has not reached a terminal state, `queued` ones included.
@@ -1184,17 +1215,38 @@ impl LoopJobRepository for DbLoopJobRepository {
         &self,
         tenant: TenantId,
         workspace: WorkspaceId,
-        limit: i64,
-    ) -> ApiResult<Vec<LoopJob>> {
-        Ok(self
-            .db
-            .query_all(
-                "SELECT * FROM loop_jobs
-                  WHERE tenant_id = $1 AND workspace_id = $2 AND kind = 'review'
-                  ORDER BY created_at DESC LIMIT $3",
-                params![tenant, workspace.0, limit],
-            )
-            .await?)
+        args: &PageArgs,
+    ) -> ApiResult<DbPage<nook_types::WorkspaceReviewRun>> {
+        // `j.*` keeps the row a whole `LoopJob` — the shape this endpoint has
+        // always returned — and the two joined columns ride alongside it.
+        // LEFT JOIN on the requester so a run whose user row is gone still
+        // lists, nameless, rather than dropping out of the history.
+        // No branch column: nothing on this side records a PR's head ref (see
+        // `WorkspaceReviewRun::branch`), and NULL states that where a guess
+        // would hide it.
+        //
+        // The initiator is UNGATED here, and that is the ruling rather than an
+        // omission (MAIN-557 AC-3b): a review run is about a pull request and
+        // has no card, so this statement has no `tasks` join and there is no
+        // private card to withhold. Do not add one to gate against — the join
+        // would manufacture the very thing the gate exists to protect.
+        Ok(ListSpec {
+            select: "SELECT j.*, CAST(NULL AS text) AS branch,
+                            u.display_name AS initiator
+                       FROM loop_jobs j
+                       LEFT JOIN users u ON u.id = j.requested_by
+                      WHERE j.tenant_id = $4 AND j.workspace_id = $5
+                        AND j.kind = 'review'",
+            id: "id",
+            search: &[],
+        }
+        .fetch(
+            &self.db,
+            args,
+            params![tenant, workspace.0],
+            |r: &nook_types::WorkspaceReviewRun| r.job.id.0,
+        )
+        .await?)
     }
 
     async fn list_builds_for_workspace(
@@ -1202,8 +1254,8 @@ impl LoopJobRepository for DbLoopJobRepository {
         tenant: TenantId,
         viewer: nook_types::UserId,
         workspace: WorkspaceId,
-        limit: i64,
-    ) -> ApiResult<Vec<nook_types::WorkspaceBuildRun>> {
+        args: &PageArgs,
+    ) -> ApiResult<DbPage<nook_types::WorkspaceBuildRun>> {
         // `||` and CAST are the concat/coercion BOTH engines run — this file is
         // held to SQL both engines run, like every query here. LEFT JOIN so a
         // run whose card was deleted still lists (key NULL), rather than
@@ -1212,26 +1264,50 @@ impl LoopJobRepository for DbLoopJobRepository {
         // workspace's history, but a private card's identity is the owner's —
         // a non-owner sees the run keyless, the way MAIN-86 withholds a
         // private epic's key from its children.
-        Ok(self
-            .db
-            .query_all(
-                &format!(
-                    "SELECT j.id, j.state,
+        //
+        // The BRANCH is behind the same gate, and it has to be: `start-work`
+        // defaults it to `slugify(task.title)`, so an ungated branch hands a
+        // non-owner the private card's TITLE — strictly more than the key
+        // withheld one line above, and a thing this tree withholds elsewhere
+        // (`services::tasks::public_title`). Reading a workspace's run history
+        // is a tenant-membership check, not repo access, so "the viewer can see
+        // the repo anyway" does not license it.
+        //
+        // The INITIATOR is behind it too (MAIN-557 AC-3a, owner ruling): the
+        // sentence above is the whole reason, applied once more. A non-owner
+        // seeing `{task_key: null, branch: null, initiator: "Alice"}` learns
+        // WHO has a private card building here, where the row used to name
+        // nobody — a thinner leak than the branch, and the same kind.
+        Ok(ListSpec {
+            select: &format!(
+                "SELECT j.id, j.state,
                         CASE WHEN {vis}
                              THEN (b.key || '-' || CAST(t.number AS text))
                         END AS task_key,
                         j.queued_reason, j.queued_reason_kind,
-                        j.created_at
+                        j.created_at, j.updated_at,
+                        CASE WHEN {vis} THEN t.branch END AS branch,
+                        CASE WHEN {vis} THEN u.display_name END AS initiator,
+                        {commit}
                    FROM loop_jobs j
                    LEFT JOIN tasks t ON t.id = j.target_task_id
                    LEFT JOIN boards b ON b.id = t.board_id
-                  WHERE j.tenant_id = $1 AND j.workspace_id = $2 AND j.kind = 'build'
-                  ORDER BY j.created_at DESC LIMIT $3",
-                    vis = crate::services::tasks::visible_sql("t", "$4"),
-                ),
-                params![tenant, workspace.0, limit, viewer],
-            )
-            .await?)
+                   LEFT JOIN users u ON u.id = j.requested_by
+                  WHERE j.tenant_id = $4 AND j.workspace_id = $5
+                    AND j.kind = 'build'",
+                vis = crate::services::tasks::visible_sql("t", "$6"),
+                commit = COMMIT_FROM_FINGERPRINT,
+            ),
+            id: "id",
+            search: &[],
+        }
+        .fetch(
+            &self.db,
+            args,
+            params![tenant, workspace.0, viewer],
+            |r: &nook_types::WorkspaceBuildRun| r.id,
+        )
+        .await?)
     }
 
     async fn live_build_states(
@@ -2093,20 +2169,29 @@ impl LoopJobRepository for FakeLoopJobRepository {
         &self,
         tenant: TenantId,
         workspace: WorkspaceId,
-        limit: i64,
-    ) -> ApiResult<Vec<LoopJob>> {
+        args: &PageArgs,
+    ) -> ApiResult<DbPage<nook_types::WorkspaceReviewRun>> {
         let s = self.inner.lock().unwrap();
-        let mut mine: Vec<LoopJob> = s
+        let mine: Vec<nook_types::WorkspaceReviewRun> = s
             .jobs
             .iter()
             .filter(|j| {
                 j.tenant_id == tenant && j.workspace_id == Some(workspace) && j.kind == "review"
             })
-            .cloned()
+            .map(|j| nook_types::WorkspaceReviewRun {
+                job: j.clone(),
+                // The fake holds no users to join, and a review's branch is
+                // `None` on a real row too.
+                branch: None,
+                initiator: None,
+            })
             .collect();
-        mine.sort_by_key(|j| std::cmp::Reverse(j.created_at));
-        mine.truncate(limit.max(0) as usize);
-        Ok(mine)
+        Ok(nook_db::paging::page_vec(
+            mine,
+            args,
+            |r| r.job.id.0,
+            |col, _, _| unreachable!("unlisted sort col {col}"),
+        ))
     }
 
     async fn list_builds_for_workspace(
@@ -2114,10 +2199,10 @@ impl LoopJobRepository for FakeLoopJobRepository {
         tenant: TenantId,
         _viewer: nook_types::UserId,
         workspace: WorkspaceId,
-        limit: i64,
-    ) -> ApiResult<Vec<nook_types::WorkspaceBuildRun>> {
+        args: &PageArgs,
+    ) -> ApiResult<DbPage<nook_types::WorkspaceBuildRun>> {
         let s = self.inner.lock().unwrap();
-        let mut mine: Vec<nook_types::WorkspaceBuildRun> = s
+        let mine: Vec<nook_types::WorkspaceBuildRun> = s
             .jobs
             .iter()
             .filter(|j| {
@@ -2126,17 +2211,29 @@ impl LoopJobRepository for FakeLoopJobRepository {
             .map(|j| nook_types::WorkspaceBuildRun {
                 id: j.id.0,
                 state: j.state.clone(),
-                // The fake holds no boards to join; the key is the panel's
-                // concern, and `None` is a legal row (a deleted card's run).
+                // The fake holds no boards, cards or users to join; every one
+                // of these is a legal `None` on a real row too (a deleted
+                // card's run, a card with no branch recorded).
                 task_key: None,
                 queued_reason: j.queued_reason.clone(),
                 queued_reason_kind: j.queued_reason_kind.clone(),
                 created_at: j.created_at,
+                updated_at: j.updated_at,
+                branch: None,
+                initiator: None,
+                commit_sha: j
+                    .build_fingerprint
+                    .as_deref()
+                    .and_then(|f| f.strip_prefix("repair:"))
+                    .map(str::to_string),
             })
             .collect();
-        mine.sort_by_key(|r| std::cmp::Reverse(r.created_at));
-        mine.truncate(limit.max(0) as usize);
-        Ok(mine)
+        Ok(nook_db::paging::page_vec(
+            mine,
+            args,
+            |r| r.id,
+            |col, _, _| unreachable!("unlisted sort col {col}"),
+        ))
     }
 
     async fn live_build_states(

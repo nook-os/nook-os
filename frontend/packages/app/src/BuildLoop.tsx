@@ -129,7 +129,7 @@ export function BuildLoop({ workspaceId }: { workspaceId: string }) {
         await api.GET("/api/v1/workspaces/{id}/builds", {
           params: { path: { id: workspaceId } },
         })
-      ).data as { state: string }[] | undefined) ?? [],
+      ).data?.rows as { state: string }[] | undefined) ?? [],
     refetchInterval: 10000,
   });
 
