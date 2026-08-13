@@ -358,6 +358,7 @@ use utoipa::OpenApi;
         nook_types::BuildCapacityBlocker,
         nook_types::SetReviewLoopRequest,
         nook_types::ReviewLoopStatus,
+        nook_types::ForgeTrouble,
         nook_types::ReviewRaiseResult,
         nook_types::ReviewVerdictRequest,
         nook_types::CreateReviewJobRequest,

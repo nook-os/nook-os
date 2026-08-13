@@ -75,6 +75,12 @@ it `""` to omit that env var. Non-secret config (`APP_ENV`, `PUBLIC_BASE_URL`,
 secret encryption — a separate concept from these deployment credentials; see
 [`docs/secrets-encryption.md`](../../docs/secrets-encryption.md).
 
+**The forge credential is not here.** A GitHub token is set per workspace, in
+the UI (Workspaces → *forge token*), and sealed with the vault `SECRETS_KEY`
+unlocks — so it is never a chart value. What it must be able to do, and what
+happens to a token that cannot, is the
+[operator-node chart's forge-credential section](../nook-operator-node/README.md#the-fleets-github-token-main-407).
+
 ### Syncing from a secret manager
 
 Clients keep credentials in Vault, Google Secret Manager, or AWS Secrets

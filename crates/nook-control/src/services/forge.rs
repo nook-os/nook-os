@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use nook_types::WorkspaceId;
+use nook_types::{ForgeTrouble, WorkspaceId};
 
 /// One repository, as the forge names it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,6 +198,130 @@ pub trait Forge: Send + Sync {
     }
 }
 
+/// One HTTP refusal from the forge, carried as a STATUS rather than only as a
+/// sentence (MAIN-469).
+///
+/// Every read here used to `bail!("{status} {body}")`, so the one fact a caller
+/// most needs — was this the CREDENTIAL or the forge — survived only as text
+/// somebody downstream would have to re-parse. The rendered message is
+/// unchanged; what is new is that the cause can be asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForgeHttpError {
+    pub status: u16,
+    pub body: String,
+}
+
+impl std::fmt::Display for ForgeHttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} {}", self.status, self.body)
+    }
+}
+
+impl std::error::Error for ForgeHttpError {}
+
+impl ForgeHttpError {
+    /// A spent budget is a 403 too, and it is not a permission problem —
+    /// reporting it as one sends an operator to re-issue a token that was fine.
+    pub fn is_rate_limit(&self) -> bool {
+        self.body.to_ascii_lowercase().contains("rate limit")
+    }
+
+    /// The CREDENTIAL is what GitHub refused: dead (401), or not allowed to do
+    /// this (403 that is not a rate limit).
+    pub fn is_credential(&self) -> bool {
+        self.status == 401 || (self.status == 403 && !self.is_rate_limit())
+    }
+
+    /// GitHub's own `message`, or the raw body when it is not the shape we
+    /// expect. Never rephrased: the refusal an operator has to act on is
+    /// GitHub's, not ours.
+    pub fn detail(&self) -> String {
+        serde_json::from_str::<serde_json::Value>(&self.body)
+            .ok()
+            .and_then(|v| v.get("message")?.as_str().map(str::to_string))
+            .unwrap_or_else(|| self.body.clone())
+    }
+}
+
+/// The permissions verdict delivery needs, named as GitHub's fine-grained
+/// settings page names them (MAIN-469) — the message an operator reads has to
+/// be the label they will look for.
+pub const ISSUES_WRITE: &str = "Issues: write";
+pub const PULLS_WRITE: &str = "Pull requests: write";
+
+/// The whole requirement, in one sentence, appended to every refusal so the
+/// person holding a rejected token is told what a good one looks like.
+pub const TOKEN_REQUIREMENT: &str = "a fine-grained PAT needs Issues: write, \
+     Pull requests: write, Contents: read and Metadata: read on this repository \
+     (a classic PAT needs the repo scope)";
+
+/// Why a pasted token was refused (MAIN-469), in the operator's terms.
+///
+/// Structured rather than a sentence because the two under-configurations
+/// prod hit on 2026-08-08 need different answers: a dead token is re-issued,
+/// an under-scoped one has a checkbox ticked. A refusal that said only
+/// "invalid" would send both of them to the same wrong place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TokenRefusal {
+    /// 401 — invalid, expired, or revoked.
+    Rejected { repo: String },
+    /// 404 on the repository read: authenticated, but this repository is not in
+    /// the token's reach. A fine-grained token that never listed the repo, or
+    /// an account with no access to it, land here identically — and GitHub is
+    /// deliberately unable to tell them apart, because saying which would leak
+    /// the existence of a private repository.
+    Invisible { repo: String },
+    /// 403 on a write the verdict path performs, with GitHub's own words.
+    CannotWrite {
+        repo: String,
+        permission: &'static str,
+        detail: String,
+    },
+}
+
+impl std::fmt::Display for TokenRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rejected { repo } => write!(
+                f,
+                "GitHub rejected this token (401) — it is invalid, expired or \
+                 revoked. To review {repo}, {TOKEN_REQUIREMENT}."
+            ),
+            Self::Invisible { repo } => write!(
+                f,
+                "this token cannot see {repo} (404) — a fine-grained token must \
+                 list that repository under Repository access. {TOKEN_REQUIREMENT}."
+            ),
+            Self::CannotWrite {
+                repo,
+                permission,
+                detail,
+            } => write!(
+                f,
+                "this token cannot deliver a verdict on {repo}: it is missing \
+                 {permission} (GitHub refused with 403: {detail}). {TOKEN_REQUIREMENT}."
+            ),
+        }
+    }
+}
+
+/// The writes verdict delivery performs, each with the probe that proves the
+/// token may perform it.
+///
+/// A probe is a REAL request to the endpoint whose permission is in question,
+/// with a body GitHub is certain to reject: permission is checked before the
+/// body is, so a token that may write is answered `422 Validation Failed` and a
+/// token that may not is answered `403`, and NEITHER creates anything. The
+/// alternative — reading `permissions` off the repository document — reports
+/// the account's role rather than the token's grants, which is exactly the
+/// distinction a fine-grained PAT exists to make.
+const WRITE_PROBES: [(&str, &str, &str); 2] = [
+    // Labels: the verdict label, and the endpoint fine-grained tokens gate on
+    // Issues rather than on Pull requests.
+    (ISSUES_WRITE, "labels", r#"{"name":""}"#),
+    (PULLS_WRITE, "pulls", "{}"),
+];
+
 /// Is this remote a GitHub repository, and which one?
 ///
 /// Reuses `discovery::normalize_remote`, which already reduces every URL shape
@@ -248,10 +372,27 @@ fn fleet_gh_token() -> Option<String> {
         .find(|t| !t.trim().is_empty())
 }
 
+/// Where GitHub's REST API lives, and the one variable that moves it.
+///
+/// It exists so the paste check (MAIN-469) can be exercised against a stub that
+/// answers like GitHub does — a check that only ever runs against the real API
+/// is a check no test can hold to its refusals. Unset, which is every
+/// deployment, this is the public API and nothing about the forge changes.
+const API_BASE: &str = "https://api.github.com";
+
+fn api_base() -> String {
+    std::env::var("NOOK_GITHUB_API_BASE")
+        .ok()
+        .map(|b| b.trim().trim_end_matches('/').to_string())
+        .filter(|b| !b.is_empty())
+        .unwrap_or_else(|| API_BASE.to_string())
+}
+
 /// GitHub, over its REST API.
 pub struct GithubForge {
     http: reqwest::Client,
     token: String,
+    api: String,
 }
 
 impl GithubForge {
@@ -264,6 +405,11 @@ impl GithubForge {
     /// falls back to the pre-MAIN-448 behaviour: the ceiling is the count.
     /// A forge speaking as one WORKSPACE's own token (MAIN-456).
     pub fn from_token(token: &str) -> Self {
+        Self::from_token_at(&api_base(), token)
+    }
+
+    /// The same forge, told where the API is — the seam [`API_BASE`] describes.
+    pub fn from_token_at(api: &str, token: &str) -> Self {
         Self {
             // The same 10s bound `from_env` carries, for the same reason: the
             // hygiene pass runs inside the serial reconcile loop, and a forge
@@ -273,6 +419,7 @@ impl GithubForge {
                 .build()
                 .unwrap_or_default(),
             token: token.to_string(),
+            api: api.trim_end_matches('/').to_string(),
         }
     }
 
@@ -286,6 +433,7 @@ impl GithubForge {
                 .build()
                 .unwrap_or_default(),
             token,
+            api: api_base(),
         })
     }
 }
@@ -348,6 +496,80 @@ pub fn verdict_label(verdict: &str) -> Option<&'static str> {
 }
 
 impl GithubForge {
+    /// Can this token do what the loop will ask of it on `repo` (MAIN-469)?
+    ///
+    /// Run before a pasted token is sealed, because both ways of getting it
+    /// wrong fail LATE and quietly otherwise: a dead token makes the demand
+    /// poll fail, which reads as "no PRs", and a read-only token executes an
+    /// entire review before dying at `POST issues/comments` — five burned
+    /// passes across two PRs on prod, 2026-08-08.
+    ///
+    /// **Only GitHub's own refusals refuse the paste.** A timeout, a 5xx or a
+    /// spent rate limit leaves the token stored: those are not statements about
+    /// this credential, and turning GitHub's bad day into "your token is
+    /// broken" would block an operator from configuring anything at all.
+    pub async fn check_access(&self, repo: &Repo) -> Result<(), TokenRefusal> {
+        let named = format!("{}/{}", repo.owner, repo.name);
+        // The read first: a dead token must be named dead rather than as unable
+        // to write, and a repository the token cannot see refuses every probe
+        // below for a reason that has nothing to do with permissions.
+        if let Err(e) = self.get_json(self.repo_base(repo)).await {
+            match e.downcast_ref::<ForgeHttpError>().map(|h| h.status) {
+                Some(401) => return Err(TokenRefusal::Rejected { repo: named }),
+                Some(404) => return Err(TokenRefusal::Invisible { repo: named }),
+                _ => {
+                    tracing::warn!(repo = %named, error = %e, "token check could not reach GitHub — storing it unverified");
+                    return Ok(());
+                }
+            }
+        }
+        for (permission, path, body) in WRITE_PROBES {
+            let Some(refused) = self.probe_write(repo, path, body).await else {
+                continue;
+            };
+            match refused.status {
+                401 => return Err(TokenRefusal::Rejected { repo: named }),
+                403 if !refused.is_rate_limit() => {
+                    return Err(TokenRefusal::CannotWrite {
+                        repo: named,
+                        permission,
+                        detail: refused.detail(),
+                    })
+                }
+                // 422 is the pass — the write was allowed and the body was not.
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// One write probe: `None` when GitHub allowed it (or could not answer),
+    /// the refusal when it did not.
+    async fn probe_write(&self, repo: &Repo, path: &str, body: &str) -> Option<ForgeHttpError> {
+        let resp = self
+            .authed(self.http.post(format!("{}/{path}", self.repo_base(repo))))
+            .header("Content-Type", "application/json")
+            .body(body.to_string())
+            .send()
+            .await
+            .ok()?;
+        let status = resp.status();
+        if status.is_success() {
+            return None;
+        }
+        Some(ForgeHttpError {
+            status: status.as_u16(),
+            body: resp
+                .text()
+                .await
+                .unwrap_or_default()
+                .trim()
+                .chars()
+                .take(300)
+                .collect(),
+        })
+    }
+
     /// Deliver a review verdict to the PR: the `Loop review of <sha>` comment
     /// and the matching label, replacing whichever verdict label was there.
     ///
@@ -385,9 +607,12 @@ impl GithubForge {
         };
         if !duplicate {
             self.issue_comment(repo, pr, &format!("Loop review of {head_sha}\n\n{body}"))
-                .await?;
+                .await
+                .map_err(|e| delivery_failure(e, repo))?;
         }
-        self.replace_verdict_label(repo, pr, label).await
+        self.replace_verdict_label(repo, pr, label)
+            .await
+            .map_err(|e| delivery_failure(e, repo))
     }
 
     /// The two facts the verdict dedupe reads: every comment body on the PR —
@@ -413,11 +638,12 @@ impl GithubForge {
         Ok((comments, labels))
     }
 
+    fn repo_base(&self, repo: &Repo) -> String {
+        format!("{}/repos/{}/{}", self.api, repo.owner, repo.name)
+    }
+
     fn issue_base(&self, repo: &Repo, pr: u64) -> String {
-        format!(
-            "https://api.github.com/repos/{}/{}/issues/{pr}",
-            repo.owner, repo.name
-        )
+        format!("{}/issues/{pr}", self.repo_base(repo))
     }
 
     async fn issue_comment(&self, repo: &Repo, pr: u64, body: &str) -> anyhow::Result<()> {
@@ -464,7 +690,7 @@ impl GithubForge {
     /// from "asked, and nothing was ejected".
     async fn graphql(&self, body: serde_json::Value) -> anyhow::Result<serde_json::Value> {
         let resp = self
-            .authed(self.http.post("https://api.github.com/graphql"))
+            .authed(self.http.post(format!("{}/graphql", self.api)))
             .json(&body)
             .send()
             .await?;
@@ -472,12 +698,7 @@ impl GithubForge {
         let json: serde_json::Value = if status.is_success() {
             resp.json().await?
         } else {
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!(
-                "{} {}",
-                status.as_u16(),
-                text.trim().chars().take(300).collect::<String>()
-            );
+            return Err(http_error(status, resp.text().await.unwrap_or_default()));
         };
         if let Some(errors) = json.get("errors").and_then(|e| e.as_array()) {
             if let Some(first) = errors.first() {
@@ -498,12 +719,7 @@ impl GithubForge {
         let resp = self.authed(self.http.get(url)).send().await?;
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!(
-                "{} {}",
-                status.as_u16(),
-                body.trim().chars().take(300).collect::<String>()
-            );
+            return Err(http_error(status, resp.text().await.unwrap_or_default()));
         }
         Ok(resp.json().await?)
     }
@@ -519,12 +735,7 @@ impl GithubForge {
         let resp = self.authed(rb).send().await?;
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!(
-                "{} {}",
-                status.as_u16(),
-                body.trim().chars().take(300).collect::<String>()
-            );
+            return Err(http_error(status, resp.text().await.unwrap_or_default()));
         }
         Ok(())
     }
@@ -533,10 +744,7 @@ impl GithubForge {
 #[async_trait::async_trait]
 impl Forge for GithubForge {
     async fn prs_needing_review(&self, repo: &Repo) -> anyhow::Result<Vec<PullRequest>> {
-        let url = format!(
-            "https://api.github.com/repos/{}/{}/pulls?state=open&per_page={PAGE}",
-            repo.owner, repo.name
-        );
+        let url = format!("{}/pulls?state=open&per_page={PAGE}", self.repo_base(repo));
         let resp = self
             .http
             .get(&url)
@@ -549,12 +757,7 @@ impl Forge for GithubForge {
             .await?;
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!(
-                "{} {}",
-                status.as_u16(),
-                body.trim().chars().take(300).collect::<String>()
-            );
+            return Err(http_error(status, resp.text().await.unwrap_or_default()));
         }
         let prs: Vec<serde_json::Value> = resp.json().await?;
         Ok(needing_review(&prs))
@@ -562,10 +765,7 @@ impl Forge for GithubForge {
 
     async fn pr_details(&self, repo: &Repo, number: u64) -> anyhow::Result<PrDetails> {
         let json = self
-            .get_json(format!(
-                "https://api.github.com/repos/{}/{}/pulls/{number}",
-                repo.owner, repo.name
-            ))
+            .get_json(format!("{}/pulls/{number}", self.repo_base(repo)))
             .await?;
         Ok(PrDetails {
             // `null` while GitHub is still computing — kept as unknown.
@@ -590,9 +790,8 @@ impl Forge for GithubForge {
         // covers the ordinary case.
         let json = self
             .get_json(format!(
-                "https://api.github.com/repos/{}/{}/pulls\
-                 ?state=closed&sort=updated&direction=desc&per_page={PAGE}",
-                repo.owner, repo.name
+                "{}/pulls?state=closed&sort=updated&direction=desc&per_page={PAGE}",
+                self.repo_base(repo)
             ))
             .await?;
         let prs = json
@@ -664,6 +863,45 @@ impl Forge for GithubForge {
                 .unwrap_or(&serde_json::Value::Null),
         ))
     }
+}
+
+/// One failed HTTP call, as the error every caller here raises. The body is
+/// bounded because it reaches logs and API messages, and GitHub's HTML error
+/// pages are megabytes.
+fn http_error(status: reqwest::StatusCode, body: String) -> anyhow::Error {
+    anyhow::Error::new(ForgeHttpError {
+        status: status.as_u16(),
+        body: body.trim().chars().take(300).collect(),
+    })
+}
+
+/// A verdict that could not be delivered, said in terms of the CREDENTIAL when
+/// that is what refused it (MAIN-469).
+///
+/// The bare `403 {"message":"Resource not accessible by personal access
+/// token"}` this replaces is a true sentence that names neither the token nor
+/// the permission, so the run retried the identical pass on every backoff and
+/// nobody read the transcript until five had burned.
+fn delivery_failure(err: anyhow::Error, repo: &Repo) -> anyhow::Error {
+    let Some(http) = err.downcast_ref::<ForgeHttpError>() else {
+        return err;
+    };
+    if !http.is_credential() {
+        return err;
+    }
+    let repo = format!("{}/{}", repo.owner, repo.name);
+    if http.status == 401 {
+        return anyhow::anyhow!(
+            "the forge token was rejected by GitHub (401) — it is invalid, \
+             expired or revoked, so the verdict on {repo} was not delivered"
+        );
+    }
+    anyhow::anyhow!(
+        "the forge token lacks Issues/Pull requests write on {repo} — GitHub \
+         refused the verdict with 403: {}. Fix it on the workspace's forge \
+         token: {TOKEN_REQUIREMENT}.",
+        http.detail()
+    )
 }
 
 /// Which of a repository's open PRs a reviewer would actually pick up.
@@ -827,9 +1065,10 @@ struct Cached {
     /// come to disagree. The count is `.len()`.
     items: Option<Vec<PullRequest>>,
     fetched: Instant,
-    /// Whether the last attempt failed, so the log speaks once per transition
-    /// rather than once per pass.
-    failing: bool,
+    /// How the last attempt failed, or `None` when it did not — so the log
+    /// speaks once per transition rather than once per pass, and so the status
+    /// endpoint can say WHICH failure it is (MAIN-469).
+    trouble: Option<ForgeTrouble>,
 }
 
 /// The reconciler's view of review demand: cached counts, and a failure policy.
@@ -957,7 +1196,7 @@ impl ReviewDemand {
         let Ok(mut seen) = self.seen.lock() else {
             return;
         };
-        let was_failing = seen.get(&workspace).is_some_and(|c| c.failing);
+        let was_failing = seen.get(&workspace).is_some_and(|c| c.trouble.is_some());
         if was_failing {
             tracing::info!(
                 %workspace, repo = %format!("{}/{}", repo.owner, repo.name),
@@ -970,7 +1209,7 @@ impl ReviewDemand {
             Cached {
                 items: Some(items),
                 fetched: Instant::now(),
-                failing: false,
+                trouble: None,
             },
         );
     }
@@ -987,25 +1226,62 @@ impl ReviewDemand {
             return None;
         };
         let last = seen.get(&workspace).and_then(|c| c.items.clone());
-        let was_failing = seen.get(&workspace).is_some_and(|c| c.failing);
+        let was_failing = seen.get(&workspace).is_some_and(|c| c.trouble.is_some());
+        let trouble = trouble_of(error);
         if !was_failing {
-            tracing::warn!(
-                %workspace, repo = %format!("{}/{}", repo.owner, repo.name),
-                error = %error,
-                last_known_open_prs = ?last.as_ref().map(Vec::len),
-                "forge unreachable — holding the last known review demand; \
-                 this is NOT a scale-down"
-            );
+            match &trouble {
+                // The credential case is an ERROR, not a warning, and says so in
+                // the credential's own terms: nothing recovers from it on its
+                // own, and the loop that follows looks exactly like a repo with
+                // no open PRs (MAIN-469).
+                ForgeTrouble::CredentialRejected { detail } => tracing::error!(
+                    %workspace, repo = %format!("{}/{}", repo.owner, repo.name),
+                    detail = %detail,
+                    "forge credential rejected — this workspace's token is invalid or \
+                     under-scoped; reviews will not run until it is replaced"
+                ),
+                ForgeTrouble::Unreachable { .. } => tracing::warn!(
+                    %workspace, repo = %format!("{}/{}", repo.owner, repo.name),
+                    error = %error,
+                    last_known_open_prs = ?last.as_ref().map(Vec::len),
+                    "forge unreachable — holding the last known review demand; \
+                     this is NOT a scale-down"
+                ),
+            }
         }
         seen.insert(
             workspace,
             Cached {
                 items: last.clone(),
                 fetched: Instant::now(),
-                failing: true,
+                trouble: Some(trouble),
             },
         );
         last
+    }
+
+    /// How this workspace's last forge poll failed, for the status endpoint
+    /// (MAIN-469). `None` once a poll succeeds — the cache clears it on
+    /// recovery, so this reports the CURRENT state and not a scar.
+    pub fn trouble(&self, workspace: WorkspaceId) -> Option<ForgeTrouble> {
+        self.seen.lock().ok()?.get(&workspace)?.trouble.clone()
+    }
+}
+
+/// Which failure this is: the token, or everything else.
+///
+/// Read from the typed [`ForgeHttpError`] rather than from the message, so a
+/// reworded error cannot silently reclassify a dead credential as an outage.
+/// Anything that is not an HTTP refusal — a timeout, DNS, a malformed body —
+/// is unreachable by definition.
+fn trouble_of(error: &anyhow::Error) -> ForgeTrouble {
+    match error.downcast_ref::<ForgeHttpError>() {
+        Some(http) if http.is_credential() => ForgeTrouble::CredentialRejected {
+            detail: http.detail(),
+        },
+        _ => ForgeTrouble::Unreachable {
+            detail: error.to_string(),
+        },
     }
 }
 
@@ -1420,6 +1696,90 @@ mod tests {
     /// Two processes read the fleet credential and they must read the same
     /// variables. There is no crate both can share, so the node's source is the
     /// authority and this test is the link — a rename there fails here.
+    /// The failure GitHub answers a dead token with, in the shape the reads
+    /// here raise it.
+    fn refused(status: u16, message: &str) -> anyhow::Error {
+        anyhow::Error::new(ForgeHttpError {
+            status,
+            body: format!(r#"{{"message":"{message}"}}"#),
+        })
+    }
+
+    #[tokio::test]
+    async fn a_rejected_credential_is_reported_as_one_and_not_as_an_outage() {
+        // MAIN-469 AC-3: a 401 on the poll used to be indistinguishable from a
+        // repo with nothing open — the count simply held and nothing said why.
+        let (fake, _) = Fake::answering(vec![Err(refused(401, "Bad credentials"))]);
+        let d = ReviewDemand::new(Some(fake), Duration::ZERO);
+        let _ = d.open_prs(ws(), Some(REMOTE), None).await;
+        let ForgeTrouble::CredentialRejected { detail } =
+            d.trouble(ws()).expect("the failure is recorded")
+        else {
+            panic!("a 401 is the credential, not an outage");
+        };
+        assert_eq!(detail, "Bad credentials", "GitHub's own words, not ours");
+    }
+
+    #[tokio::test]
+    async fn an_outage_is_not_reported_as_a_credential_problem_and_clears_on_recovery() {
+        let (fake, _) = Fake::answering(vec![
+            Err(refused(503, "Server Error")),
+            // A spent budget is a 403, and it is not the token's fault.
+            Err(refused(403, "API rate limit exceeded for user ID 1")),
+            Ok(2),
+        ]);
+        let d = ReviewDemand::new(Some(fake), Duration::ZERO);
+        for _ in 0..2 {
+            let _ = d.open_prs(ws(), Some(REMOTE), None).await;
+            assert!(
+                matches!(d.trouble(ws()), Some(ForgeTrouble::Unreachable { .. })),
+                "neither a 5xx nor a rate limit says anything about the token"
+            );
+        }
+        assert_eq!(d.open_prs(ws(), Some(REMOTE), None).await, Some(2));
+        assert!(
+            d.trouble(ws()).is_none(),
+            "a recovered poll reports the current state, not a scar"
+        );
+    }
+
+    #[test]
+    fn a_refused_verdict_names_the_permission_rather_than_the_status() {
+        let repo = Repo {
+            owner: "acme".into(),
+            name: "api".into(),
+        };
+        // The exact prod failure of 2026-08-08: the review ran, and delivery
+        // died on a 403 whose message named neither the token nor the fix.
+        let named = delivery_failure(
+            refused(403, "Resource not accessible by personal access token"),
+            &repo,
+        )
+        .to_string();
+        assert!(
+            named.contains("lacks Issues/Pull requests write"),
+            "the 403 must name the permission: {named}"
+        );
+        assert!(named.contains("acme/api"), "and the repository: {named}");
+        assert!(
+            named.contains("Resource not accessible by personal access token"),
+            "keeping GitHub's own words: {named}"
+        );
+
+        let dead = delivery_failure(refused(401, "Bad credentials"), &repo).to_string();
+        assert!(
+            dead.contains("rejected by GitHub (401)"),
+            "a dead token is re-issued, not re-scoped: {dead}"
+        );
+
+        // Everything else passes through untouched: a 404 on the PR is not a
+        // permission problem, and dressing it as one sends somebody to the
+        // token settings for a PR that was deleted.
+        let other = delivery_failure(refused(404, "Not Found"), &repo).to_string();
+        assert!(other.contains("404"), "unchanged: {other}");
+        assert!(!other.contains("lacks Issues"), "unchanged: {other}");
+    }
+
     #[test]
     fn the_token_variables_match_the_nodes() {
         let node = std::fs::read_to_string(concat!(

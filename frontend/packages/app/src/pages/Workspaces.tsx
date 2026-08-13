@@ -117,6 +117,7 @@ export function WorkspaceForgeToken({ workspaceId }: { workspaceId: string }) {
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
+  const [refusal, setRefusal] = useState<string | null>(null);
 
   const { data: state } = useQuery({
     queryKey: ["workspace-gh-token", workspaceId],
@@ -130,13 +131,20 @@ export function WorkspaceForgeToken({ workspaceId }: { workspaceId: string }) {
 
   const save = async (token: string | null) => {
     setBusy(true);
+    setRefusal(null);
     const { error } = await api.PUT("/api/v1/workspaces/{id}/gh-token", {
       params: { path: { id: workspaceId } },
       body: { token },
     });
     setBusy(false);
     if (error) {
-      await notify("Could not store the token", JSON.stringify(error));
+      // The server exercised the token against this repo (MAIN-469) and its
+      // 400 names the permission that is missing. Shown IN PLACE, beside the
+      // box still holding the rejected value, because that sentence is the
+      // whole instruction for the next paste — a toast carrying
+      // `JSON.stringify(error)` was neither readable nor still on screen when
+      // somebody went back to GitHub to fix the scopes.
+      setRefusal((error as { error?: string })?.error ?? JSON.stringify(error));
       return;
     }
     setDraft("");
@@ -183,10 +191,19 @@ export function WorkspaceForgeToken({ workspaceId }: { workspaceId: string }) {
           )}
         </div>
       </div>
+      {refusal && (
+        <div className="small" data-testid="forge-token-refusal" style={{ color: "var(--nook-err)" }}>
+          {refusal}
+        </div>
+      )}
       <div className="muted">
-        Verdicts and PR reads for this workspace use this identity. Least-privilege
-        scopes: repo read, PR read/write, issue comments/labels. The value is
-        sealed server-side and never shown again.
+        Verdicts and PR reads for this workspace use this identity. A{" "}
+        <b>fine-grained PAT</b> needs, on this repository: <b>Issues: write</b> (the
+        verdict comment and the <code>loop-*</code> labels), <b>Pull requests: write</b>,{" "}
+        <b>Contents: read</b> and <b>Metadata: read</b>. A classic PAT needs the{" "}
+        <code>repo</code> scope. It is checked against this repo before it is stored,
+        so a token that cannot post a verdict is refused here rather than three
+        hours into a review. The value is sealed server-side and never shown again.
       </div>
     </Panel>
   );

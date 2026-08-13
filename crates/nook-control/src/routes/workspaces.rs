@@ -410,6 +410,13 @@ pub async fn get_gh_token(
 /// tenant's verdicts post as one identity and the control plane holds a
 /// credential with reach into every tenant's forge. The workspace token
 /// OUTRANKS the fleet variable everywhere a forge is spoken to.
+///
+/// **The token is exercised before it is sealed (MAIN-469).** A token that
+/// cannot authenticate, cannot see the repository, or cannot perform the writes
+/// verdict delivery performs is refused with a 400 naming what is missing —
+/// because both under-configurations otherwise fail late and silently: a dead
+/// token makes the demand poll read as "no PRs", and a read-only one runs a
+/// whole review before dying at `POST issues/comments`.
 #[utoipa::path(put, path = "/api/v1/workspaces/{id}/gh-token",
     operation_id = "set_workspace_gh_token",
     params(("id" = String, Path,)),
@@ -426,12 +433,15 @@ pub async fn set_gh_token(
     auth.require_user()?;
     let sealed = match req.token.as_deref().map(str::trim) {
         None | Some("") => None,
-        Some(t) => Some(
-            state
-                .vault
-                .encrypt(t.as_bytes())
-                .map_err(|_| ApiError::BadRequest("could not seal the token".into()))?,
-        ),
+        Some(t) => {
+            check_forge_token(&state, auth.tenant_id, id, t).await?;
+            Some(
+                state
+                    .vault
+                    .encrypt(t.as_bytes())
+                    .map_err(|_| ApiError::BadRequest("could not seal the token".into()))?,
+            )
+        }
     };
     let set = sealed.is_some();
     if !state
@@ -444,6 +454,34 @@ pub async fn set_gh_token(
     // The forge cache may hold an answer fetched with the OLD identity.
     state.review_demand.forget(id);
     Ok(Json(WorkspaceGhTokenState { set }))
+}
+
+/// Exercise a pasted token against the workspace's own repository (MAIN-469).
+///
+/// Nothing to exercise is not a failure: a workspace with no remote, or one
+/// whose remote is not a GitHub repository this build can name, has no repo to
+/// check the token against — and refusing the paste because we cannot check it
+/// would make a local-path workspace unable to hold a token at all.
+async fn check_forge_token(
+    state: &AppState,
+    tenant: nook_types::TenantId,
+    id: WorkspaceId,
+    token: &str,
+) -> ApiResult<()> {
+    let Some(ws) = state.workspaces.get(tenant, id).await? else {
+        return Err(ApiError::NotFound);
+    };
+    let Some(repo) = ws
+        .git_remote_url
+        .as_deref()
+        .and_then(crate::services::forge::github_repo)
+    else {
+        return Ok(());
+    };
+    crate::services::forge::GithubForge::from_token(token)
+        .check_access(&repo)
+        .await
+        .map_err(|refusal| ApiError::BadRequest(refusal.to_string()))
 }
 
 /// `GET /api/v1/workspaces/{id}/review-loop` — the ceiling on review loops for
@@ -722,6 +760,10 @@ pub async fn review_loop_status(
             })
             .collect(),
         eligible: (plan.desired.saturating_sub(plan.shortfall)) as u32,
+        // Read AFTER the plan, because planning is what performs the poll this
+        // reports on — read first, a cold status call would always say the
+        // forge was fine (MAIN-469).
+        forge_trouble: state.review_demand.trouble(id),
     }))
 }
 

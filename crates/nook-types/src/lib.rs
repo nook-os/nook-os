@@ -1237,6 +1237,22 @@ pub struct ReviewRaiseResult {
     pub withheld: u32,
 }
 
+/// Why a workspace's forge poll last failed (MAIN-469).
+///
+/// The two are reported apart because only one of them is anybody's to fix. A
+/// rejected credential is a silence nothing recovers from — the poll fails, the
+/// count reads as "no PRs", and the loop is indistinguishable from a quiet repo
+/// until somebody re-issues the token. Everything else is GitHub having a bad
+/// minute, which the last-known count already carries the loop through.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ForgeTrouble {
+    /// GitHub refused the token: 401, or a 403 that is not a rate limit.
+    CredentialRejected { detail: String },
+    /// Asked, and not answered — a timeout, a 5xx, a spent rate limit.
+    Unreachable { detail: String },
+}
+
 /// Desired versus actual for a workspace's REVIEW LOOP (MAIN-447 AC-4).
 ///
 /// Separate from [`ReconcileStatus`], which reports the workspace's own
@@ -1273,6 +1289,10 @@ pub struct ReviewLoopStatus {
     pub blocked: Vec<ReconcileBlocker>,
     /// How many nodes match the selector and tolerate the taints.
     pub eligible: u32,
+    /// What the forge poll last said, when what it said was a failure
+    /// (MAIN-469). `None` is the healthy case AND the no-forge one: a
+    /// workspace with no GitHub remote never polls, and has nothing to report.
+    pub forge_trouble: Option<ForgeTrouble>,
 }
 
 /// Why one node of the fleet contributes nothing to a viewer's BUILD capacity
