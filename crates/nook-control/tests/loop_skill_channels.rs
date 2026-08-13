@@ -59,17 +59,116 @@ fn interview_skills_route_job_mode_through_durable_interactions() {
 
 /// The versions were bumped alongside the paragraph (so `nook teach` re-publishes
 /// them) — a guard that the content change and the version change ship together.
+/// The fleet distributes skills BY VERSION, so an unbumped edit reaches no node:
+/// moving these pins is the mechanical half of every skill-text ticket.
 #[test]
 fn interview_skill_versions_were_bumped() {
     assert!(
-        skill("nook-spec").contains("version: 1.3.0"),
+        skill("nook-spec").contains("version: 1.4.0"),
         "nook-spec version must be bumped when its body changes — move this pin \
-         with the bump (1.2.0 was the job-mode input channel; 1.3.0 is MAIN-138)"
+         with the bump (1.3.0 was MAIN-138; 1.4.0 is MAIN-569's AC↔NG cross-check)"
     );
     assert!(
-        skill("nook-epic").contains("version: 2.4.0"),
-        "nook-epic version must be bumped for the job-mode input channel"
+        skill("nook-epic").contains("version: 2.5.0"),
+        "nook-epic version must be bumped when its body changes — move this pin \
+         with the bump (2.4.0 was the job-mode input channel; 2.5.0 is MAIN-569)"
     );
+    assert!(
+        skill("nook-review").contains("version: 1.7.0"),
+        "nook-review version must be bumped when its body changes — move this pin \
+         with the bump (1.7.0 is MAIN-569's card-internal scope conflict)"
+    );
+}
+
+/// MAIN-569: the AC↔NG rule used to be a single sentence of policy with no step
+/// that performed it, so in practice a draft was read once for prose and filed.
+/// Speccing is the only stage of the loop with no later pair of eyes, so a
+/// contradiction that ships here produces a confidently wrong build — the
+/// builder picks a side and the reviewer validates the diff against that same
+/// side. Both drafting skills must now carry the step, its four shapes, the
+/// report-even-when-clean rule, and the stop-and-ask rule.
+#[test]
+fn drafting_skills_cross_check_acs_against_ngs_before_showing_a_draft() {
+    for name in ["nook-spec", "nook-epic"] {
+        let body = flat(name);
+        for taught in [
+            // The grid itself — every AC against every NG, on meaning.
+            "against **every** `NG-N`",
+            "the whole grid, not a skim of the prose",
+            // The four shapes, so the check is concrete rather than "look for
+            // contradictions".
+            "an AC requiring a change to a surface an NG freezes",
+            "an AC requiring behaviour an NG defers to a later ticket",
+            "an AC requiring data or schema an NG excludes",
+            "an AC whose only reasonable implementation crosses an NG",
+            // Clean is a finding: silence must not be ambiguous.
+            "**Report the result even when it is clean",
+            "AC↔NG cross-check",
+            // The human rules; the agent does not resolve it itself.
+            "Do not reword either side",
+            // NG-6: the result is conversation and transcript, never a new
+            // section on the ticket the board ends up holding.
+            "never to the filed ticket body",
+        ] {
+            assert!(
+                body.contains(taught),
+                "{name}: the AC↔NG cross-check must teach: {taught:?}"
+            );
+        }
+    }
+    // The check runs per CHILD ticket, not once for the epic — an epic's own
+    // scope statement is not a child's NG list.
+    assert!(
+        flat("nook-epic").contains("per child, never once for the epic"),
+        "nook-epic: the cross-check is per child ticket"
+    );
+    // Job mode routes the ruling through the same durable channel the interview
+    // uses, so a conflict pauses the job instead of being decided silently.
+    assert!(
+        flat("nook-spec").contains("the same durable channel the interview rounds use"),
+        "nook-spec: a conflict in job mode must use the durable ask, not a guess"
+    );
+}
+
+/// MAIN-569 AC-5: `[SCOPE-CONFLICT]` covers a card that contradicts ITSELF, not
+/// only a diff that crosses a non-goal. The reviewer records it against the
+/// card — a builder cannot repair a contradiction, and re-issuing it as an
+/// `[AC-N]` would only swap which half of the contract the PR breaks.
+#[test]
+fn reviewer_records_a_card_internal_scope_conflict_against_the_card() {
+    let body = flat("nook-review");
+    for taught in [
+        "[SCOPE-CONFLICT AC-N ↔ NG-N]",
+        "**The diff crosses a non-goal.**",
+        "**The card contradicts itself.**",
+        "the contradiction is in the spec, not in the diff",
+        "Record it **against the card**",
+        "Do not restate it as an `[AC-N]` or `[DEFECT]` finding",
+    ] {
+        assert!(
+            body.contains(taught),
+            "nook-review: the scope-conflict marker must teach: {taught:?}"
+        );
+    }
+}
+
+/// MAIN-569 NG-5: the builder's conflict handling is the BACKSTOP for a
+/// contradiction that survives the new drafting check, so it stays exactly as
+/// it is. Pinned because the obvious next edit is to "improve" it in sympathy
+/// with the drafting step, and its value is that it is unchanged.
+#[test]
+fn the_builder_keeps_its_conflict_backstop_unchanged() {
+    let body = flat("nook-build");
+    for line in [
+        "Compare every `AC-N` against every `NG-N` before editing",
+        "conflicts with a non-goal",
+        "hand the decision to a human",
+    ] {
+        assert!(
+            body.contains(line),
+            "nook-build: the conflict backstop changed or was removed: {line:?}"
+        );
+    }
 }
 
 /// MAIN-232 AC-1: job mode reads the human's *unsolicited* input — the seed as

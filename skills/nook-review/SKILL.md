@@ -1,7 +1,7 @@
 ---
 name: nook-review
 description: "Review open PRs against their linked NookOS board issue and required GitHub checks, then post a three-group verdict with loop labels. Use when asked to run the loop's reviewer or review its PR queue. Designed for /loop; never merges or pushes code."
-version: 1.6.0
+version: 1.7.0
 author: NookOS
 license: MIT
 platforms: [linux, macos]
@@ -117,10 +117,20 @@ Every must-fix code finding starts with one of:
 - `[SECURITY]` — a severe security issue blocks shipping
 - `[CI]` — a required GitHub check failed
 
-Non-goals are binding. If fixing a finding would require behavior excluded by
-an `NG-N`, do not prescribe code. Record
-`[SCOPE-CONFLICT AC-N ↔ NG-N]` with the exact contradiction and mark the PR for
-human escalation.
+Non-goals are binding, and `[SCOPE-CONFLICT AC-N ↔ NG-N]` records two shapes of
+the same fault. Either way: name the exact pair, state the contradiction, do not
+prescribe code, and mark the PR for human escalation.
+
+- **The diff crosses a non-goal.** Fixing a finding would require behavior an
+  `NG-N` excludes, so there is no fix to prescribe inside the contract.
+- **The card contradicts itself.** An `AC-N` cannot be satisfied *at all*
+  without violating an `NG-N` — the contradiction is in the spec, not in the
+  diff. Record it **against the card**: say which pair is irreconcilable and
+  that whichever side the PR took, the fault is upstream of it. Do not restate
+  it as an `[AC-N]` or `[DEFECT]` finding; the builder cannot repair a
+  contradiction, and asking it to would only swap which half of the contract
+  the PR breaks. (`nook-spec` and `nook-epic` cross-check this before filing;
+  what reaches you here is a card that predates that step or slipped past it.)
 
 ## 3. Check merge evidence
 

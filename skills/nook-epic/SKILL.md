@@ -1,7 +1,7 @@
 ---
 name: nook-epic
 description: "Walk opted-in NookOS epics and draft the next sub-ticket, grounded in the epic's own (free-form) body plus the current code. Attended by default: asks the human when it needs discovery, and shows the finished draft for a go-ahead before filing. Unattended (files without a read, escalates via comments) only when /loop passes the `unattended` flag. One ticket per pass."
-version: 2.4.0
+version: 2.5.0
 author: NookOS
 license: MIT
 platforms: [linux, macos]
@@ -215,6 +215,43 @@ is sized to one day of agent work or less. Apply the confidence test:
 
 If the epic body plus the current code cannot make that true — **do not fill the
 gap by guessing.** Attended: ask (§5a). Unattended: escalate (§5b).
+
+**Then cross-check every AC against every NG, before the draft is shown.** The
+no-AC-may-require-a-non-goal rule above does not enforce itself; this is the
+step that carries it out, and it runs on the child ticket you just drafted —
+**per child, never once for the epic.** A pass drafts one child, so that is one
+grid per pass; if a pass ever produces more than one, each gets its own. An
+epic's own scope statement is not a child's NG list, and checking at the epic
+level would pass a chain whose individual tickets each contradict themselves.
+
+Take each `AC-N` in turn against **every** `NG-N` — the whole grid, not a skim
+of the prose — judging meaning rather than wording: can that AC be satisfied
+without violating that NG? Four shapes to look for:
+
+1. an AC requiring a change to a surface an NG freezes;
+2. an AC requiring behaviour an NG defers to a later ticket;
+3. an AC requiring data or schema an NG excludes;
+4. an AC whose only reasonable implementation crosses an NG, even though its
+   wording does not name it.
+
+**Report the result even when it is clean**, with the draft, so a child that
+skipped the check is distinguishable from one that passed it:
+
+> AC↔NG cross-check (NOOK-7 child 3): no conflicts (AC-1…AC-4 × NG-1…NG-2).
+
+**On a conflict, hold that child and get a human to rule.** Do not reword either
+side, drop one, or pick a winner — the decomposer is not the product brain, and
+a contradiction filed here becomes a build that ships confidently wrong.
+Name the pair and state the contradiction, then route it the way this run's
+context routes any question it cannot answer: attended, ask inline (§5a); in a
+job, the durable channel (§3b's `nook interactions ask --wait`); unattended,
+escalate by comment (§5b) and file nothing. A canceled or timed-out ask files
+nothing either. Fold the ruling in, re-run the grid over the amended child, and
+continue.
+
+The check and its result belong to the conversation, the escalation comment or
+the job transcript — **never to the filed ticket body.** §4 files exactly the
+template above.
 
 ### 3a. Attended — show the draft and get the go-ahead BEFORE filing
 
