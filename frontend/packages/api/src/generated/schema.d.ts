@@ -4496,6 +4496,24 @@ export interface components {
             label: string;
         };
         /**
+         * @description One file hanging off a message (MAIN-535).
+         *
+         *     `content_id` is the ONLY join to the bytes: `GET /api/v1/user-content/{id}`
+         *     on the control plane serves them, and decides there what content type
+         *     actually goes on the wire. `content_type` here is what the uploader claimed
+         *     — enough to choose a preview from a chip, never enough to trust.
+         */
+        ChatAttachment: {
+            /** Format: uuid */
+            content_id: string;
+            content_type: string;
+            filename: string;
+            /** Format: uuid */
+            id: string;
+            /** Format: int64 */
+            size_bytes: number;
+        };
+        /**
          * @description A channel category (MAIN-178): a Discord-style group shared across a
          *     tenant/org, ordered by `position`. Admin-defined; DMs are never categorized.
          */
@@ -4589,6 +4607,15 @@ export interface components {
          *     (AC-2/AC-4), like the rest of NookOS.
          */
         ChatMessage: {
+            /**
+             * @description The files this message carries (MAIN-535 AC-1). Empty for the ordinary
+             *     text message, and empty for a deleted one — a delete takes the
+             *     attachments and their bytes with it (AC-6).
+             *
+             *     The rendering facts travel here rather than being fetched per message,
+             *     so drawing a page of history needs no call to the control plane at all.
+             */
+            attachments?: components["schemas"]["ChatAttachment"][];
             /** Format: uuid */
             author_id: string;
             /**
@@ -6674,6 +6701,13 @@ export interface components {
          *     not itself be a reply (one level, no nesting).
          */
         PostChatMessage: {
+            /**
+             * @description User-content ids to hang off this message (MAIN-535 AC-1) — each one
+             *     already uploaded to the control plane's store, and each one the
+             *     caller's own upload. With at least one of these the body may be empty
+             *     (AC-2); with none it may not.
+             */
+            attachments?: string[];
             body: string;
             /** Format: uuid */
             parent_message_id?: string | null;

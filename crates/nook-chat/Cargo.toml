@@ -30,6 +30,10 @@ tracing-subscriber = { workspace = true }
 dotenvy = { workspace = true }
 dashmap = { workspace = true }
 futures-util = { workspace = true }
+# One call, one direction: forgetting an attachment's bytes through the control
+# plane's user-content route (MAIN-535). See src/content.rs for why chat asks
+# instead of opening the store itself.
+reqwest = { workspace = true }
 
 [dev-dependencies]
 # `oneshot` for the panic-layer test (MAIN-273); nook-chat otherwise needs only

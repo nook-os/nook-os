@@ -5644,6 +5644,108 @@ button.chat-tool-line:hover { color: var(--nook-fg-dim); }
   cursor: default;
 }
 
+/* ── Attachments (MAIN-535) ────────────────────────────────────────────────
+   A message's files sit under its body, so a message carrying only files reads
+   as one block rather than as an empty bubble with something below it. */
+.chat-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+.chat-attachment-image {
+  display: block;
+  max-width: 320px;
+  border: 1px solid var(--nook-border);
+  border-radius: var(--nook-radius);
+  overflow: hidden;
+  line-height: 0;
+}
+.chat-attachment-image img {
+  display: block;
+  max-width: 100%;
+  /* Bounded so a tall screenshot cannot push the rest of the conversation off
+     screen; the link opens it at full size. */
+  max-height: 260px;
+  object-fit: contain;
+}
+.chat-attachment-image:hover { border-color: var(--nook-accent); }
+.chat-attachment-chip,
+.chat-staged-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 320px;
+  padding: 4px 8px;
+  border: 1px solid var(--nook-border-bright);
+  border-radius: var(--nook-radius);
+  background: var(--nook-bg);
+  color: var(--nook-fg-dim);
+  font-size: 11px;
+  text-decoration: none;
+}
+.chat-attachment-chip:hover {
+  color: var(--nook-accent);
+  border-color: var(--nook-accent);
+}
+.chat-attachment-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--nook-fg);
+}
+.chat-attachment-meta {
+  flex: none;
+  color: var(--nook-fg-faint);
+}
+
+/* The staging row: between the log and the composer, so what is about to be
+   sent sits with the box it will be sent from. */
+.chat-staged {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 12px 0;
+}
+.chat-staged-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.chat-staged-chip.uploading { opacity: 0.6; }
+.chat-staged-remove {
+  display: inline-flex;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--nook-fg-faint);
+  cursor: pointer;
+}
+.chat-staged-remove:hover { color: var(--nook-err); }
+.chat-staged-error { color: var(--nook-err); font-size: 11px; }
+.chat-staged-notice { color: var(--nook-fg-faint); font-size: 11px; }
+.chat-file-input { display: none; }
+.chat-attach {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  order: -1;
+  width: var(--nook-chat-ctrl);
+  height: var(--nook-chat-ctrl);
+  border: 1px solid var(--nook-border-bright);
+  border-radius: var(--nook-radius);
+  background: var(--nook-bg);
+  color: var(--nook-fg-dim);
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s;
+}
+.chat-attach:hover:not(:disabled) {
+  color: var(--nook-accent);
+  border-color: var(--nook-accent);
+}
+.chat-attach:disabled { opacity: 0.5; cursor: default; }
+/* Dropping over the whole surface, so the target is unmistakable while a file
+   is in the air. Inset rather than an added border: an outline would shift the
+   layout at the moment the pointer is trying to hit it. */
+.chat-view.dropping { box-shadow: inset 0 0 0 2px var(--nook-accent); }
+
 /* ── Composer pickers: emoji + GIPHY (MAIN-171) ────────────────────────────
    Both triggers sit in the composer row at exactly --nook-chat-ctrl, matching
    the input and the Send button beside them; both popups are portalled to the

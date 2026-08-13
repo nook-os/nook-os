@@ -504,6 +504,7 @@ use utoipa::OpenApi;
         nook_types::ChatMessagePage,
         nook_types::ChatThread,
         nook_types::ChatReactionAggregate,
+        nook_types::ChatAttachment,
         nook_types::UpdateChatMessage,
         nook_types::CreateChatChannel,
         nook_types::UpdateChatChannel,

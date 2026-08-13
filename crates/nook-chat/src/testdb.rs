@@ -49,6 +49,9 @@ use crate::AppState;
 /// `AppState::clone` and every existing call site keeps working untouched.
 pub(crate) struct ChatTest {
     state: AppState,
+    /// The same store `state.content` holds, kept concretely so a test can ask
+    /// what a delete had forgotten (MAIN-535 AC-6).
+    content: Arc<crate::content::RecordingContent>,
     /// The bed owns the private database and drops it — on Postgres from its own
     /// `Drop` safety net when a test ends or panics without calling
     /// [`ChatTest::teardown`]. It must outlive the test, so holding it here is
@@ -70,6 +73,12 @@ impl ChatTest {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn db_name(&self) -> &str {
         self.bed.db_name()
+    }
+
+    /// The content ids this test's deletes asked the store to forget, in order.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn forgotten_content(&self) -> Vec<uuid::Uuid> {
+        self.content.forgotten()
     }
 
     /// Drop the whole private database — both schemas with it.
@@ -95,11 +104,15 @@ impl ChatTest {
 
 /// Wire the repositories and registry over a pool — the same `AppState` the
 /// service builds, whichever engine produced the pool.
-fn state_over(db: DbPool) -> AppState {
+fn state_over(db: DbPool, content: Arc<crate::content::RecordingContent>) -> AppState {
     AppState {
         channels: Arc::new(crate::repo::channels::DbChannelRepository::new(db.clone())),
         messages: Arc::new(crate::repo::messages::DbMessageRepository::new(db.clone())),
         dms: Arc::new(crate::repo::dms::DbDmRepository::new(db.clone())),
+        // A test has no control plane to ask, and asking one would make the
+        // suite depend on a second service being up. What matters here is that
+        // chat asks at all, and for which ids — so the store records.
+        content,
         db,
         registry: Arc::new(crate::registry::Registry::new()),
     }
@@ -116,8 +129,10 @@ pub(crate) async fn chat_test(what: &str) -> Option<ChatTest> {
         return None;
     }
     let bed = nook_testkit::TestBed::new().await?;
+    let content = Arc::new(crate::content::RecordingContent::default());
     Some(ChatTest {
-        state: state_over(chat_pool(&bed).await?),
+        state: state_over(chat_pool(&bed).await?, content.clone()),
+        content,
         bed,
     })
 }

@@ -61,6 +61,30 @@ pub struct MessageParent {
     pub parent_message_id: Option<Uuid>,
 }
 
+/// One file hanging off a message, as stored (MAIN-535). The rendering facts
+/// are copied from the upload at post time — see the migration for why they are
+/// not read back through `public.user_content` on every render.
+#[derive(Debug, Clone, nook_db::FromDbRow)]
+pub struct AttachmentRow {
+    pub id: Uuid,
+    pub message_id: Uuid,
+    pub content_id: Uuid,
+    pub filename: String,
+    pub content_type: String,
+    pub size_bytes: i64,
+}
+
+/// An upload the caller may hang off a message: the control plane's record,
+/// narrowed to what chat copies. Answered only for the caller's OWN uploads in
+/// their own tenant, which is what makes attaching a bare id safe.
+#[derive(Debug, Clone, nook_db::FromDbRow)]
+pub struct UploadRef {
+    pub id: Uuid,
+    pub filename: String,
+    pub content_type: String,
+    pub size_bytes: i64,
+}
+
 /// A message to post.
 #[derive(Debug, Clone)]
 pub struct NewMessage {
@@ -71,6 +95,10 @@ pub struct NewMessage {
     pub parent_message_id: Option<Uuid>,
     /// `None` posts an ordinary message; a command sets its own kind (MAIN-528).
     pub kind: Option<String>,
+    /// The uploads to hang off it, in the order the sender picked them
+    /// (MAIN-535). Resolved by the caller through [`MessageRepository::uploads_of`]
+    /// so this cannot carry an id the poster does not own.
+    pub attachments: Vec<UploadRef>,
 }
 
 /// A keyset page: v7 ids are time-ordered, so `id < before` is "older" and
@@ -153,6 +181,39 @@ pub trait MessageRepository: Send + Sync {
     /// Soft-delete, keeping the prior body in the revision trail. The row stays
     /// so threads do not lose their shape; the content is redacted on read.
     async fn soft_delete(&self, message: Uuid, actor: Uuid) -> RepoResult<()>;
+
+    /// Which of `ids` are uploads `uploader` made in `tenant` **and has not
+    /// already attached** — the check that turns a bare content id from a
+    /// client into something safe to attach (MAIN-535 AC-1). An id belonging to
+    /// nobody, to another tenant, to another person, or to a message that
+    /// already carries it is simply absent from the answer, so the caller
+    /// refuses the post rather than learning which of the four it was.
+    ///
+    /// The already-attached arm is what keeps that refusal a 400. The unique
+    /// index is still the backstop for two posts racing the same id, and the
+    /// transaction in `post` is what lets that backstop lose cleanly.
+    ///
+    /// This reads `public.user_content`, the control plane's table, for the
+    /// same reason `tenant_role` reads `public.users`: the owning repository is
+    /// in another crate and there is nowhere else for the read to go. Named for
+    /// the question, not the table.
+    async fn uploads_of(
+        &self,
+        ids: &[Uuid],
+        tenant: Uuid,
+        uploader: Uuid,
+    ) -> RepoResult<Vec<UploadRef>>;
+
+    /// Attachments for a set of messages in ONE query — the same no-N+1 shape
+    /// reactions use, so a page of history costs one extra round trip however
+    /// many files it carries.
+    async fn attachments_for(&self, messages: &[Uuid]) -> RepoResult<Vec<AttachmentRow>>;
+
+    /// Drop a message's attachment rows and report the content ids that were
+    /// on them, so the caller can have the bytes forgotten too (AC-6). Returns
+    /// an empty list for a message with none, and for one already detached —
+    /// deleting twice must not ask the store to forget twice.
+    async fn detach_all(&self, message: Uuid) -> RepoResult<Vec<Uuid>>;
 }
 
 pub struct DbMessageRepository {
@@ -226,8 +287,18 @@ impl MessageRepository for DbMessageRepository {
         }))
     }
 
+    /// A message and its attachments are ONE write.
+    ///
+    /// Each statement is its own autocommit otherwise, so the `chat_messages`
+    /// row was already durable by the time an attachment insert could fail —
+    /// and the 500 that followed left a message in everyone's history carrying
+    /// no text and no files, which the client's Retry then duplicated on every
+    /// press. A transaction is what makes the failure mean what the caller is
+    /// told it means: nothing was posted, so retrying is a retry.
     async fn post(&self, new: NewMessage) -> RepoResult<MessageRow> {
-        self.db
+        let id = Uuid::now_v7();
+        let mut tx = self.db.begin().await.map_err(nook_db::DbError::from)?;
+        let row = tx
             .query_one::<MessageRow>(
                 &format!(
                     "INSERT INTO chat_messages
@@ -242,7 +313,7 @@ impl MessageRepository for DbMessageRepository {
                     null_ts = type_mapping(self.db.engine()).cast("NULL", "timestamptz"),
                 ),
                 params![
-                    Uuid::now_v7(),
+                    id,
                     new.channel_id,
                     new.author_id,
                     new.tenant_id,
@@ -251,8 +322,30 @@ impl MessageRepository for DbMessageRepository {
                     new.kind
                 ],
             )
-            .await
-            .map_err(Into::into)
+            .await?;
+
+        // After the message, because the rows point at it — and inside the same
+        // transaction, so a failure here takes the message with it. Dropping
+        // `tx` on the `?` rolls back.
+        for (position, upload) in new.attachments.iter().enumerate() {
+            tx.exec(
+                "INSERT INTO chat_message_attachments
+                    (id, message_id, content_id, filename, content_type, size_bytes, position)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                params![
+                    Uuid::now_v7(),
+                    id,
+                    upload.id,
+                    upload.filename.clone(),
+                    upload.content_type.clone(),
+                    upload.size_bytes,
+                    position as i32
+                ],
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(row)
     }
 
     async fn get(&self, message: Uuid) -> RepoResult<Option<MessageRow>> {
@@ -356,5 +449,57 @@ impl MessageRepository for DbMessageRepository {
             )
             .await?;
         Ok(())
+    }
+
+    async fn uploads_of(
+        &self,
+        ids: &[Uuid],
+        tenant: Uuid,
+        uploader: Uuid,
+    ) -> RepoResult<Vec<UploadRef>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.db
+            .query_all::<UploadRef>(
+                "SELECT id, filename, content_type, size_bytes FROM user_content
+                  WHERE id = ANY($1) AND tenant_id = $2 AND uploaded_by = $3
+                    AND NOT EXISTS (SELECT 1 FROM chat_message_attachments a
+                                     WHERE a.content_id = user_content.id)",
+                params![ids.to_vec(), tenant, uploader],
+            )
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn attachments_for(&self, messages: &[Uuid]) -> RepoResult<Vec<AttachmentRow>> {
+        if messages.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.db
+            .query_all::<AttachmentRow>(
+                "SELECT id, message_id, content_id, filename, content_type, size_bytes
+                   FROM chat_message_attachments
+                  WHERE message_id = ANY($1)
+                  ORDER BY message_id, position, id",
+                params![messages.to_vec()],
+            )
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn detach_all(&self, message: Uuid) -> RepoResult<Vec<Uuid>> {
+        // Read then delete rather than `DELETE … RETURNING`: the return shape is
+        // the same on both engines this way, and the pair is not a correctness
+        // race — a message being deleted takes no new attachments (there is no
+        // edit path for them, NG-4).
+        let rows = self.attachments_for(&[message]).await?;
+        self.db
+            .exec(
+                "DELETE FROM chat_message_attachments WHERE message_id = $1",
+                params![message],
+            )
+            .await?;
+        Ok(rows.into_iter().map(|r| r.content_id).collect())
     }
 }

@@ -18,6 +18,12 @@ pub struct Config {
     /// production. Gates the migrator's dev tolerance (MAIN-224): dev warns past
     /// a ledger ahead of this checkout, production stays strictly fatal.
     pub app_env: String,
+    /// Where the CONTROL PLANE answers, from inside the deployment — the twin of
+    /// nginx's `CHAT_ORIGIN`, pointing the other way (MAIN-535). Chat calls one
+    /// route on it: forgetting the bytes behind a deleted message's attachment.
+    /// Same default shape as its twin: the compose service name, which is what a
+    /// container-per-service deployment resolves.
+    pub control_origin: String,
 }
 
 fn env_opt(key: &str) -> Option<String> {
@@ -33,6 +39,8 @@ impl Config {
                 .unwrap_or_else(|| "http://localhost:5173".into()),
             web_origin: env_opt("WEB_ORIGIN").unwrap_or_else(|| "http://localhost:5173".into()),
             app_env: env_opt("APP_ENV").unwrap_or_else(|| "dev".into()),
+            control_origin: env_opt("NOOK_CONTROL_ORIGIN")
+                .unwrap_or_else(|| "http://control-plane:8080".into()),
         })
     }
 
