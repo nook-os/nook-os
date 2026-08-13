@@ -26,7 +26,9 @@ vi.mock("@nookos/api", () => ({
       // `build-loop`, so the looser match would answer both with the ceiling.
       if (path.includes("build-loop-status")) return { data: state.status };
       if (path.includes("build-loop")) return { data: state.decl };
-      if (path.includes("builds")) return { data: state.runs };
+      // The run listings answer the pagination contract's envelope
+      // (MAIN-557), not a bare array.
+      if (path.includes("builds")) return { data: { rows: state.runs, next_cursor: null } };
       return { data: null };
     }),
     PUT: put,

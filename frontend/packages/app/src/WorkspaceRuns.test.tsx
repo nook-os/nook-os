@@ -29,8 +29,10 @@ vi.mock("@nookos/api", () => ({
       // Before the `/builds` arm: the repo itself, which the panel reads for
       // the remote a review's PR link is built from.
       if (path === "/api/v1/workspaces/{id}") return { data: state.workspace };
-      if (path.includes("/builds")) return { data: state.builds };
-      if (path.includes("/reviews")) return { data: state.reviews };
+      // Both run listings answer the pagination contract's envelope
+      // (MAIN-557), not a bare array.
+      if (path.includes("/builds")) return { data: { rows: state.builds, next_cursor: null } };
+      if (path.includes("/reviews")) return { data: { rows: state.reviews, next_cursor: null } };
       // Before the `/jobs/` arm: a run's command list is a different endpoint
       // under the same prefix, and it answers a LIST (MAIN-530).
       if (path.endsWith("/commands")) return { data: [] };

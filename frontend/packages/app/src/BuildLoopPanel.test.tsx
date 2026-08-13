@@ -44,7 +44,7 @@ vi.mock("@nookos/api", () => ({
       if (path.includes("build-loop-settings")) return { data: state.settings };
       if (path.includes("build-loop-status")) return { data: null };
       if (path.includes("build-loop")) return { data: { max_replicas: null } };
-      if (path.endsWith("/builds")) return { data: state.builds };
+      if (path.endsWith("/builds")) return { data: { rows: state.builds, next_cursor: null } };
       if (path.startsWith("/api/v1/jobs/")) return { data: state.job };
       if (path.startsWith("/api/v1/tasks/")) return { data: state.task };
       if (path === "/api/v1/tasks") return { data: state.escalated };

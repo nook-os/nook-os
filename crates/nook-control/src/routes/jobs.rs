@@ -1,7 +1,7 @@
 //! REST surface for loop jobs (MAIN-127): create from a ticket/epic, read with
 //! transcript, cancel, and re-run. Thin wrappers over `services::jobs`.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::Json;
 use nook_types::*;
 
@@ -184,51 +184,76 @@ pub async fn list_for_task(
 }
 
 /// `GET /api/v1/workspaces/{id}/reviews` — this repo's review runs, newest
-/// first (MAIN-455 AC-5).
+/// first (MAIN-455 AC-5), paged (MAIN-557 AC-5).
 ///
 /// The workspace's own window onto work the control plane raised for it. Each
 /// row is an ordinary loop job, so its transcript is read through the same
 /// endpoint and the same view a spec run's is — there is no second transcript
 /// mechanism to keep in step.
+///
+/// `sort` and `q` are refused: the only order is newest-first, and filtering is
+/// the client's (MAIN-557 NG-4). Absent `after` is the first page, which is
+/// what it always was.
 #[utoipa::path(get, path = "/api/v1/workspaces/{id}/reviews",
     operation_id = "list_workspace_reviews",
-    params(("id" = String, Path,)),
-    responses((status = 200, body = [LoopJob])))]
+    params(("id" = String, Path,), PageQuery),
+    responses((status = 200, body = Page<WorkspaceReviewRun>)))]
 pub async fn list_reviews_for_workspace(
     State(state): State<AppState>,
     auth: AuthCtx,
     Path(id): Path<WorkspaceId>,
-) -> ApiResult<Json<Vec<LoopJob>>> {
-    // A page's worth. A repo that gets pushed to all day accumulates one run
-    // per push per PR, and none of the older ones tell you anything the newest
-    // does not.
-    const PAGE: i64 = 50;
+    Query(q): Query<PageQuery>,
+) -> ApiResult<Json<Page<WorkspaceReviewRun>>> {
+    let args = page_args(&q)?;
     Ok(Json(
         state
             .jobs
-            .list_reviews_for_workspace(auth.tenant_id, id, PAGE)
-            .await?,
+            .list_reviews_for_workspace(auth.tenant_id, id, &args)
+            .await?
+            .into(),
     ))
 }
 
 /// `GET /api/v1/workspaces/{id}/builds` — the Builds panel's rows (MAIN-461
-/// AC-2): this repo's build runs, newest first, each naming its card by key.
+/// AC-2): this repo's build runs, newest first, each naming its card by key,
+/// paged on the same contract as its review twin.
 #[utoipa::path(get, path = "/api/v1/workspaces/{id}/builds",
     operation_id = "list_builds_for_workspace",
-    params(("id" = String, Path,)),
-    responses((status = 200, body = [WorkspaceBuildRun]), (status = 404)))]
+    params(("id" = String, Path,), PageQuery),
+    responses((status = 200, body = Page<WorkspaceBuildRun>), (status = 404)))]
 pub async fn list_builds_for_workspace(
     State(state): State<AppState>,
     auth: AuthCtx,
     Path(id): Path<WorkspaceId>,
-) -> ApiResult<Json<Vec<WorkspaceBuildRun>>> {
-    const PAGE: i64 = 50;
+    Query(q): Query<PageQuery>,
+) -> ApiResult<Json<Page<WorkspaceBuildRun>>> {
+    let args = page_args(&q)?;
     Ok(Json(
         state
             .jobs
-            .list_builds_for_workspace(auth.tenant_id, auth.user_id, id, PAGE)
-            .await?,
+            .list_builds_for_workspace(auth.tenant_id, auth.user_id, id, &args)
+            .await?
+            .into(),
     ))
+}
+
+/// Both run listings' page arguments, validated the same way — a stale cursor
+/// or an unknown sort is the caller's 400, never a silently different page.
+///
+/// `q` is refused by NAME rather than left to the SQL. These lists declare no
+/// searchable column (MAIN-557 NG-4 — filtering is the client's), and the
+/// pagination skeleton renders an empty search set as `1 = 0`, so a `q` would
+/// otherwise answer `200` with an empty page: "nothing matched" in reply to a
+/// question this endpoint does not answer at all. Saying so is the difference
+/// between an empty result and an empty result that means something.
+fn page_args(q: &PageQuery) -> ApiResult<nook_db::paging::PageArgs> {
+    if q.q.as_deref().is_some_and(|s| !s.trim().is_empty()) {
+        return Err(crate::error::ApiError::BadRequest(
+            "this list does not search — filter the returned rows client-side".into(),
+        ));
+    }
+    q.args(crate::repo::jobs::RUN_PAGE_SORTS)
+        .map_err(crate::services::operator_queries::bad_page)
 }
 
 #[utoipa::path(post, path = "/api/v1/jobs/{id}/cancel",
@@ -363,4 +388,56 @@ async fn status_text(state: &AppState, tenant: TenantId, job: &LoopJob) -> ApiRe
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod page_arg_tests {
+    use super::*;
+
+    fn query(q: Option<&str>, sort: Option<&str>, after: Option<&str>) -> PageQuery {
+        PageQuery {
+            q: q.map(str::to_string),
+            after: after.map(str::to_string),
+            limit: None,
+            sort: sort.map(str::to_string),
+            dir: None,
+        }
+    }
+
+    fn refusal(r: ApiResult<nook_db::paging::PageArgs>) -> String {
+        match r {
+            Err(crate::error::ApiError::BadRequest(m)) => m,
+            Err(other) => panic!("expected a 400, got {other:?}"),
+            Ok(_) => panic!("expected a refusal"),
+        }
+    }
+
+    #[test]
+    fn no_query_string_is_the_first_page() {
+        let args = page_args(&query(None, None, None)).expect("the default is always valid");
+        assert!(args.cursor.is_none());
+        assert!(args.sort.is_id(), "newest first, on the keyset order");
+    }
+
+    /// The searchless list says so, rather than answering "nothing matched" —
+    /// which is what an empty search set renders as in SQL.
+    #[test]
+    fn a_search_term_is_refused_by_name() {
+        assert!(
+            refusal(page_args(&query(Some("MAIN-557"), None, None))).contains("does not search")
+        );
+    }
+
+    /// Whitespace is how a cleared search box arrives, and it means "no filter"
+    /// everywhere else in the contract. It must not become a 400.
+    #[test]
+    fn a_blank_search_term_is_no_filter_not_a_refusal() {
+        page_args(&query(Some("   "), None, None)).expect("a cleared box is not a search");
+    }
+
+    #[test]
+    fn there_is_no_sortable_column_and_a_stale_cursor_is_refused() {
+        assert!(refusal(page_args(&query(None, Some("created"), None))).contains("sort key"));
+        assert!(refusal(page_args(&query(None, None, Some("not-a-cursor")))).contains("cursor"));
+    }
 }

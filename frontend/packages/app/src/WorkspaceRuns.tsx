@@ -448,7 +448,7 @@ export function WorkspaceRuns({
         await api.GET("/api/v1/workspaces/{id}/builds", {
           params: { path: { id: workspaceId } },
         })
-      ).data as BuildRun[] | undefined) ?? [],
+      ).data?.rows as BuildRun[] | undefined) ?? [],
   });
   const { data: reviews } = useQuery({
     queryKey: ["workspace-reviews", workspaceId],
@@ -457,7 +457,7 @@ export function WorkspaceRuns({
         await api.GET("/api/v1/workspaces/{id}/reviews", {
           params: { path: { id: workspaceId } },
         })
-      ).data as ReviewRun[] | undefined) ?? [],
+      ).data?.rows as ReviewRun[] | undefined) ?? [],
   });
 
   // Shared key with `useBuildRunFacts`, so a panel that already resolved this

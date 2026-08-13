@@ -187,9 +187,10 @@ async fn the_builds_listing_carries_the_sentence_and_the_gate() {
 
     let rows = state
         .jobs
-        .list_builds_for_workspace(tenant, user, ws, 50)
+        .list_builds_for_workspace(tenant, user, ws, &nook_testkit::first_page(50))
         .await
-        .expect("list");
+        .expect("list")
+        .rows;
     let row = rows
         .iter()
         .find(|r| r.id == job.0)
@@ -242,9 +243,10 @@ async fn a_row_with_no_typed_gate_keeps_its_sentence() {
 
     let rows = state
         .jobs
-        .list_builds_for_workspace(tenant, user, ws, 50)
+        .list_builds_for_workspace(tenant, user, ws, &nook_testkit::first_page(50))
         .await
-        .expect("list");
+        .expect("list")
+        .rows;
     let listed = rows.iter().find(|r| r.id == job.0).expect("listed");
     assert_eq!(
         listed.queued_reason.as_deref(),

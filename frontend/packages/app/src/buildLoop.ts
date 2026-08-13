@@ -224,7 +224,7 @@ export function useWorkspaceBuilds(workspaceId: string) {
         await api.GET("/api/v1/workspaces/{id}/builds", {
           params: { path: { id: workspaceId } },
         })
-      ).data as BuildRunRow[] | undefined) ?? [],
+      ).data?.rows as BuildRunRow[] | undefined) ?? [],
     // No poll of its own, deliberately: `job_changed` already invalidates this
     // key (see `live.ts`), and Mission Control mounts one of these PER REPO —
     // a ten-second poll each would make this page's dominant traffic a question

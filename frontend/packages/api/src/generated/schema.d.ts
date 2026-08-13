@@ -3558,7 +3558,8 @@ export interface paths {
         };
         /**
          * `GET /api/v1/workspaces/{id}/builds` — the Builds panel's rows (MAIN-461
-         *     AC-2): this repo's build runs, newest first, each naming its card by key.
+         *     AC-2): this repo's build runs, newest first, each naming its card by key,
+         *     paged on the same contract as its review twin.
          */
         get: operations["list_builds_for_workspace"];
         put?: never;
@@ -3873,11 +3874,15 @@ export interface paths {
         };
         /**
          * `GET /api/v1/workspaces/{id}/reviews` — this repo's review runs, newest
-         *     first (MAIN-455 AC-5).
+         *     first (MAIN-455 AC-5), paged (MAIN-557 AC-5).
          * @description The workspace's own window onto work the control plane raised for it. Each
          *     row is an ordinary loop job, so its transcript is read through the same
          *     endpoint and the same view a spec run's is — there is no second transcript
          *     mechanism to keep in step.
+         *
+         *     `sort` and `q` are refused: the only order is newest-first, and filtering is
+         *     the client's (MAIN-557 NG-4). Absent `after` is the first page, which is
+         *     what it always was.
          */
         get: operations["list_workspace_reviews"];
         put?: never;
@@ -6839,11 +6844,120 @@ export interface components {
          *     The server half — cursor codec, validation, SQL skeleton — is
          *     `nook_db::paging`; the React half is `usePagedList` + `PagedPanel`.
          */
+        Page_WorkspaceBuildRun: {
+            /** @description Opaque continuation token — pass back verbatim as `after`; null = end. */
+            next_cursor?: string | null;
+            rows: {
+                /**
+                 * @description The branch the run acted on, from its card's record (MAIN-557 AC-2).
+                 *
+                 *     `None` is the ordinary case for a loop-raised build TODAY and that is
+                 *     not an oversight: `record_loop_worktree` stamps the worktree and
+                 *     deliberately not the branch (MAIN-480), the branch itself is created
+                 *     inside the run by the build skill, and nothing reports it back. A card a
+                 *     human started with start-work carries one. A name assembled from the key
+                 *     would be a guess — the skill appends a free-form slug — so the field is
+                 *     null rather than synthesised.
+                 *
+                 *     VIEWER-GATED exactly as `task_key` is: `start-work` defaults the branch
+                 *     to the card's slugified TITLE, so a private card's branch is the same
+                 *     secret as its key and is withheld from a non-owner the same way.
+                 */
+                branch?: string | null;
+                /**
+                 * @description The commit the run acted on (MAIN-557 AC-4): a REPAIR run is raised at
+                 *     the head its verdict was written for, and that head is what this is.
+                 *
+                 *     `None` for a fresh build, whose `build_fingerprint` is a fingerprint of
+                 *     the CARD's contract and not a commit at all — presenting that as a sha
+                 *     is exactly what AC-4 forbids.
+                 */
+                commit_sha?: string | null;
+                /** Format: date-time */
+                created_at: string;
+                /** Format: uuid */
+                id: string;
+                /**
+                 * @description Who the run was requested by, by display name (MAIN-557 AC-3) — the
+                 *     join a console would otherwise pay per row.
+                 *
+                 *     It does NOT say whether a human or the converger raised the run, because
+                 *     nothing recorded here can: an auto-raised run is requested by the person
+                 *     who enabled the loop, which is the same kind of value a hand-raised one
+                 *     carries. Naming them all alike is the honest reading; labelling them
+                 *     would be inventing a distinction the data does not hold.
+                 *
+                 *     VIEWER-GATED like `task_key` and `branch` (MAIN-557 AC-3a, owner
+                 *     ruling): a non-owner must not learn WHO has a private card building in
+                 *     this repo. Its review-listing twin is deliberately ungated — a review
+                 *     run has no card, so there is nothing there to withhold.
+                 */
+                initiator?: string | null;
+                /**
+                 * @description Why a `queued` run is still waiting, and the same gate typed
+                 *     (MAIN-494). Both `None` on a run that got placed — the panel's whole
+                 *     question is why one that did not is still here.
+                 */
+                queued_reason?: string | null;
+                queued_reason_kind?: null | components["schemas"]["QueuedReason"];
+                state: string;
+                /** @description The card's human key (`MAIN-42`); `None` if the card was deleted. */
+                task_key?: string | null;
+                /**
+                 * Format: date-time
+                 * @description Last lifecycle movement (MAIN-557 AC-1), which for a finished run is
+                 *     when it finished. `created_at` alone cannot say how long a row has been
+                 *     where it is, so a console showing elapsed time had to invent one.
+                 */
+                updated_at: string;
+            }[];
+        };
+        /**
+         * @description One page of any paginated list — THE pagination wire contract (QOL sprint
+         *     2026-08). Every list endpoint returns this shape; the request half is
+         *     [`PageQuery`]. `next_cursor` is an OPAQUE token: pass it back verbatim as
+         *     `after`, never parse it — the opacity is what lets the server pick the
+         *     mechanism (keyset vs offset) per request. Null means end of list.
+         *
+         *     The server half — cursor codec, validation, SQL skeleton — is
+         *     `nook_db::paging`; the React half is `usePagedList` + `PagedPanel`.
+         */
         Page_WorkspaceDetail: {
             /** @description Opaque continuation token — pass back verbatim as `after`; null = end. */
             next_cursor?: string | null;
             rows: (components["schemas"]["Workspace"] & {
                 locations: components["schemas"]["WorkspaceLocation"][];
+            })[];
+        };
+        /**
+         * @description One page of any paginated list — THE pagination wire contract (QOL sprint
+         *     2026-08). Every list endpoint returns this shape; the request half is
+         *     [`PageQuery`]. `next_cursor` is an OPAQUE token: pass it back verbatim as
+         *     `after`, never parse it — the opacity is what lets the server pick the
+         *     mechanism (keyset vs offset) per request. Null means end of list.
+         *
+         *     The server half — cursor codec, validation, SQL skeleton — is
+         *     `nook_db::paging`; the React half is `usePagedList` + `PagedPanel`.
+         */
+        Page_WorkspaceReviewRun: {
+            /** @description Opaque continuation token — pass back verbatim as `after`; null = end. */
+            next_cursor?: string | null;
+            rows: (components["schemas"]["LoopJob"] & {
+                /**
+                 * @description The PR's head ref. Always `None` today, and the reason is worth stating
+                 *     rather than leaving as an empty column: the forge read a review run is
+                 *     raised from (`forge::PullRequest`) carries the PR's number, head sha and
+                 *     labels, and nothing else — no head ref reaches this side, at raise time
+                 *     or after. The run's commit is `review_head_sha`, which is real; the
+                 *     branch that commit sat on is not recorded anywhere, and deriving it from
+                 *     the PR number would mean a forge call per row.
+                 */
+                branch?: string | null;
+                /**
+                 * @description Who the run was requested by, by display name — the same field, with the
+                 *     same caveat, as [`WorkspaceBuildRun::initiator`].
+                 */
+                initiator?: string | null;
             })[];
         };
         /**
@@ -8896,10 +9010,51 @@ export interface components {
          *     The run's outcome column joins this shape when MAIN-458 lands it.
          */
         WorkspaceBuildRun: {
+            /**
+             * @description The branch the run acted on, from its card's record (MAIN-557 AC-2).
+             *
+             *     `None` is the ordinary case for a loop-raised build TODAY and that is
+             *     not an oversight: `record_loop_worktree` stamps the worktree and
+             *     deliberately not the branch (MAIN-480), the branch itself is created
+             *     inside the run by the build skill, and nothing reports it back. A card a
+             *     human started with start-work carries one. A name assembled from the key
+             *     would be a guess — the skill appends a free-form slug — so the field is
+             *     null rather than synthesised.
+             *
+             *     VIEWER-GATED exactly as `task_key` is: `start-work` defaults the branch
+             *     to the card's slugified TITLE, so a private card's branch is the same
+             *     secret as its key and is withheld from a non-owner the same way.
+             */
+            branch?: string | null;
+            /**
+             * @description The commit the run acted on (MAIN-557 AC-4): a REPAIR run is raised at
+             *     the head its verdict was written for, and that head is what this is.
+             *
+             *     `None` for a fresh build, whose `build_fingerprint` is a fingerprint of
+             *     the CARD's contract and not a commit at all — presenting that as a sha
+             *     is exactly what AC-4 forbids.
+             */
+            commit_sha?: string | null;
             /** Format: date-time */
             created_at: string;
             /** Format: uuid */
             id: string;
+            /**
+             * @description Who the run was requested by, by display name (MAIN-557 AC-3) — the
+             *     join a console would otherwise pay per row.
+             *
+             *     It does NOT say whether a human or the converger raised the run, because
+             *     nothing recorded here can: an auto-raised run is requested by the person
+             *     who enabled the loop, which is the same kind of value a hand-raised one
+             *     carries. Naming them all alike is the honest reading; labelling them
+             *     would be inventing a distinction the data does not hold.
+             *
+             *     VIEWER-GATED like `task_key` and `branch` (MAIN-557 AC-3a, owner
+             *     ruling): a non-owner must not learn WHO has a private card building in
+             *     this repo. Its review-listing twin is deliberately ungated — a review
+             *     run has no card, so there is nothing there to withhold.
+             */
+            initiator?: string | null;
             /**
              * @description Why a `queued` run is still waiting, and the same gate typed
              *     (MAIN-494). Both `None` on a run that got placed — the panel's whole
@@ -8910,6 +9065,13 @@ export interface components {
             state: string;
             /** @description The card's human key (`MAIN-42`); `None` if the card was deleted. */
             task_key?: string | null;
+            /**
+             * Format: date-time
+             * @description Last lifecycle movement (MAIN-557 AC-1), which for a finished run is
+             *     when it finished. `created_at` alone cannot say how long a row has been
+             *     where it is, so a console showing elapsed time had to invent one.
+             */
+            updated_at: string;
         };
         /**
          * @description Clone a workspace's *stored* remote onto a node (MAIN-223 AC-2). Unlike
@@ -8942,6 +9104,33 @@ export interface components {
             path: string;
             /** @description This checkout is a linked git worktree of the workspace's primary repo. */
             worktree?: boolean;
+        };
+        /**
+         * @description One row of a workspace's Reviews listing (MAIN-557): the run, plus the two
+         *     joins a console would otherwise pay per row.
+         *
+         *     The job is FLATTENED rather than narrowed to the handful of fields a panel
+         *     reads today — the endpoint has always returned a whole [`LoopJob`], and a
+         *     listing card is no place to decide which of its fields somebody stopped
+         *     needing. So this is a strict superset: every existing key, plus `branch` and
+         *     `initiator`.
+         */
+        WorkspaceReviewRun: components["schemas"]["LoopJob"] & {
+            /**
+             * @description The PR's head ref. Always `None` today, and the reason is worth stating
+             *     rather than leaving as an empty column: the forge read a review run is
+             *     raised from (`forge::PullRequest`) carries the PR's number, head sha and
+             *     labels, and nothing else — no head ref reaches this side, at raise time
+             *     or after. The run's commit is `review_head_sha`, which is real; the
+             *     branch that commit sat on is not recorded anywhere, and deriving it from
+             *     the PR number would mean a forge call per row.
+             */
+            branch?: string | null;
+            /**
+             * @description Who the run was requested by, by display name — the same field, with the
+             *     same caveat, as [`WorkspaceBuildRun::initiator`].
+             */
+            initiator?: string | null;
         };
         /** @description A workspace secret file (e.g. .env). Content only present on single-get. */
         WorkspaceSecret: {
@@ -15556,7 +15745,18 @@ export interface operations {
     };
     list_builds_for_workspace: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Case-insensitive substring; the searched fields differ per list. */
+                q?: string | null;
+                /** @description Opaque cursor from the previous page's `next_cursor`. */
+                after?: string | null;
+                /** @description Page size (default 50, clamped 1..=200). */
+                limit?: number | null;
+                /** @description Sort key from the endpoint's documented set. Absent = newest first. */
+                sort?: string | null;
+                /** @description `asc` | `desc`. Defaults ascending under `sort`, newest-first without. */
+                dir?: string | null;
+            };
             header?: never;
             path: {
                 id: string;
@@ -15570,7 +15770,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["WorkspaceBuildRun"][];
+                    "application/json": components["schemas"]["Page_WorkspaceBuildRun"];
                 };
             };
             404: {
@@ -16077,7 +16277,18 @@ export interface operations {
     };
     list_workspace_reviews: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Case-insensitive substring; the searched fields differ per list. */
+                q?: string | null;
+                /** @description Opaque cursor from the previous page's `next_cursor`. */
+                after?: string | null;
+                /** @description Page size (default 50, clamped 1..=200). */
+                limit?: number | null;
+                /** @description Sort key from the endpoint's documented set. Absent = newest first. */
+                sort?: string | null;
+                /** @description `asc` | `desc`. Defaults ascending under `sort`, newest-first without. */
+                dir?: string | null;
+            };
             header?: never;
             path: {
                 id: string;
@@ -16091,7 +16302,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["LoopJob"][];
+                    "application/json": components["schemas"]["Page_WorkspaceReviewRun"];
                 };
             };
         };
