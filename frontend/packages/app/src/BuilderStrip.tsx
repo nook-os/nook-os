@@ -17,7 +17,7 @@ import React from "react";
 import { Link } from "react-router-dom";
 import { ExternalLink, GitBranch } from "lucide-react";
 import { Pill } from "@nookos/ui";
-import { buildOutcomeWords, useBuildRunFacts, type BuildRunRow } from "./buildLoop";
+import { buildOutcomeWords, useBuildRunFacts, type BuildRunRow } from "./buildRuns";
 import { agentActivityLabel, jobStateMeta } from "./loop";
 import { useLive } from "./live";
 

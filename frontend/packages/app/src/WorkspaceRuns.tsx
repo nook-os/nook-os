@@ -20,7 +20,7 @@ import { api, type LoopJobTranscriptEntry, type Page } from "@nookos/api";
 import { ChatView, Empty, Panel, useAnchoredMenu } from "@nookos/ui";
 import { useAgentCommands } from "./agentCommands";
 import { BuildOutcome } from "./BuilderStrip";
-import { useBuildRunFacts } from "./buildLoop";
+import { useBuildRunFacts } from "./buildRuns";
 import { ContextMenuRegion, useContextMenuApi, type ContextMenuItem } from "./contextMenu";
 import { askConfirm } from "./dialogs";
 import { transcriptMessages } from "./LoopPanel";

@@ -17,7 +17,7 @@ import {
   whyWords,
   type BuildLoopSettings,
   type BuildRunRow,
-} from "./buildLoop";
+} from "./buildRuns";
 
 const NOW = Date.parse("2026-08-13T12:00:00Z");
 

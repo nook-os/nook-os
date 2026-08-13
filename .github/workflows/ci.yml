@@ -151,6 +151,8 @@ jobs:
       - name: Source guards
         if: matrix.engine == 'postgres'
         run: |
+          ./scripts/check-case-collisions.sh
+          ./scripts/check-case-collisions.test.sh
           ./scripts/check-inline-sql.sh
           ./scripts/check-inline-sql.test.sh
           ./scripts/check-sqlx-signatures.sh
