@@ -39,8 +39,24 @@
 # Measured on two full runs of `cargo test --workspace --no-fail-fast` under
 # sqlite://, which produced identical failure sets — nothing here is flaky.
 #
-# 168 test binaries: 155 COVERED, 12 pending below, 1 deliberately Postgres-only —
+# 168 test binaries: 162 COVERED, 4 pending below, 2 deliberately Postgres-only —
 # the numbers check-sqlite-ci.sh itself reports, not arithmetic on this file.
+# (Read off the leg's own verdict by MAIN-549, which deleted `squash_restamp`
+# and moved `multi_instance` to the engine-specific file — so this is the first
+# line where the third number is not 1.
+#
+# The line it replaces was `168/155/12/1`, and that one was WRONG well before
+# this card touched it: #447, #448, #450 and #451 landed without re-measuring,
+# so the header claimed 12 pending while the file below it held 6. Nothing
+# detects that — the guard reads the entries and never reads this line — which
+# is exactly why it says to run the gate and copy its sentence. Arithmetic on
+# the stale line would have given 10 pending; the real answer is 4.
+#
+# Measured four times on this branch, once per rebase (#443 → #444 → #448 →
+# #451), because a tally is a property of the tree it was read on and nothing
+# carries across a rebase that changes the entry set. The last two runs agreed
+# — #450 and #451 changed no binary's verdict — and it was still re-run, since
+# "the numbers did not move" is a result, not an assumption.)
 # (Read off the leg's own verdict by MAIN-545, which deleted ten lines. It said
 # 166/143/22 before, and adding ten to that would have given 166/153/12 — right
 # only about the pending count, because two more binaries arrived while this
@@ -96,7 +112,7 @@
 # below now names the card that owns the failure the run actually produced.
 #
 # FIVE causes, five owners, and only ONE of them is the cause the old lines
-# claimed:
+# claimed (MAIN-549 has since been answered — see its entry):
 #
 #   MAIN-545  the TEST's own fixtures emit Postgres-only SQL — `interval '…'`,
 #             `now()`, `gen_random_uuid()`, `::` casts, `CREATE SCHEMA`, and
@@ -130,13 +146,29 @@
 #             unmounted node's checkouts are silently left un-tombstoned.
 #   MAIN-548  the one line where the old reason was TRUE: still raw sqlx.
 #   MAIN-549  the mechanism under test does not exist on SQLite; needs a ruling
-#             before it needs code.
+#             before it needs code. RULED 2026-08-12, and the two binaries it
+#             was filed for got DIFFERENT answers: `multi_instance` moved to
+#             sqlite-ci-engine-specific.txt — SQLite is single-instance by
+#             design, so a cross-instance bus is a Postgres CAPABILITY and not a
+#             gap — and `squash_restamp` was FIXED, its failure being a
+#             hardcoded Postgres MIGRATOR rather than a missing mechanism, so
+#             its line is deleted rather than moved. Both are gone from below.
+#             A THIRD binary briefly wore this number and does NOT belong to
+#             that ruling. MAIN-545 re-measured `migrate_dev_tolerance` onto
+#             MAIN-549 on 2026-08-12, after this card's acceptance criteria were
+#             written and fixed at two binaries — so closing MAIN-549 would have
+#             left a pending line naming a done card, the exact state the header
+#             above warns about three times. It is re-tagged to **MAIN-566**,
+#             filed for it: its `VersionMissing(38)` half is the same
+#             hardcoded-migrator defect and takes the same fix as
+#             squash_restamp, while its empty orphan list is `orphan_versions`
+#             answering honestly on SQLite and needs a gate, not a ruling.
+#             Neither half needed the ruling this card was raised for, which is
+#             why it is a separate owner rather than a third bullet here.
 dispatch_ownership         # MEASURED (MAIN-478): `EnginePool::pg() on a SQLite pool` — `sqlx::query(…).execute(state.db.pg())` at :27. The ONLY line where "raw sqlx in the test itself" was still true (MAIN-548)
 job_reaper                 # MEASURED (MAIN-545, 2026-08-12, after its three fixtures were converted): `near "j": syntax error` — production `repo/jobs.rs:1367` is `UPDATE loop_jobs j … FROM nodes n`, and its `RETURNING n.last_seen_at` names the joined table SQLite cannot return from. 3 passed, 6 failed (MAIN-564)
-migrate_dev_tolerance      # MEASURED (MAIN-545, 2026-08-12, after the bytea literals were bound and the two schema/psql tests gated): `VersionMissing(38)` and an empty orphan list — the Postgres MIGRATOR driven at a SQLite bed, and `orphan_versions` returning empty there BY DESIGN. Same signature as squash_restamp; needs the same ruling. 3 passed, 3 failed (MAIN-549)
-multi_instance             # MEASURED (MAIN-478): "instance A never started listening" — production `ws/bus.rs:204` is `PgListener` + `pg_notify`, so the bus task dies on a SQLite pool. Needs a ruling, not a sweep (MAIN-549)
+migrate_dev_tolerance      # MEASURED (MAIN-545, 2026-08-12, after the bytea literals were bound and the two schema/psql tests gated; re-measured unchanged by MAIN-549, 2026-08-13): `VersionMissing(38)` and an empty orphan list — the Postgres MIGRATOR driven at a SQLite bed, and `orphan_versions` returning empty there BY DESIGN. It needs the same FIX as squash_restamp, not the same ruling. 3 passed, 3 failed (MAIN-566)
 reconcile_tombstones       # MEASURED (MAIN-547, 2026-08-13): the production `path != ALL($2)` half is FIXED and its three assertions pass; the one remaining failure is the fixture `now() - ($8::bigint * interval '1 second')` at :246. That cause is MAIN-545's class but MAIN-545 NG-2 disowns this binary, so the fixture half has no card yet — this line waits on one (MAIN-547)
-squash_restamp             # MEASURED (MAIN-478): `EngineUnsupported` — `nook_db::restamp` refuses a non-Postgres pool BY DESIGN, and the test unwraps it at :190. Also drives the Postgres MIGRATOR on a SQLite bed (`VersionMissing(38)` at :288). Needs a ruling (MAIN-549)
 
 # ── the MAIN-423 residue, and what MEASURING it found (MAIN-472) ──
 #
