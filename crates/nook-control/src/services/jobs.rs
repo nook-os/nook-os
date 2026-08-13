@@ -1657,24 +1657,21 @@ pub async fn select_executor(
     // again the moment it does.
     let pinned = pinned_node(state, tenant, &job).await?;
     let candidates: Vec<NodeId> = match pinned {
-        Some(pin) => candidates.into_iter().filter(|n| *n == pin).collect(),
+        Some((node, _)) => candidates.into_iter().filter(|n| *n == node).collect(),
         None => candidates,
     };
-    if let Some(pin) = pinned {
+    if let Some((node, pin)) = pinned {
         if candidates.is_empty() {
             let name = state
                 .nodes
-                .by_id_any_tenant_or_none(pin)
+                .by_id_any_tenant_or_none(node)
                 .await?
                 .map(|n| n.name)
-                .unwrap_or_else(|| pin.0.to_string());
+                .unwrap_or_else(|| node.0.to_string());
             return set_queued_reason(
                 state,
                 job_id,
-                &format!(
-                    "waiting for node {name}, which holds this card's worktree — it is offline \
-                     or not eligible right now. Prune the worktree from the card to release it."
-                ),
+                &pin.waiting_for(&name),
                 Some(QueuedReason::PinnedNodeUnavailable { node_name: name }),
             )
             .await;
@@ -1946,33 +1943,80 @@ pub async fn place_queued_in_order(state: &AppState, tenant: TenantId) -> ApiRes
     Ok(placed)
 }
 
-/// The node a job is pinned to, if its card already has a worktree somewhere
-/// (MAIN-480 AC-5).
+/// Why a job may only run on one node, and what to say when that node is not
+/// available.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pin {
+    /// The card already has a worktree there (MAIN-480 AC-5).
+    Worktree,
+    /// The workspace's build loop names it (MAIN-385 AC-4).
+    BuildLoop,
+}
+
+impl Pin {
+    /// The queued reason, in the terms of the pin that caused it — the whole
+    /// question "why did nothing get placed" is asking which of these it is,
+    /// and what would release it.
+    fn waiting_for(self, node: &str) -> String {
+        match self {
+            Pin::Worktree => format!(
+                "waiting for node {node}, which holds this card's worktree — it is offline \
+                 or not eligible right now. Prune the worktree from the card to release it."
+            ),
+            Pin::BuildLoop => format!(
+                "waiting for node {node}, this repo's pinned build-loop node — it is offline \
+                 or not eligible right now. A pin never fails over to another machine; \
+                 unpin it (`nook builds loop <workspace> --node none`) to place this \
+                 anywhere eligible."
+            ),
+        }
+    }
+}
+
+/// The node a job may run on and no other.
 ///
 /// Only BUILD work is pinned. A review or spec run carries no state across
 /// passes, and pinning one would strand it on a machine for no gain; a card's
 /// `worktree_node_id` may also have been set by the human `start-work` path,
 /// which those kinds have no business honouring.
+///
+/// The card's worktree wins over the workspace's pin when they disagree
+/// (MAIN-385 AC-4): the worktree holds this card's interrupted work and the
+/// warm session that remembers it, while the workspace pin is a standing
+/// preference about where NEW runs go. Honouring the preference would abandon
+/// the state — and a card only has a worktree because some earlier pass was
+/// placed there, so the two agree in every case but a human's `start-work`.
+///
+/// The workspace pin is read only while that workspace's build loop is ON. The
+/// pin is a statement about where the LOOP places work, and it is preserved
+/// across a pause so resuming does not lose it — so a repo whose loop is off
+/// must not have a stale pin, on a machine long since retired, silently
+/// confining the builds a person enqueues by hand.
 async fn pinned_node(
     state: &AppState,
     tenant: TenantId,
     job: &LoopJob,
-) -> ApiResult<Option<NodeId>> {
+) -> ApiResult<Option<(NodeId, Pin)>> {
     if job.kind != BUILD_KIND {
         return Ok(None);
     }
-    let Some(task) = job.target_task_id else {
+    if let Some(task) = job.target_task_id {
+        if let Some(card) = state.tasks.get_row(tenant, task).await? {
+            if let (Some(_), Some(node)) = (card.worktree_path.as_deref(), card.worktree_node_id) {
+                return Ok(Some((node, Pin::Worktree)));
+            }
+        }
+    }
+    let Some(workspace) = job.workspace_id else {
         return Ok(None);
     };
-    let Some(card) = state.tasks.get_row(tenant, task).await? else {
-        return Ok(None);
-    };
-    Ok(
-        match (card.worktree_path.as_deref(), card.worktree_node_id) {
-            (Some(_), Some(node)) => Some(node),
-            _ => None,
-        },
-    )
+    Ok(state
+        .workspaces
+        .get(tenant, workspace)
+        .await?
+        .filter(|ws| ws.build_loop_enabled)
+        .and_then(|ws| ws.build_loop_node_id)
+        .map(|node| (node, Pin::BuildLoop)))
 }
 
 /// The cordon a node is reporting, if any (MAIN-505).

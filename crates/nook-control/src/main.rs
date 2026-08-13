@@ -216,6 +216,12 @@ async fn serve(db: nook_db::DbPool, cfg: Config) -> Result<()> {
     // could have created one.
     nook_control::services::tunnel_reaper::start(state.clone());
 
+    // Fire build runs for the workspaces whose owners enabled the build loop
+    // (MAIN-385). Off for every workspace until a person says otherwise, and
+    // gated on `loops.enabled` besides — with either off this is one indexed
+    // lookup a tick and nothing else.
+    nook_control::services::build_loop::start(state.clone());
+
     // Converge sessions to what workspaces declare (MAIN-316). Every replica
     // runs it; a partial unique index on live managed sessions per
     // (workspace, node) is what makes one starter win rather than a lease.

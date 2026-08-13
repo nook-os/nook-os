@@ -74,6 +74,7 @@ pub mod activity_queries;
 pub mod agent_commands;
 pub mod attachments;
 pub mod build_handback;
+pub mod build_loop;
 pub mod claim_reaper;
 pub mod discovery;
 pub mod forge;

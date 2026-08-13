@@ -147,6 +147,30 @@ pub trait WorkspaceRepository: Send + Sync {
         replicas: Option<i32>,
     ) -> ApiResult<Option<Workspace>>;
 
+    /// The per-workspace build-loop switch (MAIN-385 AC-1).
+    ///
+    /// A whole-triple write rather than a partial one: the caller reads the
+    /// workspace, applies whichever fields its request named, and stores the
+    /// result — the same shape `set_session_spec` uses, and it keeps three
+    /// three-state SQL expressions out of a query two engines have to agree on.
+    ///
+    /// `enabled_by` is the identity auto-fired runs are requested by, so it is
+    /// written whenever the switch is ON and preserved when it goes off: who
+    /// last enabled a repo stays answerable after somebody pauses it.
+    async fn set_build_loop(
+        &self,
+        tenant: TenantId,
+        id: WorkspaceId,
+        enabled: bool,
+        node: Option<NodeId>,
+        enabled_by: Option<UserId>,
+    ) -> ApiResult<Option<Workspace>>;
+
+    /// Every workspace of this tenant whose build loop is ON — the sweep's
+    /// whole read (MAIN-385 AC-5). 0068's partial index is what makes a
+    /// deployment with nothing enabled cost one indexed lookup a pass.
+    async fn build_loop_enabled(&self, tenant: TenantId) -> ApiResult<Vec<Workspace>>;
+
     /// Seal or clear a workspace's own forge token (MAIN-456). The SEALED
     /// bytes, never plaintext — the vault is the caller's, and this layer must
     /// not know how to read what it stores.
@@ -668,6 +692,48 @@ impl WorkspaceRepository for DbWorkspaceRepository {
                     type_mapping(self.db.engine()).now()
                 ),
                 params![tenant, id, replicas],
+            )
+            .await?)
+    }
+
+    async fn set_build_loop(
+        &self,
+        tenant: TenantId,
+        id: WorkspaceId,
+        enabled: bool,
+        node: Option<NodeId>,
+        enabled_by: Option<UserId>,
+    ) -> ApiResult<Option<Workspace>> {
+        Ok(self
+            .db
+            .query_opt(
+                &format!(
+                    "UPDATE workspaces
+                     SET build_loop_enabled = $3, build_loop_node_id = $4,
+                         build_loop_enabled_by = $5, updated_at = {}
+                     WHERE tenant_id = $1 AND id = $2
+                     RETURNING *",
+                    type_mapping(self.db.engine()).now()
+                ),
+                params![
+                    tenant,
+                    id,
+                    enabled,
+                    node.map(|n| n.0),
+                    enabled_by.map(|u| u.0)
+                ],
+            )
+            .await?)
+    }
+
+    async fn build_loop_enabled(&self, tenant: TenantId) -> ApiResult<Vec<Workspace>> {
+        Ok(self
+            .db
+            .query_all(
+                "SELECT * FROM workspaces
+                 WHERE tenant_id = $1 AND build_loop_enabled
+                 ORDER BY name",
+                params![tenant],
             )
             .await?)
     }
@@ -1927,6 +1993,9 @@ impl FakeWorkspaceRepository {
             git_credential_id: None,
             review_loop_max_replicas: None,
             build_max_replicas: None,
+            build_loop_enabled: false,
+            build_loop_node_id: None,
+            build_loop_enabled_by: None,
         }
     }
 }
@@ -2038,6 +2107,35 @@ impl WorkspaceRepository for FakeWorkspaceRepository {
                 w.build_max_replicas = replicas;
                 w.clone()
             }))
+    }
+
+    async fn set_build_loop(
+        &self,
+        tenant: TenantId,
+        id: WorkspaceId,
+        enabled: bool,
+        node: Option<NodeId>,
+        enabled_by: Option<UserId>,
+    ) -> ApiResult<Option<Workspace>> {
+        let mut s = self.inner.lock().unwrap();
+        Ok(s.workspaces
+            .iter_mut()
+            .find(|w| w.id == id && w.tenant_id == tenant)
+            .map(|w| {
+                w.build_loop_enabled = enabled;
+                w.build_loop_node_id = node;
+                w.build_loop_enabled_by = enabled_by;
+                w.clone()
+            }))
+    }
+
+    async fn build_loop_enabled(&self, tenant: TenantId) -> ApiResult<Vec<Workspace>> {
+        let s = self.inner.lock().unwrap();
+        Ok(s.workspaces
+            .iter()
+            .filter(|w| w.tenant_id == tenant && w.build_loop_enabled)
+            .cloned()
+            .collect())
     }
 
     async fn set_port_requirements(

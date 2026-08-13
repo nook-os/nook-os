@@ -746,6 +746,20 @@ async fn main() -> Result<()> {
         Command::Builds(BuildsCommand::Scale { workspace, count }) => {
             cli::builds_scale(&workspace, count.as_deref()).await
         }
+        Command::Builds(BuildsCommand::Loop {
+            workspace,
+            state,
+            node,
+            concurrency,
+        }) => {
+            cli::builds_loop(
+                &workspace,
+                state.as_deref(),
+                node.as_deref(),
+                concurrency.as_deref(),
+            )
+            .await
+        }
         Command::Builds(BuildsCommand::Enqueue { task }) => cli::builds_enqueue(&task).await,
         Command::Builds(BuildsCommand::Outcome {
             conclusion,
@@ -1273,6 +1287,27 @@ enum BuildsCommand {
         workspace: String,
         /// The ceiling, `0` to turn builds off, or `unset`. Omit to read.
         count: Option<String>,
+    },
+    /// The per-workspace build loop: does the control plane fire build runs
+    /// for this repo by itself (MAIN-385)?
+    ///
+    /// Off for every workspace until somebody turns it on, and the person who
+    /// does is who the auto-fired runs are requested by — so they are placed on
+    /// THEIR nodes. Omit the state to read the current settings.
+    Loop {
+        /// The workspace, by id, slug or name.
+        workspace: String,
+        /// `on` or `off`. Omit to read.
+        state: Option<String>,
+        /// Pin auto-fired runs to this node (by name or id), or `none` to
+        /// unpin. A pin never fails over: a run waits queued while its node is
+        /// dark rather than starting somewhere else.
+        #[arg(long)]
+        node: Option<String>,
+        /// How many of this repo's cards may build at once — the same ceiling
+        /// `nook builds scale` sets. `unset` returns it to the default of one.
+        #[arg(long)]
+        concurrency: Option<String>,
     },
     /// Build this card now: the reconciler's own convergence on demand,
     /// filtered to one card — same claim, same dedupe, same ceiling.

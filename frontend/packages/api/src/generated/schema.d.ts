@@ -3446,6 +3446,36 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{id}/build-loop-settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/workspaces/{id}/build-loop-settings` — the per-workspace build
+         *     loop switch (MAIN-385 AC-8): is the control plane firing runs for this repo
+         *     by itself, where are they pinned, how many at once, and who said so.
+         */
+        get: operations["get_build_loop_settings"];
+        /**
+         * `PUT /api/v1/workspaces/{id}/build-loop-settings` — turn the loop on or
+         *     off, pin or unpin a node, set the concurrency (MAIN-385 AC-8).
+         * @description Every field is optional and an absent one leaves that setting alone, so
+         *     `{"enabled": true}` is a complete request. Turning it ON records the CALLER
+         *     as the identity auto-fired runs are requested by (AC-2) — which is why a
+         *     node credential is refused here: a job requested by a machine resolves to
+         *     no person, and no node would ever be eligible for it.
+         */
+        put: operations["set_build_loop_settings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{id}/build-loop-status": {
         parameters: {
             query?: never;
@@ -4319,6 +4349,32 @@ export interface components {
         BuildLoopDeclaration: {
             /** Format: int32 */
             max_replicas?: number | null;
+        };
+        /**
+         * @description The per-workspace build-loop switch (MAIN-385 AC-8): whether the control
+         *     plane fires build runs for this repo by itself, where they are pinned, how
+         *     many at once, and who said so.
+         *
+         *     Separate from `BuildLoopDeclaration`, which is the ceiling alone and is what
+         *     `nook builds scale` has always written. `concurrency` appears in both
+         *     because it IS the same column — reported here so one read answers "what is
+         *     this repo's build loop doing", written by either.
+         */
+        BuildLoopSettings: {
+            /**
+             * Format: int32
+             * @description `build_max_replicas` resolved the way `converge_builds` reads it:
+             *     unset is one, and 0 is this repo's kill switch.
+             */
+            concurrency: number;
+            enabled: boolean;
+            enabled_by?: null | components["schemas"]["UserId"];
+            node_id?: null | components["schemas"]["NodeId"];
+            /**
+             * @description The pin's name, so a caller can print it without a second lookup.
+             *     `None` when nothing is pinned, or when the pinned node is gone.
+             */
+            node_name?: string | null;
         };
         /**
          * @description Desired versus deliverable for a workspace's BUILD loop (MAIN-495) —
@@ -7493,6 +7549,29 @@ export interface components {
             max_replicas?: number | null;
         };
         /**
+         * @description `PUT /api/v1/workspaces/{id}/build-loop-settings` (MAIN-385 AC-8). Every
+         *     field is optional and an ABSENT one leaves that setting alone — a caller
+         *     turning the loop on must not have to restate a pin it does not care about.
+         *
+         *     `node` and `concurrency` are three-state on purpose: absent leaves the
+         *     setting, `null` clears it (unpin / back to the default ceiling), and a
+         *     value sets it. That is `double_option`'s whole job — a plain
+         *     `Option<T>` applies a JSON `null` to the option itself, so "clear it" and
+         *     "leave it alone" would arrive identical and `--node none` would silently
+         *     do nothing.
+         */
+        SetBuildLoopSettingsRequest: {
+            /**
+             * Format: int32
+             * @description The ceiling on in-flight build runs; `null` returns it to unset, which
+             *     is the default of one.
+             */
+            concurrency?: number | null;
+            enabled?: boolean | null;
+            /** @description A node id or name; `null` unpins. */
+            node?: string | null;
+        };
+        /**
          * @description Point feedback at a repo and a branch. Separate from submitting, so the
          *     target can be changed at any time rather than only on the first send.
          */
@@ -8619,9 +8698,19 @@ export interface components {
         };
         Workspace: {
             /**
+             * @description Does the control plane fire build runs for this repo by itself
+             *     (MAIN-385)? Off for every workspace including on upgrade (NG-4) — a
+             *     human enables a repo, and until they do the loop reads nothing here.
+             */
+            build_loop_enabled?: boolean;
+            build_loop_enabled_by?: null | components["schemas"]["UserId"];
+            build_loop_node_id?: null | components["schemas"]["NodeId"];
+            /**
              * Format: int32
              * @description The ceiling on this repo's build runs (MAIN-461) — same three states as
              *     `review_loop_max_replicas`: unset = default 1, 0 = off, n = at most n.
+             *     Also the build loop's CONCURRENCY (MAIN-385 AC-1): how many of this
+             *     repo's cards the sweep may have in flight at once.
              */
             build_max_replicas?: number | null;
             /** Format: date-time */
@@ -15150,6 +15239,70 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BuildLoopDeclaration"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_build_loop_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BuildLoopSettings"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    set_build_loop_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetBuildLoopSettingsRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BuildLoopSettings"];
                 };
             };
             400: {

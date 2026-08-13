@@ -772,7 +772,8 @@ async fn the_manual_trigger_raises_exactly_once() {
 
 /// The label-apply NUDGE (MAIN-458, trigger three): applying `agent-ready`
 /// converges the card's workspace immediately — gated on the tenant's
-/// `loops.enabled`, checked inside the spawned task.
+/// `loops.enabled` AND, since MAIN-385, on the workspace's own build-loop
+/// switch, both checked inside the spawned task.
 #[tokio::test]
 async fn applying_agent_ready_nudges_a_run_into_existence() {
     let Some(mut bed) = TestBed::new().await else {
@@ -791,6 +792,15 @@ async fn applying_agent_ready_nudges_a_run_into_existence() {
         )
         .await
         .expect("loops on");
+    // MAIN-385: a workspace fires nothing until somebody enables it, and the
+    // enabler is who its runs are requested by. This test is about the LABEL
+    // being an event, so it says both things and varies only the label.
+    state
+        .workspaces
+        .set_build_loop(tenant, ws, true, None, Some(user))
+        .await
+        .expect("enable the build loop")
+        .expect("workspace");
 
     // Approved-shaped in every way EXCEPT the label, which the nudge applies.
     let provider = LocalBoardProvider {

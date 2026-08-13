@@ -1404,6 +1404,59 @@ pub struct SetBuildLoopRequest {
     pub max_replicas: serde_json::Value,
 }
 
+/// The per-workspace build-loop switch (MAIN-385 AC-8): whether the control
+/// plane fires build runs for this repo by itself, where they are pinned, how
+/// many at once, and who said so.
+///
+/// Separate from `BuildLoopDeclaration`, which is the ceiling alone and is what
+/// `nook builds scale` has always written. `concurrency` appears in both
+/// because it IS the same column — reported here so one read answers "what is
+/// this repo's build loop doing", written by either.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BuildLoopSettings {
+    pub enabled: bool,
+    /// The pinned node, if any. `None` is placement over the enabler's own
+    /// eligible nodes, which is the ordinary case.
+    #[serde(default)]
+    pub node_id: Option<NodeId>,
+    /// The pin's name, so a caller can print it without a second lookup.
+    /// `None` when nothing is pinned, or when the pinned node is gone.
+    #[serde(default)]
+    pub node_name: Option<String>,
+    /// The user auto-fired runs are requested by. `None` only on a workspace
+    /// nobody has ever enabled.
+    #[serde(default)]
+    pub enabled_by: Option<UserId>,
+    /// `build_max_replicas` resolved the way `converge_builds` reads it:
+    /// unset is one, and 0 is this repo's kill switch.
+    pub concurrency: u32,
+}
+
+/// `PUT /api/v1/workspaces/{id}/build-loop-settings` (MAIN-385 AC-8). Every
+/// field is optional and an ABSENT one leaves that setting alone — a caller
+/// turning the loop on must not have to restate a pin it does not care about.
+///
+/// `node` and `concurrency` are three-state on purpose: absent leaves the
+/// setting, `null` clears it (unpin / back to the default ceiling), and a
+/// value sets it. That is `double_option`'s whole job — a plain
+/// `Option<T>` applies a JSON `null` to the option itself, so "clear it" and
+/// "leave it alone" would arrive identical and `--node none` would silently
+/// do nothing.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct SetBuildLoopSettingsRequest {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// A node id or name; `null` unpins.
+    #[serde(default, deserialize_with = "double_option")]
+    #[schema(value_type = Option<String>, nullable)]
+    pub node: Option<Option<String>>,
+    /// The ceiling on in-flight build runs; `null` returns it to unset, which
+    /// is the default of one.
+    #[serde(default, deserialize_with = "double_option")]
+    #[schema(value_type = Option<i32>, nullable)]
+    pub concurrency: Option<Option<i32>>,
+}
+
 /// One row of a workspace's Builds panel (MAIN-461 AC-2): the card the run
 /// owns, named by KEY — the join the panel would otherwise pay N queries for.
 /// A purpose-built row rather than `LoopJob`, which never carries the key.
@@ -1577,8 +1630,26 @@ pub struct Workspace {
     pub review_loop_max_replicas: Option<i32>,
     /// The ceiling on this repo's build runs (MAIN-461) — same three states as
     /// `review_loop_max_replicas`: unset = default 1, 0 = off, n = at most n.
+    /// Also the build loop's CONCURRENCY (MAIN-385 AC-1): how many of this
+    /// repo's cards the sweep may have in flight at once.
     #[serde(default)]
     pub build_max_replicas: Option<i32>,
+    /// Does the control plane fire build runs for this repo by itself
+    /// (MAIN-385)? Off for every workspace including on upgrade (NG-4) — a
+    /// human enables a repo, and until they do the loop reads nothing here.
+    #[serde(default)]
+    pub build_loop_enabled: bool,
+    /// The node auto-fired runs are PINNED to, if the enabler named one
+    /// (MAIN-385 AC-4). A pin never fails over: a job waits queued while its
+    /// node is dark rather than starting somewhere else.
+    #[serde(default)]
+    pub build_loop_node_id: Option<NodeId>,
+    /// Who turned the switch on — the identity an auto-fired job is requested
+    /// by (MAIN-385 AC-2), which is what makes it placeable: node ownership
+    /// keys on the requester's person, so this decides which machines are
+    /// candidates at all.
+    #[serde(default)]
+    pub build_loop_enabled_by: Option<UserId>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

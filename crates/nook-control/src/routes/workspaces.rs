@@ -550,6 +550,149 @@ pub async fn set_build_loop(
     }))
 }
 
+/// `GET /api/v1/workspaces/{id}/build-loop-settings` — the per-workspace build
+/// loop switch (MAIN-385 AC-8): is the control plane firing runs for this repo
+/// by itself, where are they pinned, how many at once, and who said so.
+#[utoipa::path(get, path = "/api/v1/workspaces/{id}/build-loop-settings",
+    operation_id = "get_build_loop_settings",
+    params(("id" = String, Path,)),
+    responses((status = 200, body = BuildLoopSettings), (status = 404)))]
+pub async fn get_build_loop_settings(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<WorkspaceId>,
+) -> ApiResult<Json<BuildLoopSettings>> {
+    let ws = state
+        .workspaces
+        .get(auth.tenant_id, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    settings_of(&state, auth.tenant_id, &ws).await.map(Json)
+}
+
+/// `PUT /api/v1/workspaces/{id}/build-loop-settings` — turn the loop on or
+/// off, pin or unpin a node, set the concurrency (MAIN-385 AC-8).
+///
+/// Every field is optional and an absent one leaves that setting alone, so
+/// `{"enabled": true}` is a complete request. Turning it ON records the CALLER
+/// as the identity auto-fired runs are requested by (AC-2) — which is why a
+/// node credential is refused here: a job requested by a machine resolves to
+/// no person, and no node would ever be eligible for it.
+#[utoipa::path(put, path = "/api/v1/workspaces/{id}/build-loop-settings",
+    operation_id = "set_build_loop_settings",
+    params(("id" = String, Path,)),
+    request_body = SetBuildLoopSettingsRequest,
+    responses((status = 200, body = BuildLoopSettings), (status = 400), (status = 404)))]
+pub async fn set_build_loop_settings(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<WorkspaceId>,
+    Json(req): Json<SetBuildLoopSettingsRequest>,
+) -> ApiResult<Json<BuildLoopSettings>> {
+    auth.require_user()?;
+    let actor = auth.user_id;
+    let ws = state
+        .workspaces
+        .get(auth.tenant_id, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+
+    // Read-modify-write: the request names only what it wants changed, and the
+    // repository stores the whole triple (see `set_build_loop`).
+    //
+    // The three states are ABSENT / null / value, and they are three because
+    // unpinning has to be expressible: a caller who cannot clear a pin cannot
+    // undo a machine that has since been retired.
+    let enabled = req.enabled.unwrap_or(ws.build_loop_enabled);
+    let node = match &req.node {
+        None => ws.build_loop_node_id,
+        Some(None) => None,
+        Some(Some(ident)) => Some(resolve_pin(&state, auth.tenant_id, ident).await?),
+    };
+    // The enabler is stamped whenever the switch is on — including a caller who
+    // changes a pin on a loop somebody else enabled, because they are the
+    // person now answerable for the runs it fires.
+    let enabled_by = if enabled {
+        Some(actor)
+    } else {
+        ws.build_loop_enabled_by
+    };
+
+    if let Some(concurrency) = req.concurrency {
+        if concurrency.is_some_and(|n| n < 0) {
+            return Err(ApiError::BadRequest(
+                "concurrency must be a non-negative integer, or null to unset".into(),
+            ));
+        }
+        state
+            .workspaces
+            .set_build_max_replicas(auth.tenant_id, id, concurrency)
+            .await?
+            .ok_or(ApiError::NotFound)?;
+    }
+    let ws = state
+        .workspaces
+        .set_build_loop(auth.tenant_id, id, enabled, node, enabled_by)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+
+    // Enabling is itself an occasion to evaluate (AC-6's reason, applied to the
+    // switch): a repo enabled with ready cards on the board should not wait a
+    // sweep interval to prove it works.
+    if ws.build_loop_enabled {
+        let (bg, tenant, ws) = (state.clone(), auth.tenant_id, ws.clone());
+        tokio::spawn(async move {
+            if crate::services::loops::enabled(&*bg.settings, tenant).await {
+                if let Err(e) = crate::services::build_loop::evaluate(&bg, tenant, &ws).await {
+                    tracing::warn!(workspace = %ws.id, error = %e, "build loop enable-nudge failed");
+                }
+            }
+        });
+    }
+    settings_of(&state, auth.tenant_id, &ws).await.map(Json)
+}
+
+/// The response both halves answer with. The pin's NAME is joined here rather
+/// than by the caller, so a terminal can print "pinned to azul" from one read.
+async fn settings_of(
+    state: &AppState,
+    tenant: TenantId,
+    ws: &nook_types::Workspace,
+) -> ApiResult<BuildLoopSettings> {
+    let node_name = match ws.build_loop_node_id {
+        Some(node) => state.nodes.get(tenant, node).await?.map(|n| n.name),
+        None => None,
+    };
+    Ok(BuildLoopSettings {
+        enabled: ws.build_loop_enabled,
+        node_id: ws.build_loop_node_id,
+        node_name,
+        // `converge_builds`' own reading, so the number reported is the number
+        // acted on: unset is one, and 0 is this repo's kill switch.
+        concurrency: ws.build_max_replicas.unwrap_or(1).max(0) as u32,
+        enabled_by: ws.build_loop_enabled_by,
+    })
+}
+
+/// A pin by node id or by name, within this tenant. Online is deliberately NOT
+/// required: pinning a machine that is currently down is a legitimate thing to
+/// say, and what happens next — the job queues with a reason naming it — is
+/// exactly AC-4's contract.
+async fn resolve_pin(state: &AppState, tenant: TenantId, ident: &str) -> ApiResult<NodeId> {
+    let ident = ident.trim();
+    let nodes = state.nodes.list_ids_and_names(tenant).await?;
+    if let Ok(id) = ident.parse::<uuid::Uuid>() {
+        if let Some((id, _)) = nodes.iter().find(|(n, _)| n.0 == id) {
+            return Ok(*id);
+        }
+    }
+    nodes
+        .into_iter()
+        .find(|(_, name)| name == ident)
+        .map(|(id, _)| id)
+        .ok_or_else(|| ApiError::BadRequest(format!("no node named {ident:?} in this tenant")))
+}
+
 /// `GET /api/v1/workspaces/{id}/build-loop-status` — desired versus
 /// DELIVERABLE for the build loop (MAIN-495 AC-1), `/review-loop-status`'s
 /// twin.

@@ -4505,6 +4505,87 @@ pub async fn builds_scale(workspace: &str, count: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// `nook builds loop <workspace> [on|off] [--node …] [--concurrency …]`
+/// (MAIN-385 AC-8) — the per-workspace build-loop switch.
+///
+/// A read with no arguments, because "is this repo building by itself, and
+/// where" is the question people ask far more often than they flip it. Every
+/// write is partial: `--node azul` on its own moves the pin and says nothing
+/// about the switch, which is what the endpoint's absent-means-unchanged rule
+/// is for.
+pub async fn builds_loop(
+    workspace: &str,
+    state: Option<&str>,
+    node: Option<&str>,
+    concurrency: Option<&str>,
+) -> Result<()> {
+    let client = Client::from_config()?;
+    let id = resolve_workspace(&client, workspace).await?;
+    let path = format!("/api/v1/workspaces/{id}/build-loop-settings");
+
+    let mut body = serde_json::Map::new();
+    match state {
+        None => {}
+        Some("on") => {
+            body.insert("enabled".into(), serde_json::Value::Bool(true));
+        }
+        Some("off") => {
+            body.insert("enabled".into(), serde_json::Value::Bool(false));
+        }
+        Some(other) => bail!("'{other}' is not a state — say `on` or `off`"),
+    }
+    // Parsed here so a typo is a CLI error naming the argument, rather than a
+    // round trip that comes back as a 400 about a JSON field nobody typed.
+    if let Some(n) = node {
+        body.insert(
+            "node".into(),
+            match n {
+                "none" | "unset" | "null" => serde_json::Value::Null,
+                name => serde_json::Value::String(name.to_string()),
+            },
+        );
+    }
+    if let Some(c) = concurrency {
+        body.insert(
+            "concurrency".into(),
+            match c {
+                "unset" | "null" => serde_json::Value::Null,
+                raw => serde_json::json!(raw.parse::<u32>().with_context(|| format!(
+                    "'{raw}' is not a non-negative whole number (or `unset`)"
+                ))?),
+            },
+        );
+    }
+
+    let current = if body.is_empty() {
+        client.get(&path).await?
+    } else {
+        client.put(&path, serde_json::Value::Object(body)).await?
+    };
+
+    let on = current["enabled"].as_bool().unwrap_or(false);
+    let concurrency = current["concurrency"].as_u64().unwrap_or(1);
+    if on {
+        println!(
+            "build loop: {} — up to {concurrency} at once",
+            crate::style::ok_c("on")
+        );
+    } else {
+        println!(
+            "build loop: {} — this repo's cards are only built when somebody asks",
+            crate::style::dim("off")
+        );
+    }
+    match current["node_name"].as_str() {
+        Some(name) => println!(
+            "  pinned to {} — runs wait for it rather than moving elsewhere",
+            crate::style::bold(name)
+        ),
+        None => println!("  no pinned node — placed on whichever of your nodes is free"),
+    }
+    Ok(())
+}
+
 // ── issues: the board verbs a skill drives a card with (MAIN-138) ────────────
 
 /// `nook issues move <key> <state>` / `--column "<Name>"`.
