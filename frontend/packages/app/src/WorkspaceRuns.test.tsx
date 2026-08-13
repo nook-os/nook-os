@@ -48,10 +48,9 @@ vi.mock("@nookos/api", () => ({
 
 import { ContextMenuProvider } from "./contextMenu";
 import { DialogHost } from "./dialogs";
+import { KIND_CHOICES, parseKind } from "./runsFilter";
 import {
-  KIND_CHOICES,
   mergeRuns,
-  parseKind,
   pillTone,
   queuedReason,
   reviewMeta,
@@ -159,6 +158,35 @@ const pickKind = (label: string) => fireEvent.click(kindSegment(label));
 const chosenKind = () =>
   screen.getAllByRole("radio").find((b) => b.getAttribute("aria-checked") === "true")
     ?.textContent;
+
+/** The toolbar's search field (MAIN-558 AC-1). */
+const searchBox = () => screen.getByLabelText("search runs") as HTMLInputElement;
+const typeSearch = (q: string) => fireEvent.change(searchBox(), { target: { value: q } });
+
+/** Open the filter popover (AC-3). Its own act, because the count and the chips
+ *  outside it are what a closed popover is supposed to still show. */
+async function openFilters() {
+  // Idempotent: the trigger TOGGLES, so a second click would shut what the
+  // caller asked to have open.
+  if (!screen.queryByRole("dialog", { name: "run filters" }))
+    fireEvent.click(screen.getByTestId("run-filters"));
+  return screen.findByRole("dialog", { name: "run filters" });
+}
+
+/** Toggle one state inside the popover, by the word the loop shows for it. */
+async function pickState(label: string) {
+  const panel = await openFilters();
+  fireEvent.click(within(panel).getByRole("button", { name: label }));
+}
+
+/** Every active-filter chip, as text — the `×` included, since it is what makes
+ *  each one individually removable (AC-5). */
+const chipTexts = () =>
+  screen.queryByTestId("run-filter-chips")
+    ? [...screen.getByTestId("run-filter-chips").querySelectorAll(".filter-chip")].map(
+        (c) => c.textContent,
+      )
+    : [];
 
 describe("row identity", () => {
   it("names the pull request a review owns", () => {
@@ -271,17 +299,19 @@ describe("one list, both kinds", () => {
     expect(rows[0].textContent).not.toEqual(rows[1].textContent);
   });
 
-  it("offers both filters, visibly, and starts with neither applied", async () => {
+  it("offers search, kind and the rest, visibly, with none applied (MAIN-558)", async () => {
     state.builds = [build()];
     state.reviews = [review()];
     renderRuns();
     await screen.findAllByTestId("run-row");
-    const kind = screen.getByRole("radiogroup", { name: "filter by kind" });
-    const runState = screen.getByLabelText("filter by state") as HTMLSelectElement;
-    expect(isVisible(kind)).toBe(true);
-    expect(isVisible(runState)).toBe(true);
+    expect(isVisible(screen.getByRole("radiogroup", { name: "filter by kind" }))).toBe(true);
+    expect(isVisible(searchBox())).toBe(true);
+    expect(isVisible(screen.getByTestId("run-filters"))).toBe(true);
     expect(chosenKind()).toBe("All");
-    expect(runState.value).toBe("all");
+    expect(searchBox().value).toBe("");
+    // No filter is on, so there is no count and no chip row to read.
+    expect(screen.queryByTestId("run-filter-count")).toBeNull();
+    expect(screen.queryByTestId("run-filter-chips")).toBeNull();
     expect(search()).toBe("");
   });
 });
@@ -324,19 +354,260 @@ describe("filtering", () => {
   it("narrows by state, across both kinds", async () => {
     renderRuns();
     await screen.findAllByTestId("run-row");
-    fireEvent.change(screen.getByLabelText("filter by state"), { target: { value: "completed" } });
+    await pickState("done");
     const rows = await screen.findAllByTestId("run-row");
     expect(rows).toHaveLength(2);
     expect(rows.map(kindOf).sort()).toEqual(["build", "review"]);
   });
 
-  it("says so when the two filters agree on nothing", async () => {
+  it("says so when the filters agree on nothing", async () => {
     renderRuns();
     await screen.findAllByTestId("run-row");
     pickKind("Reviews");
-    fireEvent.change(screen.getByLabelText("filter by state"), { target: { value: "running" } });
+    await pickState("running");
     expect(screen.queryAllByTestId("run-row")).toHaveLength(0);
     expect(isVisible(await screen.findByText(/No run matches this filter/i))).toBe(true);
+  });
+});
+
+describe("search, filters and URL state (MAIN-558)", () => {
+  /** Three runs that between them carry every field search matches on. */
+  const populated = () => {
+    state.builds = [
+      build({
+        id: "019f8000-0000-7000-8000-00000000b001",
+        task_key: "MAIN-512",
+        state: "running",
+        created_at: "2026-08-13T11:00:00Z",
+        branch: "main-512-a-slug",
+        initiator: "Ryan Hein",
+        commit_sha: "abcdef1234567890abcdef1234567890abcdef12",
+      }),
+      build({
+        id: "019f8000-0000-7000-8000-00000000b002",
+        task_key: "MAIN-600",
+        state: "completed",
+        created_at: "2026-08-13T09:00:00Z",
+        branch: "main-600-other",
+        initiator: "Dana",
+      }),
+    ];
+    state.reviews = [
+      review({
+        id: "019f8000-0000-7000-8000-00000000r001",
+        review_pr_number: 439,
+        review_head_sha: "999888777666555444333222111000fedcba9876",
+        state: "queued",
+        created_at: "2026-08-13T10:00:00Z",
+        initiator: "the converger",
+      }),
+    ];
+  };
+
+  const labels = () =>
+    screen.queryAllByTestId("run-row").map((r) => r.querySelector(".runs-row-id")?.textContent);
+
+  it("filters as it is typed, with no submit (AC-1)", async () => {
+    populated();
+    renderRuns();
+    await screen.findAllByTestId("run-row");
+    expect(searchBox().placeholder).toBe("Search runs…");
+
+    // Every keystroke narrows: no Enter, no debounce to wait out.
+    typeSearch("MAIN-5");
+    expect(labels()).toEqual(["MAIN-512"]);
+    typeSearch("MAIN-51");
+    expect(labels()).toEqual(["MAIN-512"]);
+    typeSearch("");
+    expect(labels()).toHaveLength(3);
+  });
+
+  it("matches every field a row has, and is unbothered by the ones it has not (AC-2)", async () => {
+    populated();
+    renderRuns();
+    await screen.findAllByTestId("run-row");
+    for (const [term, expected] of [
+      ["MAIN-512", ["MAIN-512"]],
+      ["PR #439", ["PR #439"]],
+      ["439", ["PR #439"]],
+      ["00000000b002", ["MAIN-600"]],
+      ["abcdef1", ["MAIN-512"]],
+      ["abcdef1234567890abcdef1234567890abcdef12", ["MAIN-512"]],
+      ["main-600-other", ["MAIN-600"]],
+      ["Dana", ["MAIN-600"]],
+      ["converger", ["PR #439"]],
+      // A review has no card and no branch, and the build with no commit has
+      // no sha: none of that is an error, it is simply not a match.
+      ["MAIN-999", []],
+    ] as const) {
+      typeSearch(term);
+      expect(labels(), term).toEqual([...expected]);
+    }
+  });
+
+  it("counts the active filters on the button and chips them beneath (AC-4, AC-5)", async () => {
+    populated();
+    renderRuns();
+    await screen.findAllByTestId("run-row");
+    await pickState("running");
+    await pickState("queued");
+
+    expect(screen.getByTestId("run-filter-count").textContent).toBe("2");
+    expect(chipTexts()).toEqual(["queued×", "running×"]);
+    expect(labels()).toEqual(["MAIN-512", "PR #439"]);
+  });
+
+  it("removes one chip and leaves the other (AC-5)", async () => {
+    populated();
+    renderRuns();
+    await screen.findAllByTestId("run-row");
+    await pickState("running");
+    await pickState("queued");
+
+    fireEvent.click(screen.getByRole("button", { name: "remove filter: running" }));
+    expect(chipTexts()).toEqual(["queued×"]);
+    expect(screen.getByTestId("run-filter-count").textContent).toBe("1");
+    expect(labels()).toEqual(["PR #439"]);
+  });
+
+  it("offers Clear all only past one filter, and then clears them all (AC-5)", async () => {
+    populated();
+    renderRuns();
+    await screen.findAllByTestId("run-row");
+
+    await pickState("running");
+    // One chip: the button beside it would do exactly what the chip does.
+    expect(screen.queryByTestId("run-filters-clear")).toBeNull();
+
+    await pickState("queued");
+    expect(isVisible(screen.getByTestId("run-filters-clear"))).toBe(true);
+
+    fireEvent.click(screen.getByTestId("run-filters-clear"));
+    expect(chipTexts()).toEqual([]);
+    expect(screen.queryByTestId("run-filter-count")).toBeNull();
+    expect(labels()).toHaveLength(3);
+  });
+
+  it("keeps the kind, the search and the filters independent (AC-6)", async () => {
+    populated();
+    renderRuns();
+    await screen.findAllByTestId("run-row");
+
+    typeSearch("MAIN");
+    await pickState("running");
+    expect(labels()).toEqual(["MAIN-512"]);
+
+    // Changing the kind preserves both...
+    pickKind("Builds");
+    expect(searchBox().value).toBe("MAIN");
+    expect(chipTexts()).toEqual(["running×"]);
+    expect(labels()).toEqual(["MAIN-512"]);
+
+    // ...and changing the search preserves the kind and the filter.
+    typeSearch("MAIN-600");
+    expect(chosenKind()).toBe("Builds");
+    expect(chipTexts()).toEqual(["running×"]);
+    expect(labels()).toEqual([]);
+  });
+
+  it("puts every dimension in the URL (AC-7)", async () => {
+    populated();
+    renderRuns();
+    await screen.findAllByTestId("run-row");
+
+    typeSearch("MAIN");
+    pickKind("Builds");
+    await pickState("running");
+
+    const url = new URLSearchParams(search()!);
+    expect(url.get("q")).toBe("MAIN");
+    expect(url.get("kind")).toBe("build");
+    expect(url.get("state")).toBe("running");
+  });
+
+  it("restores a filtered view exactly from the URL it was copied as (AC-7)", async () => {
+    populated();
+    renderRuns("/workspaces/ws-1?section=runs&kind=build&q=MAIN&state=running&initiator=Ryan+Hein");
+    await screen.findAllByTestId("run-row");
+
+    expect(chosenKind()).toBe("Builds");
+    expect(searchBox().value).toBe("MAIN");
+    expect(chipTexts()).toEqual(["running×", "Ryan Hein×"]);
+    expect(screen.getByTestId("run-filter-count").textContent).toBe("2");
+    expect(labels()).toEqual(["MAIN-512"]);
+  });
+
+  it("offers the initiators and branches this repo actually has (AC-3)", async () => {
+    populated();
+    renderRuns();
+    await screen.findAllByTestId("run-row");
+    const panel = await openFilters();
+
+    const people = within(panel).getByLabelText("initiator") as HTMLSelectElement;
+    expect([...people.options].map((o) => o.textContent)).toEqual([
+      "anyone",
+      "Dana",
+      "Ryan Hein",
+      "the converger",
+    ]);
+    const branch = within(panel).getByLabelText("branch") as HTMLSelectElement;
+    expect([...branch.options].map((o) => o.textContent)).toEqual([
+      "any branch",
+      "main-512-a-slug",
+      "main-600-other",
+    ]);
+
+    fireEvent.change(branch, { target: { value: "main-600-other" } });
+    expect(labels()).toEqual(["MAIN-600"]);
+    expect(chipTexts()).toEqual(["main-600-other×"]);
+  });
+
+  it("narrows by a raised-range, relative or dated (AC-3)", async () => {
+    populated();
+    renderRuns();
+    await screen.findAllByTestId("run-row");
+    const panel = await openFilters();
+
+    fireEvent.change(within(panel).getByLabelText("raised after"), {
+      target: { value: "2026-08-13" },
+    });
+    expect(chipTexts()).toEqual(["from 2026-08-13×"]);
+    expect(labels()).toHaveLength(3);
+
+    // A preset and a pair of dates are one dimension: choosing either clears
+    // the other, so the chip row never shows two answers to one question.
+    fireEvent.click(within(panel).getByRole("button", { name: "last 7 days" }));
+    expect(chipTexts()).toEqual(["last 7 days×"]);
+    expect((within(panel).getByLabelText("raised after") as HTMLInputElement).value).toBe("");
+  });
+
+  it("keeps filters, the selection and the list itself across a live update (AC-8)", async () => {
+    populated();
+    const qc = renderRuns();
+    await screen.findAllByTestId("run-row");
+
+    typeSearch("MAIN");
+    await pickState("running");
+    fireEvent.click(screen.getAllByTestId("run-row")[0]);
+    expect(new URLSearchParams(search()!).get("run")).toBe(
+      "019f8000-0000-7000-8000-00000000b001",
+    );
+    // The scrolling box itself, not its offset: jsdom runs no layout, so what
+    // is provable here is that React keeps the same node — which is exactly
+    // what keeps its `scrollTop` in a browser. A remount is the only way a
+    // repaint loses a scroll position.
+    const list = document.querySelector(".runs-list");
+
+    state.builds = [...(state.builds as Record<string, unknown>[]), build({ id: "job-new" })];
+    await jobChanged(qc);
+    await waitFor(() => expect(screen.getAllByTestId("run-row").length).toBeGreaterThan(0));
+
+    expect(searchBox().value).toBe("MAIN");
+    expect(chipTexts()).toEqual(["running×"]);
+    expect(new URLSearchParams(search()!).get("run")).toBe(
+      "019f8000-0000-7000-8000-00000000b001",
+    );
+    expect(document.querySelector(".runs-list")).toBe(list);
   });
 });
 
@@ -414,22 +685,24 @@ describe("the list is live (AC-8)", () => {
     expect(kindOf(screen.getAllByTestId("run-row")[0])).toBe("build");
   });
 
-  it("stops filtering by a state nothing is in any more", async () => {
-    // Otherwise finishing the one running build empties the list under a
-    // control still reading "running" — a list that looks broken because of a
-    // filter the runs outgrew.
+  it("keeps a state filter the runs have left, rather than withdrawing it", async () => {
+    // The state list is the LOOP's vocabulary now (MAIN-558 AC-3), not a
+    // reading of what is on screen — so a run leaving `running` empties the
+    // list under a filter that is still, visibly, "running". Withdrawing it
+    // instead would silently un-narrow a URL somebody shared.
     state.builds = [build({ state: "running" })];
     state.reviews = [review()];
     const qc = renderRuns();
     await screen.findAllByTestId("run-row");
-    fireEvent.change(screen.getByLabelText("filter by state"), { target: { value: "running" } });
+    await pickState("running");
     expect(screen.getAllByTestId("run-row")).toHaveLength(1);
 
     state.builds = [build({ state: "completed" })];
     await jobChanged(qc);
 
-    expect(screen.getAllByTestId("run-row")).toHaveLength(2);
-    expect((screen.getByLabelText("filter by state") as HTMLSelectElement).value).toBe("all");
+    await waitFor(() => expect(screen.queryAllByTestId("run-row")).toHaveLength(0));
+    expect(chipTexts()).toEqual(["running×"]);
+    expect(search()).toContain("state=running");
   });
 });
 
@@ -441,6 +714,8 @@ describe("a repo with no runs", () => {
     expect(document.querySelectorAll(".empty")).toHaveLength(1);
     // Nothing to narrow, so nothing offers to narrow it.
     expect(screen.queryByLabelText("filter by kind")).toBeNull();
+    expect(screen.queryByLabelText("search runs")).toBeNull();
+    expect(screen.queryByTestId("run-filters")).toBeNull();
   });
 });
 

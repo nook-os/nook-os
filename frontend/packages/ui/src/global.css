@@ -7423,17 +7423,75 @@ button.chat-tool-line:hover { color: var(--nook-fg-dim); }
   container-name: runs-browser;
 }
 
-/* Region 1. `flex-wrap`, because at the minimum pane width the segmented
-   selector and the state control do not share a line — and the toolbar is the
-   one region where taking a second line costs nothing, since it is outside the
-   list's rhythm. */
+/* Region 1, and it holds THREE lines now (MAIN-558): the search field, the
+   controls, and the active-filter chips. A column rather than one wrapping
+   line, because AC-1 wants the search field full-width and a flex row would
+   size it to its content — and because the chip row must sit inside this
+   region rather than beside it. The browser's grid has exactly two tracks and
+   the second is the only box that scrolls; a chip row as a fourth child would
+   take that track and hand the list an implicit one. */
 .runs-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 7px;
+  border-bottom: 1px solid var(--nook-border);
+}
+
+/* The magnifier sits INSIDE the field's box rather than beside it, so the
+   field itself is the full width of the toolbar (AC-1). */
+.runs-search {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 6px;
+  border: 1px solid var(--nook-border-bright);
+  border-radius: var(--nook-radius);
+  background: var(--nook-bg-raised);
+  color: var(--nook-fg-faint);
+}
+.runs-search:focus-within {
+  border-color: var(--nook-accent);
+}
+.runs-search svg {
+  flex: none;
+}
+/* Bare, because the wrapper above draws the box: a second border and a second
+   background inside it would read as a field within a field. */
+.runs-toolbar .runs-search-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: var(--nook-ctrl-sm);
+  padding: 0;
+  border: 0;
+  background: none;
+}
+.runs-toolbar .runs-search-input:focus {
+  outline: none;
+}
+
+/* `flex-wrap`, because at the minimum pane width the segmented selector and
+   the filters button do not share a line — and the toolbar is the one region
+   where taking a second line costs nothing, since it is outside the list's
+   rhythm. */
+.runs-controls {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-  padding: 6px 7px;
-  border-bottom: 1px solid var(--nook-border);
+}
+.runs-filters-host {
+  display: inline-flex;
+  margin-left: auto;
+}
+
+/* The active filters, each removable (AC-5). Wraps, because the number of them
+   is the reader's choice and not something a width can cap. */
+.runs-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
 }
 
 /* AC-7: the kind selector is a CONTROL, not a dropdown in the panel's corner.
@@ -7474,10 +7532,6 @@ button.chat-tool-line:hover { color: var(--nook-fg-dim); }
 .runs-kind:focus-visible {
   outline: 1px solid var(--nook-accent);
   outline-offset: -1px;
-}
-.runs-toolbar .runs-state {
-  flex: 1 1 110px;
-  min-width: 0;
 }
 
 /* Region 2: the only box in the browser that scrolls. */
