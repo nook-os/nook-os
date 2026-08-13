@@ -76,6 +76,25 @@ pub struct CheckoutUpsert {
     pub kind: String,
 }
 
+/// What the UNAUTHENTICATED webhook receiver needs about a workspace, found by
+/// id alone (MAIN-554).
+///
+/// By id alone because the route takes no `AuthCtx`: GitHub carries no session
+/// and no tenant, and the workspace in the path is the only thing that names
+/// one. The tenant comes back OUT of this read and is what the recorded row is
+/// scoped to — so a delivery can only ever write into the tenant its own
+/// workspace belongs to.
+///
+/// A deliberately narrow projection rather than the whole `Workspace`: the
+/// sealed secret must never ride a struct that serializes to the UI, the same
+/// rule [`WorkspaceRepository::gh_token_sealed`] keeps.
+#[derive(Debug, Clone, nook_db::FromDbRow)]
+pub struct WebhookTarget {
+    pub tenant_id: TenantId,
+    pub git_remote_normalized: Option<String>,
+    pub webhook_secret_enc: Option<Vec<u8>>,
+}
+
 /// Resolving a user-supplied workspace key. `Ambiguous` carries the slugs to
 /// disambiguate with, so the caller can write the error message without going
 /// back to the database.
@@ -189,6 +208,25 @@ pub trait WorkspaceRepository: Send + Sync {
         tenant: TenantId,
         id: WorkspaceId,
     ) -> ApiResult<Option<Vec<u8>>>;
+
+    /// Set or clear the workspace's inbound webhook secret, sealed (MAIN-554).
+    /// `false` when no such workspace exists in this tenant.
+    async fn set_webhook_secret_sealed(
+        &self,
+        tenant: TenantId,
+        id: WorkspaceId,
+        sealed: Option<Vec<u8>>,
+    ) -> ApiResult<bool>;
+
+    /// Whether this workspace holds a webhook secret — the fact only. The
+    /// value has ONE read path ([`Self::webhook_target`], for the receiver),
+    /// and no API reaches it.
+    async fn has_webhook_secret(&self, tenant: TenantId, id: WorkspaceId) -> ApiResult<bool>;
+
+    /// The receiver's read: tenant, remote and sealed secret, by workspace id
+    /// across every tenant. See [`WebhookTarget`] for why it is not
+    /// tenant-scoped.
+    async fn webhook_target(&self, id: WorkspaceId) -> ApiResult<Option<WebhookTarget>>;
 
     /// Every workspace that declares a spec, across every tenant (MAIN-316).
     ///
@@ -771,6 +809,49 @@ impl WorkspaceRepository for DbWorkspaceRepository {
             )
             .await?
             .flatten())
+    }
+
+    async fn set_webhook_secret_sealed(
+        &self,
+        tenant: TenantId,
+        id: WorkspaceId,
+        sealed: Option<Vec<u8>>,
+    ) -> ApiResult<bool> {
+        Ok(self
+            .db
+            .exec(
+                &format!(
+                    "UPDATE workspaces SET webhook_secret_enc = $3, updated_at = {}
+                     WHERE tenant_id = $1 AND id = $2",
+                    type_mapping(self.db.engine()).now()
+                ),
+                params![tenant, id, sealed],
+            )
+            .await?
+            > 0)
+    }
+
+    async fn has_webhook_secret(&self, tenant: TenantId, id: WorkspaceId) -> ApiResult<bool> {
+        Ok(self
+            .db
+            .query_scalar_opt::<Option<Vec<u8>>>(
+                "SELECT webhook_secret_enc FROM workspaces WHERE tenant_id = $1 AND id = $2",
+                params![tenant, id],
+            )
+            .await?
+            .flatten()
+            .is_some())
+    }
+
+    async fn webhook_target(&self, id: WorkspaceId) -> ApiResult<Option<WebhookTarget>> {
+        self.db
+            .query_opt(
+                "SELECT tenant_id, git_remote_normalized, webhook_secret_enc
+                   FROM workspaces WHERE id = $1",
+                params![id],
+            )
+            .await
+            .map_err(Into::into)
     }
 
     async fn set_port_requirements(
@@ -1889,6 +1970,7 @@ struct FakeState {
     nodes: Vec<(NodeId, TenantId, String, String)>,
     live_sessions: HashMap<WorkspaceId, i64>,
     gh_tokens: HashMap<WorkspaceId, Vec<u8>>,
+    webhook_secrets: HashMap<WorkspaceId, Vec<u8>>,
     /// (node, worktree_path) pairs, so a path migration can report task moves.
     task_worktrees: Vec<(NodeId, String)>,
     seq: u64,
@@ -2041,6 +2123,53 @@ impl WorkspaceRepository for FakeWorkspaceRepository {
             return Ok(None);
         }
         Ok(st.gh_tokens.get(&id).cloned())
+    }
+
+    async fn set_webhook_secret_sealed(
+        &self,
+        tenant: TenantId,
+        id: WorkspaceId,
+        sealed: Option<Vec<u8>>,
+    ) -> ApiResult<bool> {
+        let mut st = self.inner.lock().unwrap();
+        if !st
+            .workspaces
+            .iter()
+            .any(|w| w.tenant_id == tenant && w.id == id)
+        {
+            return Ok(false);
+        }
+        match sealed {
+            Some(b) => {
+                st.webhook_secrets.insert(id, b);
+            }
+            None => {
+                st.webhook_secrets.remove(&id);
+            }
+        }
+        Ok(true)
+    }
+
+    async fn has_webhook_secret(&self, tenant: TenantId, id: WorkspaceId) -> ApiResult<bool> {
+        let st = self.inner.lock().unwrap();
+        Ok(st
+            .workspaces
+            .iter()
+            .any(|w| w.tenant_id == tenant && w.id == id)
+            && st.webhook_secrets.contains_key(&id))
+    }
+
+    async fn webhook_target(&self, id: WorkspaceId) -> ApiResult<Option<WebhookTarget>> {
+        let st = self.inner.lock().unwrap();
+        Ok(st
+            .workspaces
+            .iter()
+            .find(|w| w.id == id)
+            .map(|w| WebhookTarget {
+                tenant_id: w.tenant_id,
+                git_remote_normalized: w.git_remote_normalized.clone(),
+                webhook_secret_enc: st.webhook_secrets.get(&id).cloned(),
+            }))
     }
 
     async fn set_session_spec(

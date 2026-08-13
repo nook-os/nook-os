@@ -13,6 +13,7 @@
 
 pub mod admin;
 pub mod attachments;
+pub mod forge_deliveries;
 pub mod identity;
 pub mod invites;
 pub mod jobs;

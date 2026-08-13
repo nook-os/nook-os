@@ -67,6 +67,9 @@ pub struct AppState {
     /// Which uploads hang off which ticket or comment (MAIN-533). The join
     /// MAIN-532's store deliberately knows nothing about.
     pub attachments: Arc<dyn crate::repo::attachments::TaskAttachmentRepository>,
+    /// What GitHub has delivered (MAIN-554). Written by the receiver and read
+    /// by nobody yet — this card records, its children act.
+    pub forge_deliveries: Arc<dyn crate::repo::forge_deliveries::ForgeDeliveryRepository>,
     /// Tenant- and user-scoped settings rows (MAIN-258).
     pub settings: Arc<dyn crate::repo::admin::SettingRepository>,
     /// Org-visibility policy rows (MAIN-305).
@@ -179,6 +182,9 @@ impl AppState {
             attachments: Arc::new(crate::repo::attachments::DbTaskAttachmentRepository::new(
                 db.clone(),
             )),
+            forge_deliveries: Arc::new(
+                crate::repo::forge_deliveries::DbForgeDeliveryRepository::new(db.clone()),
+            ),
             notifications: Arc::new(crate::repo::notifications::DbNotificationRepository::new(
                 db.clone(),
             )),
