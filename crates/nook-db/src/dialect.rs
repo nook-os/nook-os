@@ -64,9 +64,34 @@ pub trait Json {
     /// untrusted JSON as a literal — bind it and `cast` the placeholder — or the
     /// sweep would open an injection. Postgres: `{col} @> {rhs}`.
     fn contains(&self, col: &str, rhs: &str) -> String;
+    /// Does a JSON **array** expression contain a given text scalar? The
+    /// `needle` is a **bound placeholder holding the plain string** — the
+    /// JSON encoding is each arm's, because the two engines disagree about
+    /// where it has to happen.
+    ///
+    /// Separate from [`Json::contains`] rather than folded into it (MAIN-546),
+    /// because array-⊇-scalar is not the shape that method approximates.
+    /// SQLite's `contains` walks `json_each(rhs)` expecting an OBJECT's keys;
+    /// handed a scalar needle it gets one row whose `key` is NULL, so
+    /// `json_extract(col, '$.' || NULL)` is NULL and the test is false for
+    /// every array that has ever been asked. And routing the needle through
+    /// [`TypeMapping::cast`] to reach it does not help: `CAST('"spec"' AS
+    /// jsonb)` is NUMERIC affinity on SQLite, which silently yields the
+    /// integer `0`.
+    fn array_contains_text(&self, arr: &str, needle: &str) -> String;
     /// Expand a JSON array expression to a set of rows. Postgres:
-    /// `jsonb_array_elements({expr})`.
+    /// `jsonb_array_elements({expr})`. The alias a caller attaches is NOT the
+    /// element on both engines — read the element with [`Json::array_element`].
     fn array_elements(&self, expr: &str) -> String;
+    /// The element yielded by [`Json::array_elements`], given the alias the
+    /// caller attached to it. The two are one seam in two halves and neither is
+    /// usable alone (MAIN-546): Postgres' `jsonb_array_elements(x) e` is a
+    /// single-column set whose column takes the alias, so the element IS `e`,
+    /// while SQLite's `json_each(x) e` is a table-valued function with a fixed
+    /// column list whose payload is `e.value` — and `json_extract(e, …)` there
+    /// is `no such column: e`. Feed the result to [`Json::get_text`] /
+    /// [`Json::get_json`] rather than naming the alias directly.
+    fn array_element(&self, alias: &str) -> String;
     /// A **static** JSON literal — e.g. `'[]'::jsonb` as a COALESCE default.
     /// Postgres: `'{raw}'::jsonb`. For user-supplied JSON, bind a parameter and
     /// [`TypeMapping::cast`] the placeholder instead; never build a literal from
@@ -210,8 +235,14 @@ impl Json for Postgres {
     fn contains(&self, col: &str, rhs: &str) -> String {
         format!("{col} @> {rhs}")
     }
+    fn array_contains_text(&self, arr: &str, needle: &str) -> String {
+        format!("{arr} @> to_jsonb({needle}::text)")
+    }
     fn array_elements(&self, expr: &str) -> String {
         format!("jsonb_array_elements({expr})")
+    }
+    fn array_element(&self, alias: &str) -> String {
+        alias.to_string()
     }
     fn literal(&self, raw: &str) -> String {
         format!("'{raw}'::jsonb")
@@ -410,8 +441,17 @@ impl Json for Sqlite {
         // to look at each `contains` call rather than trusting the seam.
         format!("EXISTS (SELECT 1 FROM json_each({rhs}) k WHERE json_extract({col}, '$.' || k.key) = k.value)")
     }
+    fn array_contains_text(&self, arr: &str, needle: &str) -> String {
+        // `json_each` unwraps each element to its SQL value, so a text element
+        // arrives as bare `spec` and compares to the bound string directly —
+        // no encoding on this side at all.
+        format!("EXISTS (SELECT 1 FROM json_each({arr}) x WHERE x.value = {needle})")
+    }
     fn array_elements(&self, expr: &str) -> String {
         format!("json_each({expr})")
+    }
+    fn array_element(&self, alias: &str) -> String {
+        format!("{alias}.value")
     }
     fn literal(&self, raw: &str) -> String {
         format!("json('{raw}')")
@@ -501,6 +541,26 @@ mod tests {
         assert_eq!(
             pg.array_elements("caps -> 'runtime_auth'"),
             "jsonb_array_elements(caps -> 'runtime_auth')"
+        );
+        // The alias IS the element here, so the composed read is byte-for-byte
+        // the `e ->> 'runtime'` the placement query has always emitted.
+        assert_eq!(pg.array_element("e"), "e");
+        // Array-contains-scalar encodes the needle in SQL, so the bind stays a
+        // plain string and `'"spec"'::jsonb` never has to be built in Rust.
+        assert_eq!(
+            pg.array_contains_text(
+                &format!(
+                    "COALESCE({}, {})",
+                    pg.get_json("caps", "loop_kinds"),
+                    pg.literal("[]")
+                ),
+                "$4"
+            ),
+            "COALESCE(caps -> 'loop_kinds', '[]'::jsonb) @> to_jsonb($4::text)"
+        );
+        assert_eq!(
+            pg.get_text(&pg.array_element("e"), "runtime"),
+            "e ->> 'runtime'"
         );
         assert_eq!(pg.literal("[]"), "'[]'::jsonb");
         // set() composes a BOUND value into jsonb_set — the ws/node.rs
@@ -618,6 +678,53 @@ mod tests {
             .await
             .expect("jsonb_set executes with a bound value");
         assert_eq!(merged, "{\"a\": 1, \"b\": 2}");
+        // The expansion and its element, as the placement query composes them
+        // (MAIN-546). The alias IS the element on this engine, and that is only
+        // true because the set-returning function has one column — so it is
+        // asserted by EXECUTING it, not by reading the fragment back.
+        let elem = pg.array_element("e");
+        let runtime: String = sqlx::query_scalar(&format!(
+            "SELECT {rt} FROM {expand} e WHERE {state} = 'authorized'",
+            expand = pg.array_elements(&pg.literal(
+                "[{\"runtime\":\"codex\",\"state\":\"not_authorized\"},\
+                  {\"runtime\":\"claude\",\"state\":\"authorized\"}]"
+            )),
+            rt = pg.get_text(&elem, "runtime"),
+            state = pg.get_text(&elem, "state"),
+        ))
+        .fetch_one(pool.pg())
+        .await
+        .expect("jsonb_array_elements + its element execute");
+        assert_eq!(runtime, "claude");
+        // Array-contains-scalar with the needle bound as a PLAIN string — the
+        // encoding is this arm's `to_jsonb`, so nothing JSON-shaped is built in
+        // Rust and nothing is spliced.
+        let member = pg.array_contains_text(
+            &format!(
+                "COALESCE({}, {})",
+                pg.get_json("c", "loop_kinds"),
+                pg.literal("[]")
+            ),
+            "$1",
+        );
+        let declared: bool = sqlx::query_scalar(&format!(
+            "SELECT {member} FROM (SELECT {caps} AS c) t",
+            caps = pg.literal("{\"loop_kinds\":[\"spec\",\"review\"]}"),
+        ))
+        .bind("spec")
+        .fetch_one(pool.pg())
+        .await
+        .expect("array @> to_jsonb($1::text) executes");
+        assert!(declared);
+        let absent: bool = sqlx::query_scalar(&format!(
+            "SELECT {member} FROM (SELECT {caps} AS c) t",
+            caps = pg.literal("{\"loop_kinds\":[\"review\"]}"),
+        ))
+        .bind("spec")
+        .fetch_one(pool.pg())
+        .await
+        .expect("array @> to_jsonb($1::text) executes");
+        assert!(!absent, "a kind the node does not declare must not match");
     }
 
     #[tokio::test]
@@ -764,6 +871,45 @@ mod sqlite_dialect_tests {
         assert_eq!(t.uuid_column(), "TEXT");
         assert_eq!(t.timestamptz_column(), "TEXT");
         assert_eq!(t.jsonb_column(), "TEXT");
+    }
+
+    /// `json_each` is a table-valued function, so the alias is a ROW and the
+    /// payload is one of its columns — the distinction that made every
+    /// placement query on this engine die with `no such column: e` (MAIN-546).
+    /// Reading the element off the alias is the mistake, so the guard is that
+    /// the two engines disagree about what the alias denotes.
+    #[test]
+    fn the_expanded_element_is_not_the_alias_on_sqlite() {
+        let j = json(Engine::Sqlite);
+        assert_eq!(j.array_elements("caps"), "json_each(caps)");
+        assert_eq!(j.array_element("e"), "e.value");
+        assert_eq!(
+            j.get_text(&j.array_element("e"), "runtime"),
+            "json_extract(e.value, '$.runtime')"
+        );
+        assert_ne!(
+            j.array_element("e"),
+            json(Engine::Postgres).array_element("e")
+        );
+    }
+
+    /// The needle reaches SQLite as the bound string and is compared to what
+    /// `json_each` unwraps — no cast, because `CAST('"spec"' AS jsonb)` here is
+    /// NUMERIC affinity and yields the integer 0, and no `contains`, because
+    /// that method's walk over an object's keys reads a scalar needle's `key`
+    /// as NULL and is false for every array (MAIN-546).
+    #[test]
+    fn an_array_containing_a_scalar_is_its_own_seam_on_sqlite() {
+        let j = json(Engine::Sqlite);
+        assert_eq!(
+            j.array_contains_text("caps", "$4"),
+            "EXISTS (SELECT 1 FROM json_each(caps) x WHERE x.value = $4)"
+        );
+        assert!(!j.array_contains_text("caps", "$4").contains("CAST"));
+        assert_ne!(
+            j.array_contains_text("caps", "$4"),
+            j.contains("caps", &type_mapping(Engine::Sqlite).cast("$4", "jsonb"))
+        );
     }
 
     #[test]
