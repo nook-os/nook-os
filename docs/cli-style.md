@@ -26,11 +26,38 @@ through untouched. The freeze is on leaves, never on groups.
 
 - **Plural nouns** for groups: `issues`, `sessions`, `workspaces`, `nodes` —
   not `issue`, not `session`. The group names a collection you act on.
+  - **`notebook` is the one ruled exception** (MAIN-575, owner ruling
+    2026-08-14). Singular, for two reasons worth having on the record: it
+    matches the `/notebook` URL the web UI already uses, so one thing has one
+    name across both surfaces; and the plural, `notes`, would collide with the
+    unrelated tenant/workspace note system (MAIN-245/254) — two different
+    resources answering to one word is worse than a singular noun. The
+    exception is written down rather than absorbed: the next group that wants
+    a singular name has to earn one the same way, in a ruling somebody can
+    point at.
 - **Verb second**, and an ordinary one: `list`, `get`, `create`, `move`, `ask`.
 - **No new abbreviations.** `interactions`, not `ix`. The existing short ones
   (`exec`, `whoami`) are grandfathered; do not add siblings for them.
 - Prefer an existing group over a new one. A new noun is justified when the
   thing it names is a real resource, not when it is a convenient prefix.
+
+### Naming the thing a verb acts on
+
+A group whose resource has both a **human address** and an id should accept
+either, in every place it names one. `nook notebook` (MAIN-575) is the
+exemplar: a note or folder is given as a slash-delimited path
+(`"Nook/Ideas/2026-08-13"`) or as a uuid, and the path is matched against the
+address the group's own `list` prints — so what a person copies out of the
+output works verbatim, and a script that kept an id keeps working too.
+
+Two conventions the notebook group did not invent but that every new group
+should follow, because a skill written against one CLI verb should not have to
+learn a second dialect for the next:
+
+- **`--content -` reads stdin**, and a lone `-` is never content itself
+  (`nook set-description`, MAIN-470 AC-1).
+- **`--json` on every verb** emits the API shape unchanged, and human-readable
+  output is what you get without it.
 
 ## The grandfathered thirty
 
