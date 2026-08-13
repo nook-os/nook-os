@@ -5,13 +5,15 @@
 up to whatever terminates TLS in front of the control plane, and on the routing
 rule you give it for the tunnel zone.
 
-**Nothing in this repository writes that rule for you yet, on any deployment.**
-Two of the shipped modes have a proxy the contract *can* be satisfied on —
-Compose behind Traefik, and the Helm chart's ingress — but neither emits a
-wildcard router or a wildcard ingress rule, and neither sets `TUNNEL_DOMAIN`;
-automating each is its own card. So this page is for every deployment, not for
-"everyone else": on those two you are adding a rule to a proxy that already
-exists, and on the rest you are standing one up first.
+**One shipped mode writes that rule for you** — Compose behind Traefik, when
+`nook server init` is given a tunnel domain (MAIN-511). It emits the wildcard
+router and sets `TUNNEL_DOMAIN`, which leaves you the DNS record and the
+certificate those assume. The Helm chart's ingress is the other proxy the
+contract *can* be satisfied on and still emits neither; automating it is its own
+card. So this page is for every deployment, not for "everyone else": on the
+chart you are adding a rule to a proxy that already exists, on the four modes
+with no proxy you are standing one up first, and on Traefik you are reading what
+was generated.
 
 The failure when it is missing is quiet: `nook tunnel` hands back a URL and the
 URL does not resolve — or resolves to NookOS's own app shell instead of the app
@@ -119,7 +121,7 @@ control plane at all, and two have one whose configuration stops at the apex.
 | Mode | Tunnels | Why |
 | --- | --- | --- |
 | Compose, ports published directly | **No proxy** | The control plane publishes `8080` on the host itself. Nothing terminates TLS and nothing routes by host. |
-| Compose behind Traefik | Proxy yes, **rule no** | Traefik is the proxy, and the generated labels define only the two apex routers. Add a wildcard router yourself. |
+| Compose behind Traefik | **Generated, if you ask** | Traefik is the proxy, and `nook server init` writes the wildcard router when you give it a tunnel domain (MAIN-511). Leave that blank — the default — and the labels stop at the two apex routers, as below. |
 | `docker run` | **No proxy** | Same as direct Compose — `-p 8080:8080`, and whatever orchestrates it is expected to bring its own front end. |
 | systemd + native binary | **No proxy** | The binary binds its port on the host directly. |
 | Kubernetes (Helm chart) | Proxy yes, **rule no** | The ingress is the proxy, and its only rule is the apex. Add a wildcard rule yourself, pointed at the **control-plane** Service. |
@@ -141,8 +143,9 @@ local-only, and there is no hostname to route to a loopback sidecar on another
 person's laptop. Every other row becomes tunnel-capable once a proxy satisfying
 the contract above is in front of it and `TUNNEL_DOMAIN` is set — for the four
 no-proxy modes that means standing one up, which is what the nginx and Caddy
-examples below are for; for Traefik and the chart it means one more router or
-rule on the proxy you already run.
+examples below are for; for the chart it means one more rule on the proxy you
+already run; for Traefik it means answering the wizard's question, or pasting
+its labels into a deployment generated before it existed.
 
 Today `nook tunnel` returns a URL on all of these regardless. It does not detect
 that a deployment has no proxy or no wildcard rule, so the first sign of any of
@@ -237,30 +240,50 @@ same reason as nginx's `client_max_body_size`.
 
 `nook server init` generates two routers on the control-plane container —
 `nook-api` for the apex's API prefixes and `nook-web` for everything else on the
-apex — and no wildcard router. These labels add one, on the same container,
-reusing the `nook-api` service the generated file already defines:
+apex — and, **when you answer its tunnel-domain question**, a third for tunnels.
+These are the labels it writes for `tunnels.example.com`; add them by hand to a
+deployment generated before MAIN-511, or to one where you left the question
+blank:
 
 ```yaml
-      - "traefik.http.routers.nook-tunnels.rule=HostRegexp(`^[a-z0-9-]+\\.tunnels\\.example\\.com$`)"
+      - "traefik.http.routers.nook-tunnels.rule=HostRegexp(`^[a-z0-9-]+\\.tunnels\\.example\\.com$$`)"
       - "traefik.http.routers.nook-tunnels.entrypoints=websecure"
       - "traefik.http.routers.nook-tunnels.service=nook-api"
       - "traefik.http.routers.nook-tunnels.tls=true"
-      # A wildcard means DNS-01, so this resolver must be a DNS-01 one.
-      - "traefik.http.routers.nook-tunnels.tls.certresolver=letsencrypt-dns"
-      - "traefik.http.routers.nook-tunnels.tls.domains[0].main=tunnels.example.com"
-      - "traefik.http.routers.nook-tunnels.tls.domains[0].sans=*.tunnels.example.com"
+      - "traefik.http.routers.nook-tunnels.tls.domains[0].main=*.tunnels.example.com"
+      - "traefik.http.routers.nook-tunnels.priority=5"
 ```
+
+and `TUNNEL_DOMAIN: tunnels.example.com` on the same service, which the wizard
+also writes — the router decides which hosts arrive, that decides which the
+control plane treats as tunnels, and they have to name the same zone.
+
+Two escapes, both load-bearing. `\\.` is a backslash halved by YAML's
+double-quoted scalar, so Traefik receives `\.`; written singly it would arrive
+as `.`, matching any character and widening the rule past the zone. `$$` is
+Compose's escape for a literal `$`: Compose v2 tolerates a bare one, Compose v1
+refuses the whole file with *"Invalid interpolation format"*.
 
 `HostRegexp` takes a Go regular expression in Traefik v3; on v2 the named-group
 form ``HostRegexp(`{sub:[a-z0-9-]+}.tunnels.example.com`)`` is the equivalent.
 Either way it routes to the control plane, which is what makes this different
-from the two generated routers — same `service=nook-api`, without the apex's
-path split.
+from the two apex routers — same `service=nook-api`, without the apex's path
+split. Reusing that service is not incidental: a second HTTP service declared on
+this container would leave `nook-api`'s own router with no unambiguous backend.
 
-**No `priority` is needed, and that is worth knowing rather than guessing.**
-Traefik only weighs priorities between routers whose rules both match a request,
-and the generated pair match `Host(<your apex>)` exactly, which no tunnel host
-satisfies.
+**`tls.domains[0].main` is what asks for the wildcard.** Given only a rule,
+Traefik requests a certificate per host — impossible for a name invented when a
+tunnel opens — and serves `TRAEFIK DEFAULT CERT` instead. The wizard writes no
+`certresolver`, matching the apex routers and leaving the entrypoint's default
+in charge; if that default is an HTTP-01 resolver, add
+`traefik.http.routers.nook-tunnels.tls.certresolver=<your DNS-01 one>`, because
+HTTP-01 cannot answer for `*`.
+
+**`priority` decides nothing today, and is set anyway.** Traefik only weighs
+priorities between routers whose rules both match a request, and the apex pair
+match `Host(<your apex>)` exactly, which no tunnel host satisfies. The number is
+there so that if one ever does, precedence is something somebody wrote rather
+than Traefik's rule-length default — 5, below the apex routers' 20 and 10.
 
 The exception is a `TUNNEL_DOMAIN` that is a *parent* of your apex — apex
 `nook.example.com` with `TUNNEL_DOMAIN=example.com`. Do not do that, and not

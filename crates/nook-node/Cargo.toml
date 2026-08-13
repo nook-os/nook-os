@@ -37,6 +37,13 @@ tracing-subscriber = { workspace = true }
 toml = { workspace = true }
 walkdir = { workspace = true }
 
+[dev-dependencies]
+# The generated Traefik tunnel rule is a regular expression, and the assertion
+# that it cannot match the apex is only worth anything if a regex engine makes
+# it (MAIN-511 AC-4/AC-8). Traefik v3 uses Go's RE2; this pattern means the
+# same in both.
+regex = { workspace = true }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 
