@@ -57,7 +57,36 @@ RUN npm install -g \
       "@openai/codex@${CODEX_VERSION}" \
       "@github/copilot@${COPILOT_VERSION}" \
     && npm cache clean --force
-RUN curl -fsSL https://hermes-agent.nousresearch.com/install.sh | HERMES_REF="${HERMES_REF}" bash
+# Hermes is installed BEST-EFFORT, and that is deliberate. It is a third-party
+# install script that runs its own `npm install`, and when that timed out on
+# 2026-08-13 it failed the operator-node image and with it the whole v0.6.9
+# RELEASE — an optional agent runtime taking the release down with it.
+#
+# Absence is already a state this system models correctly:
+# `capabilities::detect_runtimes` (crates/nook-node/src/capabilities.rs:59)
+# probes the PATH and advertises only the runtimes actually present, so a node
+# without hermes simply never offers it and the picker never shows it. Given
+# that, failing the build is the wrong response to somebody else's bad minute.
+#
+# Three attempts, because the observed failure was a timeout rather than a
+# refusal. If it still does not land the build continues and the image ships
+# without hermes — visible in `nook get nodes` under capabilities.runtimes,
+# which is where you would look anyway.
+RUN for attempt in 1 2 3; do \
+      echo "hermes install: attempt $attempt/3"; \
+      if curl -fsSL --max-time 300 https://hermes-agent.nousresearch.com/install.sh \
+           | HERMES_REF="${HERMES_REF}" bash; then \
+        break; \
+      fi; \
+      echo "hermes install: attempt $attempt failed"; \
+      sleep 15; \
+    done; \
+    if command -v hermes >/dev/null 2>&1; then \
+      echo "hermes: installed"; \
+    else \
+      echo "WARNING: hermes did not install; this image ships without that runtime."; \
+      echo "         The node will not advertise it, which is a supported state."; \
+    fi
 
 # `gh`. The review loop IS a `gh` client: `nook-review` opens by requiring
 # `gh auth status` to pass and then drives `gh pr list/view/checks`. Without the
