@@ -8,6 +8,7 @@
 
 use nook_control::state::AppState;
 use nook_control::ws::registry::NodeHandle;
+use nook_db::{params, Db};
 use nook_proto::ControlToNode;
 use nook_testkit::TestBed;
 use nook_types::*;
@@ -24,19 +25,22 @@ async fn online_node(state: &AppState, tenant: TenantId, owner: Uuid, free_mem_g
         "load_avg1": 0.0,
         "active_sessions": 0,
     });
-    sqlx::query(
-        "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status, owner_person_id, resources)
-         VALUES ($1, $2, $3, $4, 'online', $5, $6)",
-    )
-    .bind(id)
-    .bind(tenant)
-    .bind(format!("n-{}", id.0.simple()))
-    .bind(format!("h-{}", id.0.simple()))
-    .bind(owner)
-    .bind(resources)
-    .execute(state.db.pg())
-    .await
-    .expect("node");
+    state
+        .db
+        .exec(
+            "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status, owner_person_id, resources)
+             VALUES ($1, $2, $3, $4, 'online', $5, $6)",
+            params![
+                id,
+                tenant,
+                format!("n-{}", id.0.simple()),
+                format!("h-{}", id.0.simple()),
+                owner,
+                resources
+            ],
+        )
+        .await
+        .expect("node");
     let (tx, _rx) = tokio::sync::mpsc::channel::<ControlToNode>(4);
     state.registry.register_node(
         id,

@@ -39,8 +39,12 @@
 # Measured on two full runs of `cargo test --workspace --no-fail-fast` under
 # sqlite://, which produced identical failure sets — nothing here is flaky.
 #
-# 168 test binaries: 162 COVERED, 4 pending below, 2 deliberately Postgres-only —
+# 169 test binaries: 164 COVERED, 3 pending below, 2 deliberately Postgres-only —
 # the numbers check-sqlite-ci.sh itself reports, not arithmetic on this file.
+# (Read off the leg's own verdict by MAIN-548, which deleted
+# `dispatch_ownership`. It said 168/162/4/2 before, and arithmetic on that
+# line would have given 168/163/3/2 — wrong on both totals, because a
+# binary arrived while this branch was open and came in COVERED.)
 # (Read off the leg's own verdict by MAIN-549, which deleted `squash_restamp`
 # and moved `multi_instance` to the engine-specific file — so this is the first
 # line where the third number is not 1.
@@ -145,6 +149,12 @@
 #             SQLite where Postgres matches everything — and returns Ok, so an
 #             unmounted node's checkouts are silently left un-tombstoned.
 #   MAIN-548  the one line where the old reason was TRUE: still raw sqlx.
+#             LANDED 2026-08-13, and it needed only what its line said:
+#             the fixture INSERT moved to `Db::exec` + `params!`, which
+#             binds `resources` as JSON on either engine. Nothing behind
+#             the fixture — `owned_with_resources` was already
+#             engine-agnostic — so this is the one of the five that had
+#             no second cause waiting under it.
 #   MAIN-549  the mechanism under test does not exist on SQLite; needs a ruling
 #             before it needs code. RULED 2026-08-12, and the two binaries it
 #             was filed for got DIFFERENT answers: `multi_instance` moved to
@@ -165,7 +175,6 @@
 #             answering honestly on SQLite and needs a gate, not a ruling.
 #             Neither half needed the ruling this card was raised for, which is
 #             why it is a separate owner rather than a third bullet here.
-dispatch_ownership         # MEASURED (MAIN-478): `EnginePool::pg() on a SQLite pool` — `sqlx::query(…).execute(state.db.pg())` at :27. The ONLY line where "raw sqlx in the test itself" was still true (MAIN-548)
 job_reaper                 # MEASURED (MAIN-545, 2026-08-12, after its three fixtures were converted): `near "j": syntax error` — production `repo/jobs.rs:1367` is `UPDATE loop_jobs j … FROM nodes n`, and its `RETURNING n.last_seen_at` names the joined table SQLite cannot return from. 3 passed, 6 failed (MAIN-564)
 migrate_dev_tolerance      # MEASURED (MAIN-545, 2026-08-12, after the bytea literals were bound and the two schema/psql tests gated; re-measured unchanged by MAIN-549, 2026-08-13): `VersionMissing(38)` and an empty orphan list — the Postgres MIGRATOR driven at a SQLite bed, and `orphan_versions` returning empty there BY DESIGN. It needs the same FIX as squash_restamp, not the same ruling. 3 passed, 3 failed (MAIN-566)
 reconcile_tombstones       # MEASURED (MAIN-547, 2026-08-13): the production `path != ALL($2)` half is FIXED and its three assertions pass; the one remaining failure is the fixture `now() - ($8::bigint * interval '1 second')` at :246. That cause is MAIN-545's class but MAIN-545 NG-2 disowns this binary, so the fixture half has no card yet — this line waits on one (MAIN-547)
