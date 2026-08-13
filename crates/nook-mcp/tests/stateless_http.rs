@@ -16,8 +16,9 @@ use uuid::Uuid;
 use nook_mcp::{BuildRunQuery, McpCaller, NookBackend, TaskQuery};
 use nook_types::{
     AttachmentContent, CreateUserNote, CreateUserNoteFolder, Event, LoopRunLookup, LoopRunSummary,
-    Node, Note, Session, TaskAttachment, TaskItem, UpdateUserNote, UpdateUserNoteFolder, UserNote,
-    UserNoteFolder, UserNoteFolderId, UserNoteId, UserNoteSummary, WorkspaceDetail,
+    Node, Note, Session, TaskAttachment, TaskItem, TunnelView, UpdateUserNote,
+    UpdateUserNoteFolder, UserNote, UserNoteFolder, UserNoteFolderId, UserNoteId, UserNoteSummary,
+    WorkspaceDetail,
 };
 
 const HOST: &str = "nook.example.test";
@@ -72,6 +73,9 @@ never_called! {
     fn read_task_attachment(String) -> anyhow::Result<AttachmentContent>;
     fn list_build_runs(McpCaller, BuildRunQuery) -> anyhow::Result<Vec<LoopRunSummary>>;
     fn get_build_run(McpCaller, String, u32) -> anyhow::Result<LoopRunLookup>;
+    fn open_tunnel(McpCaller, String, u16) -> anyhow::Result<TunnelView>;
+    fn list_tunnels(McpCaller) -> anyhow::Result<Vec<TunnelView>>;
+    fn stop_tunnel(McpCaller, String) -> anyhow::Result<()>;
     fn notebook_list_notes(Uuid, Option<String>) -> anyhow::Result<Vec<UserNoteSummary>>;
     fn notebook_get_note(Uuid, UserNoteId) -> anyhow::Result<UserNote>;
     fn notebook_create_note(Uuid, CreateUserNote) -> anyhow::Result<UserNote>;
