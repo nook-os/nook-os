@@ -127,3 +127,37 @@ tlsSecret mounts here; the process reads the cert and key from these paths.
 {{- define "nook-control.agentCertDir" -}}/etc/nook/agent{{- end -}}
 {{- define "nook-control.agentCertPath" -}}{{ include "nook-control.agentCertDir" . }}/{{ .Values.agent.tlsCertKey }}{{- end -}}
 {{- define "nook-control.agentKeyPath" -}}{{ include "nook-control.agentCertDir" . }}/{{ .Values.agent.tlsKeyKey }}{{- end -}}
+
+{{/*
+The tunnel zone (MAIN-512), validated once for every consumer. The ConfigMap
+renders whatever ingress.enabled says, so the check lives here rather than in
+the Ingress — a deployment fronted by something other than this chart's Ingress
+still gets its TUNNEL_DOMAIN judged.
+
+Two refusals, both of which otherwise fail silently at runtime:
+  - a stored "*.zone", which would render "*.*.zone" and match nothing;
+  - a zone that is a PARENT of ingress.host, where host_dispatch strips the
+    zone off the apex, reads the leading label as a tunnel, and answers the
+    whole application with the "No such tunnel" page (docs/tunnel-proxy.md).
+*/}}
+{{- define "nook-control.tunnelHost" -}}
+{{- $h := .Values.ingress.tunnelHost -}}
+{{- if $h -}}
+{{- if hasPrefix "*." $h -}}
+{{- fail (printf "\n\ningress.tunnelHost must be the zone itself, not a wildcard: got %q. The chart prefixes \"*.\" for you, so store e.g. tunnels.example.com." $h) -}}
+{{- end -}}
+{{- if and .Values.ingress.host (hasSuffix (printf ".%s" $h) .Values.ingress.host) -}}
+{{- fail (printf "\n\ningress.tunnelHost (%q) is a parent of ingress.host (%q): the control plane would read your apex as a tunnel host and answer the application with its \"No such tunnel\" page. Give tunnels a zone beside the apex, not above it (docs/tunnel-proxy.md)." $h .Values.ingress.host) -}}
+{{- end -}}
+{{- end -}}
+{{- $h -}}
+{{- end -}}
+
+{{/*
+The wildcard form of the tunnel zone — the Ingress rule host and the TLS entry.
+One label deep, which is why the zone stored must be exactly the one tunnels
+are served under.
+*/}}
+{{- define "nook-control.tunnelWildcard" -}}
+{{- printf "*.%s" (include "nook-control.tunnelHost" .) -}}
+{{- end -}}

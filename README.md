@@ -121,11 +121,13 @@ that has to exist first — this is deliberately not inferred from
    which tunnel a request is for.
 
 **Read [`docs/tunnel-proxy.md`](docs/tunnel-proxy.md) before you try this.** No
-deployment mode serves tunnels out of the box — most have no proxy in front of
-the control plane at all, and the two that do (Compose behind Traefik, the Helm
-chart) configure only the apex. That page states the contract any proxy has to
-satisfy, with worked nginx, Caddy and Traefik examples, and says which mode is
-missing which piece.
+deployment mode serves tunnels with its default values — most have no proxy in
+front of the control plane at all, and Compose behind Traefik has one that
+configures only the apex. The Helm chart is the exception: `ingress.tunnelHost`
+renders the wildcard rule and sets `TUNNEL_DOMAIN` from the same value, leaving
+you the DNS record and the certificate. That page states the contract any proxy
+has to satisfy, with worked nginx, Caddy and Traefik examples, and says which
+mode is missing which piece.
 
 **Tunnels do not survive a restart, and that is the design rather than a gap.**
 They are held in memory: a tunnel is a live route to a live process, and a table

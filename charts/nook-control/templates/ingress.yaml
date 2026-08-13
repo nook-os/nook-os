@@ -3,6 +3,8 @@
 {{- fail "\n\ningress.host is required when ingress.enabled is true: set --set ingress.host=nook.example.com (or disable with --set ingress.enabled=false)." -}}
 {{- end -}}
 {{- $webSvc := include "nook-control.componentName" (dict "root" . "component" "web") -}}
+{{- $controlSvc := include "nook-control.componentName" (dict "root" . "component" "control") -}}
+{{- $tunnelHost := include "nook-control.tunnelHost" . -}}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -21,6 +23,9 @@ spec:
   tls:
     - hosts:
         - {{ .Values.ingress.host | quote }}
+        {{- if $tunnelHost }}
+        - {{ include "nook-control.tunnelWildcard" . | quote }}
+        {{- end }}
       {{- with .Values.ingress.tls.secretName }}
       secretName: {{ . }}
       {{- end }}
@@ -37,4 +42,21 @@ spec:
                 name: {{ $webSvc }}
                 port:
                   number: {{ .Values.service.web.port }}
+    {{- if $tunnelHost }}
+    - host: {{ include "nook-control.tunnelWildcard" . | quote }}
+      http:
+        paths:
+          # A tunnel host belongs to the control plane on EVERY path, not just
+          # /api: `host_dispatch` decides what the host means before routing,
+          # and it must be reached first. Pointed at web instead, the SPA
+          # fallback answers every path with the NookOS app shell and nothing
+          # reports an error (docs/tunnel-proxy.md).
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $controlSvc }}
+                port:
+                  number: {{ .Values.service.control.port }}
+    {{- end }}
 {{- end }}

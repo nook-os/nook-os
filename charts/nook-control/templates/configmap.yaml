@@ -26,6 +26,13 @@ data:
   {{- with $c.webOrigin }}
   WEB_ORIGIN: {{ . | quote }}
   {{- end }}
+  {{- with include "nook-control.tunnelHost" . }}
+  # The tunnel zone, from ingress.tunnelHost — the SAME value the Ingress builds
+  # its `*.<zone>` rule from, so the router and the surface it routes to cannot
+  # disagree about which hosts are tunnels'. Unset, the surface stays off and
+  # `nook tunnel` refuses by name rather than handing back a dead URL.
+  TUNNEL_DOMAIN: {{ . | quote }}
+  {{- end }}
   {{- with $c.oidc.issuerUrl }}
   OIDC_ISSUER_URL: {{ . | quote }}
   {{- end }}
