@@ -11,6 +11,39 @@
   },
   "paths": {
     "/api/v1/attachments/{id}": {
+      "get": {
+        "tags": [
+          "crate::routes::task_attachments"
+        ],
+        "summary": "One attachment by id — what `nook attachments get` resolves before it\nwrites a byte (MAIN-534).",
+        "description": "The listing routes answer \"what is on this parent\"; an agent handed an id\nhas neither parent, and re-listing a whole thread to find one row is a\nquestion with an answer nobody asked for. Metadata BEFORE bytes is also\nwhat lets the CLI refuse to overwrite a file without having downloaded 25\nMiB first.\n\nAnother tenant's id and an id that never existed are the same 404, for the\nreason the content route already states: a distinguishable answer is a\nprobe (AC-4).",
+        "operationId": "get_task_attachment",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskAttachment"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
       "delete": {
         "tags": [
           "crate::routes::task_attachments"

@@ -11,7 +11,20 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * One attachment by id — what `nook attachments get` resolves before it
+         *     writes a byte (MAIN-534).
+         * @description The listing routes answer "what is on this parent"; an agent handed an id
+         *     has neither parent, and re-listing a whole thread to find one row is a
+         *     question with an answer nobody asked for. Metadata BEFORE bytes is also
+         *     what lets the CLI refuse to overwrite a file without having downloaded 25
+         *     MiB first.
+         *
+         *     Another tenant's id and an id that never existed are the same 404, for the
+         *     reason the content route already states: a distinguishable answer is a
+         *     probe (AC-4).
+         */
+        get: operations["get_task_attachment"];
         put?: never;
         post?: never;
         delete: operations["detach_content"];
@@ -8613,6 +8626,33 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    get_task_attachment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskAttachment"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     detach_content: {
         parameters: {
             query?: never;

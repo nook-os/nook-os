@@ -20,9 +20,10 @@ use uuid::Uuid;
 
 use nook_errors::ApiError;
 use nook_types::{
-    CreateUserNote, CreateUserNoteFolder, Event, LoopRunLookup, LoopRunSummary, Node, Note,
-    Session, TaskItem, TenantId, UpdateUserNote, UpdateUserNoteFolder, UserId, UserNote,
-    UserNoteFolder, UserNoteFolderId, UserNoteId, UserNoteSummary, WorkspaceDetail,
+    AttachmentContent, CreateUserNote, CreateUserNoteFolder, Event, LoopRunLookup, LoopRunSummary,
+    Node, Note, Session, TaskAttachment, TaskItem, TenantId, UpdateUserNote, UpdateUserNoteFolder,
+    UserId, UserNote, UserNoteFolder, UserNoteFolderId, UserNoteId, UserNoteSummary,
+    WorkspaceDetail,
 };
 
 /// The per-request MCP caller identity resolved from an OIDC bearer (MAIN-102).
@@ -162,6 +163,18 @@ pub trait NookBackend: Send + Sync + 'static {
         to: String,
         kind: String,
     ) -> anyhow::Result<serde_json::Value>;
+
+    // ── Attachments (MAIN-534) ──────────────────────────────────────────────
+    //
+    // Read-only on purpose: a ticket's files are part of the brief an agent is
+    // handed, and an agent that cannot see them is working from an incomplete
+    // one. Uploading stays a person's act (NG-1).
+    /// Every file on a ticket AND on its comments — metadata only, never bytes,
+    /// so listing twenty screenshots costs one small answer.
+    async fn list_task_attachments(&self, task: String) -> anyhow::Result<Vec<TaskAttachment>>;
+    /// One attachment's content, when it is text small enough to belong in a
+    /// reply. Anything else comes back as a pointer to the CLI.
+    async fn read_task_attachment(&self, attachment: String) -> anyhow::Result<AttachmentContent>;
 
     // ── Build runs (MAIN-525) ───────────────────────────────────────────────
     //
@@ -380,6 +393,12 @@ pub struct MoveTaskParams {
 pub struct TaskRefParams {
     /// Human key (NOOK-42) or uuid.
     pub task: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct AttachmentRefParams {
+    /// The attachment id, as `list_task_attachments` prints it.
+    pub attachment: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -1008,6 +1027,44 @@ impl NookMcp {
         Parameters(p): Parameters<TaskRefParams>,
     ) -> Result<CallToolResult, McpError> {
         to_result(&self.backend.get_task(p.task).await.map_err(backend_err)?)
+    }
+
+    #[tool(
+        description = "List the files attached to a ticket and to its comments: filename, \
+                       content type, size and the id to read or fetch each one. Metadata only \
+                       — no bytes. Check this before starting work: a file named in the \
+                       description is part of the contract."
+    )]
+    async fn list_task_attachments(
+        &self,
+        Parameters(p): Parameters<TaskRefParams>,
+    ) -> Result<CallToolResult, McpError> {
+        to_result(
+            &self
+                .backend
+                .list_task_attachments(p.task)
+                .await
+                .map_err(backend_err)?,
+        )
+    }
+
+    #[tool(
+        description = "Read one attachment by id. A text file (markdown, JSON, CSV, source) \
+                       comes back as content you can read. Anything else — an image, a PDF, \
+                       an archive — comes back as a pointer telling you to fetch it with \
+                       `nook attachments get <id>`; the bytes are never returned here."
+    )]
+    async fn read_task_attachment(
+        &self,
+        Parameters(p): Parameters<AttachmentRefParams>,
+    ) -> Result<CallToolResult, McpError> {
+        to_result(
+            &self
+                .backend
+                .read_task_attachment(p.attachment)
+                .await
+                .map_err(backend_err)?,
+        )
     }
 
     #[tool(

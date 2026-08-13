@@ -74,6 +74,13 @@ pub trait TaskAttachmentRepository: Send + Sync {
     /// One row, or `None` — including when it belongs to another tenant.
     async fn get(&self, tenant: TenantId, id: Uuid) -> ApiResult<Option<AttachmentRow>>;
 
+    /// The same row as the API type — filename, type and size joined in.
+    ///
+    /// [`Self::get`] answers what a *removal* needs; this answers what a reader
+    /// needs, and a reader that had to call both would be paying two round
+    /// trips for one row (MAIN-534).
+    async fn get_record(&self, tenant: TenantId, id: Uuid) -> ApiResult<Option<TaskAttachment>>;
+
     /// Every attachment a task carries, its comments' included. What the
     /// cascade removes when the ticket goes (AC-7).
     async fn of_task(&self, tenant: TenantId, task: TaskId) -> ApiResult<Vec<AttachmentRow>>;
@@ -191,6 +198,21 @@ impl TaskAttachmentRepository for DbTaskAttachmentRepository {
             .query_opt(
                 "SELECT id, user_content_id, parent_kind, parent_id, attached_by
                    FROM task_attachments WHERE id = $1 AND tenant_id = $2",
+                params![id, tenant],
+            )
+            .await?)
+    }
+
+    async fn get_record(&self, tenant: TenantId, id: Uuid) -> ApiResult<Option<TaskAttachment>> {
+        Ok(self
+            .db
+            .query_opt(
+                &format!(
+                    "SELECT {ATTACHMENT_COLUMNS}
+                       FROM task_attachments a
+                       JOIN user_content c ON c.id = a.user_content_id
+                      WHERE a.id = $1 AND a.tenant_id = $2"
+                ),
                 params![id, tenant],
             )
             .await?)

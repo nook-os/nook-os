@@ -162,6 +162,61 @@ impl Client {
         self.send(reqwest::Method::GET, path, None).await
     }
 
+    /// GET where "not there" is an answer rather than a failure: `Ok(None)` on
+    /// a 404, an error on anything else.
+    ///
+    /// The distinction is what turns another tenant's attachment id into one
+    /// clean sentence instead of `404 /api/v1/attachments/…: {"error":…}`
+    /// (MAIN-534 AC-4). Every other status still fails, so an outage is never
+    /// reported as an absence.
+    pub async fn get_opt(&self, path: &str) -> Result<Option<Value>> {
+        let url = format!("{}{path}", self.base);
+        let mut req = self
+            .http
+            .get(&url)
+            .bearer_auth(&self.token)
+            .header("accept", "application/json");
+        if let Some(t) = &self.tenant {
+            req = req.header("x-nook-tenant", t);
+        }
+        let resp = req
+            .send()
+            .await
+            .with_context(|| format!("could not reach {}", self.base))?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            bail!("{} {}: {}", status.as_u16(), path, text.trim());
+        }
+        Ok(Some(serde_json::from_str(&text).unwrap_or(Value::Null)))
+    }
+
+    /// GET the raw bytes of a body that is a file, not a document.
+    ///
+    /// Buffered rather than streamed: the store's own cap is 25 MiB, so the
+    /// worst case fits in memory comfortably, and a partially written file
+    /// left behind by a mid-stream failure would be worse than a slightly
+    /// larger allocation.
+    pub async fn get_bytes(&self, path: &str) -> Result<Vec<u8>> {
+        let url = format!("{}{path}", self.base);
+        let mut req = self.http.get(&url).bearer_auth(&self.token);
+        if let Some(t) = &self.tenant {
+            req = req.header("x-nook-tenant", t);
+        }
+        let resp = req
+            .send()
+            .await
+            .with_context(|| format!("could not reach {}", self.base))?;
+        let status = resp.status();
+        if !status.is_success() {
+            bail!("{} {}", status.as_u16(), path);
+        }
+        Ok(resp.bytes().await?.to_vec())
+    }
+
     /// GET returning the RAW body, for endpoints whose answer is not JSON.
     ///
     /// The git-ssh shim's key material is one of those: a PEM block is not a
@@ -2583,8 +2638,34 @@ pub async fn task(key: &str, json: bool, revisions: bool) -> Result<()> {
     if revisions {
         return task_revisions(&client, key, json).await;
     }
-    let resp = client.get(&format!("/api/v1/tasks/{key}")).await?;
+    let mut resp = client.get(&format!("/api/v1/tasks/{key}")).await?;
+    // A second request rather than a wider detail payload: the ticket page has
+    // its own attachment call already and does not want these bytes twice, and
+    // the endpoint that answers for the ticket AND its comments at once exists
+    // for exactly this reader (MAIN-534 AC-1).
+    // `None` is "could not ask", which is not the same fact as an empty list —
+    // a reader that could not tell them apart would treat an outage as a card
+    // with no files, which is exactly the incomplete brief this ticket is about.
+    let attachments = match crate::attachments::fetch(&client, key).await {
+        Ok(rows) => Some(rows),
+        Err(e) => {
+            // Never fatal: the contract is the description, and a card that
+            // would not print because its file list was unreachable helps
+            // nobody.
+            eprintln!(
+                "{} could not read this card's attachments: {e}",
+                crate::style::err("!")
+            );
+            None
+        }
+    };
     if json {
+        // Additive, so an existing `--json` consumer is untouched — and the
+        // agent-facing path is not the one that gets to be blind to a file
+        // named in the description. Absent, not empty, when the ask failed.
+        if let (Some(obj), Some(rows)) = (resp.as_object_mut(), attachments.clone()) {
+            obj.insert("attachments".into(), Value::Array(rows));
+        }
         println!("{}", serde_json::to_string_pretty(&resp)?);
         return Ok(());
     }
@@ -2652,13 +2733,22 @@ pub async fn task(key: &str, json: bool, revisions: bool) -> Result<()> {
             "{}",
             crate::style::dim(&format!("── {} comment(s)", comments.len()))
         );
-        for c in comments {
+        for c in &comments {
             println!(
                 "\n{} {}",
                 crate::style::bold(c["author_name"].as_str().unwrap_or("?")),
                 crate::style::dim(c["created_at"].as_str().unwrap_or("")),
             );
             println!("{}", c["body_md"].as_str().unwrap_or(""));
+        }
+    }
+    // A card with no files prints nothing extra at all (AC-8) — the section is
+    // information, and a header saying "0 attachments" on every ticket in the
+    // board is noise every reader then has to skip.
+    if let Some(rows) = attachments.filter(|r| !r.is_empty()) {
+        println!();
+        for line in crate::attachments::render(&rows, &comments) {
+            println!("{line}");
         }
     }
     Ok(())

@@ -1,3 +1,4 @@
+mod attachments;
 mod capabilities;
 mod certs;
 mod chat;
@@ -218,6 +219,15 @@ enum Command {
     /// human decision without losing it to a dropped connection (MAIN-159).
     #[command(subcommand)]
     Interactions(InteractionsCommand),
+    /// Files hung on a ticket or on one of its comments (MAIN-534).
+    ///
+    ///     nook attachments list MAIN-42     what the card carries
+    ///     nook attachments get <id>         pull the one you want
+    ///
+    /// Read-only: an agent reads a card's attachments, a person adds them.
+    /// A new noun group, per docs/cli-style.md — the top level stays frozen.
+    #[command(subcommand)]
+    Attachments(AttachmentsCommand),
     /// Loop reviews of a workspace (MAIN-408).
     ///
     /// A review job is raised automatically by the board-signal sweep when a
@@ -723,6 +733,12 @@ async fn main() -> Result<()> {
             url,
             question,
         }) => cli::builds_outcome(&conclusion, url.as_deref(), question.as_deref()).await,
+        Command::Attachments(AttachmentsCommand::List { task, json }) => {
+            attachments::list(&task, json).await
+        }
+        Command::Attachments(AttachmentsCommand::Get { id, out, force }) => {
+            attachments::get(&id, out.as_deref(), force).await
+        }
         Command::Notify {
             title,
             body,
@@ -1219,6 +1235,33 @@ enum BuildsCommand {
         /// for `blocked`; `-` reads stdin.
         #[arg(long)]
         question: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AttachmentsCommand {
+    /// Every file on a ticket and on its comments: filename, type, size and
+    /// the id to fetch it with.
+    List {
+        /// The card, by key (MAIN-42) or id.
+        task: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Download one attachment, preserving its original filename.
+    ///
+    /// Refuses rather than overwriting a file that is already there — a
+    /// download that silently replaced a file in a worktree would be the one
+    /// mistake nothing recovers from.
+    Get {
+        /// The attachment id, as `list` prints it.
+        id: String,
+        /// Where to put it: a path, or a directory to keep the name inside.
+        #[arg(long)]
+        out: Option<String>,
+        /// Overwrite what is already there.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -2233,7 +2276,7 @@ mod cli_surface {
     fn noun_groups_are_not_frozen() {
         let (leaves, groups) = surface();
         assert!(
-            groups.len() >= 11,
+            groups.len() >= 12,
             "expected the existing noun groups; found {groups:?}"
         );
         for g in &groups {
@@ -2242,6 +2285,83 @@ mod cli_surface {
                 "{g} is a noun group and must not be in the flat-verb freeze"
             );
             assert!(!leaves.contains(g), "{g} cannot be both a group and a leaf");
+        }
+    }
+
+    /// Every command a skill tells an agent to run must exist (MAIN-534 AC-7).
+    ///
+    /// `skills/` ships prompts that are TAUGHT to a fleet, so a verb that has
+    /// been renamed does not fail at review — it fails months later, on a
+    /// machine nobody re-taught, inside a loop with no human watching. The
+    /// sweep is a rule in docs/cli-style.md; this is the half a machine can
+    /// check.
+    ///
+    /// Scoped to command POSITION — an inline `` `nook x` `` or a line in a
+    /// fenced block starting with `nook` — because prose says the word "nook"
+    /// too, and a test that read "nook is the fleet" as a verb would be a
+    /// tripwire nobody could satisfy.
+    #[test]
+    fn every_verb_a_skill_teaches_exists() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills");
+        let cmd = Cli::command();
+        let known: Vec<String> = cmd
+            .get_subcommands()
+            .flat_map(|s| {
+                std::iter::once(s.get_name().to_string())
+                    .chain(s.get_all_aliases().map(str::to_string))
+            })
+            .collect();
+
+        let mut unknown: Vec<String> = Vec::new();
+        for entry in walkdir::WalkDir::new(&root)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name() == "SKILL.md")
+        {
+            let text = std::fs::read_to_string(entry.path()).expect("a readable skill");
+            for verb in verbs_taught(&text) {
+                if !known.contains(&verb) {
+                    unknown.push(format!("{}: nook {verb}", entry.path().display()));
+                }
+            }
+        }
+        assert!(
+            unknown.is_empty(),
+            "\nSkills teach commands that do not exist:\n  {}\n\n\
+             Sweep skills/ in THIS ticket — update every hit, bump each touched skill's\n\
+             `version:`, and say in the PR that `nook teach` must be re-run.\n",
+            unknown.join("\n  ")
+        );
+    }
+
+    /// The verbs a skill's text tells somebody to run.
+    fn verbs_taught(text: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for line in text.lines() {
+            let trimmed = line.trim_start().trim_start_matches("$ ");
+            if let Some(rest) = trimmed.strip_prefix("nook ") {
+                push_verb(rest, &mut out);
+            }
+            // Inline code: `nook task <KEY>` in the middle of a sentence.
+            for chunk in line.split('`').skip(1).step_by(2) {
+                if let Some(rest) = chunk.trim_start().strip_prefix("nook ") {
+                    push_verb(rest, &mut out);
+                }
+            }
+        }
+        out
+    }
+
+    fn push_verb(rest: &str, out: &mut Vec<String>) {
+        let word = rest.split_whitespace().next().unwrap_or("");
+        // A flag or a variable is not a verb, and neither is `nook --help`.
+        if !word.is_empty()
+            && word
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            && !word.starts_with('-')
+        {
+            out.push(word.to_string());
         }
     }
 }

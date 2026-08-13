@@ -116,6 +116,7 @@ use utoipa::OpenApi;
         crate::routes::task_attachments::attach_to_task,
         crate::routes::task_attachments::list_for_comment,
         crate::routes::task_attachments::attach_to_comment,
+        crate::routes::task_attachments::get_one,
         crate::routes::task_attachments::detach,
         crate::routes::user_content::upload,
         crate::routes::user_content::serve,
