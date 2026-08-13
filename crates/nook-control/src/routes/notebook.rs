@@ -25,7 +25,9 @@ use uuid::Uuid;
 use crate::auth::AuthCtx;
 use crate::crypto::Vault;
 use crate::error::{ApiError, ApiResult};
-use crate::repo::notebook::{FolderEdit, NewUserNote, SealedBody, StoredUserNote, UserNoteEdit};
+use crate::repo::notebook::{
+    FolderDeletion, FolderEdit, NewUserNote, SealedBody, StoredUserNote, UserNoteEdit,
+};
 use crate::state::AppState;
 
 /// Resolve the caller's `person_id` — the owner key for every notebook row.
@@ -43,7 +45,12 @@ async fn person_id_for(state: &AppState, auth: &AuthCtx) -> ApiResult<Uuid> {
 /// scalar count. A title is a label for a tree, not a document (MAIN-84 AC-3).
 const MAX_NAME_LEN: usize = 200;
 
-/// Reject a blank or over-long title / folder name (MAIN-84 AC-2, AC-3).
+/// Reject a blank, over-long, or slash-carrying title / folder name (MAIN-84
+/// AC-2, AC-3; MAIN-574 AC-5).
+///
+/// `/` is refused because a note is addressed by a slash-delimited path — a
+/// name that contains the separator makes its own path unparseable, and no live
+/// name contained one when this landed.
 ///
 /// Trims ONLY to decide accept/reject — the value is stored exactly as sent
 /// (NG-2), so leading/trailing spaces a person typed on purpose survive. On
@@ -53,6 +60,11 @@ fn validate_name(value: &str, what: &str) -> ApiResult<()> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Err(ApiError::BadRequest(format!("a {what} cannot be blank")));
+    }
+    if trimmed.contains('/') {
+        return Err(ApiError::BadRequest(format!(
+            "a {what} cannot contain '/' — it separates the parts of a note's path"
+        )));
     }
     let len = trimmed.chars().count();
     if len > MAX_NAME_LEN {
@@ -186,6 +198,65 @@ async fn owned_folder(
     }
 }
 
+/// Refuse a folder name that is already taken under `parent` (`None` = the
+/// notebook root), ignoring `except` — the folder being renamed or moved.
+///
+/// A 409 naming the taken name (MAIN-574 AC-4), because the alternatives are
+/// both worse: a raw constraint violation reaches the client as a 500 it can
+/// say nothing about, and a silent auto-suffix hands back a folder under a
+/// name nobody asked for.
+async fn folder_name_free(
+    state: &AppState,
+    person: Uuid,
+    parent: Option<UserNoteFolderId>,
+    name: &str,
+    except: Option<UserNoteFolderId>,
+) -> ApiResult<()> {
+    if state
+        .notebook
+        .folder_name_taken(person, parent, name, except)
+        .await?
+    {
+        return Err(taken(name, "folder"));
+    }
+    Ok(())
+}
+
+/// The note twin of [`folder_name_free`], keyed on the containing folder.
+async fn note_title_free(
+    state: &AppState,
+    person: Uuid,
+    folder: Option<UserNoteFolderId>,
+    title: &str,
+    except: Option<UserNoteId>,
+) -> ApiResult<()> {
+    if state
+        .notebook
+        .note_title_taken(person, folder, title, except)
+        .await?
+    {
+        return Err(taken(title, "note"));
+    }
+    Ok(())
+}
+
+fn taken(name: &str, what: &str) -> ApiError {
+    ApiError::Conflict(format!("a {what} named \"{name}\" is already here"))
+}
+
+/// Turn the unique index's own refusal into that same 409.
+///
+/// The check above answers the common case with a readable message; this closes
+/// the window between it and the write, where a second request can take the
+/// name first. Without it that race is the 500 AC-4 rules out — and the index,
+/// not the check, is what actually guarantees the uniqueness.
+fn conflict_if_taken(e: ApiError, name: &str, what: &str) -> ApiError {
+    match &e {
+        ApiError::Db(db) if db.is_unique_violation() => taken(name, what),
+        _ => e,
+    }
+}
+
 // ── Notes ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Default, Deserialize)]
@@ -260,7 +331,7 @@ pub(crate) async fn get_note_for(
 #[utoipa::path(post, path = "/api/v1/notebook/notes",
     operation_id = "notebook_create_note",
     request_body = CreateUserNote,
-    responses((status = 200, body = UserNote)))]
+    responses((status = 200, body = UserNote), (status = 409)))]
 pub async fn create_note(
     State(state): State<AppState>,
     auth: AuthCtx,
@@ -281,6 +352,7 @@ pub(crate) async fn create_note_for(
     if let Some(folder) = req.folder_id {
         owned_folder(state, person, folder).await?;
     }
+    note_title_free(state, person, req.folder_id, &req.title, None).await?;
     let enc = state
         .vault
         .encrypt(req.content_md.as_bytes())
@@ -293,7 +365,8 @@ pub(crate) async fn create_note_for(
             title: req.title.clone(),
             content_enc: enc,
         })
-        .await?;
+        .await
+        .map_err(|e| conflict_if_taken(e, &req.title, "note"))?;
     row.into_note(&state.vault)
 }
 
@@ -301,7 +374,7 @@ pub(crate) async fn create_note_for(
     operation_id = "notebook_update_note",
     params(("id" = String, Path,)),
     request_body = UpdateUserNote,
-    responses((status = 200, body = UserNote), (status = 404)))]
+    responses((status = 200, body = UserNote), (status = 404), (status = 409)))]
 pub async fn update_note(
     State(state): State<AppState>,
     auth: AuthCtx,
@@ -329,6 +402,22 @@ pub(crate) async fn update_note_for(
     if let Some(Some(folder)) = req.folder_id {
         owned_folder(state, person, folder).await?;
     }
+    // A rename and a move are the same collision from the index's side, and
+    // either one alone still needs the other half of the key — so the effective
+    // pair is resolved from the stored note before it is asked about (AC-4).
+    let moving_title = if req.title.is_some() || req.folder_id.is_some() {
+        let current = state
+            .notebook
+            .get_note(person, id)
+            .await?
+            .ok_or(ApiError::NotFound)?;
+        let title = req.title.clone().unwrap_or(current.title);
+        let folder = req.folder_id.unwrap_or(current.folder_id);
+        note_title_free(state, person, folder, &title, Some(id)).await?;
+        Some(title)
+    } else {
+        None
+    };
     // A sealed note's body may only change through the seal contract — a plain
     // body PATCH would overwrite the client's sealed blob with server-encrypted
     // plaintext, silently breaking the seal. Title/move-only edits still pass.
@@ -365,7 +454,12 @@ pub(crate) async fn update_note_for(
                 folder: req.folder_id,
             },
         )
-        .await?;
+        .await
+        // A body-only edit cannot collide, so there is no name to name.
+        .map_err(|e| match &moving_title {
+            Some(title) => conflict_if_taken(e, title, "note"),
+            None => e,
+        })?;
     row.ok_or(ApiError::NotFound)?.into_note(&state.vault)
 }
 
@@ -421,7 +515,7 @@ pub(crate) async fn list_folders_for(
 #[utoipa::path(post, path = "/api/v1/notebook/folders",
     operation_id = "notebook_create_folder",
     request_body = CreateUserNoteFolder,
-    responses((status = 200, body = UserNoteFolder)))]
+    responses((status = 200, body = UserNoteFolder), (status = 409)))]
 pub async fn create_folder(
     State(state): State<AppState>,
     auth: AuthCtx,
@@ -442,17 +536,19 @@ pub(crate) async fn create_folder_for(
     if let Some(parent) = req.parent_id {
         owned_folder(state, person, parent).await?;
     }
+    folder_name_free(state, person, req.parent_id, &req.name, None).await?;
     state
         .notebook
         .create_folder(person, req.parent_id, &req.name)
         .await
+        .map_err(|e| conflict_if_taken(e, &req.name, "folder"))
 }
 
 #[utoipa::path(patch, path = "/api/v1/notebook/folders/{id}",
     operation_id = "notebook_update_folder",
     params(("id" = String, Path,)),
     request_body = UpdateUserNoteFolder,
-    responses((status = 200, body = UserNoteFolder), (status = 404)))]
+    responses((status = 200, body = UserNoteFolder), (status = 404), (status = 409)))]
 pub async fn update_folder(
     State(state): State<AppState>,
     auth: AuthCtx,
@@ -487,6 +583,21 @@ pub(crate) async fn update_folder_for(
             ));
         }
     }
+    // As for a note: a rename and a move share one collision, so the effective
+    // (parent, name) comes off the stored folder before it is asked about.
+    let moving_name = if req.name.is_some() || req.parent_id.is_some() {
+        let current = state
+            .notebook
+            .get_folder(person, id)
+            .await?
+            .ok_or(ApiError::NotFound)?;
+        let name = req.name.clone().unwrap_or(current.name);
+        let parent = req.parent_id.unwrap_or(current.parent_id);
+        folder_name_free(state, person, parent, &name, Some(id)).await?;
+        Some(name)
+    } else {
+        None
+    };
     let folder = state
         .notebook
         .update_folder(
@@ -497,14 +608,18 @@ pub(crate) async fn update_folder_for(
                 parent: req.parent_id,
             },
         )
-        .await?;
+        .await
+        .map_err(|e| match &moving_name {
+            Some(name) => conflict_if_taken(e, name, "folder"),
+            None => e,
+        })?;
     folder.ok_or(ApiError::NotFound)
 }
 
 #[utoipa::path(delete, path = "/api/v1/notebook/folders/{id}",
     operation_id = "notebook_delete_folder",
     params(("id" = String, Path,)),
-    responses((status = 204), (status = 404)))]
+    responses((status = 204), (status = 404), (status = 409)))]
 pub async fn delete_folder(
     State(state): State<AppState>,
     auth: AuthCtx,
@@ -525,10 +640,17 @@ pub(crate) async fn delete_folder_for(
     person: Uuid,
     id: UserNoteFolderId,
 ) -> ApiResult<()> {
-    if !state.notebook.delete_folder_reparenting(person, id).await? {
-        return Err(ApiError::NotFound);
+    match state.notebook.delete_folder_reparenting(person, id).await? {
+        FolderDeletion::Deleted => Ok(()),
+        FolderDeletion::NoSuchFolder => Err(ApiError::NotFound),
+        // The reparenting is a move, and a move onto a taken name is the same
+        // 409 the PATCH verbs give (MAIN-574) — the delete is refused whole
+        // rather than half-performed, so the folder is still there to retry.
+        FolderDeletion::Collision { what, name } => Err(ApiError::Conflict(format!(
+            "deleting this folder would move a {what} named \"{name}\" beside one of the \
+             same name — rename one of them first"
+        ))),
     }
-    Ok(())
 }
 
 // ── Person vault + note sealing (MAIN-100) ─────────────────────────────────────
