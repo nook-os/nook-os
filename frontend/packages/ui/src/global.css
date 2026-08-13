@@ -7346,41 +7346,164 @@ button.chat-tool-line:hover { color: var(--nook-fg-dim); }
 /* A repo's review runs beside the one being read (MAIN-455). Two columns, so
    picking a different run does not scroll the transcript out of view — the
    list is short and the transcript is the thing you came for. */
-/* The original block referenced `--border`/`--panel-hover`/`--primary` — none
-   of which exist in this sheet (everything is `--nook-*`) — so the run list had
-   NO visible separation from the transcript at all. The list is its own sunken
-   column now: recessed background, a real border, and the open run marked by
-   the accent edge the broken var was meant to draw. */
 .reviews-split {
+  /* The narrowest the browser column is designed for (MAIN-556 AC-8).
+     `RUNS_MIN_PANE_PX` in WorkspaceRuns.tsx is the same number in the place
+     that can reason about it, and `WorkspaceRunsStyles.test.ts` fails if the
+     two drift. It is the sum of the row grid's reserved tracks below, plus a
+     floor for the identifier: at exactly this width nothing on line 1
+     truncates. The old floor was 150px, which was narrower than one row's
+     content and is what let the state word disappear. */
+  --nook-runs-min-pane: 260px;
   display: grid;
-  grid-template-columns: minmax(150px, 230px) 1fr;
+  grid-template-columns: minmax(var(--nook-runs-min-pane), 300px) minmax(0, 1fr);
   gap: 12px;
   min-height: 0;
   height: 100%;
 }
-.reviews-runs {
-  list-style: none;
-  margin: 0;
-  padding: 4px;
-  overflow-y: auto;
+
+/* Below the shared medium breakpoint there is not room for a 260px browser AND
+   a transcript worth reading, so they stack instead of both being too narrow.
+   Introduced with the wider floor above: at the old 150px the two columns
+   merely looked cramped here; at 260px they would overflow the page. */
+@media (max-width: 1024px) {
+  .reviews-split {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 40%) minmax(0, 1fr);
+  }
+}
+
+/* ── The runs browser: three regions, one of which scrolls (MAIN-556 AC-6) ──
+   The toolbar is a grid TRACK, not `position: sticky` inside the scroller.
+   Sticky would keep it in view; a track means the question never arises — the
+   toolbar is not in the scrolling box at all, so no row can slide under it and
+   no scroll frame has to repaint it. */
+.runs-browser {
+  /* The row grid's reserved tracks live here rather than in `:root`: nothing
+     outside this browser has an opinion about them, and a reader changing a
+     row should find them beside the row. */
+
+  /* `REVIEW`, the longer of the two kind words, at the badge's 10px monospace
+     plus its padding and border. Fixed, so every identifier starts at the same
+     x down the column (AC-4) instead of wherever its own badge ended. */
+  --nook-runs-kind-col: 52px;
+  /* RESERVED (AC-2). Wide enough for `waiting on human` — the longest label
+     `jobStateMeta` produces, 16 characters at 10px monospace — plus the
+     greyscale glyph, the gap and the pill's padding. The state cannot truncate
+     because this column never has to give anything up: it is this wide on
+     every row, whatever the state and whatever the pane. */
+  --nook-runs-state-col: 120px;
+  /* One line of the row grid, matched to the badge height so a pill can never
+     make one row taller than its neighbours. Two of these, always, is what
+     makes every row the same height whatever it holds (AC-1). */
+  --nook-runs-line-h: 18px;
+
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
   background: var(--nook-bg);
   /* Only the RIGHT edge draws: the column sits flush inside the panel, whose
      own chrome already bounds the top, left and bottom — a full border there
      doubled against it and read bolder on three sides. The one edge this
      column owns is the seam against the transcript. */
-  border: 0;
   border-right: 1px solid var(--nook-border);
-  height: 100%;
+  /* What AC-8's fallback measures itself against. A container query, not a
+     media query: what matters is how wide THIS pane is, which on a wide screen
+     with a wide transcript is not the viewport. */
+  container-type: inline-size;
+  container-name: runs-browser;
+}
+
+/* Region 1. `flex-wrap`, because at the minimum pane width the segmented
+   selector and the state control do not share a line — and the toolbar is the
+   one region where taking a second line costs nothing, since it is outside the
+   list's rhythm. */
+.runs-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 7px;
+  border-bottom: 1px solid var(--nook-border);
+}
+
+/* AC-7: the kind selector is a CONTROL, not a dropdown in the panel's corner.
+   Three segments in one bordered group — the shape says "pick one of these"
+   before it is read, which a <select> collapsed to its current value never
+   did. */
+.runs-kinds {
+  display: flex;
+  flex: none;
+  border: 1px solid var(--nook-border-bright);
+  border-radius: var(--nook-radius);
+  overflow: hidden;
+}
+.runs-kind {
+  appearance: none;
+  height: var(--nook-ctrl-sm);
+  padding: 0 8px;
+  background: none;
+  border: 0;
+  border-left: 1px solid var(--nook-border-bright);
+  color: var(--nook-fg-dim);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+.runs-kind:first-child {
+  border-left: 0;
+}
+.runs-kind:hover {
+  background: var(--nook-bg-raised);
+  color: var(--nook-fg);
+}
+.runs-kind.is-on {
+  background: var(--nook-selection);
+  color: var(--nook-fg-bright);
+}
+.runs-kind:focus-visible {
+  outline: 1px solid var(--nook-accent);
+  outline-offset: -1px;
+}
+.runs-toolbar .runs-state {
+  flex: 1 1 110px;
+  min-width: 0;
+}
+
+/* Region 2: the only box in the browser that scrolls. */
+.runs-list {
+  overflow-y: auto;
+  min-height: 0;
+  padding: 4px;
+}
+.runs-options {
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
-.reviews-run {
-  display: flex;
+
+/* ── One row, one grid, every row the same (MAIN-556 AC-1/AC-4) ─────────────
+   The row used to be a wrapping flex line: its content decided its height, so
+   the list shifted under the eye while scanning, and the state pill — the one
+   thing a scan is FOR — was the first casualty when the column narrowed. Two
+   FIXED rows and three fixed-or-flooring columns instead. Fixed rows are what
+   make the height a property of the list rather than of whatever a run
+   happens to say; declaring the columns once here is what puts every badge,
+   identifier and timestamp on a shared column instead of per-row flex. */
+.runs-row {
+  display: grid;
+  grid-template-columns:
+    var(--nook-runs-kind-col)
+    minmax(0, 1fr)
+    var(--nook-runs-state-col);
+  grid-template-rows: repeat(2, var(--nook-runs-line-h));
   align-items: center;
-  gap: 6px;
+  column-gap: 6px;
   width: 100%;
-  padding: 5px 7px;
+  padding: 3px 7px;
   background: none;
   border: 0;
   border-left: 2px solid transparent;
@@ -7391,36 +7514,88 @@ button.chat-tool-line:hover { color: var(--nook-fg-dim); }
   font: inherit;
   font-size: 12px;
 }
-/* A row carries its kind as well as its state now (MAIN-488), which is one
-   pill more than this ~200px column fits on a line. The identity truncates and
-   the annotation wraps, rather than every pill compressing to nothing. */
-.reviews-run {
-  flex-wrap: wrap;
+/* Smaller than a standalone pill, and matched to the line track: a 20px pill
+   in an 18px row is how a "fixed" row height starts drifting again. */
+.runs-row .pill {
+  height: var(--nook-runs-line-h);
+  padding: 0 6px;
+  font-size: 10px;
 }
-.reviews-run .run-label {
-  flex: 1 1 auto;
+.runs-row-kind {
+  grid-area: 1 / 1;
+  justify-self: start;
+  text-transform: uppercase;
+}
+.runs-row-id {
+  grid-area: 1 / 2;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--nook-fg);
 }
-/* Why a queued run is waiting (MAIN-494): its own line under the pills, in
-   full. The row already wraps, so `100%` is what claims the line rather than
-   sharing one with the pills and truncating the half that says what to do. */
-.reviews-run .run-reason {
-  flex: 1 0 100%;
-  line-height: 1.35;
-  white-space: normal;
+.runs-row-state {
+  grid-area: 1 / 3;
+  justify-self: end;
 }
-.reviews-run:hover {
+/* The shape half of the state, so `failed`, `running` and the waiting states
+   are still three different things in greyscale (AC-5). */
+.runs-row-glyph {
+  font-size: 11px;
+  line-height: 1;
+}
+/* A BLOCK, not a flex row: the outcome and the waiting sentence ellipsise as
+   one string with one ellipsis at the end of the line, which is what AC-3
+   asks for. `text-overflow` does nothing on a flex container, so laying this
+   out as flex would have looked right and truncated nothing. */
+.runs-row-meta {
+  grid-area: 2 / 1 / 3 / 3;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--nook-fg-dim);
+}
+.runs-row-meta > span + span {
+  margin-left: 6px;
+}
+.runs-row-time {
+  grid-area: 2 / 3;
+  justify-self: end;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--nook-fg-faint);
+}
+/* AC-8's fallback, below the width the grid above is designed for. The
+   SECONDARY line goes and nothing else does — the identifier and the whole
+   state word are what a scan needs, and they are what is left. The row does
+   not get shorter: the two line tracks are fixed, so the list keeps its
+   rhythm rather than reflowing at the moment somebody is dragging the pane.
+   The number is `--nook-runs-min-pane`, repeated because a container query
+   condition cannot read a custom property — the same constraint the
+   breakpoint tokens carry. */
+@container runs-browser (max-width: 259px) {
+  .runs-row-meta {
+    display: none;
+  }
+}
+.runs-row:hover {
   background: var(--nook-bg-raised);
   color: var(--nook-fg);
 }
-.reviews-run.is-open {
+/* Selected is a background AND an edge (AC-5): the background alone is a
+   contrast step some displays swallow, and the accent alone is a colour. */
+.runs-row.is-open {
   border-left-color: var(--nook-accent);
   background: var(--nook-bg-raised);
   color: var(--nook-fg);
 }
+.runs-row:focus-visible {
+  outline: 1px solid var(--nook-accent);
+  outline-offset: -1px;
+}
+
 /* The copy/export row above a run transcript (MAIN-471). */
 .reviews-transcript-actions {
   display: flex;

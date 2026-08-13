@@ -12,15 +12,19 @@
 // A run keeps a transcript — the same `loop_job_transcript` a spec keeps,
 // rendered through the same `ChatView`. There is deliberately no second
 // transcript mechanism.
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { api, type LoopJobTranscriptEntry } from "@nookos/api";
-import { ChatView, Empty, Panel, Pill } from "@nookos/ui";
+import { ChatView, Empty, Panel } from "@nookos/ui";
 import { useAgentCommands } from "./agentCommands";
 import { BuildOutcome } from "./BuilderStrip";
 import { transcriptMessages } from "./LoopPanel";
 import { agentActivityLabel, foldToolActivity, jobStateMeta } from "./loop";
+// The queue panel's duration words, not a second set of them: "5m" there and
+// "5 min" here would be two vocabularies for one idea, and the one thing a
+// reader must never have to do is work out whether they mean the same.
+import { shortAge } from "./QueuePanel";
 import { fileSlug, TranscriptActions } from "./transcriptExport";
 
 /** What raised a run. The word a row shows, and the value the URL carries. */
@@ -79,6 +83,39 @@ export function pillTone(
   tone: "info" | "warn" | "err" | "ok" | "muted",
 ): "ok" | "warn" | "err" | "info" | "dim" {
   return tone === "muted" ? "dim" : tone;
+}
+
+/**
+ * The greyscale half of a state badge (MAIN-556 AC-5).
+ *
+ * The pill's colour is the whole signal today, and on this theme `warn` and the
+ * accent are the same amber — so a greyscale screen, a projector, or a reader
+ * who cannot separate the red from the green sees one pill repeated down the
+ * list. Every state therefore also has a SHAPE. Distinct characters rather than
+ * one dot at several opacities, because opacity is still colour.
+ *
+ * Named state by state rather than derived from the tone: `queued` and
+ * `canceled` share a tone and are not the same thing to look at.
+ */
+export function stateGlyph(state: string): string {
+  switch (state) {
+    case "queued":
+      return "…";
+    case "claimed":
+      return "◐";
+    case "running":
+      return "▸";
+    case "waiting_on_human":
+      return "?";
+    case "completed":
+      return "✓";
+    case "failed":
+      return "✕";
+    case "canceled":
+      return "⊘";
+    default:
+      return "•";
+  }
 }
 
 /** What a review run is ABOUT, in the words the panel can show without a
@@ -176,6 +213,47 @@ export function filterRuns(rows: RunRow[], kind: KindFilter, state: string): Run
   );
 }
 
+/** The segments of the kind selector, in the order they are shown (AC-7).
+ *  Plural words, because each names a set of rows rather than one row's kind —
+ *  the badge in a row is the singular. */
+export const KIND_CHOICES: { value: KindFilter; label: string }[] = [
+  { value: "all", label: "All" },
+  { value: "build", label: "Builds" },
+  { value: "review", label: "Reviews" },
+];
+
+/**
+ * The narrowest pane the runs browser is DESIGNED for (MAIN-556 AC-8).
+ *
+ * Derived, not chosen: it is the sum of the row grid's reserved tracks — the
+ * kind badge, the state column wide enough for the loop's longest state word,
+ * the gaps and the list's padding — plus a floor for the identifier, which is
+ * the one flexible track. At exactly this width every part of line 1 still
+ * fits without any of it truncating.
+ *
+ * Below it the SECONDARY line is what gives way (a container query in
+ * `global.css` hides it); the identifier and the whole state word survive,
+ * because those two are what a scan is for. Rows do not get taller when it
+ * goes: the grid's two rows are fixed tracks, so the row keeps its height and
+ * the list keeps its rhythm.
+ *
+ * `--nook-runs-min-pane` in `global.css` is the same number in the place that
+ * can act on it; `WorkspaceRunsStyles.test.ts` fails if the two drift.
+ */
+export const RUNS_MIN_PANE_PX = 260;
+
+/** How long ago a run was raised, or "" for a timestamp that will not parse —
+ *  a row with a broken date should lose its age, not its whole line. */
+export function runAge(createdAt: string, now: number): string {
+  const at = Date.parse(createdAt);
+  return Number.isNaN(at) ? "" : shortAge(Math.max(0, now - at));
+}
+
+/** Line 2's full text, for the `title` a truncated cell needs (AC-3). */
+export function rowSecondary(row: RunRow): string {
+  return [row.meta, row.reason].filter(Boolean).join(" · ");
+}
+
 /** The section id this panel lives under, and the two ids it replaced. */
 export const RUNS_SECTION = "runs";
 const LEGACY_SECTIONS: Record<string, RunKind> = { builds: "build", reviews: "review" };
@@ -219,11 +297,17 @@ export function WorkspaceRuns({
 }) {
   const [params, setParams] = useSearchParams();
   const [openId, setOpenId] = useState<string | null>(null);
+  // Where the KEYBOARD is in the list, which is not the same as which run is
+  // open (AC-9): arrowing moves this, Enter is what opens. Null until somebody
+  // arrows, so tabbing in lands on the run the pane is already showing rather
+  // than at the top of a list they have scrolled away from.
+  const [cursorId, setCursorId] = useState<string | null>(null);
   // The kind lives in the URL because an old link arrives carrying one; the
   // state filter is a glance at the list you are already looking at, so it
   // stays local rather than growing the URL a second knob nobody links to.
   const [stateFilter, setStateFilter] = useState("all");
   const kind = parseKind(params.get("kind"));
+  const listRef = useRef<HTMLDivElement>(null);
 
   const { data: builds } = useQuery({
     queryKey: ["workspace-builds", workspaceId],
@@ -296,83 +380,174 @@ export function WorkspaceRuns({
     // Absence IS "all": the default belongs in the code, not in every URL.
     if (next === "all") p.delete("kind");
     else p.set("kind", next);
+    // `replace`, so picking a kind is not a navigation (AC-7): the list is
+    // being narrowed in place, and three clicks through the segments must not
+    // cost three presses of the back button to undo.
     setParams(p, { replace: true });
   };
 
+  // Roving focus inside the segmented control, which is what makes a
+  // radiogroup one tab stop instead of three.
+  const onKindKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const step =
+      e.key === "ArrowRight" || e.key === "ArrowDown"
+        ? 1
+        : e.key === "ArrowLeft" || e.key === "ArrowUp"
+          ? -1
+          : 0;
+    if (!step) return;
+    e.preventDefault();
+    const at = KIND_CHOICES.findIndex((c) => c.value === kind);
+    const next = (at + step + KIND_CHOICES.length) % KIND_CHOICES.length;
+    pickKind(KIND_CHOICES[next].value);
+    e.currentTarget.querySelectorAll<HTMLElement>('[role="radio"]')[next]?.focus();
+  };
+
+  const cursorAt = Math.max(
+    0,
+    visible.findIndex((r) => r.id === (cursorId ?? open)),
+  );
+
+  const onListKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const step = e.key === "ArrowDown" ? 1 : e.key === "ArrowUp" ? -1 : 0;
+    if (step) {
+      e.preventDefault();
+      const next = Math.min(visible.length - 1, Math.max(0, cursorAt + step));
+      setCursorId(visible[next]?.id ?? null);
+      listRef.current?.querySelectorAll<HTMLElement>('[role="option"]')[next]?.focus();
+      return;
+    }
+    if (e.key === "Enter" || e.key === " ") {
+      // A row is a <button>, so the browser would click it for us — but then
+      // "move the cursor, then open it" and "open whatever has focus" would be
+      // two paths to one act, and only one of them would ever be tested.
+      e.preventDefault();
+      const row = visible[cursorAt];
+      if (row) setOpenId(row.id);
+    }
+  };
+
+  const now = Date.now();
+
   return (
-    <Panel
-      title="Runs"
-      actions={
-        <>
-          <select
-            className="input small"
-            aria-label="filter by kind"
-            value={kind}
-            onChange={(e) => pickKind(e.target.value as KindFilter)}
-          >
-            <option value="all">all kinds</option>
-            <option value="build">build</option>
-            <option value="review">review</option>
-          </select>
-          <select
-            className="input small"
-            aria-label="filter by state"
-            value={stateOf}
-            onChange={(e) => setStateFilter(e.target.value)}
-          >
-            <option value="all">all states</option>
-            {states.map((s) => (
-              <option key={s} value={s}>
-                {jobStateMeta(s).label}
-              </option>
-            ))}
-          </select>
-        </>
-      }
-    >
+    <Panel title="Runs">
       <div className="reviews-split">
-        <ul className="reviews-runs">
-          {visible.length === 0 ? (
-            <li>
+        {/* Three regions (AC-6): a toolbar that cannot scroll away because it
+            is a grid track of its own, the list that scrolls inside the second
+            track, and the transcript beside them. */}
+        <div className="runs-browser">
+          <div className="runs-toolbar">
+            <div
+              className="runs-kinds"
+              role="radiogroup"
+              aria-label="filter by kind"
+              onKeyDown={onKindKey}
+            >
+              {KIND_CHOICES.map((c) => (
+                <button
+                  key={c.value}
+                  type="button"
+                  role="radio"
+                  aria-checked={kind === c.value}
+                  tabIndex={kind === c.value ? 0 : -1}
+                  className={`runs-kind${kind === c.value ? " is-on" : ""}`}
+                  onClick={() => pickKind(c.value)}
+                >
+                  {c.label}
+                </button>
+              ))}
+            </div>
+            <select
+              className="input small runs-state"
+              aria-label="filter by state"
+              value={stateOf}
+              onChange={(e) => setStateFilter(e.target.value)}
+            >
+              <option value="all">all states</option>
+              {states.map((s) => (
+                <option key={s} value={s}>
+                  {jobStateMeta(s).label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="runs-list">
+            {visible.length === 0 ? (
               <Empty>No run matches this filter.</Empty>
-            </li>
-          ) : (
-            visible.map((r) => {
-              // `jobStateMeta` speaks the loop's tone vocabulary, which has a
-              // `muted` the Pill spells `dim`. Mapped here rather than widened
-              // in the shared component, whose set is the design system's.
-              const tone = pillTone(jobStateMeta(r.state).tone);
-              return (
-                <li key={r.id}>
-                  <button
-                    className={`reviews-run${r.id === open ? " is-open" : ""}`}
-                    onClick={() => setOpenId(r.id)}
-                    data-testid="run-row"
-                    data-kind={r.kind}
-                    data-reason-kind={r.reasonKind}
-                  >
-                    {/* The kind is a WORD, not a colour: colour in this row is
-                        already the state's, and a second palette next to it
-                        would make two claims a reader has to tell apart. */}
-                    <Pill tone="dim">{r.kind}</Pill>
-                    <span className="mono run-label">{r.label}</span>
-                    <Pill tone={tone}>{r.state}</Pill>
-                    <span className="faint small mono">{r.meta}</span>
-                    {/* A second line rather than the meta slot: the reason is a
-                        SENTENCE — it names a node, or the label to set — and
-                        squeezing it into a one-word annotation would truncate
-                        the half that says what to do about it. */}
-                    {r.reason ? (
-                      <span className="faint small run-reason" data-testid="run-reason">
-                        {r.reason}
+            ) : (
+              <div
+                className="runs-options"
+                role="listbox"
+                aria-label="runs"
+                ref={listRef}
+                onKeyDown={onListKey}
+              >
+                {visible.map((r, i) => {
+                  // `jobStateMeta` speaks the loop's tone vocabulary, which has
+                  // a `muted` the design system spells `dim`. Mapped here
+                  // rather than widened in the shared component, whose set is
+                  // the design system's.
+                  const meta = jobStateMeta(r.state);
+                  const tone = pillTone(meta.tone);
+                  const secondary = rowSecondary(r);
+                  return (
+                    <button
+                      key={r.id}
+                      type="button"
+                      role="option"
+                      aria-selected={r.id === open}
+                      tabIndex={i === cursorAt ? 0 : -1}
+                      className={`runs-row${r.id === open ? " is-open" : ""}`}
+                      onClick={() => {
+                        setOpenId(r.id);
+                        setCursorId(r.id);
+                      }}
+                      data-testid="run-row"
+                      data-kind={r.kind}
+                      data-reason-kind={r.reasonKind}
+                    >
+                      {/* The kind is a WORD, not a colour: colour in this row
+                          is already the state's, and a second palette next to
+                          it would make two claims a reader has to tell apart.
+                          `role="img"` so the badge announces as one named thing
+                          — an aria-label on a bare span is not owed to anyone.  */}
+                      <span
+                        className="pill dim runs-row-kind"
+                        role="img"
+                        aria-label={`kind: ${r.kind}`}
+                      >
+                        {r.kind}
                       </span>
-                    ) : null}
-                  </button>
-                </li>
-              );
-            })
-          )}
-        </ul>
+                      <span className="mono runs-row-id" title={r.label}>
+                        {r.label}
+                      </span>
+                      <span
+                        className={`pill ${tone} runs-row-state`}
+                        role="img"
+                        aria-label={`state: ${meta.label}`}
+                      >
+                        <span className="runs-row-glyph">{stateGlyph(r.state)}</span>
+                        {meta.label}
+                      </span>
+                      {/* Line 2 is ONE cell, whatever it holds: the outcome, the
+                          waiting sentence, or both. It is the row's only
+                          truncating text and the first thing a narrow pane
+                          takes away (AC-3, AC-8) — the row's height is the
+                          grid's, so losing it costs no rhythm. */}
+                      <span className="runs-row-meta" title={secondary || undefined}>
+                        {r.meta ? <span className="mono">{r.meta}</span> : null}
+                        {r.reason ? <span data-testid="run-reason">{r.reason}</span> : null}
+                      </span>
+                      <span className="runs-row-time" title={r.createdAt}>
+                        {runAge(r.createdAt, now)}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
         <div className="reviews-transcript" data-testid="run-transcript">
           {/* Above the transcript, not inside it (MAIN-387 AC-7): the branch and
               the PR are what the open run PRODUCED, and reading a log to find
