@@ -27,20 +27,15 @@ pub use state::AppState;
 
 // `sqlx::migrate!` embeds the migration set at COMPILE time, so adding a new
 // `.sql` file does not by itself force a rebuild — this file has to change too
-// for the new migration to be embedded and applied. Migrations embedded:
-// 0001_init, 0002_add_person_id, 0003_backfill_tenant_members,
-// 0004_add_task_archived_at, 0005_invites, 0006_add_email_verified,
-// 0007_email_verification_tokens, 0008_mail_sends, 0009_task_type,
-// 0010_review_column, 0011_user_notebook, 0012_task_visibility,
-// 0013_task_parent, 0014_managed_content, 0015_board_automation,
-// 0016_node_owner, 0017_node_shared, 0018_work_queue, 0019_notebook_seal,
-// 0020_loop_jobs, 0021_loop_job_queued_reason, 0022_backfill_auth_mode,
-// 0023_interactions, 0024_node_workspace_missing_at,
-// 0025_checkout_kind_and_session_checkout, 0026_workspace_git_remote_url,
-// 0027_task_checkout_id, 0028_loop_job_seed, 0029_node_labels_taints,
-// 0030_workspace_session_spec, 0031_session_managed,
-// 0032_managed_session_per_checkout, 0033_task_claim_lease,
-// 0034_session_port_leases, 0035_operator_tenant_manage.
+// for the new migration to be embedded and applied. TOUCH IT IN THE SAME COMMIT
+// as the migration, or the container keeps running the old set and silently
+// skips yours.
+//
+// It used to enumerate every embedded version here, which is what the line
+// below replaces: the list froze at 0035 while the directory went on to 0069,
+// so a reader checking whether their file was embedded was reading a comment
+// that had been wrong for thirty-four migrations. The directory is the list.
+// Head of the set: 0069_forge_webhooks (MAIN-554).
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 /// The SQLite track (MAIN-236 scaffolded it; MAIN-196 boots it). A parallel set,

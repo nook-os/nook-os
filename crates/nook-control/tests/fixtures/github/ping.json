@@ -1,0 +1,24 @@
+{
+  "zen": "Non-blocking is better than blocking.",
+  "hook_id": 574839201,
+  "hook": {
+    "type": "Repository",
+    "id": 574839201,
+    "active": true,
+    "events": ["pull_request", "check_suite", "pull_request_review", "issue_comment"],
+    "config": {
+      "content_type": "json",
+      "insecure_ssl": "0",
+      "url": "https://nook.example/api/v1/hooks/github/00000000-0000-0000-0000-000000000000"
+    }
+  },
+  "repository": {
+    "id": 42424242,
+    "name": "api",
+    "full_name": "acme/api",
+    "private": true,
+    "owner": { "login": "acme", "type": "Organization" },
+    "default_branch": "main"
+  },
+  "sender": { "login": "acme-admin", "type": "User" }
+}

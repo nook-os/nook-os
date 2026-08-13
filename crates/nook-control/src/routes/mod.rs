@@ -8,6 +8,7 @@ pub mod events;
 pub mod feedback;
 pub mod gitops;
 pub mod health;
+pub mod hooks;
 pub mod interactions;
 pub mod invites;
 pub mod jobs;
@@ -166,6 +167,12 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/workspaces/{id}/gh-token",
             get(workspaces::get_gh_token).put(workspaces::set_gh_token),
+        )
+        .route(
+            "/workspaces/{id}/webhook-secret",
+            get(workspaces::get_webhook)
+                .put(workspaces::set_webhook_secret)
+                .delete(workspaces::clear_webhook_secret),
         )
         .route(
             "/workspaces/{id}/review-loop",
@@ -533,6 +540,18 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/ws/sessions/{id}/attach",
             get(crate::ws::attach::attach_ws),
+        )
+        // Unauthenticated: GitHub carries no session — the HMAC over the raw
+        // body is the authentication, and the workspace in the path is what
+        // names the tenant (MAIN-554).
+        //
+        // The body limit is EXPLICIT and not axum's 2 MiB default, which
+        // silently rejects the larger deliveries GitHub genuinely sends — a
+        // `check_suite` on a big repo, a `push` with many commits. 8 MiB is
+        // GitHub's own documented ceiling for a delivery.
+        .route(
+            "/hooks/github/{workspace_id}",
+            post(hooks::github).layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
         )
         .route("/dispatcher/suggest", post(dispatcher::suggest))
         .route("/schedule/node", get(schedule::node))

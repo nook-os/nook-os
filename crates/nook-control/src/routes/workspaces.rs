@@ -5,7 +5,7 @@ use nook_types::*;
 use crate::auth::AuthCtx;
 use crate::error::{ApiError, ApiResult};
 use crate::events::{self, EventDraft};
-use crate::services::{identity::slugify, workspace_queries};
+use crate::services::{forge_webhook, identity::slugify, workspace_queries};
 use crate::state::AppState;
 use nook_proto::ControlToNode;
 
@@ -482,6 +482,103 @@ async fn check_forge_token(
         .check_access(&repo)
         .await
         .map_err(|refusal| ApiError::BadRequest(refusal.to_string()))
+}
+
+/// `GET /api/v1/workspaces/{id}/webhook-secret` — is a webhook configured, and
+/// where does GitHub deliver (MAIN-554)?
+///
+/// Reports the FACT and the URL, never the secret. There is no read path that
+/// reproduces it: `PUT` is the one response that carries a value, and it
+/// carries the one it just generated.
+#[utoipa::path(get, path = "/api/v1/workspaces/{id}/webhook-secret",
+    operation_id = "get_workspace_webhook",
+    params(("id" = String, Path,)),
+    responses((status = 200, body = WorkspaceWebhookState), (status = 404)))]
+pub async fn get_webhook(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<WorkspaceId>,
+) -> ApiResult<Json<WorkspaceWebhookState>> {
+    auth.require_user()?;
+    if state.workspaces.get(auth.tenant_id, id).await?.is_none() {
+        return Err(ApiError::NotFound);
+    }
+    Ok(Json(WorkspaceWebhookState {
+        set: state
+            .workspaces
+            .has_webhook_secret(auth.tenant_id, id)
+            .await?,
+        delivery_url: forge_webhook::delivery_url(&state.cfg.public_base_url, id),
+    }))
+}
+
+/// `PUT /api/v1/workspaces/{id}/webhook-secret` — generate a secret and return
+/// it EXACTLY ONCE (MAIN-554 AC-3).
+///
+/// The server generates rather than accepting a pasted value, which is the one
+/// place this departs from `set_gh_token`'s shape. A forge token is minted
+/// elsewhere and can only be pasted; a webhook secret is a shared secret with
+/// no other home, so generating it here means it is random, long enough, and
+/// never typed twice — the operator pastes it INTO GitHub rather than out of
+/// it. Replacing an existing one is the same call: rotation and first
+/// configuration are the same operation.
+#[utoipa::path(put, path = "/api/v1/workspaces/{id}/webhook-secret",
+    operation_id = "set_workspace_webhook",
+    params(("id" = String, Path,)),
+    responses((status = 200, body = WorkspaceWebhookSecret), (status = 404)))]
+pub async fn set_webhook_secret(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<WorkspaceId>,
+) -> ApiResult<Json<WorkspaceWebhookSecret>> {
+    // A person configures a credential; a node token is not a person — the
+    // same rule every workspace declaration applies.
+    auth.require_user()?;
+    let secret = forge_webhook::generate_secret();
+    let sealed = state
+        .vault
+        .encrypt(secret.as_bytes())
+        .map_err(|_| ApiError::BadRequest("could not seal the secret".into()))?;
+    if !state
+        .workspaces
+        .set_webhook_secret_sealed(auth.tenant_id, id, Some(sealed))
+        .await?
+    {
+        return Err(ApiError::NotFound);
+    }
+    Ok(Json(WorkspaceWebhookSecret {
+        secret,
+        delivery_url: forge_webhook::delivery_url(&state.cfg.public_base_url, id),
+    }))
+}
+
+/// `DELETE /api/v1/workspaces/{id}/webhook-secret` — stop receiving.
+///
+/// With no secret the receiver answers 404 rather than 401, so a hook left
+/// configured in GitHub after this reads as "there is nothing here" rather than
+/// "your signature is wrong" — the former is the true statement and the one an
+/// operator can act on.
+#[utoipa::path(delete, path = "/api/v1/workspaces/{id}/webhook-secret",
+    operation_id = "clear_workspace_webhook",
+    params(("id" = String, Path,)),
+    responses((status = 200, body = WorkspaceWebhookState), (status = 404)))]
+pub async fn clear_webhook_secret(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<WorkspaceId>,
+) -> ApiResult<Json<WorkspaceWebhookState>> {
+    auth.require_user()?;
+    if !state
+        .workspaces
+        .set_webhook_secret_sealed(auth.tenant_id, id, None)
+        .await?
+    {
+        return Err(ApiError::NotFound);
+    }
+    Ok(Json(WorkspaceWebhookState {
+        set: false,
+        delivery_url: forge_webhook::delivery_url(&state.cfg.public_base_url, id),
+    }))
 }
 
 /// `GET /api/v1/workspaces/{id}/review-loop` — the ceiling on review loops for

@@ -1329,6 +1329,75 @@
         }
       }
     },
+    "/api/v1/hooks/github/{workspace_id}": {
+      "post": {
+        "tags": [
+          "crate::routes::hooks"
+        ],
+        "summary": "`POST /api/v1/hooks/github/{workspace_id}` — one signed delivery.",
+        "description": "**Takes no `AuthCtx`, which is how a route opts out of auth here** (the\nprecedent is `/invites/preview`). GitHub carries no session and no tenant;\nthe signature is the authentication, and the workspace in the path is what\nnames the tenant. Nothing else about the request is trusted.\n\nThe outcomes, each distinct and each meaning something an operator can act\non from GitHub's own delivery log:\n\n| code | when |\n|------|------|\n| 202  | signed, consistent, recorded |\n| 200  | a redelivery of something already recorded — no second row |\n| 401  | no signature, or one that does not verify |\n| 404  | no such workspace, or no secret configured on it |\n| 413  | body over the route's 8 MiB limit — no row |\n| 422  | the payload names a different repository — recorded as an error |\n\n404 rather than 401 for a workspace with no secret is deliberate: \"there is\nnothing here\" is the true statement and the one that tells an operator to\ngenerate a secret, where a 401 would send them to check the one they pasted.\n(There is no archived state on a workspace today, so \"unknown or archived\"\nreduces to the row not being there.)",
+        "operationId": "receive_github_webhook",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForgeDeliveryAck"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForgeDeliveryAck"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          },
+          "413": {
+            "description": ""
+          },
+          "422": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForgeDeliveryAck"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/interactions": {
       "get": {
         "tags": [
@@ -9393,6 +9462,107 @@
         }
       }
     },
+    "/api/v1/workspaces/{id}/webhook-secret": {
+      "get": {
+        "tags": [
+          "crate::routes::workspaces"
+        ],
+        "summary": "`GET /api/v1/workspaces/{id}/webhook-secret` — is a webhook configured, and\nwhere does GitHub deliver (MAIN-554)?",
+        "description": "Reports the FACT and the URL, never the secret. There is no read path that\nreproduces it: `PUT` is the one response that carries a value, and it\ncarries the one it just generated.",
+        "operationId": "get_workspace_webhook",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceWebhookState"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "crate::routes::workspaces"
+        ],
+        "summary": "`PUT /api/v1/workspaces/{id}/webhook-secret` — generate a secret and return\nit EXACTLY ONCE (MAIN-554 AC-3).",
+        "description": "The server generates rather than accepting a pasted value, which is the one\nplace this departs from `set_gh_token`'s shape. A forge token is minted\nelsewhere and can only be pasted; a webhook secret is a shared secret with\nno other home, so generating it here means it is random, long enough, and\nnever typed twice — the operator pastes it INTO GitHub rather than out of\nit. Replacing an existing one is the same call: rotation and first\nconfiguration are the same operation.",
+        "operationId": "set_workspace_webhook",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceWebhookSecret"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "crate::routes::workspaces"
+        ],
+        "summary": "`DELETE /api/v1/workspaces/{id}/webhook-secret` — stop receiving.",
+        "description": "With no secret the receiver answers 404 rather than 401, so a hook left\nconfigured in GitHub after this reads as \"there is nothing here\" rather than\n\"your signature is wrong\" — the former is the true statement and the one an\noperator can act on.",
+        "operationId": "clear_workspace_webhook",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceWebhookState"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/workspaces/{id}/worktrees": {
       "post": {
         "tags": [
@@ -12498,6 +12668,31 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "ForgeDeliveryAck": {
+        "type": "object",
+        "description": "What the receiver tells GitHub it did with a delivery (MAIN-554).\n\n`duplicate` is the difference between the 202 a first delivery gets and the\n200 a redelivery gets — GitHub's own UI shows the status code, so an\noperator pressing **Redeliver** can see that it was recognised rather than\nre-recorded.",
+        "required": [
+          "delivery_id",
+          "event",
+          "status",
+          "duplicate"
+        ],
+        "properties": {
+          "delivery_id": {
+            "type": "string"
+          },
+          "duplicate": {
+            "type": "boolean"
+          },
+          "event": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "description": "`received` | `ignored` | `error`."
           }
         }
       },
@@ -19456,6 +19651,39 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "WorkspaceWebhookSecret": {
+        "type": "object",
+        "description": "A freshly generated webhook secret, returned EXACTLY ONCE (MAIN-554).\n\nThe value is sealed with the vault on the way in and there is no read path\nthat reproduces it, so a caller that loses this response rotates rather than\nrecovers. That is the point: a secret nothing can re-read is a secret no\nlater bug can leak.",
+        "required": [
+          "secret",
+          "delivery_url"
+        ],
+        "properties": {
+          "delivery_url": {
+            "type": "string"
+          },
+          "secret": {
+            "type": "string"
+          }
+        }
+      },
+      "WorkspaceWebhookState": {
+        "type": "object",
+        "description": "Whether a workspace holds a webhook secret, and the URL GitHub delivers to\n(MAIN-554). Never the secret itself — [`WorkspaceWebhookSecret`] is the one\nresponse that carries it, and only the response that generated it.",
+        "required": [
+          "set",
+          "delivery_url"
+        ],
+        "properties": {
+          "delivery_url": {
+            "type": "string",
+            "description": "`{PUBLIC_BASE_URL}/api/v1/hooks/github/{workspace_id}` — built here so\nan operator pastes it rather than assembling it, and so it stays right\nwhen the deployment's public URL changes."
+          },
+          "set": {
+            "type": "boolean"
           }
         }
       },

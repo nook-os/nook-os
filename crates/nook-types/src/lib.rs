@@ -1176,6 +1176,45 @@ pub struct WorkspaceGhTokenState {
     pub set: bool,
 }
 
+/// Whether a workspace holds a webhook secret, and the URL GitHub delivers to
+/// (MAIN-554). Never the secret itself — [`WorkspaceWebhookSecret`] is the one
+/// response that carries it, and only the response that generated it.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WorkspaceWebhookState {
+    pub set: bool,
+    /// `{PUBLIC_BASE_URL}/api/v1/hooks/github/{workspace_id}` — built here so
+    /// an operator pastes it rather than assembling it, and so it stays right
+    /// when the deployment's public URL changes.
+    pub delivery_url: String,
+}
+
+/// A freshly generated webhook secret, returned EXACTLY ONCE (MAIN-554).
+///
+/// The value is sealed with the vault on the way in and there is no read path
+/// that reproduces it, so a caller that loses this response rotates rather than
+/// recovers. That is the point: a secret nothing can re-read is a secret no
+/// later bug can leak.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WorkspaceWebhookSecret {
+    pub secret: String,
+    pub delivery_url: String,
+}
+
+/// What the receiver tells GitHub it did with a delivery (MAIN-554).
+///
+/// `duplicate` is the difference between the 202 a first delivery gets and the
+/// 200 a redelivery gets — GitHub's own UI shows the status code, so an
+/// operator pressing **Redeliver** can see that it was recognised rather than
+/// re-recorded.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ForgeDeliveryAck {
+    pub delivery_id: String,
+    pub event: String,
+    /// `received` | `ignored` | `error`.
+    pub status: String,
+    pub duplicate: bool,
+}
+
 /// A workspace's review-loop declaration (MAIN-445), as the API reports it.
 ///
 /// `max_replicas: null` is UNSET — the build's default ceiling of one applies.

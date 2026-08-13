@@ -1,0 +1,25 @@
+{
+  "action": "closed",
+  "number": 441,
+  "pull_request": {
+    "id": 2233445566,
+    "number": 441,
+    "state": "closed",
+    "title": "Document and enforce the workspace forge token's permissions (MAIN-469).",
+    "merged": true,
+    "merge_commit_sha": "afc97f5c88629292c5f716bcffbe7277ad254db6",
+    "html_url": "https://github.com/acme/api/pull/441",
+    "head": { "ref": "main-469-forge-token-permissions", "sha": "1111111111111111111111111111111111111111" },
+    "base": { "ref": "main", "sha": "2222222222222222222222222222222222222222" },
+    "user": { "login": "acme-bot", "type": "Bot" }
+  },
+  "repository": {
+    "id": 42424242,
+    "name": "api",
+    "full_name": "acme/api",
+    "private": true,
+    "owner": { "login": "acme", "type": "Organization" },
+    "default_branch": "main"
+  },
+  "sender": { "login": "acme-bot", "type": "Bot" }
+}

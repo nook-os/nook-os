@@ -612,6 +612,47 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/hooks/github/{workspace_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/hooks/github/{workspace_id}` — one signed delivery.
+         * @description **Takes no `AuthCtx`, which is how a route opts out of auth here** (the
+         *     precedent is `/invites/preview`). GitHub carries no session and no tenant;
+         *     the signature is the authentication, and the workspace in the path is what
+         *     names the tenant. Nothing else about the request is trusted.
+         *
+         *     The outcomes, each distinct and each meaning something an operator can act
+         *     on from GitHub's own delivery log:
+         *
+         *     | code | when |
+         *     |------|------|
+         *     | 202  | signed, consistent, recorded |
+         *     | 200  | a redelivery of something already recorded — no second row |
+         *     | 401  | no signature, or one that does not verify |
+         *     | 404  | no such workspace, or no secret configured on it |
+         *     | 413  | body over the route's 8 MiB limit — no row |
+         *     | 422  | the payload names a different repository — recorded as an error |
+         *
+         *     404 rather than 401 for a workspace with no secret is deliberate: "there is
+         *     nothing here" is the true statement and the one that tells an operator to
+         *     generate a secret, where a 401 would send them to check the one they pasted.
+         *     (There is no archived state on a workspace today, so "unknown or archived"
+         *     reduces to the row not being there.)
+         */
+        post: operations["receive_github_webhook"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/interactions": {
         parameters: {
             query?: never;
@@ -3971,6 +4012,47 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{id}/webhook-secret": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/workspaces/{id}/webhook-secret` — is a webhook configured, and
+         *     where does GitHub deliver (MAIN-554)?
+         * @description Reports the FACT and the URL, never the secret. There is no read path that
+         *     reproduces it: `PUT` is the one response that carries a value, and it
+         *     carries the one it just generated.
+         */
+        get: operations["get_workspace_webhook"];
+        /**
+         * `PUT /api/v1/workspaces/{id}/webhook-secret` — generate a secret and return
+         *     it EXACTLY ONCE (MAIN-554 AC-3).
+         * @description The server generates rather than accepting a pasted value, which is the one
+         *     place this departs from `set_gh_token`'s shape. A forge token is minted
+         *     elsewhere and can only be pasted; a webhook secret is a shared secret with
+         *     no other home, so generating it here means it is random, long enough, and
+         *     never typed twice — the operator pastes it INTO GitHub rather than out of
+         *     it. Replacing an existing one is the same call: rotation and first
+         *     configuration are the same operation.
+         */
+        put: operations["set_workspace_webhook"];
+        post?: never;
+        /**
+         * `DELETE /api/v1/workspaces/{id}/webhook-secret` — stop receiving.
+         * @description With no secret the receiver answers 404 rather than 401, so a hook left
+         *     configured in GitHub after this reads as "there is nothing here" rather than
+         *     "your signature is wrong" — the former is the true statement and the one an
+         *     operator can act on.
+         */
+        delete: operations["clear_workspace_webhook"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{id}/worktrees": {
         parameters: {
             query?: never;
@@ -5487,6 +5569,21 @@ export interface components {
             session_name: string;
             workspace_id?: null | components["schemas"]["WorkspaceId"];
             workspace_name?: string | null;
+        };
+        /**
+         * @description What the receiver tells GitHub it did with a delivery (MAIN-554).
+         *
+         *     `duplicate` is the difference between the 202 a first delivery gets and the
+         *     200 a redelivery gets — GitHub's own UI shows the status code, so an
+         *     operator pressing **Redeliver** can see that it was recognised rather than
+         *     re-recorded.
+         */
+        ForgeDeliveryAck: {
+            delivery_id: string;
+            duplicate: boolean;
+            event: string;
+            /** @description `received` | `ignored` | `error`. */
+            status: string;
         };
         /**
          * @description Why a workspace's forge poll last failed (MAIN-469).
@@ -8857,6 +8954,32 @@ export interface components {
             /** Format: date-time */
             updated_at: string;
         };
+        /**
+         * @description A freshly generated webhook secret, returned EXACTLY ONCE (MAIN-554).
+         *
+         *     The value is sealed with the vault on the way in and there is no read path
+         *     that reproduces it, so a caller that loses this response rotates rather than
+         *     recovers. That is the point: a secret nothing can re-read is a secret no
+         *     later bug can leak.
+         */
+        WorkspaceWebhookSecret: {
+            delivery_url: string;
+            secret: string;
+        };
+        /**
+         * @description Whether a workspace holds a webhook secret, and the URL GitHub delivers to
+         *     (MAIN-554). Never the secret itself — [`WorkspaceWebhookSecret`] is the one
+         *     response that carries it, and only the response that generated it.
+         */
+        WorkspaceWebhookState: {
+            /**
+             * @description `{PUBLIC_BASE_URL}/api/v1/hooks/github/{workspace_id}` — built here so
+             *     an operator pastes it rather than assembling it, and so it stays right
+             *     when the deployment's public URL changes.
+             */
+            delivery_url: string;
+            set: boolean;
+        };
         WorktreeRequest: {
             branch: string;
             node_id: components["schemas"]["NodeId"];
@@ -9979,6 +10102,65 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    receive_github_webhook: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": unknown;
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ForgeDeliveryAck"];
+                };
+            };
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ForgeDeliveryAck"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ForgeDeliveryAck"];
+                };
             };
         };
     };
@@ -16142,6 +16324,87 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_workspace_webhook: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceWebhookState"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    set_workspace_webhook: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceWebhookSecret"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    clear_workspace_webhook: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceWebhookState"];
+                };
             };
             404: {
                 headers: {

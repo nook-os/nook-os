@@ -211,6 +211,155 @@ export function WorkspaceForgeToken({ workspaceId }: { workspaceId: string }) {
   );
 }
 
+/** Inbound webhooks from the forge (MAIN-554).
+ *
+ *  The opposite of the panel above it: that one takes a credential GitHub
+ *  minted, this one mints a credential GitHub is given. So the value is
+ *  generated server-side and shown EXACTLY ONCE — there is no read path that
+ *  reproduces it, which is what makes losing this box a rotation rather than a
+ *  leak waiting to happen.
+ *
+ *  Registration is by hand, deliberately (NG-3): the documented PAT does not
+ *  carry `admin:repo_hook` and this card does not widen it. Everything an
+ *  operator has to paste is therefore on screen — the URL, the secret, and the
+ *  events to subscribe. */
+export function WorkspaceWebhooks({ workspaceId }: { workspaceId: string }) {
+  const queryClient = useQueryClient();
+  const [busy, setBusy] = useState(false);
+  const [shown, setShown] = useState<string | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
+
+  const { data: state } = useQuery({
+    queryKey: ["workspace-webhook", workspaceId],
+    queryFn: async () =>
+      (
+        await api.GET("/api/v1/workspaces/{id}/webhook-secret", {
+          params: { path: { id: workspaceId } },
+        })
+      ).data ?? null,
+  });
+
+  const copy = async (what: string, value: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(what);
+      window.setTimeout(() => setCopied(null), 1500);
+    } catch {
+      // Clipboard can be refused (insecure origin, denied permission). Both
+      // values stay on screen to select by hand, so nothing is lost.
+    }
+  };
+
+  const generate = async () => {
+    if (
+      state?.set &&
+      !(await askConfirm({
+        title: "Rotate the webhook secret?",
+        description:
+          "The current secret stops working the moment this is generated. GitHub will show failed deliveries until you paste the new one into the repository's webhook settings.",
+        confirmLabel: "rotate",
+        danger: true,
+      }))
+    )
+      return;
+    setBusy(true);
+    const { data, error } = await api.PUT("/api/v1/workspaces/{id}/webhook-secret", {
+      params: { path: { id: workspaceId } },
+    });
+    setBusy(false);
+    if (error || !data) {
+      await notify("Could not generate a secret", JSON.stringify(error));
+      return;
+    }
+    setShown(data.secret);
+    queryClient.invalidateQueries({ queryKey: ["workspace-webhook", workspaceId] });
+  };
+
+  const clear = async () => {
+    if (
+      !(await askConfirm({
+        title: "Stop receiving webhooks?",
+        description:
+          "Deliveries for this workspace will be refused until a new secret is generated.",
+        confirmLabel: "clear",
+        danger: true,
+      }))
+    )
+      return;
+    setBusy(true);
+    await api.DELETE("/api/v1/workspaces/{id}/webhook-secret", {
+      params: { path: { id: workspaceId } },
+    });
+    setBusy(false);
+    setShown(null);
+    queryClient.invalidateQueries({ queryKey: ["workspace-webhook", workspaceId] });
+  };
+
+  return (
+    <Panel title="webhooks">
+      <div className="field">
+        <label>
+          Inbound deliveries from GitHub{" "}
+          {state?.set ? (
+            <Pill tone="ok">secret set</Pill>
+          ) : (
+            <Pill tone="dim">not configured</Pill>
+          )}
+        </label>
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <code className="mono bright" data-testid="webhook-delivery-url" style={{ userSelect: "all", flex: 1, overflowX: "auto" }}>
+            {state?.delivery_url ?? "…"}
+          </code>
+          <button
+            className="btn small"
+            disabled={!state?.delivery_url}
+            onClick={() => copy("url", state!.delivery_url)}
+          >
+            {copied === "url" ? "copied" : "copy url"}
+          </button>
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 6 }}>
+        <button className="btn primary small" disabled={busy} onClick={generate}>
+          {state?.set ? "rotate secret" : "generate secret"}
+        </button>
+        {state?.set && (
+          <button className="btn small" disabled={busy} onClick={clear}>
+            clear
+          </button>
+        )}
+      </div>
+      {shown && (
+        <div className="field" data-testid="webhook-secret-once">
+          <label>
+            <Pill tone="warn">shown only once</Pill> Paste this into GitHub now — it
+            cannot be read back, only replaced.
+          </label>
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <code className="mono bright" style={{ userSelect: "all", flex: 1, overflowX: "auto" }}>
+              {shown}
+            </code>
+            <button className="btn small" onClick={() => copy("secret", shown)}>
+              {copied === "secret" ? "copied" : "copy secret"}
+            </button>
+            <button className="btn small" title="hide it" onClick={() => setShown(null)}>
+              done
+            </button>
+          </div>
+        </div>
+      )}
+      <div className="muted">
+        In the repository: <b>Settings → Webhooks → Add webhook</b>. Paste the URL
+        above, paste the secret, set content type to <code>application/json</code>,
+        and subscribe to <code>pull_request</code>, <code>check_suite</code>,{" "}
+        <code>pull_request_review</code> and <code>issue_comment</code>. GitHub
+        sends a <code>ping</code> on save — a green <b>202</b> means it arrived.
+        Deliveries are recorded and nothing acts on them yet.
+      </div>
+    </Panel>
+  );
+}
+
 /**
  * One click from a repo to a Loop page with a seed box (MAIN-298).
  *
@@ -690,6 +839,13 @@ export function WorkspaceDetail() {
           <WorkspaceForgeToken workspaceId={ws.id} />
         </div>
       ),
+    },
+    {
+      id: "webhooks",
+      title: "Webhooks",
+      group: "Repo",
+      keywords: ["webhook", "hook", "github", "delivery", "secret", "ping", "events", "inbound"],
+      render: () => <WorkspaceWebhooks workspaceId={ws.id} />,
     },
     {
       id: "sessions",

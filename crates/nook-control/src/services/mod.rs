@@ -79,6 +79,7 @@ pub mod build_loop;
 pub mod claim_reaper;
 pub mod discovery;
 pub mod forge;
+pub mod forge_webhook;
 pub mod identity;
 pub mod interactions;
 pub mod job_dispatch;
