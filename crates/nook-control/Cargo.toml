@@ -82,4 +82,8 @@ nook-testkit = { workspace = true }
 # The notebook seal test (MAIN-100) fabricates a client blob with
 # `crypto::seal_with_passphrase` and base64-encodes it for the seal request.
 base64 = { workspace = true }
+# A real WebSocket client for the tunnel upgrade tests (MAIN-10). `oneshot`
+# cannot reach them: the `101` is only half of an upgrade, and the half that
+# matters exists only once a connection has actually been upgraded.
+tokio-tungstenite = { workspace = true }
 
