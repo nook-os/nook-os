@@ -1304,6 +1304,44 @@ table.nook-table tr.clickable { cursor: pointer; }
   color: var(--nook-fg);
 }
 
+/* Health tab: one row per check (MAIN-570). A row is a BUTTON so a non-zero
+   check is reachable by keyboard and reads as the link it is; a zero row is the
+   same button, disabled — an all-zero board must look healthy, not empty. */
+.board-health { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow-y: auto; }
+.board-health-intro { padding: 8px 10px; border-bottom: 1px solid var(--nook-border); }
+.board-health-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--nook-border);
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+}
+.board-health-row:hover:not(:disabled) { background: var(--nook-bg-raised); }
+.board-health-row:disabled { cursor: default; }
+/* The count is the number the eye lands on, so it gets a fixed column and does
+   not move as labels change length. */
+.board-health-count {
+  flex: 0 0 auto;
+  min-width: 28px;
+  text-align: right;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--nook-warn);
+}
+.board-health-row.zero .board-health-count { color: var(--nook-fg-faint); font-weight: 400; }
+.board-health-text { flex: 0 0 260px; display: flex; flex-direction: column; gap: 1px; }
+.board-health-label { color: var(--nook-fg-bright); }
+.board-health-why { font-size: 11px; }
+.board-health-keys { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; flex: 1; }
+
 /* Backlog tab: a dense prioritized list, not columns (MAIN-82). */
 .backlog {
   display: flex;

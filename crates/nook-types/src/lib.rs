@@ -3139,6 +3139,79 @@ pub struct WorkspaceDetail {
     pub locations: Vec<WorkspaceLocation>,
 }
 
+// ── Board health (MAIN-570) ──────────────────────────────────────────────────
+
+/// One of the four board states that make a card read as one thing while
+/// behaving as another (MAIN-570).
+///
+/// A name on the wire rather than a shape, because the Health tab links each
+/// check to a backlog filtered by it and only the NAME travels in the URL
+/// (`?view=backlog&health=done_agent_ready`) — the ids are re-fetched from this
+/// endpoint on the other side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BoardHealthCheckKind {
+    /// Archived while unfinished: off every listing and unpickable by the loop,
+    /// so the work is simply lost.
+    ArchivedNotDone,
+    /// Finished, still labelled ready to build.
+    DoneAgentReady,
+    /// An epic whose every remaining child is finished — nothing left in it.
+    EpicsCloseable,
+    /// An epic with no children at all.
+    EpicsEmpty,
+}
+
+impl BoardHealthCheckKind {
+    /// Every check, in the order the report presents them. The one definition of
+    /// both the set and its order, so a check cannot be added to the report and
+    /// forgotten by the query, or listed twice in two different orders.
+    pub const ALL: [Self; 4] = [
+        Self::ArchivedNotDone,
+        Self::DoneAgentReady,
+        Self::EpicsCloseable,
+        Self::EpicsEmpty,
+    ];
+}
+
+/// A card a check found: enough to name it in a report and to link to it.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BoardHealthTask {
+    pub id: TaskId,
+    /// `MAIN-42`. `None` only for a card created before keys existed.
+    pub key: Option<String>,
+}
+
+/// One check's result.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BoardHealthCheck {
+    pub check: BoardHealthCheckKind,
+    /// Always `tasks.len()`, and set only by [`BoardHealthCheck::of`] so the two
+    /// cannot drift into disagreeing about the same check.
+    pub count: i64,
+    pub tasks: Vec<BoardHealthTask>,
+}
+
+impl BoardHealthCheck {
+    pub fn of(check: BoardHealthCheckKind, tasks: Vec<BoardHealthTask>) -> Self {
+        Self {
+            check,
+            count: tasks.len() as i64,
+            tasks,
+        }
+    }
+}
+
+/// A board's health report: every check, including the ones that found nothing.
+///
+/// A zero-count check is present rather than omitted — an all-zero board must
+/// read as healthy, not as a report that failed to render (AC-7).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BoardHealth {
+    pub board_id: BoardId,
+    pub checks: Vec<BoardHealthCheck>,
+}
+
 // ── Mission Control overview (MAIN-226) ──────────────────────────────────────
 
 /// The whole fleet in one payload: every workspace the caller can see anything

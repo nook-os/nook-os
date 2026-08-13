@@ -359,6 +359,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/boards/{id}/health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The board's health report (MAIN-570): the four states that make a card read
+         *     as one thing while behaving as another, none of which any existing task
+         *     filter can express.
+         * @description Read-only by construction — it computes nothing to act on and offers no
+         *     remediation (NG-3). The Health tab links each non-zero check to the backlog
+         *     filtered by it, and the existing bulk toolbar does the fixing there.
+         */
+        get: operations["board_health"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/boards/{id}/tasks": {
         parameters: {
             query?: never;
@@ -4382,6 +4406,44 @@ export interface components {
             board: components["schemas"]["Board"];
             columns: components["schemas"]["BoardColumn"][];
             tasks: components["schemas"]["TaskItem"][];
+        };
+        /**
+         * @description A board's health report: every check, including the ones that found nothing.
+         *
+         *     A zero-count check is present rather than omitted — an all-zero board must
+         *     read as healthy, not as a report that failed to render (AC-7).
+         */
+        BoardHealth: {
+            board_id: components["schemas"]["BoardId"];
+            checks: components["schemas"]["BoardHealthCheck"][];
+        };
+        /** @description One check's result. */
+        BoardHealthCheck: {
+            check: components["schemas"]["BoardHealthCheckKind"];
+            /**
+             * Format: int64
+             * @description Always `tasks.len()`, and set only by [`BoardHealthCheck::of`] so the two
+             *     cannot drift into disagreeing about the same check.
+             */
+            count: number;
+            tasks: components["schemas"]["BoardHealthTask"][];
+        };
+        /**
+         * @description One of the four board states that make a card read as one thing while
+         *     behaving as another (MAIN-570).
+         *
+         *     A name on the wire rather than a shape, because the Health tab links each
+         *     check to a backlog filtered by it and only the NAME travels in the URL
+         *     (`?view=backlog&health=done_agent_ready`) — the ids are re-fetched from this
+         *     endpoint on the other side.
+         * @enum {string}
+         */
+        BoardHealthCheckKind: "archived_not_done" | "done_agent_ready" | "epics_closeable" | "epics_empty";
+        /** @description A card a check found: enough to name it in a report and to link to it. */
+        BoardHealthTask: {
+            id: components["schemas"]["TaskId"];
+            /** @description `MAIN-42`. `None` only for a card created before keys existed. */
+            key?: string | null;
         };
         /** Format: uuid */
         BoardId: string;
@@ -9739,6 +9801,33 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BoardColumn"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    board_health: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BoardHealth"];
                 };
             };
             404: {
