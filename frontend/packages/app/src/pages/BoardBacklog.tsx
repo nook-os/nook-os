@@ -394,6 +394,7 @@ export function BoardBacklog({
   columns,
   members,
   onBulk,
+  bucketLabel = "No epic",
 }: {
   groups: BacklogGroups;
   colTypeById: Map<string, string | undefined>;
@@ -425,6 +426,11 @@ export function BoardBacklog({
   /** Apply one bulk action over the current selection; resolves to the one-line
    *  summary to show (or null on a no-op / failure). */
   onBulk: (action: string, value?: string) => Promise<string | null>;
+  /** What to call the flat bucket. "No epic" describes the refinement queue it
+   *  normally holds; a health-filtered backlog (MAIN-570 AC-8) puts a check's
+   *  cards there instead, and calling those "No epic" would name them by the
+   *  one thing the list is not about. */
+  bucketLabel?: string;
 }) {
   const [collapsed, toggle] = useCollapsed();
   // While filtering/searching, treat every section as expanded so a match never
@@ -627,7 +633,7 @@ export function BoardBacklog({
           {/* No chevron — there is no epic here to collapse — but its width is
               reserved, or this head sits 26px left of every real one (AC-3). */}
           <span className="backlog-epic-chevron-spacer" aria-hidden="true" />
-          <span className="backlog-epic-title faint">No epic</span>
+          <span className="backlog-epic-title faint">{bucketLabel}</span>
           <span className="backlog-epic-progress faint">{groups.noEpic.length}</span>
         </div>
         <div className="backlog-epic-body">

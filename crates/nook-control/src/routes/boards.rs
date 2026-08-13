@@ -117,6 +117,40 @@ pub async fn get_one(
     Ok(Json(detail))
 }
 
+/// The board's health report (MAIN-570): the four states that make a card read
+/// as one thing while behaving as another, none of which any existing task
+/// filter can express.
+///
+/// Read-only by construction — it computes nothing to act on and offers no
+/// remediation (NG-3). The Health tab links each non-zero check to the backlog
+/// filtered by it, and the existing bulk toolbar does the fixing there.
+#[utoipa::path(get, path = "/api/v1/boards/{id}/health",
+    operation_id = "board_health",
+    params(("id" = String, Path,)),
+    responses((status = 200, body = nook_types::BoardHealth), (status = 404)))]
+pub async fn board_health(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<BoardId>,
+) -> ApiResult<Json<nook_types::BoardHealth>> {
+    // The board must be this tenant's; without it the report is a cross-tenant
+    // read of somebody else's cards.
+    if !state.tasks.board_in_tenant(id, auth.tenant_id).await? {
+        return Err(ApiError::NotFound);
+    }
+    // `auth.user_id` unconditionally, exactly as `get_one` filters the board
+    // itself: card visibility is a per-card owner predicate, not a role, so a
+    // tenant admin gets no wider view here than they get of the board (MAIN-76).
+    let checks = state
+        .tasks
+        .board_health(auth.tenant_id, id, auth.user_id)
+        .await?;
+    Ok(Json(nook_types::BoardHealth {
+        board_id: id,
+        checks,
+    }))
+}
+
 #[utoipa::path(post, path = "/api/v1/boards/{id}/tasks",
     operation_id = "create_task",
     params(("id" = String, Path,)),

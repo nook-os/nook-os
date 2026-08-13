@@ -13,9 +13,11 @@ import {
   searchTypeParam,
   matchedEpicHeaders,
   exactKeyMatch,
+  parseView,
   BACKLOG_TYPES,
   type BoardFilter,
 } from "./pages/Board";
+import { parseHealthCheck, HEALTH_LABEL } from "./pages/BoardHealth";
 
 /** A minimal TaskItem for the grouping tests — only the fields the pure
  *  functions read; the rest is filled to satisfy the type. */
@@ -48,6 +50,7 @@ describe("board filter URL round-trip (MAIN-15 AC-1)", () => {
       showArchived: false,
       q: "",
       view: "board",
+      health: null,
     },
     {
       label: ["agent-ready", "urgent"],
@@ -62,6 +65,7 @@ describe("board filter URL round-trip (MAIN-15 AC-1)", () => {
       showArchived: true,
       q: "postmark",
       view: "backlog",
+      health: null,
     },
     {
       label: [],
@@ -76,6 +80,7 @@ describe("board filter URL round-trip (MAIN-15 AC-1)", () => {
       showArchived: false,
       q: "MAIN-42",
       view: "board",
+      health: null,
     },
   ];
 
@@ -228,6 +233,7 @@ describe("specific-person assignee + epic filter (MAIN-111)", () => {
       showArchived: false,
       q: "",
       view: "board",
+      health: null,
     };
     const members = [{ id: uuid, name: "Alex Rivera" }];
     const epics = [{ id: uuid, key: "MAIN-7" }];
@@ -253,6 +259,7 @@ describe("specific-person assignee + epic filter (MAIN-111)", () => {
       showArchived: false,
       q: "",
       view: "board",
+      health: null,
     };
     // No members/epics resolve the ids — the chips still render and are active.
     const chips = activeChips(base, [], [], []);
@@ -276,6 +283,7 @@ describe("active-filter chips (MAIN-110 AC-2/AC-3/AC-4)", () => {
     showArchived: false,
     q: "",
     view: "board",
+    health: null,
   };
   const ws = [{ id: "ws1", name: "nook-os" }];
 
@@ -353,6 +361,7 @@ const EMPTY: BoardFilter = {
   showArchived: false,
   q: "",
   view: "board",
+  health: null,
 };
 
 describe("backlog search includes epics (MAIN-181 AC-1)", () => {
@@ -415,5 +424,59 @@ describe("exact-key search hit (MAIN-181 AC-3)", () => {
     expect(exactKeyMatch(tasks, "MAIN-3")).toBeNull(); // partial
     expect(exactKeyMatch(tasks, "the one")).toBeNull(); // title, not a key
     expect(exactKeyMatch(tasks, "")).toBeNull();
+  });
+});
+
+describe("the Health tab rides the same URL round-trip as every other view (MAIN-570 AC-6/AC-8)", () => {
+  const base: BoardFilter = { ...EMPTY };
+
+  it("round-trips the health view and a selected check", () => {
+    const f: BoardFilter = { ...base, view: "backlog", health: "done_agent_ready" };
+    expect(parseFilter(serializeFilter(f))).toEqual(f);
+    expect(serializeFilter(f).toString()).toBe("view=backlog&health=done_agent_ready");
+  });
+
+  it("round-trips the Health tab itself", () => {
+    const f: BoardFilter = { ...base, view: "health" };
+    expect(parseFilter(serializeFilter(f))).toEqual(f);
+    expect(serializeFilter(f).toString()).toBe("view=health");
+  });
+
+  it("the board tab still writes no view key at all", () => {
+    expect(serializeFilter(base).toString()).toBe("");
+    expect(parseView(null)).toBe("board");
+    expect(parseView("nonsense")).toBe("board");
+    expect(parseView("health")).toBe("health");
+    expect(parseView("backlog")).toBe("backlog");
+  });
+
+  it("a health value that names no check reads as no filter, not as an empty board", () => {
+    expect(parseHealthCheck(null)).toBeNull();
+    expect(parseHealthCheck("")).toBeNull();
+    expect(parseHealthCheck("retired_check")).toBeNull();
+    // Not a check name that happens to live on Object.prototype either.
+    expect(parseHealthCheck("toString")).toBeNull();
+    expect(parseHealthCheck("epics_empty")).toBe("epics_empty");
+  });
+
+  it("every check the API can return has a label to render", () => {
+    for (const check of [
+      "archived_not_done",
+      "done_agent_ready",
+      "epics_closeable",
+      "epics_empty",
+    ] as const) {
+      expect(HEALTH_LABEL[check]).toBeTruthy();
+    }
+  });
+
+  it("a health filter is a removable chip, and counts as a filter being on", () => {
+    const f: BoardFilter = { ...base, view: "backlog", health: "archived_not_done" };
+    const chips = activeChips(f, []);
+    expect(chips.map((c) => c.key)).toContain("health");
+    expect(isFilterActive(f)).toBe(true);
+    const cleared = chips.find((c) => c.key === "health")!.next;
+    expect(cleared.health).toBeNull();
+    expect(isFilterActive(cleared)).toBe(false);
   });
 });

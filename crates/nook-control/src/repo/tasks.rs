@@ -734,6 +734,20 @@ pub trait TaskRepository: Send + Sync {
 
     async fn related_tasks(&self, task: TaskId, viewer: UserId) -> ApiResult<Vec<RelatedTask>>;
 
+    /// The board's health report (MAIN-570): the four states that make a card
+    /// read as one thing while behaving as another, each with the cards it
+    /// found. Read-only, and additive — nothing here touches the pick query or
+    /// any existing filter (NG-6).
+    ///
+    /// `viewer` scopes every check by the same card-visibility predicate the
+    /// board read applies, so a private card is not revealed by a count.
+    async fn board_health(
+        &self,
+        tenant: TenantId,
+        board: BoardId,
+        viewer: UserId,
+    ) -> ApiResult<Vec<BoardHealthCheck>>;
+
     /// The keys of tasks whose worktree is that exact directory on that node.
     /// `worktree_path` is a plain string, not an FK, so a checkout can be
     /// reclaimed out from under a task — this is what lets the reaper say which
@@ -2566,6 +2580,99 @@ impl TaskRepository for DbTaskRepository {
             .await?)
     }
 
+    async fn board_health(
+        &self,
+        tenant: TenantId,
+        board: BoardId,
+        viewer: UserId,
+    ) -> ApiResult<Vec<BoardHealthCheck>> {
+        // Each check is an exact SQL predicate over board state and nothing else
+        // (MAIN-570 NG-1) — no heuristic, no scoring, no "probably stale".
+        #[derive(nook_db::FromDbRow)]
+        struct Row {
+            id: TaskId,
+            key: Option<String>,
+        }
+
+        let number = type_mapping(self.db.engine()).cast("t.number", "text");
+        let visible = crate::services::tasks::visible_sql("t", "$3");
+        // Every check is "which of this board's visible cards satisfy <rule>",
+        // so the frame is written once and only the rule differs.
+        let query = |rule: &str| {
+            format!(
+                "SELECT t.id, b.key || '-' || {number} AS key
+                   FROM tasks t
+                   JOIN boards b ON b.id = t.board_id
+                   JOIN board_columns c ON c.id = t.column_id
+                  WHERE t.board_id = $1
+                    AND t.tenant_id = $2
+                    AND {visible}
+                    AND ({rule})
+                  ORDER BY t.number"
+            )
+        };
+
+        // An epic's remaining work: its non-archived children. Archived children
+        // are excluded from the test entirely (AC-4), so a withdrawn child can
+        // neither hold an epic open nor make an empty one look populated.
+        //
+        // Deliberately NOT viewer-scoped, unlike the epic itself. Visibility
+        // decides which cards a check may NAME, and this subquery names none —
+        // it only asks whether work remains. Hiding a private child here would
+        // make the report tell somebody an epic is closeable, or empty, while
+        // work is open inside it, which is the exact class of lie this endpoint
+        // exists to find.
+        let open_child = "SELECT 1 FROM tasks ch
+                JOIN board_columns cc ON cc.id = ch.column_id
+               WHERE ch.parent_task_id = t.id
+                 AND ch.archived_at IS NULL";
+
+        let mut checks = Vec::with_capacity(BoardHealthCheckKind::ALL.len());
+        for check in BoardHealthCheckKind::ALL {
+            let rule = match check {
+                // Work archived while unfinished: invisible to every listing and
+                // unpickable by the loop, so it is simply lost (AC-2).
+                BoardHealthCheckKind::ArchivedNotDone => {
+                    "t.archived_at IS NOT NULL AND c.type NOT IN ('completed', 'canceled')"
+                        .to_string()
+                }
+                // Finished, still labelled ready to build. Archived cards are
+                // INCLUDED — a merged card carrying the label lies whether or not
+                // somebody also archived it (AC-3).
+                BoardHealthCheckKind::DoneAgentReady => "c.type = 'completed' AND EXISTS (
+                        SELECT 1 FROM task_labels tl JOIN labels l ON l.id = tl.label_id
+                         WHERE tl.task_id = t.id AND l.name = 'agent-ready')"
+                    .to_string(),
+                // Canceled counts as finished — there is nothing left to do
+                // either way. Deliberately unlike the backlog head's client-side
+                // done/total, which counts only `completed` (AC-4, NG-8).
+                BoardHealthCheckKind::EpicsCloseable => format!(
+                    "t.type = 'epic'
+                       AND EXISTS ({open_child})
+                       AND NOT EXISTS ({open_child}
+                             AND cc.type NOT IN ('completed', 'canceled'))"
+                ),
+                BoardHealthCheckKind::EpicsEmpty => {
+                    format!("t.type = 'epic' AND NOT EXISTS ({open_child})")
+                }
+            };
+            let rows: Vec<Row> = self
+                .db
+                .query_all(&query(&rule), params![board, tenant, viewer])
+                .await?;
+            checks.push(BoardHealthCheck::of(
+                check,
+                rows.into_iter()
+                    .map(|r| BoardHealthTask {
+                        id: r.id,
+                        key: r.key,
+                    })
+                    .collect(),
+            ));
+        }
+        Ok(checks)
+    }
+
     async fn key_of(&self, tenant: TenantId, id: TaskId) -> ApiResult<Option<String>> {
         Ok(self
             .db
@@ -4385,6 +4492,90 @@ impl TaskRepository for FakeTaskRepository {
                     .map(|c| c.r#type.clone())
                     .unwrap_or_default(),
                 archived_at: t.archived_at,
+            })
+            .collect())
+    }
+
+    async fn board_health(
+        &self,
+        tenant: TenantId,
+        board: BoardId,
+        viewer: UserId,
+    ) -> ApiResult<Vec<BoardHealthCheck>> {
+        let st = self.inner.lock().unwrap();
+        let col_type = |c: ColumnId| {
+            st.columns
+                .iter()
+                .find(|x| x.id == c)
+                .map(|x| x.r#type.clone())
+                .unwrap_or_default()
+        };
+        let finished =
+            |t: &TaskItem| matches!(col_type(t.column_id).as_str(), "completed" | "canceled");
+        let visible = |t: &TaskItem| {
+            crate::services::tasks::visible_by_cols(
+                &t.visibility,
+                t.created_by,
+                t.assignee_user_id,
+                viewer,
+            )
+        };
+        // Mirrors the SQL's `open_child`: a child counts unless it is archived,
+        // whether or not this viewer may see it.
+        let open_children = |epic: TaskId| {
+            st.tasks
+                .iter()
+                .filter(|c| c.parent_task_id == Some(epic))
+                .filter(|c| c.archived_at.is_none())
+                .collect::<Vec<_>>()
+        };
+        let has_label = |t: &TaskItem, name: &str| {
+            st.task_labels
+                .iter()
+                .any(|(id, n)| *id == t.id.0 && n == name)
+        };
+
+        let mut on_board: Vec<&TaskItem> = st
+            .tasks
+            .iter()
+            .filter(|t| t.board_id == board && t.tenant_id == tenant)
+            .filter(|t| visible(t))
+            .collect();
+        on_board.sort_by_key(|t| t.number);
+
+        Ok(BoardHealthCheckKind::ALL
+            .into_iter()
+            .map(|check| {
+                let found = on_board.iter().filter(|t| match check {
+                    BoardHealthCheckKind::ArchivedNotDone => {
+                        t.archived_at.is_some() && !finished(t)
+                    }
+                    BoardHealthCheckKind::DoneAgentReady => {
+                        col_type(t.column_id) == "completed" && has_label(t, "agent-ready")
+                    }
+                    BoardHealthCheckKind::EpicsCloseable => {
+                        let kids = open_children(t.id);
+                        t.type_ == "epic" && !kids.is_empty() && kids.iter().all(|c| finished(c))
+                    }
+                    BoardHealthCheckKind::EpicsEmpty => {
+                        t.type_ == "epic" && open_children(t.id).is_empty()
+                    }
+                });
+                BoardHealthCheck::of(
+                    check,
+                    found
+                        .map(|t| BoardHealthTask {
+                            id: t.id,
+                            key: st
+                                .boards
+                                .iter()
+                                .find(|b| b.id == t.board_id)
+                                .and_then(|b| b.key.clone())
+                                .zip(t.number)
+                                .map(|(k, n)| format!("{k}-{n}")),
+                        })
+                        .collect(),
+                )
             })
             .collect())
     }

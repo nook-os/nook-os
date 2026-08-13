@@ -460,6 +460,7 @@ pub fn build_router(state: AppState) -> Router {
             "/columns/{id}",
             patch(boards::update_column).delete(boards::delete_column),
         )
+        .route("/boards/{id}/health", get(boards::board_health))
         .route("/boards/{id}/tasks", post(boards::create_task))
         .route(
             "/tasks/{id}",

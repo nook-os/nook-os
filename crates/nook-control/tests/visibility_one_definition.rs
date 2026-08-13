@@ -109,12 +109,13 @@ fn every_known_site_calls_the_shared_definition() {
         std::fs::read_to_string(root.join("repo/read_model.rs")).expect("repo/read_model.rs");
 
     // `visible_sql` is called once per viewer-scoped site: pick_tasks,
-    // epic_children, related_tasks in the repository, and the overview join.
+    // epic_children, related_tasks and board_health in the repository, and the
+    // overview join.
     let repo_calls = repo.matches("visible_sql(").count();
     assert_eq!(
-        repo_calls, 3,
-        "expected pick_tasks, epic_children and related_tasks to call \
-         visible_sql — found {repo_calls} call(s) in repo/tasks.rs"
+        repo_calls, 4,
+        "expected pick_tasks, epic_children, related_tasks and board_health to \
+         call visible_sql — found {repo_calls} call(s) in repo/tasks.rs"
     );
     assert!(
         overview.contains("visible_sql("),

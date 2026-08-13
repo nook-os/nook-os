@@ -647,6 +647,41 @@
         }
       }
     },
+    "/api/v1/boards/{id}/health": {
+      "get": {
+        "tags": [
+          "crate::routes::boards"
+        ],
+        "summary": "The board's health report (MAIN-570): the four states that make a card read\nas one thing while behaving as another, none of which any existing task\nfilter can express.",
+        "description": "Read-only by construction — it computes nothing to act on and offers no\nremediation (NG-3). The Health tab links each non-zero check to the backlog\nfiltered by it, and the existing bulk toolbar does the fixing there.",
+        "operationId": "board_health",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BoardHealth"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/boards/{id}/tasks": {
       "post": {
         "tags": [
@@ -10332,6 +10367,79 @@
             "items": {
               "$ref": "#/components/schemas/TaskItem"
             }
+          }
+        }
+      },
+      "BoardHealth": {
+        "type": "object",
+        "description": "A board's health report: every check, including the ones that found nothing.\n\nA zero-count check is present rather than omitted — an all-zero board must\nread as healthy, not as a report that failed to render (AC-7).",
+        "required": [
+          "board_id",
+          "checks"
+        ],
+        "properties": {
+          "board_id": {
+            "$ref": "#/components/schemas/BoardId"
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BoardHealthCheck"
+            }
+          }
+        }
+      },
+      "BoardHealthCheck": {
+        "type": "object",
+        "description": "One check's result.",
+        "required": [
+          "check",
+          "count",
+          "tasks"
+        ],
+        "properties": {
+          "check": {
+            "$ref": "#/components/schemas/BoardHealthCheckKind"
+          },
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Always `tasks.len()`, and set only by [`BoardHealthCheck::of`] so the two\ncannot drift into disagreeing about the same check."
+          },
+          "tasks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BoardHealthTask"
+            }
+          }
+        }
+      },
+      "BoardHealthCheckKind": {
+        "type": "string",
+        "description": "One of the four board states that make a card read as one thing while\nbehaving as another (MAIN-570).\n\nA name on the wire rather than a shape, because the Health tab links each\ncheck to a backlog filtered by it and only the NAME travels in the URL\n(`?view=backlog&health=done_agent_ready`) — the ids are re-fetched from this\nendpoint on the other side.",
+        "enum": [
+          "archived_not_done",
+          "done_agent_ready",
+          "epics_closeable",
+          "epics_empty"
+        ]
+      },
+      "BoardHealthTask": {
+        "type": "object",
+        "description": "A card a check found: enough to name it in a report and to link to it.",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/TaskId"
+          },
+          "key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`MAIN-42`. `None` only for a card created before keys existed."
           }
         }
       },

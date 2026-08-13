@@ -27,9 +27,10 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { api, type TaskItem, type LoopJob } from "@nookos/api";
+import { api, type TaskItem, type LoopJob, type BoardHealthCheckKind } from "@nookos/api";
 import { AutomationDialog } from "./BoardAutomation";
 import { BoardBacklog } from "./BoardBacklog";
+import { BoardHealthTab, HEALTH_LABEL, parseHealthCheck } from "./BoardHealth";
 import { NewTicketModal } from "../NewTicketModal";
 import { summarizeBulk, useBacklogSelection } from "./backlogSelection";
 import {
@@ -774,12 +775,26 @@ export interface BoardFilter {
   showArchived: boolean;
   /** Free-text search across title, key, and description. Empty = no search. */
   q: string;
-  /** Which Board-page tab is showing: the kanban `board` or the `backlog` list
-   *  (MAIN-82). URL-addressable (`?view=backlog`) so it survives a refresh. */
+  /** Which Board-page tab is showing: the kanban `board`, the `backlog` list
+   *  (MAIN-82), or the `health` report (MAIN-570). URL-addressable
+   *  (`?view=backlog`) so it survives a refresh. */
   view: BoardView;
+  /** A board-health check whose cards the Backlog tab is confined to
+   *  (MAIN-570 AC-8), or null. Only the check's NAME rides in the URL
+   *  (`?view=backlog&health=done_agent_ready`); the ids are re-fetched from the
+   *  health endpoint, so the link stays short and never goes stale. */
+  health: BoardHealthCheckKind | null;
 }
 
-export type BoardView = "board" | "backlog";
+export type BoardView = "board" | "backlog" | "health";
+
+/// A `view` URL value, defaulting to the kanban board. Anything unrecognised is
+/// the board rather than a blank page. Pure and unit-tested — the one place a
+/// tab name is turned back into a tab, so a URL, the tab memory and a deep link
+/// cannot each decide differently.
+export function parseView(value: string | null | undefined): BoardView {
+  return value === "backlog" || value === "health" ? value : "board";
+}
 
 /// Every task type the Backlog tab lists, INCLUDING `epic`. Listing epic
 /// explicitly opts a filtered fetch out of the server's default epic-exclusion
@@ -919,6 +934,7 @@ const EMPTY_FILTER: BoardFilter = {
   showArchived: false,
   q: "",
   view: "board",
+  health: null,
 };
 
 // The filter lives in the URL so a filtered board is a link you can copy and
@@ -939,6 +955,7 @@ const FILTER_KEYS = [
   "archived",
   "q",
   "view",
+  "health",
 ] as const;
 
 /** A uuid, so a person/epic filter value from the URL is recognised as one
@@ -978,7 +995,8 @@ export function parseFilter(params: URLSearchParams): BoardFilter {
     workspace: params.get("ws") || null,
     showArchived: params.get("archived") === "1",
     q: params.get("q") ?? "",
-    view: params.get("view") === "backlog" ? "backlog" : "board",
+    view: parseView(params.get("view")),
+    health: parseHealthCheck(params.get("health")),
   };
 }
 
@@ -997,7 +1015,10 @@ export function writeFilter(next: URLSearchParams, f: BoardFilter): URLSearchPar
   if (f.workspace) next.set("ws", f.workspace);
   if (f.showArchived) next.set("archived", "1");
   if (f.q) next.set("q", f.q);
-  if (f.view === "backlog") next.set("view", "backlog");
+  // Board is the default and writes no key at all, so a plain board URL stays
+  // clean (MAIN-82); every other tab names itself.
+  if (f.view !== "board") next.set("view", f.view);
+  if (f.health) next.set("health", f.health);
   return next;
 }
 
@@ -1054,6 +1075,14 @@ export function activeChips(
               // user no longer exists — the chip still removes cleanly (AC-6).
               (members.find((m) => m.id === f.assignee)?.name ?? "unknown user"),
       next: { ...f, assignee: "any" },
+    });
+  // A health filter is a chip like any other, so the Backlog tab says WHY it is
+  // showing this handful of cards, and one click takes it off (MAIN-570 AC-8).
+  if (f.health)
+    chips.push({
+      key: "health",
+      label: HEALTH_LABEL[f.health],
+      next: { ...f, health: null },
     });
   if (f.epic)
     chips.push({
@@ -1302,6 +1331,22 @@ export function BoardPage() {
     enabled: !!board && filterActive,
   });
 
+  // The board's health report (MAIN-570). Board-scoped by construction: it takes
+  // whichever board this page is already showing and has no selector of its own,
+  // so a later board switcher carries it for free (AC-6). Fetched for the Health
+  // tab AND for a health-filtered backlog, which resolves the check's cards from
+  // this same endpoint rather than carrying an id list in the URL (AC-8).
+  const { data: health } = useQuery({
+    queryKey: ["boards", board?.id, "health"],
+    queryFn: async () =>
+      (
+        await api.GET("/api/v1/boards/{id}/health", {
+          params: { path: { id: board!.id } },
+        })
+      ).data,
+    enabled: !!board && (filter.view === "health" || !!filter.health),
+  });
+
   // Deep link to a backlog task → show the Backlog tab (MAIN-82 AC-4). Only when
   // the tab was not already chosen explicitly (no `view` in the URL), so a manual
   // Board-tab choice is respected. `replace` so it does not add a history entry.
@@ -1356,12 +1401,17 @@ export function BoardPage() {
   React.useEffect(() => {
     if (restored.current) return;
     if (params.has("view")) return;
-    if (recall(tenantId, "board.view") !== "backlog") return;
+    // `parseView` is what decides which names are tabs, so a remembered value
+    // and a URL cannot disagree about that; only the DEFAULT is not worth
+    // restoring, because it writes no key and so is indistinguishable from
+    // having never chosen (see the note above).
+    const remembered = parseView(recall(tenantId, "board.view"));
+    if (remembered === "board") return;
     restored.current = true;
     setParams(
       (prev) => {
         const next = new URLSearchParams(prev);
-        next.set("view", "backlog");
+        next.set("view", remembered);
         return next;
       },
       // `replace` so returning to the board does not stack a history entry —
@@ -1496,14 +1546,34 @@ export function BoardPage() {
     [...visible, ...archivedEpicChildren, ...shownEpicHeaders],
     colTypeById,
   );
+  // A health-filtered Backlog shows EXACTLY the check's cards (MAIN-570 AC-8),
+  // and so is built from `detail.tasks` rather than from `visible` and
+  // `groupByEpic`. Both of those would drop the very rows a check exists to
+  // surface: `visible` hides archived cards unless the toggle is on, and the "No
+  // epic" bucket keeps only parentless backlog-column tasks — an archived Todo
+  // card is neither. An empty allow-set while the report is still in flight
+  // renders as the backlog's own empty state for that moment, which is the
+  // honest reading of "no cards yet" and settles as soon as it lands.
+  const healthCards = filter.health
+    ? (() => {
+        const ids = new Set(
+          (health?.checks.find((c) => c.check === filter.health)?.tasks ?? []).map(
+            (t) => t.id,
+          ),
+        );
+        return detail.tasks.filter((t) => ids.has(t.id)).sort(pickOrder);
+      })()
+    : null;
   // Epic filter on the Backlog tab: show ONLY that epic's section (AC-3). The
   // kanban tab narrows server-side via the `parent` query param instead.
-  const backlogGroups = filter.epic
-    ? {
-        epics: allBacklogGroups.epics.filter((s) => s.epic.id === filter.epic),
-        noEpic: [],
-      }
-    : allBacklogGroups;
+  const backlogGroups = healthCards
+    ? { epics: [], noEpic: healthCards }
+    : filter.epic
+      ? {
+          epics: allBacklogGroups.epics.filter((s) => s.epic.id === filter.epic),
+          noEpic: [],
+        }
+      : allBacklogGroups;
   const epics = detail.tasks.filter((t) => t.type === "epic");
 
   // Build a task's action-menu items for the shared context-menu primitive
@@ -1708,7 +1778,10 @@ export function BoardPage() {
               className={`board-tab${filter.view === "board" ? " active" : ""}`}
               onClick={() => {
                 remember(tenantId, "board.view", "board");
-                setFilter({ ...filter, view: "board" });
+                // A health filter belongs to the Backlog list; carrying it onto
+                // the kanban would leave a `health=` in the URL that nothing
+                // there reads or explains.
+                setFilter({ ...filter, view: "board", health: null });
               }}
             >
               Board
@@ -1726,6 +1799,23 @@ export function BoardPage() {
               {backlogTasks.length > 0 && (
                 <span className="board-tab-count">{backlogTasks.length}</span>
               )}
+            </button>
+            {/* Health (MAIN-570): the four board states no filter can express.
+                Board-scoped by construction — it reads whichever board this page
+                is showing and holds no selector of its own. */}
+            <button
+              role="tab"
+              aria-selected={filter.view === "health"}
+              className={`board-tab${filter.view === "health" ? " active" : ""}`}
+              onClick={() => {
+                remember(tenantId, "board.view", "health");
+                // Clearing `health` on the way in: the tab shows every check, so
+                // arriving with one still selected would be a filter nothing on
+                // this tab explains.
+                setFilter({ ...filter, view: "health", health: null });
+              }}
+            >
+              Health
             </button>
             {/* The board-level entry point (MAIN-364). The per-column composer
                 stays for jotting a title where it belongs; this is the one that
@@ -1747,27 +1837,42 @@ export function BoardPage() {
               </button>
             </span>
           </div>
-          <Filters
-            labels={labels ?? []}
-            workspaces={workspaces ?? []}
-            members={filterMembers}
-            epics={epicOptions(detail.tasks, "").map((e) => ({
-              id: e.id,
-              key: e.key ?? "",
-            }))}
-            value={filter}
-            onChange={setFilter}
-          />
+          {/* The filter strip narrows a LIST of cards; the Health tab is a report
+              of counts and does not have one to narrow. */}
+          {filter.view !== "health" && (
+            <Filters
+              labels={labels ?? []}
+              workspaces={workspaces ?? []}
+              members={filterMembers}
+              epics={epicOptions(detail.tasks, "").map((e) => ({
+                id: e.id,
+                key: e.key ?? "",
+              }))}
+              value={filter}
+              onChange={setFilter}
+            />
+          )}
           {/* Distinct from a genuinely empty board: a filter/search is on and
               nothing matched, rather than "this board has no tasks" (AC-4). */}
-          {filterActive && visible.length === 0 && (
+          {filter.view !== "health" && filterActive && visible.length === 0 && (
             <div className="board-no-matches faint small">
               {filter.q
                 ? `No tasks match “${filter.q}”.`
                 : "No tasks match these filters."}
             </div>
           )}
-          {filter.view === "backlog" ? (
+          {filter.view === "health" ? (
+            <BoardHealthTab
+              report={health}
+              // The handoff (AC-8/AC-9): the Backlog tab, confined to this
+              // check's cards, where the bulk toolbar already does the fixing.
+              // This tab itself changes nothing (NG-3).
+              onPick={(check) => {
+                remember(tenantId, "board.view", "backlog");
+                setFilter({ ...EMPTY_FILTER, view: "backlog", health: check });
+              }}
+            />
+          ) : filter.view === "backlog" ? (
             <BoardBacklog
               groups={backlogGroups}
               colTypeById={colTypeById}
@@ -1789,6 +1894,7 @@ export function BoardPage() {
               columns={detail.columns}
               members={filterMembers}
               onBulk={applyBulk}
+              bucketLabel={filter.health ? HEALTH_LABEL[filter.health] : undefined}
             />
           ) : (
             <div className="board-split">
