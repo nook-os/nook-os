@@ -2,13 +2,19 @@
 //!
 //! What these pin: the release and the comment that explain a card's return
 //! (AC-1/AC-2), the backoff that keeps the retry from being a hot loop (AC-3),
-//! the three-strike escalation that stops the cycle (AC-4), both human nudges
-//! that spend the strikes (AC-5), an outcome resetting the count (AC-6), and
-//! the human claim this path never touches (AC-7).
+//! the three-failure escalation that stops the cycle (AC-4), both human nudges
+//! that spend the count (AC-5), an outcome resetting it (AC-6), and the human
+//! claim this path never touches (AC-7).
+//!
+//! MAIN-386 moved the COUNT and the escalation into
+//! `services::build_ladder` — derived from `loop_jobs` rather than stored, and
+//! stopping at `needs-human-review` rather than `blocked`. Everything these
+//! tests were written to pin still holds; the label and the file that writes
+//! it are what changed.
 //!
 //! Engine-neutral (MAIN-264): nothing here names a `sqlx` type.
 
-use nook_control::services::build_handback::MAX_STRIKES;
+use nook_control::services::build_ladder::{MAX_BACKOFF, MAX_FAILURES};
 use nook_control::services::jobs;
 use nook_control::services::kanban::{KanbanProvider, LocalBoardProvider};
 use nook_control::services::run_reconcile::{owed, FAILURE_BACKOFF};
@@ -106,13 +112,17 @@ async fn a_run_that_concludes_nothing(
     job
 }
 
+/// Past the LONGEST hold the ladder can impose, not merely the first one: the
+/// window doubles with the run of failures (MAIN-386 AC-2), so aging by five
+/// minutes would leave the second attempt held and the test asserting a run
+/// that never came.
 async fn age_out_the_backoff(bed: &TestBed, job: JobId) {
     bed.db()
         .exec(
             "UPDATE loop_jobs SET updated_at = $2 WHERE id = $1",
             params![
                 job,
-                chrono::Utc::now() - FAILURE_BACKOFF - chrono::Duration::minutes(1)
+                chrono::Utc::now() - MAX_BACKOFF - chrono::Duration::minutes(1)
             ],
         )
         .await
@@ -258,8 +268,8 @@ async fn a_run_that_concludes_nothing_hands_its_card_back() {
 }
 
 /// AC-4/AC-5: three runs in a row concluding nothing stop the cycle with
-/// `blocked`, and lifting that label brings the card back with its strikes
-/// spent — a fresh three, not a hair trigger.
+/// `needs-human-review`, and lifting that label brings the card back with the
+/// count spent — a fresh three, not a hair trigger.
 #[tokio::test]
 async fn three_strikes_block_the_card_and_unblocking_resets_the_count() {
     let Some(mut bed) = TestBed::new().await else {
@@ -272,40 +282,51 @@ async fn three_strikes_block_the_card_and_unblocking_resets_the_count() {
     let board = board_fixture(&bed.db(), tenant).await;
     let card = approved_card(&bed.db(), tenant, board, ws, user, "strike me").await;
 
-    for _ in 0..MAX_STRIKES {
+    for _ in 0..MAX_FAILURES {
         a_run_that_concludes_nothing(&bed, &state, tenant, user, ws, None).await;
     }
 
     assert!(
-        labels(&state, card.id).await.iter().any(|l| l == "blocked"),
+        labels(&state, card.id)
+            .await
+            .iter()
+            .any(|l| l == "needs-human-review"),
         "AC-4: three strikes hand the card to a human"
     );
     let said = comments(&state, card.id).await;
     assert!(
+        said.iter().any(|c| c.contains("attempt 3 of 3")),
+        "AC-4: the handback says how many attempts were made: {said:?}"
+    );
+    assert!(
         said.iter()
-            .any(|c| c.contains("attempt 3 of 3") && c.contains("3 runs in a row")),
-        "AC-4: the comment says how many attempts and what the last one said: {said:?}"
+            .any(|c| c.contains("3 build runs for this card")),
+        "AC-4: and the ladder says what that cost the card: {said:?}"
     );
     let fourth = jobs::converge_builds(&state, tenant, user, ws, None)
         .await
         .expect("converge");
     assert_eq!(fourth.raised, 0, "AC-4: no fourth run is raised");
 
-    // AC-5, first nudge: a human removes the label.
-    state
-        .tasks
-        .detach_label(tenant, card.id, "blocked")
+    // AC-5, first nudge: a human removes the label. Through the service the
+    // label route calls, so the clear and the label come off together — a
+    // detach on its own would leave the count reading three.
+    nook_control::services::tasks::detach_label(&state, tenant, card.id, "needs-human-review")
         .await
         .expect("unblock");
+
     let after = a_run_that_concludes_nothing(&bed, &state, tenant, user, ws, None).await;
     assert_eq!(after.kind, "build");
     let said = comments(&state, card.id).await;
     assert!(
-        said.iter().any(|c| c.contains("attempt 1 of 3")),
-        "AC-5: the nudge spent the strikes — this is attempt one again: {said:?}"
+        said.last().expect("a comment").contains("attempt 1 of 3"),
+        "AC-5: the nudge spent the count — this is attempt one again: {said:?}"
     );
     assert!(
-        !labels(&state, card.id).await.iter().any(|l| l == "blocked"),
+        !labels(&state, card.id)
+            .await
+            .iter()
+            .any(|l| l == "needs-human-review"),
         "AC-5: one failure after the reset does not re-escalate"
     );
 
@@ -327,19 +348,22 @@ async fn the_manual_trigger_fires_on_an_escalated_card() {
     let board = board_fixture(&bed.db(), tenant).await;
     let card = approved_card(&bed.db(), tenant, board, ws, user, "force me").await;
 
-    for _ in 0..MAX_STRIKES {
+    for _ in 0..MAX_FAILURES {
         a_run_that_concludes_nothing(&bed, &state, tenant, user, ws, None).await;
     }
-    assert!(labels(&state, card.id).await.iter().any(|l| l == "blocked"));
+    assert!(labels(&state, card.id)
+        .await
+        .iter()
+        .any(|l| l == "needs-human-review"));
 
     // The label is still on: only naming the card overrules it.
     a_run_that_concludes_nothing(&bed, &state, tenant, user, ws, Some(card.id)).await;
     let said = comments(&state, card.id).await;
     assert!(
-        said.iter().any(|c| c.contains("attempt 1 of 3")),
-        "AC-5: the named card ran, and its strikes were spent: {said:?}"
+        said.last().expect("a comment").contains("attempt 1 of 3"),
+        "AC-5: the named card ran, and its count was spent: {said:?}"
     );
-    // …and the reconciler still will not touch it, because `blocked` is
+    // …and the reconciler still will not touch it, because the label is
     // exactly as binding as it was before.
     let reconciler = jobs::converge_builds(&state, tenant, user, ws, None)
         .await
@@ -365,7 +389,7 @@ async fn a_canceled_run_gives_the_card_back_without_a_strike() {
     let board = board_fixture(&bed.db(), tenant).await;
     let card = approved_card(&bed.db(), tenant, board, ws, user, "stop me").await;
 
-    for _ in 0..MAX_STRIKES {
+    for _ in 0..MAX_FAILURES {
         let c = jobs::converge_builds(&state, tenant, user, ws, None)
             .await
             .expect("converge");
@@ -386,9 +410,11 @@ async fn a_canceled_run_gives_the_card_back_without_a_strike() {
         age_out_the_backoff(&bed, job.id).await;
     }
 
+    let on = labels(&state, card.id).await;
     assert!(
-        !labels(&state, card.id).await.iter().any(|l| l == "blocked"),
-        "three cancels are not three strikes"
+        !on.iter()
+            .any(|l| l == "needs-human-review" || l == "loop-changes-requested"),
+        "three cancels are not three failures: {on:?}"
     );
     let said = comments(&state, card.id).await;
     assert!(
@@ -400,8 +426,8 @@ async fn a_canceled_run_gives_the_card_back_without_a_strike() {
 }
 
 /// The other half of that bypass: it overrules the LOOP's escalation and
-/// nothing else. A card a human blocked for their own reason carries no
-/// strikes, so naming it to the manual trigger changes nothing.
+/// nothing else. A card a human blocked for their own reason has no run of
+/// failures behind it, so naming it to the manual trigger changes nothing.
 #[tokio::test]
 async fn the_manual_trigger_does_not_overrule_a_humans_block() {
     let Some(mut bed) = TestBed::new().await else {
@@ -449,7 +475,7 @@ async fn refusals_count_towards_the_stop_and_do_not_say_it_twice() {
     let card = approved_card(&bed.db(), tenant, board, ws, user, "refuse me").await;
     let reason = "refusing to build on the default branch main";
 
-    for attempt in 1..=MAX_STRIKES {
+    for attempt in 1..=MAX_FAILURES {
         let c = jobs::converge_builds(&state, tenant, user, ws, None)
             .await
             .expect("converge");
@@ -473,14 +499,17 @@ async fn refusals_count_towards_the_stop_and_do_not_say_it_twice() {
         let said = comments(&state, card.id).await;
         assert!(
             said.iter()
-                .any(|c| c.contains(&format!("attempt {attempt} of {MAX_STRIKES}"))),
+                .any(|c| c.contains(&format!("attempt {attempt} of {MAX_FAILURES}"))),
             "a refusal counts: {said:?}"
         );
         age_out_the_backoff(&bed, job.id).await;
     }
 
     assert!(
-        labels(&state, card.id).await.iter().any(|l| l == "blocked"),
+        labels(&state, card.id)
+            .await
+            .iter()
+            .any(|l| l == "needs-human-review"),
         "three refusals reach the same stop three failures do"
     );
     let fourth = jobs::converge_builds(&state, tenant, user, ws, None)
@@ -493,7 +522,7 @@ async fn refusals_count_towards_the_stop_and_do_not_say_it_twice() {
     let said = comments(&state, card.id).await;
     assert_eq!(
         said.iter().filter(|c| c.trim() == reason).count(),
-        MAX_STRIKES as usize,
+        MAX_FAILURES as usize,
         "one reason comment per refusal, none of them echoed: {said:?}"
     );
     assert!(
@@ -565,7 +594,10 @@ async fn an_outcome_between_failures_resets_the_count() {
     a_run_that_concludes_nothing(&bed, &state, tenant, user, ws, None).await;
 
     assert!(
-        !labels(&state, card.id).await.iter().any(|l| l == "blocked"),
+        !labels(&state, card.id)
+            .await
+            .iter()
+            .any(|l| l == "needs-human-review"),
         "AC-6: two failures, an outcome, then one failure is not three strikes"
     );
     let said = comments(&state, card.id).await;

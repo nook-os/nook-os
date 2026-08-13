@@ -491,19 +491,18 @@ pub async fn converge_builds(
         .into_iter()
         .map(|r| (r.review_pr_number, r))
         .collect();
-    // MAIN-489 AC-5: the manual trigger overrules the loop's OWN escalation —
-    // a card it labelled `blocked` after three runs concluded nothing — and
-    // nothing else. A card a human blocked for their own reason stays blocked
-    // however it is named, so the strike count is the whole permission.
-    let unblock_task = match only_task {
-        Some(t)
-            if state.tasks.build_failures(t, tenant).await?
-                >= crate::services::build_handback::MAX_STRIKES =>
-        {
-            Some(t)
-        }
-        _ => None,
-    };
+    // MAIN-386 AC-6: manual enqueue works at EVERY rung, so naming a card
+    // stands the ladder's own stop down for it — the hold below, and the
+    // `needs-human-review` that excludes it from both lanes. Not a permission
+    // to check: a person asking for this card now is the whole of it, and the
+    // first cut (only when the count is full) had a hole exactly one click
+    // wide — the forced run spends the count, so the SECOND click found an
+    // empty count, a label still on, and nothing raised.
+    //
+    // `blocked` is untouched and still binding (MAIN-489 AC-5). It is a
+    // person's own hold on the work, which is a different statement from "the
+    // loop gave up", and the loop no longer writes it at all.
+    let unblock_task = only_task;
     let source = crate::services::work_source::BuildWork {
         tasks: state.tasks.as_ref(),
         tenant,
@@ -521,7 +520,18 @@ pub async fn converge_builds(
     if let Some(t) = only_task {
         items.retain(|i| i.target_task_id == Some(t));
     }
-    let heads = state.jobs.build_run_heads(tenant, workspace).await?;
+    let mut heads = state.jobs.build_run_heads(tenant, workspace).await?;
+    // AC-6: the ladder gates AUTO-fire, and this call names a card because a
+    // person asked for it now. The dedupe, the ceiling and the claim all still
+    // apply — only the BACKOFF stands down, which is the one gate whose whole
+    // content is "wait", and waiting is exactly what the person declined.
+    if only_task.is_some() {
+        let named: std::collections::HashSet<i64> = items.iter().map(|i| i.key).collect();
+        for h in heads.iter_mut().filter(|h| named.contains(&h.item_key)) {
+            h.attempted_at = None;
+            h.failure_streak = 0;
+        }
+    }
     let (owed, withheld, live) =
         crate::services::run_reconcile::owed(&items, &heads, ceiling, chrono::Utc::now());
 
@@ -546,20 +556,20 @@ pub async fn converge_builds(
             {
                 continue;
             }
-            // AC-5 (MAIN-489): a card can only reach a claim carrying a FULL
-            // set of strikes through a human's hand — the `blocked` label they
-            // lifted, or the card they named to the manual trigger below. Both
-            // nudges therefore spend the strikes, and this is the one place
-            // that has to know it.
-            if let Err(e) = state
-                .tasks
-                .clear_build_failures(task, tenant, crate::services::build_handback::MAX_STRIKES)
-                .await
-            {
-                // Never fatal after a successful claim: returning here would
-                // leave the card held for a run this pass then never raises,
-                // which is the wedge this whole mechanism exists to prevent.
-                tracing::warn!(%workspace, error = %e, "could not spend a nudged card's strikes");
+            // MAIN-386 AC-5: the card a human named to the manual trigger
+            // starts its ladder over, exactly as lifting `needs-human-review`
+            // does — otherwise the forced run's own failure would be the
+            // fourth, and re-escalate on the spot instead of climbing again.
+            // The OTHER human nudge writes this from the label route; this is
+            // the one that has no label change to hang off.
+            if only_task == Some(task) {
+                if let Err(e) = state.tasks.clear_build_ladder(task, tenant).await {
+                    // Never fatal after a successful claim: returning here
+                    // would leave the card held for a run this pass then never
+                    // raises, which is the wedge this whole mechanism exists
+                    // to prevent.
+                    tracing::warn!(%workspace, error = %e, "could not clear a nudged card's ladder");
+                }
             }
             claimed = Some(task);
         }
@@ -862,12 +872,11 @@ pub async fn record_build_outcome(
     // source reads `pr_url` off the card). The transcript carries the manual
     // fix an operator needs.
     let board = async {
-        // AC-6 (MAIN-489): this run concluded something, so the card's run of
-        // runs that concluded nothing is over. Three failures spread across
-        // successful builds must never add up to an escalation.
-        if !is_repair {
-            state.tasks.clear_build_failures(task, tenant, 0).await?;
-        }
+        // MAIN-489 AC-6 is now free: this run has RECORDED an outcome, and the
+        // ladder counts only failures newer than the card's last recorded one
+        // (MAIN-386 AC-5), so three failures spread across successful builds
+        // stop adding up the moment the middle one concludes. Nothing to
+        // write, and nothing that can fail to be written.
         match concluded {
             Concluded::PrOpened(url) => {
                 // The reviewer's ONLY join from a PR to its contract is the

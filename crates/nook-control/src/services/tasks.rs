@@ -376,12 +376,32 @@ pub async fn attach_label(
     repo.attach_label(tenant, task_id, name).await
 }
 
-/// Detach a label from a task by name.
+/// Detach a label from a task by name, and run whatever taking it OFF means.
+///
+/// Every surface that removes a label comes through here — the REST route, MCP
+/// `remove_label`, a board automation's `RemoveBoardLabel` — because the
+/// consequence is a property of the LABEL, not of who removed it. For
+/// `needs-human-review` that consequence is MAIN-386 AC-5's reset, and wiring
+/// it to one surface meant a card unstopped over MCP came back to auto-fire
+/// still carrying its three failures, to be re-escalated by the first one
+/// after.
+///
+/// Answers whether anything was actually removed, so a caller can record an
+/// event only when the board really changed.
 pub async fn detach_label(
-    repo: &dyn TaskRepository,
+    state: &crate::state::AppState,
     tenant: TenantId,
     task_id: TaskId,
     name: &str,
-) -> ApiResult<()> {
-    repo.detach_label(tenant, task_id, name).await
+) -> ApiResult<bool> {
+    let Some(label_id) = state.tasks.label_id_by_name(tenant, name).await? else {
+        return Ok(false);
+    };
+    if state.tasks.detach_label_id(task_id, label_id).await? == 0 {
+        return Ok(false);
+    }
+    if name == crate::services::build_ladder::ESCALATION_LABEL {
+        crate::services::build_ladder::on_stop_lifted(state, tenant, task_id).await;
+    }
+    Ok(true)
 }

@@ -60,7 +60,7 @@ pub struct NewLoopJob {
 }
 
 /// What the wakeup rule knows about one pull request's runs.
-#[derive(Debug, Clone, nook_db::FromDbRow)]
+#[derive(Debug, Clone, Default, nook_db::FromDbRow)]
 pub struct RunHeads {
     pub item_key: i64,
     /// The head of the newest run that CONCLUDED NOTHING, and when. Two states
@@ -79,6 +79,12 @@ pub struct RunHeads {
     /// The head of the newest run that actually finished. A PR whose forge head
     /// still equals this has been reviewed as it stands.
     pub done_head: Option<String>,
+    /// How long the item's current run of FAILURES is (MAIN-386 AC-1) — what
+    /// sets the length of the hold above, so a repo that cannot build backs
+    /// off instead of retrying every five minutes all night. Zero for review
+    /// items, which have no ladder: `backoff_for(0)` is the flat window they
+    /// have always had.
+    pub failure_streak: i32,
 }
 
 /// The newest REJECTING head for one PR, and WHY it was rejected — what a
@@ -97,6 +103,52 @@ pub struct RejectedHead {
     /// causes name themselves — see [`CONFLICT_VERDICT_SOURCE`] and
     /// [`EJECTION_VERDICT_SOURCE`].
     pub review_verdict_source: Option<String>,
+}
+
+/// The SQL half of MAIN-386's failure ladder: a `failed` build run of card `t`
+/// that no LATER run, and no human, has answered.
+///
+/// Three clauses, and each one is a rule the ladder would be wrong without:
+///
+/// * `state = 'failed'` with NO outcome of its own. A `canceled` run neither
+///   counts nor resets — MAIN-496 chose `canceled` for a queued run nothing
+///   could place precisely so that it would not read as an attempt, and
+///   letting one reset the ladder would zero the count every time the queue
+///   reaper fired. The outcome guard is for the row that answers the run and
+///   then joins it: `reap_stale_executors` sets `failed` on any claimed or
+///   running job whose node went stale, with no outcome guard, so a run that
+///   opened a PR and lost its node in the seconds before reaching `completed`
+///   leaves a `failed` row carrying `build_outcome`. Counting it would restart
+///   the streak at one instead of zero and bring the stop a real failure
+///   early.
+/// * A later run with a recorded `build_outcome` ends the run of failures
+///   (AC-5). An outcome is what "a successful build job" means here: the run
+///   concluded something — a PR, a question, nothing-to-do — rather than
+///   merely stopping.
+/// * `build_ladder_cleared_at` is the human's own reset (AC-5), written when
+///   somebody lifts `needs-human-review` or names the card to the manual
+///   trigger. Without it the count would still read three the moment the card
+///   came back, and the next single failure would re-escalate on the spot
+///   instead of climbing the ladder again.
+///
+/// One text, interpolated into both readers below, because a count that
+/// disagreed with the run of jobs it is a count OF is exactly the class of bug
+/// this ladder is made to end.
+const UNANSWERED_FAILURE: &str = "j.kind = 'build' AND j.state = 'failed'
+    AND j.build_outcome IS NULL
+    AND (t.build_ladder_cleared_at IS NULL OR j.updated_at > t.build_ladder_cleared_at)
+    AND NOT EXISTS (SELECT 1 FROM loop_jobs k
+                     WHERE k.target_task_id = j.target_task_id
+                       AND k.kind = 'build' AND k.build_outcome IS NOT NULL
+                       AND k.updated_at > j.updated_at)";
+
+/// One `failed` build run in a card's current, unanswered run of them —
+/// newest first. The ladder names these job ids in the comment it posts
+/// (MAIN-386 AC-3/AC-4).
+#[derive(Debug, Clone, nook_db::FromDbRow)]
+pub struct FailedBuildRun {
+    pub id: JobId,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// The newest recorded verdict for one PR: which head it judged, and what it
@@ -318,6 +370,19 @@ pub trait LoopJobRepository: Send + Sync {
         tenant: TenantId,
         workspace: WorkspaceId,
     ) -> ApiResult<Vec<RunHeads>>;
+
+    /// One card's current run of unanswered `failed` build runs, newest first
+    /// (MAIN-386 AC-1). Its LENGTH is the ladder's rung; its job ids are what
+    /// the escalation comment names.
+    ///
+    /// Derived, never stored: the rows already say this, and a counter beside
+    /// them is a second truth that drifts the first time a job is reaped, a
+    /// replica restarts, or two of them write at once.
+    async fn build_failure_streak(
+        &self,
+        tenant: TenantId,
+        task: TaskId,
+    ) -> ApiResult<Vec<FailedBuildRun>>;
 
     /// Record what a build run concluded. Guarded on a live build run — an
     /// outcome on a finished or foreign job is a caller bug, answered with 0.
@@ -752,38 +817,20 @@ impl LoopJobRepository for DbLoopJobRepository {
             .await?;
 
         let mut by_pr: std::collections::HashMap<i64, RunHeads> = std::collections::HashMap::new();
+        fn entry(m: &mut std::collections::HashMap<i64, RunHeads>, k: i64) -> &mut RunHeads {
+            m.entry(k).or_insert_with(|| RunHeads {
+                item_key: k,
+                ..Default::default()
+            })
+        }
         for h in live {
-            by_pr
-                .entry(h.review_pr_number)
-                .or_insert_with(|| RunHeads {
-                    item_key: h.review_pr_number,
-                    live_head: None,
-                    done_head: None,
-                    attempted_head: None,
-                    attempted_at: None,
-                })
-                .live_head = h.review_head_sha;
+            entry(&mut by_pr, h.review_pr_number).live_head = h.review_head_sha;
         }
         for h in done {
-            by_pr
-                .entry(h.review_pr_number)
-                .or_insert_with(|| RunHeads {
-                    item_key: h.review_pr_number,
-                    live_head: None,
-                    done_head: None,
-                    attempted_head: None,
-                    attempted_at: None,
-                })
-                .done_head = h.review_head_sha;
+            entry(&mut by_pr, h.review_pr_number).done_head = h.review_head_sha;
         }
         for h in attempted {
-            let e = by_pr.entry(h.review_pr_number).or_insert_with(|| RunHeads {
-                item_key: h.review_pr_number,
-                live_head: None,
-                done_head: None,
-                attempted_head: None,
-                attempted_at: None,
-            });
+            let e = entry(&mut by_pr, h.review_pr_number);
             e.attempted_head = h.review_head_sha;
             e.attempted_at = Some(h.updated_at);
         }
@@ -1042,14 +1089,32 @@ impl LoopJobRepository for DbLoopJobRepository {
             )
             .await?;
 
+        // The ladder's rung per card (MAIN-386 AC-2), applied to BOTH keys of a
+        // card: the count is per TICKET, so a card failing as a fresh pick and
+        // failing under repair is one card that cannot build, not two.
+        #[derive(nook_db::FromDbRow)]
+        struct Streak {
+            item_key: i32,
+            streak: i64,
+        }
+        let streaks: Vec<Streak> = self
+            .db
+            .query_all(
+                &format!(
+                    "SELECT t.number AS item_key, COUNT(*) AS streak
+                       FROM loop_jobs j JOIN tasks t ON t.id = j.target_task_id
+                      WHERE j.tenant_id = $1 AND j.workspace_id = $2 AND {UNANSWERED_FAILURE}
+                      GROUP BY t.number"
+                ),
+                params![tenant, workspace.0],
+            )
+            .await?;
+
         let mut by_key: std::collections::HashMap<i64, RunHeads> = std::collections::HashMap::new();
         let entry = |m: &mut std::collections::HashMap<i64, RunHeads>, k: i64| {
             m.entry(k).or_insert_with(|| RunHeads {
                 item_key: k,
-                live_head: None,
-                done_head: None,
-                attempted_head: None,
-                attempted_at: None,
+                ..Default::default()
             });
         };
         for h in live {
@@ -1069,7 +1134,33 @@ impl LoopJobRepository for DbLoopJobRepository {
             e.attempted_head = h.fingerprint;
             e.attempted_at = Some(h.updated_at);
         }
+        for s in streaks {
+            let n = i32::try_from(s.streak).unwrap_or(i32::MAX);
+            for k in [i64::from(s.item_key), -i64::from(s.item_key)] {
+                entry(&mut by_key, k);
+                by_key.get_mut(&k).unwrap().failure_streak = n;
+            }
+        }
         Ok(by_key.into_values().collect())
+    }
+
+    async fn build_failure_streak(
+        &self,
+        tenant: TenantId,
+        task: TaskId,
+    ) -> ApiResult<Vec<FailedBuildRun>> {
+        Ok(self
+            .db
+            .query_all(
+                &format!(
+                    "SELECT j.id, j.updated_at
+                       FROM loop_jobs j JOIN tasks t ON t.id = j.target_task_id
+                      WHERE j.tenant_id = $1 AND j.target_task_id = $2 AND {UNANSWERED_FAILURE}
+                      ORDER BY j.updated_at DESC, j.id DESC"
+                ),
+                params![tenant, task],
+            )
+            .await?)
     }
 
     async fn active_epic_run_for(
@@ -1928,10 +2019,7 @@ impl LoopJobRepository for FakeLoopJobRepository {
             let k = key_of(task);
             let e = by_key.entry(k).or_insert_with(|| RunHeads {
                 item_key: k,
-                live_head: None,
-                done_head: None,
-                attempted_head: None,
-                attempted_at: None,
+                ..Default::default()
             });
             match j.state.as_str() {
                 "queued" | "claimed" | "running" | "waiting_on_human" => {
@@ -1948,6 +2036,36 @@ impl LoopJobRepository for FakeLoopJobRepository {
             }
         }
         Ok(by_key.into_values().collect())
+    }
+
+    async fn build_failure_streak(
+        &self,
+        tenant: TenantId,
+        task: TaskId,
+    ) -> ApiResult<Vec<FailedBuildRun>> {
+        // The fake has no tasks table, so it cannot see a human's reset; what
+        // it does model is the rule that matters to the callers driving it —
+        // failures since the newest run that recorded an outcome.
+        let s = self.inner.lock().unwrap();
+        let mine = || {
+            s.jobs.iter().filter(move |j| {
+                j.tenant_id == tenant && j.target_task_id == Some(task) && j.kind == "build"
+            })
+        };
+        let answered_at = mine()
+            .filter(|j| j.build_outcome.is_some())
+            .map(|j| j.updated_at)
+            .max();
+        let mut runs: Vec<FailedBuildRun> = mine()
+            .filter(|j| j.state == "failed" && j.build_outcome.is_none())
+            .filter(|j| answered_at.is_none_or(|at| j.updated_at > at))
+            .map(|j| FailedBuildRun {
+                id: j.id,
+                updated_at: j.updated_at,
+            })
+            .collect();
+        runs.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then(b.id.cmp(&a.id)));
+        Ok(runs)
     }
 
     async fn active_epic_run_for(
@@ -2107,10 +2225,7 @@ impl LoopJobRepository for FakeLoopJobRepository {
             let pr = j.review_pr_number.unwrap();
             let e = by_pr.entry(pr).or_insert_with(|| RunHeads {
                 item_key: pr,
-                live_head: None,
-                done_head: None,
-                attempted_head: None,
-                attempted_at: None,
+                ..Default::default()
             });
             match j.state.as_str() {
                 "queued" | "claimed" | "running" | "waiting_on_human" => {

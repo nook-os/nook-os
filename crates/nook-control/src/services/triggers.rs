@@ -222,6 +222,9 @@ async fn attach_label(
 }
 
 /// Remove a board label; a no-op if the label or the link is absent (AC-4).
+///
+/// Through the shared seam, so an automation that lifts `needs-human-review`
+/// resets the build ladder exactly as a person clicking the label off does.
 async fn detach_label(
     state: &AppState,
     tenant: TenantId,
@@ -229,17 +232,10 @@ async fn detach_label(
     label: &str,
 ) -> Result<(), String> {
     let name = crate::routes::labels::validate(label).map_err(|e| e.to_string())?;
-    let label_id = state
-        .tasks
-        .label_id_by_name(tenant, &name)
+    if crate::services::tasks::detach_label(state, tenant, task_id, &name)
         .await
-        .map_err(|e| e.to_string())?;
-    if let Some(label_id) = label_id {
-        state
-            .tasks
-            .detach_label_id(task_id, label_id)
-            .await
-            .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+    {
         state
             .registry
             .publish(tenant, nook_proto::UiEvent::TaskChanged { task_id });

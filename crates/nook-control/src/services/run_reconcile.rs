@@ -38,7 +38,12 @@ pub struct Converged {
 /// identical failures in two and a half minutes, each one a clone attempt on a
 /// shared machine. Held, not forgotten: long enough that a broken repo is not
 /// a hot loop, short enough that a transient fault heals unwatched.
-pub const FAILURE_BACKOFF: chrono::Duration = chrono::Duration::minutes(5);
+///
+/// This is the FIRST hold, not the only one: a BUILD item that keeps failing
+/// doubles it up to an hour (MAIN-386 AC-2), because five minutes forever is
+/// a ticket that cannot build spending a night's quota proving it. A review
+/// item carries no streak, so this stays its flat window.
+pub const FAILURE_BACKOFF: chrono::Duration = crate::services::build_ladder::FIRST_BACKOFF;
 
 /// Which items are owed a run, given what already ran or is running.
 ///
@@ -49,8 +54,9 @@ pub const FAILURE_BACKOFF: chrono::Duration = chrono::Duration::minutes(5);
 /// An item is owed a run when nothing is live for it, its fingerprint is not
 /// what the last VERDICTED run recorded (a never-run item qualifies, because
 /// `None` equals no fingerprint), and it is not inside a concluded-nothing
-/// hold — see [`FAILURE_BACKOFF`]. A push changes the fingerprint and clears
-/// the hold immediately, so a real fix never waits on the timer.
+/// hold — see [`FAILURE_BACKOFF`], whose length grows with the item's run of
+/// failures. A push changes the fingerprint and clears the hold immediately,
+/// so a real fix never waits on the timer.
 pub fn owed<'a>(
     items: &'a [WorkItem],
     heads: &[crate::repo::jobs::RunHeads],
@@ -75,9 +81,10 @@ pub fn owed<'a>(
                     // without a verdict (checks pending, environment broken):
                     // hold. A push changes the fingerprint and clears the hold
                     // by itself, so a real fix is never waiting on a timer.
+                    let hold = crate::services::build_ladder::backoff_for(h.failure_streak);
                     !matches!(
                         (h.attempted_head.as_deref(), h.attempted_at),
-                        (Some(f), Some(at)) if f == item.fingerprint && now - at < FAILURE_BACKOFF
+                        (Some(f), Some(at)) if f == item.fingerprint && now - at < hold
                     )
                 }
                 None => true,
@@ -167,10 +174,7 @@ mod tests {
     fn heads(key: i64) -> RunHeads {
         RunHeads {
             item_key: key,
-            live_head: None,
-            done_head: None,
-            attempted_head: None,
-            attempted_at: None,
+            ..Default::default()
         }
     }
 

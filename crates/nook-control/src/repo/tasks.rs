@@ -267,17 +267,26 @@ pub trait TaskRepository: Send + Sync {
     /// This workspace's cards that carry a recorded PR — `(id, number, pr_url)`
     /// — the candidate set for REPAIR items (MAIN-458 AC-1b).
     ///
-    /// Narrowed by the same two exclusions `pick_tasks` applies to the FRESH
-    /// side, because they are properties of the card rather than of how the
-    /// work was sourced (MAIN-496 AC-3): a card in a `completed`/`canceled`
-    /// column is finished, and a `blocked` card is one a human has been asked
-    /// about. Without them the two queued-job endings feed themselves — the
-    /// reaper cancels a repair run, this query hands the same item straight
-    /// back, and the cycle repeats forever on a card nobody is being helped by.
+    /// Narrowed by the same exclusions `pick_tasks` applies to the FRESH side,
+    /// because they are properties of the card rather than of how the work was
+    /// sourced (MAIN-496 AC-3): a card in a `completed`/`canceled` column is
+    /// finished, and a card labelled `blocked` or `needs-human-review` is one a
+    /// human has been asked about. Without them the two queued-job endings feed
+    /// themselves — the reaper cancels a repair run, this query hands the same
+    /// item straight back, and the cycle repeats forever on a card nobody is
+    /// being helped by. `needs-human-review` is MAIN-386 AC-4's stop, and it
+    /// has to reach the repair lane too or a card the ladder gave up on would
+    /// keep firing repair passes off its recorded PR.
+    ///
+    /// `unstopped` is that stop standing down for ONE card, which is the manual
+    /// trigger naming it (AC-6). `blocked` never stands down — see
+    /// [`crate::services::work_source::BuildWork`], where the same split is
+    /// applied to the fresh lane.
     async fn tasks_with_pr(
         &self,
         tenant: TenantId,
         workspace: WorkspaceId,
+        unstopped: Option<TaskId>,
     ) -> ApiResult<Vec<(TaskId, i64, String)>>;
 
     /// The same cards, narrowed to those still IN FLIGHT — in a column whose
@@ -573,25 +582,14 @@ pub trait TaskRepository: Send + Sync {
         holder: UserId,
     ) -> ApiResult<bool>;
 
-    /// The card's consecutive concluded-nothing build count (MAIN-489 AC-4).
-    /// `0` for a card that has none, and for one that is gone.
-    async fn build_failures(&self, id: TaskId, tenant: TenantId) -> ApiResult<i32>;
-
-    /// Add one to that count, and report the new total.
-    async fn bump_build_failures(&self, id: TaskId, tenant: TenantId) -> ApiResult<i32>;
-
-    /// Zero that count, but only when it has reached `at_least` — `0` zeroes
-    /// unconditionally. The threshold is what makes one call serve both resets:
-    /// an outcome spends whatever is there, while a card re-entering the pick
-    /// with a FULL set can only have got there through a human's hand (the
-    /// `blocked` label lifted, or the card named to the manual trigger), so its
-    /// strikes are spent too (AC-5/AC-6).
-    async fn clear_build_failures(
-        &self,
-        id: TaskId,
-        tenant: TenantId,
-        at_least: i32,
-    ) -> ApiResult<()>;
+    /// Answer every failure the card's ladder currently counts (MAIN-386 AC-5):
+    /// a human lifted `needs-human-review`, or named the card to the manual
+    /// trigger, so the run of failures before this moment is spent and the
+    /// card climbs from the first rung again.
+    ///
+    /// A timestamp rather than a counter because the count itself is derived
+    /// from `loop_jobs` (NG-2) — this only says where to start reading.
+    async fn clear_build_ladder(&self, id: TaskId, tenant: TenantId) -> ApiResult<()>;
 
     /// Attach or detach the `agent-ready` label, creating it if new. One method
     /// because the upsert exists only to feed the attach/detach.
@@ -602,7 +600,10 @@ pub trait TaskRepository: Send + Sync {
     async fn list_labels(&self, tenant: TenantId) -> ApiResult<Vec<Label>>;
     async fn upsert_label(&self, tenant: TenantId, name: &str, color: &str) -> ApiResult<Label>;
     async fn delete_label(&self, id: Uuid, tenant: TenantId) -> ApiResult<u64>;
-    async fn label_id_by_uuid(&self, id: Uuid, tenant: TenantId) -> ApiResult<Option<Uuid>>;
+    /// A label's NAME from its id. The name is what every consequence of a
+    /// label change is keyed on — see [`crate::services::tasks::detach_label`]
+    /// — so a surface that took a uuid has to get back to it.
+    async fn label_name_by_uuid(&self, id: Uuid, tenant: TenantId) -> ApiResult<Option<String>>;
     async fn label_id_by_name(&self, tenant: TenantId, name: &str) -> ApiResult<Option<Uuid>>;
     async fn labels_of_task(&self, task: TaskId) -> ApiResult<Vec<Label>>;
 
@@ -1034,6 +1035,7 @@ impl TaskRepository for DbTaskRepository {
         &self,
         tenant: TenantId,
         workspace: WorkspaceId,
+        unstopped: Option<TaskId>,
     ) -> ApiResult<Vec<(TaskId, i64, String)>> {
         // `number` is INT4 on Postgres: decode the column's own width and
         // widen in Rust, or the whole read dies with a ColumnDecode there
@@ -1048,8 +1050,11 @@ impl TaskRepository for DbTaskRepository {
                     AND c.type NOT IN ('completed', 'canceled')
                     AND NOT EXISTS (
                         SELECT 1 FROM task_labels tl JOIN labels l ON l.id = tl.label_id
-                         WHERE tl.task_id = t.id AND l.name = 'blocked')",
-                params![tenant, workspace.0],
+                         WHERE tl.task_id = t.id AND l.name = 'blocked')
+                    AND (t.id = $3 OR NOT EXISTS (
+                        SELECT 1 FROM task_labels tl JOIN labels l ON l.id = tl.label_id
+                         WHERE tl.task_id = t.id AND l.name = 'needs-human-review'))",
+                params![tenant, workspace.0, unstopped.map(|t| t.0)],
             )
             .await?;
         Ok(rows
@@ -2100,40 +2105,15 @@ impl TaskRepository for DbTaskRepository {
         Ok(rows > 0)
     }
 
-    async fn build_failures(&self, id: TaskId, tenant: TenantId) -> ApiResult<i32> {
-        Ok(self
-            .db
-            .query_scalar_opt(
-                "SELECT build_failure_strikes FROM tasks WHERE id = $1 AND tenant_id = $2",
-                params![id, tenant],
-            )
-            .await?
-            .unwrap_or(0))
-    }
-
-    async fn bump_build_failures(&self, id: TaskId, tenant: TenantId) -> ApiResult<i32> {
-        Ok(self
-            .db
-            .query_scalar_opt(
-                "UPDATE tasks SET build_failure_strikes = build_failure_strikes + 1
-         WHERE id = $1 AND tenant_id = $2 RETURNING build_failure_strikes",
-                params![id, tenant],
-            )
-            .await?
-            .unwrap_or(0))
-    }
-
-    async fn clear_build_failures(
-        &self,
-        id: TaskId,
-        tenant: TenantId,
-        at_least: i32,
-    ) -> ApiResult<()> {
+    async fn clear_build_ladder(&self, id: TaskId, tenant: TenantId) -> ApiResult<()> {
         self.db
             .exec(
-                "UPDATE tasks SET build_failure_strikes = 0
-         WHERE id = $1 AND tenant_id = $2 AND build_failure_strikes >= $3",
-                params![id, tenant, at_least],
+                &format!(
+                    "UPDATE tasks SET build_ladder_cleared_at = {}
+                      WHERE id = $1 AND tenant_id = $2",
+                    type_mapping(self.db.engine()).now()
+                ),
+                params![id, tenant],
             )
             .await?;
         Ok(())
@@ -2201,11 +2181,11 @@ impl TaskRepository for DbTaskRepository {
             .await?)
     }
 
-    async fn label_id_by_uuid(&self, id: Uuid, tenant: TenantId) -> ApiResult<Option<Uuid>> {
-        let found: Option<(Uuid,)> = self
+    async fn label_name_by_uuid(&self, id: Uuid, tenant: TenantId) -> ApiResult<Option<String>> {
+        let found: Option<(String,)> = self
             .db
             .query_opt(
-                "SELECT id FROM labels WHERE id = $1 AND tenant_id = $2",
+                "SELECT name FROM labels WHERE id = $1 AND tenant_id = $2",
                 params![id, tenant],
             )
             .await?;
@@ -2754,8 +2734,8 @@ struct FakeState {
     tasks: Vec<TaskItem>,
     /// `(task, label_name)`
     task_labels: Vec<(Uuid, String)>,
-    /// Consecutive build runs that concluded nothing, per task (MAIN-489).
-    build_failures: HashMap<Uuid, i32>,
+    /// When a human last answered the card's build-failure ladder (MAIN-386).
+    build_ladder_cleared: HashMap<Uuid, chrono::DateTime<chrono::Utc>>,
     comments: Vec<TaskComment>,
     desc_revisions: Vec<TaskDescriptionRevision>,
     labels: Vec<Label>,
@@ -3114,21 +3094,25 @@ impl TaskRepository for FakeTaskRepository {
         &self,
         tenant: TenantId,
         workspace: WorkspaceId,
+        unstopped: Option<TaskId>,
     ) -> ApiResult<Vec<(TaskId, i64, String)>> {
         let st = self.inner.lock().unwrap();
         Ok(st
             .tasks
             .iter()
             .filter(|t| {
+                let stopped = |n: &str| {
+                    st.task_labels
+                        .iter()
+                        .any(|(task, name)| *task == t.id.0 && name == n)
+                };
                 t.tenant_id == tenant
                     && t.workspace_id == Some(workspace)
                     && t.pr_url.is_some()
                     && t.archived_at.is_none()
                     && in_flight(&st, t)
-                    && !st
-                        .task_labels
-                        .iter()
-                        .any(|(task, name)| *task == t.id.0 && name == "blocked")
+                    && !stopped("blocked")
+                    && (unstopped == Some(t.id) || !stopped("needs-human-review"))
             })
             .filter_map(|t| Some((t.id, i64::from(t.number?), t.pr_url.clone()?)))
             .collect())
@@ -3900,28 +3884,9 @@ impl TaskRepository for FakeTaskRepository {
         Ok(true)
     }
 
-    async fn build_failures(&self, id: TaskId, _tenant: TenantId) -> ApiResult<i32> {
-        let st = self.inner.lock().unwrap();
-        Ok(st.build_failures.get(&id.0).copied().unwrap_or(0))
-    }
-
-    async fn bump_build_failures(&self, id: TaskId, _tenant: TenantId) -> ApiResult<i32> {
+    async fn clear_build_ladder(&self, id: TaskId, _tenant: TenantId) -> ApiResult<()> {
         let mut st = self.inner.lock().unwrap();
-        let n = st.build_failures.entry(id.0).or_insert(0);
-        *n += 1;
-        Ok(*n)
-    }
-
-    async fn clear_build_failures(
-        &self,
-        id: TaskId,
-        _tenant: TenantId,
-        at_least: i32,
-    ) -> ApiResult<()> {
-        let mut st = self.inner.lock().unwrap();
-        if st.build_failures.get(&id.0).copied().unwrap_or(0) >= at_least {
-            st.build_failures.remove(&id.0);
-        }
+        st.build_ladder_cleared.insert(id.0, chrono::Utc::now());
         Ok(())
     }
 
@@ -3988,13 +3953,13 @@ impl TaskRepository for FakeTaskRepository {
         Ok((before - st.labels.len()) as u64)
     }
 
-    async fn label_id_by_uuid(&self, id: Uuid, tenant: TenantId) -> ApiResult<Option<Uuid>> {
+    async fn label_name_by_uuid(&self, id: Uuid, tenant: TenantId) -> ApiResult<Option<String>> {
         let st = self.inner.lock().unwrap();
         Ok(st
             .labels
             .iter()
             .find(|l| l.id == id && l.tenant_id == tenant)
-            .map(|l| l.id))
+            .map(|l| l.name.clone()))
     }
 
     async fn label_id_by_name(&self, tenant: TenantId, name: &str) -> ApiResult<Option<Uuid>> {
