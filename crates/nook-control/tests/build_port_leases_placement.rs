@@ -2,11 +2,11 @@
 //!
 //! Separated from `build_port_leases` because of what it drives, not what it
 //! asserts: every test here goes through `jobs::select_executor`, which asks
-//! `eligible_loop_executors`, which reads `json_each(…) e`'s fields off the
-//! alias and is MAIN-546's known SQLite break. So this binary is allow-listed
-//! beside `executor_selection` and `dispatch_order`, which wait on the same
-//! card, and its sibling — this card's own SQL, all of it — stays covered on
-//! both engines.
+//! `eligible_loop_executors`. That query read `json_each(…) e`'s fields off the
+//! alias, so this binary was allow-listed beside `executor_selection` and
+//! `dispatch_order`, which waited on the same card. MAIN-546 fixed it and all
+//! four lines are gone, so both halves are covered on both engines; the split
+//! stays because what each drives is still different.
 //!
 //! What is here and nowhere else: the gate that decides a build WAITS rather
 //! than fails when a required listener has no port, and that the wait is one

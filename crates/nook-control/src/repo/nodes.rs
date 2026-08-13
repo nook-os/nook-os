@@ -1020,21 +1020,26 @@ impl NodeRepository for DbNodeRepository {
             json(self.db.engine()).get_json("capabilities", "runtime_auth"),
             json(self.db.engine()).literal("[]")
         ));
-        // Containment, not an expanded compare: `jsonb_array_elements` yields
-        // JSON scalars, so `k.value::text` on the string "spec" is `"spec"`
-        // WITH its quotes and never equals a bound `spec`. `@>` against a
-        // JSON-encoded needle is the audited shape and stays parameterized.
-        let declares_kind = json(self.db.engine()).contains(
+        // The alias is not the element on both engines (MAIN-546), so the
+        // fields below are read off `array_element` rather than off `e`:
+        // Postgres' set-returning function names its one column after the
+        // alias, SQLite's `json_each` puts the payload in `e.value`.
+        let element = json(self.db.engine()).array_element("e");
+        // Array-contains-scalar, which is its OWN seam and not `contains`
+        // (MAIN-546): the needle used to be JSON-encoded in Rust and cast to
+        // `jsonb` in SQL, and BOTH halves of that are Postgres-shaped. SQLite
+        // reads `CAST('"spec"' AS jsonb)` with NUMERIC affinity and gets the
+        // integer 0, and its `contains` expects an object's keys on the right,
+        // so the test was false for every node that ever declared the kind.
+        // The bind is now the plain string and each arm encodes its own way.
+        let declares_kind = json(self.db.engine()).array_contains_text(
             &format!(
                 "COALESCE({}, {})",
                 json(self.db.engine()).get_json("capabilities", "loop_kinds"),
                 json(self.db.engine()).literal("[]")
             ),
-            &type_mapping(self.db.engine()).cast("$5", "jsonb"),
+            "$4",
         );
-        // The needle, JSON-encoded here rather than in SQL: `to_jsonb(...)` is a
-        // Postgres-only spelling and this keeps the bind a plain string.
-        let kind_json = serde_json::Value::String(kind.to_string()).to_string();
         // The build wall (AC-3), in the WHERE clause rather than in a caller:
         // a shared operator drops out of the candidate set for a `build` job
         // before anything it declared is even read.
@@ -1060,10 +1065,10 @@ impl NodeRepository for DbNodeRepository {
                        AND {declares_kind}
                      ORDER BY (owner_person_id = $2) DESC NULLS LAST, id",
                     operator = shared_operator_clause(self.db.engine()),
-                    rt = json(self.db.engine()).get_text("e", "runtime"),
-                    state = json(self.db.engine()).get_text("e", "state"),
+                    rt = json(self.db.engine()).get_text(&element, "runtime"),
+                    state = json(self.db.engine()).get_text(&element, "state"),
                 ),
-                params![tenant, person, runtime, kind, kind_json],
+                params![tenant, person, runtime, kind],
             )
             .await?)
     }

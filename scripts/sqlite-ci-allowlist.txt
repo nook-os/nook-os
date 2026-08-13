@@ -111,6 +111,20 @@
 #             only after the binary was re-run.
 #   MAIN-546  PRODUCTION: `eligible_loop_executors` reads `json_each`'s alias
 #             as a column.
+#             LANDED 2026-08-13, and it took SIX lines with it, not the two
+#             this block named. Four were the placement binaries that had
+#             accumulated against the one query — executor_selection,
+#             dispatch_order, workspace_build_loop_status (MAIN-495),
+#             build_port_leases_placement (MAIN-552), build_loop_pin
+#             (MAIN-385) — and the sixth was `loops_switch`, which MAIN-545
+#             re-measured onto this cause the day before. The card's own text
+#             named two because the other four arrived after it was written;
+#             the deletions are what the guard checks, not the count in an AC.
+#             A second defect in the SAME query had to be fixed to get there:
+#             the `loop_kinds` test bound its needle JSON-encoded and cast it
+#             to `jsonb`, and both halves are Postgres-shaped — SQLite reads
+#             `CAST('"spec"' AS jsonb)` with NUMERIC affinity as the integer 0.
+#             Fixing only the alias left 21 of executor_selection's 29 failing.
 #   MAIN-547  PRODUCTION: `!= ALL($n)` bound an EMPTY list matches nothing on
 #             SQLite where Postgres matches everything — and returns Ok, so an
 #             unmounted node's checkouts are silently left un-tombstoned.
@@ -118,60 +132,11 @@
 #   MAIN-549  the mechanism under test does not exist on SQLite; needs a ruling
 #             before it needs code.
 dispatch_ownership         # MEASURED (MAIN-478): `EnginePool::pg() on a SQLite pool` — `sqlx::query(…).execute(state.db.pg())` at :27. The ONLY line where "raw sqlx in the test itself" was still true (MAIN-548)
-executor_selection         # MEASURED (MAIN-478): `no such column: e` — production `repo/nodes.rs:1006` reads `json_each(…) e`'s fields off the alias. 0 passed, 29 failed, one error (MAIN-546)
-dispatch_order             # MEASURED (MAIN-478): the same `no such column: e`, swallowed into "no eligible executor" so every placement assertion reads `left: None`. Deletable only together with executor_selection (MAIN-546)
 job_reaper                 # MEASURED (MAIN-545, 2026-08-12, after its three fixtures were converted): `near "j": syntax error` — production `repo/jobs.rs:1367` is `UPDATE loop_jobs j … FROM nodes n`, and its `RETURNING n.last_seen_at` names the joined table SQLite cannot return from. 3 passed, 6 failed (MAIN-564)
-loops_switch               # MEASURED (MAIN-545, 2026-08-12, after both `::jsonb` literals were converted): `no such column: e` — the same production `eligible_loop_executors` executor_selection and dispatch_order hit, reached through `select_executor`. 3 passed, 1 failed (MAIN-546)
 migrate_dev_tolerance      # MEASURED (MAIN-545, 2026-08-12, after the bytea literals were bound and the two schema/psql tests gated): `VersionMissing(38)` and an empty orphan list — the Postgres MIGRATOR driven at a SQLite bed, and `orphan_versions` returning empty there BY DESIGN. Same signature as squash_restamp; needs the same ruling. 3 passed, 3 failed (MAIN-549)
 multi_instance             # MEASURED (MAIN-478): "instance A never started listening" — production `ws/bus.rs:204` is `PgListener` + `pg_notify`, so the bus task dies on a SQLite pool. Needs a ruling, not a sweep (MAIN-549)
 reconcile_tombstones       # MEASURED (MAIN-478): three assertions fail with NO SQL error — production `path != ALL($2)` bound an empty list tombstones 0 rows and returns Ok. Its fourth failure is a fixture `interval '1 second'` at :246 (MAIN-547)
 squash_restamp             # MEASURED (MAIN-478): `EngineUnsupported` — `nook_db::restamp` refuses a non-Postgres pool BY DESIGN, and the test unwraps it at :190. Also drives the Postgres MIGRATOR on a SQLite bed (`VersionMissing(38)` at :288). Needs a ruling (MAIN-549)
-
-# A THIRD line for the same one query, added by MAIN-495 and measured the same
-# way: `/build-loop-status` reports the capacity of the set `select_executor`
-# resolves, so it asks `eligible_loop_executors` for that set rather than
-# re-deriving who may build — which is the whole reason the number it prints
-# can be trusted to match where jobs actually land. All 7 tests, one error,
-# 2026-08-11:
-#
-#   Db(Query(Database(SqliteError { code: 1, message: "no such column: e" })))
-#
-# So this list grows by one, on purpose and with its measurement, rather than
-# the endpoint keeping a private copy of placement's rule to stay engine-clean.
-# It is deleted with the two above, by the same fix, in one edit.
-workspace_build_loop_status # `no such column: e`, with executor_selection (MAIN-268)
-
-# A FOURTH line for the same one query, added by MAIN-552 and measured the same
-# way. A build now leases the ports its stack binds, and the gate that decides a
-# build WAITS rather than fails when a required listener has no port lives in
-# `select_executor` — so testing it means asking `eligible_loop_executors`, and
-# inheriting its break. All 4 tests, 2026-08-13:
-#
-#   Db(Query(Database(SqliteError { code: 1, message: "no such column: e" })))
-#
-# The card's OWN sql — the widened `session_port_leases`, its two conflict
-# targets, the holder-scoped reads and deletes, the reclaim's blindness to a
-# build — is in `build_port_leases`, which is COVERED and passes on both
-# engines. Only the placement half is here, which is why it is a separate
-# binary rather than one suite excused whole. Deleted with the three above, by
-# the same fix, in one edit.
-build_port_leases_placement # `no such column: e`, with executor_selection (MAIN-546)
-
-# A FIFTH line for the same one query, added by MAIN-385 and measured the same
-# way. The build loop's node PIN is placement — a pinned node is the only
-# candidate, and an unavailable one waits rather than failing over — so proving
-# it means driving `select_executor`, which asks `eligible_loop_executors` and
-# dies on the same alias. All 3 tests, 2026-08-13:
-#
-#   Db(Query(Database(SqliteError { code: 1, message: "no such column: e" })))
-#
-# These tests are in their OWN binary for exactly this reason, and for the one
-# MAIN-552 gives just above: MAIN-385's other eleven — the sweep, both gates,
-# the three event nudges, the settings endpoint — pass on SQLite and stay
-# COVERED next door in `build_loop_switch`. Excusing three tests by excluding
-# one binary would have parked all fourteen. Deleted with the four above, by
-# the same fix, in one edit.
-build_loop_pin             # `no such column: e`, with executor_selection (MAIN-546)
 
 # ── the MAIN-423 residue, and what MEASURING it found (MAIN-472) ──
 #

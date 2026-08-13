@@ -2,14 +2,14 @@
 //! (MAIN-515) — the divergence guard for the one new query.
 //!
 //! Separate from `executor_selection.rs` deliberately, and it is worth saying
-//! why rather than leaving it to look like taste. That binary is on the SQLite
-//! CI allow-list because `eligible_loop_executors` itself does not run on
-//! SQLite yet: it builds `FROM json_each(…) e WHERE json_extract(e, …)`, and on
-//! SQLite the alias of a table-valued function is not a column, so every test
-//! that reaches placement dies with `no such column: e`. Fixing that is the
-//! dialect sweep's, not this card's — but the query THIS card adds is
-//! engine-neutral as written, and it would be dishonest to file it behind a
-//! failure it does not share. So it gets a home both legs can run.
+//! why rather than leaving it to look like taste. That binary WAS on the SQLite
+//! CI allow-list because `eligible_loop_executors` did not run on SQLite at
+//! all: it built `FROM json_each(…) e WHERE json_extract(e, …)`, and on SQLite
+//! the alias of a table-valued function is not a column, so every test that
+//! reached placement died with `no such column: e`. Fixing that was the dialect
+//! sweep's job (MAIN-546, landed) — but the query THIS card adds is
+//! engine-neutral as written, and it would have been dishonest to file it
+//! behind a failure it does not share. So it has a home both legs can run.
 //!
 //! What keeps this file engine-neutral: every insert binds through `params!`
 //! (no raw sqlx), no interval arithmetic, and the only JSON it touches is the

@@ -1,15 +1,15 @@
 //! Fixtures shared by the two build-port-lease suites (MAIN-552).
 //!
-//! Two suites because they need different things from the SQLite leg. The
+//! Two suites because they needed different things from the SQLite leg. The
 //! ALLOCATION half — this card's own SQL: the widened table, its two conflict
-//! targets, the LEFT JOINs, the holder-scoped delete — runs on both engines and
-//! is covered. The PLACEMENT half drives `jobs::select_executor`, which reaches
-//! `eligible_loop_executors`'s `json_each(…) e` and is MAIN-546's known SQLite
-//! break; it is allow-listed with the binaries already waiting on that card.
+//! targets, the LEFT JOINs, the holder-scoped delete — always ran on both
+//! engines. The PLACEMENT half drives `jobs::select_executor`, which reaches
+//! `eligible_loop_executors`'s `json_each(…) e` and was allow-listed with the
+//! binaries waiting on MAIN-546; that card landed and both halves are covered.
 //!
-//! Splitting them is what keeps AC-9 honest: everything this card introduced is
-//! exercised on SQLite, and only the part blocked by somebody else's defect is
-//! excused.
+//! Splitting them is what kept AC-9 honest while the exclusion existed:
+//! everything this card introduced was exercised on SQLite, and only the part
+//! blocked by somebody else's defect was excused.
 #![allow(dead_code)]
 
 use nook_control::state::AppState;
