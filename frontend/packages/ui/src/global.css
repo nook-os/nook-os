@@ -1305,7 +1305,23 @@ table.nook-table tr.clickable { cursor: pointer; }
 }
 
 /* Backlog tab: a dense prioritized list, not columns (MAIN-82). */
-.backlog { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow-y: auto; }
+.backlog {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  /* The row's fixed tracks (MAIN-571). Widths, not `auto`: a track that sizes
+     to its content is a track whose neighbours move when the content changes,
+     which is the whole defect. Each is its widest realistic content — a `!!`
+     mark, the compact type badge, `MAIN-1234`, `unstarted` — and anything
+     longer is clipped rather than allowed to shift the row. */
+  --nook-backlog-prio-w: 16px;
+  --nook-backlog-type-w: 26px;
+  --nook-backlog-key-w: 68px;
+  --nook-backlog-status-w: 72px;
+  --nook-backlog-chevron-w: 18px;
+}
 .backlog-composer {
   display: flex;
   gap: 6px;
@@ -1336,10 +1352,63 @@ table.nook-table tr.clickable { cursor: pointer; }
    finished work, not a live row. The class was applied but never styled. */
 .backlog-row.archived { opacity: 0.5; }
 .backlog-row.archived .backlog-row-title { text-decoration: line-through; }
-.backlog-row-title { color: var(--nook-fg-bright); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.backlog-row-preview {
-  flex: 1;
+/* The four reserved cells. `flex: 0 0 <width>` is the fixed track: present,
+   the same width, and in the same place on every row of a section whether or
+   not it has anything in it (MAIN-571 AC-1/2). */
+.backlog-row-prio {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  flex: 0 0 var(--nook-backlog-prio-w);
+}
+.backlog-row-type {
+  display: inline-flex;
+  align-items: center;
+  overflow: hidden;
+  flex: 0 0 var(--nook-backlog-type-w);
+}
+.backlog-row-status {
+  display: inline-flex;
+  align-items: center;
+  overflow: hidden;
+  flex: 0 0 var(--nook-backlog-status-w);
+}
+.backlog-row-key {
+  flex: 0 0 var(--nook-backlog-key-w);
+  /* `.card-key`'s own right margin would sit outside the basis and push the
+     title 6px past where the track says it starts. */
+  margin-right: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.backlog-row-title {
+  color: var(--nook-fg-bright);
+  flex: 0 1 auto;
   min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Labels and workspace: variable in number, so one cell rather than N flex
+   siblings, and the first to give way when the row narrows (shrink 4 against
+   the title's 1) — the title is what the row is read for. */
+.backlog-row-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 4 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+/* `flex: 1 1 0` — the preview takes the width left over and never more. Its
+   basis is 0, so however long the description is it cannot push the title into
+   truncating (AC-5); smaller and faint, so it cannot be read as the title. */
+.backlog-row-preview {
+  flex: 1 1 0;
+  min-width: 0;
+  font-size: 11.5px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1369,7 +1438,7 @@ table.nook-table tr.clickable { cursor: pointer; }
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
+  width: var(--nook-backlog-chevron-w);
   height: 18px;
   flex: none;
   padding: 0;
@@ -1384,6 +1453,9 @@ table.nook-table tr.clickable { cursor: pointer; }
   background: var(--nook-bg-raised);
 }
 .backlog-epic-collapse:focus-visible { outline: 1px solid var(--nook-accent); }
+/* The "No epic" head has no chevron to collapse, and used to begin 26px left of
+   every real epic head as a result. This reserves the width (MAIN-571 AC-3). */
+.backlog-epic-chevron-spacer { flex: 0 0 var(--nook-backlog-chevron-w); }
 .backlog-epic-body { display: flex; flex-direction: column; }
 .backlog-epic-body .backlog-row { padding-left: 22px; }
 .backlog-epic-empty { padding: 4px 10px 4px 22px; }

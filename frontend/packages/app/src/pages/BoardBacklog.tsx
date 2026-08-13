@@ -103,6 +103,11 @@ function BacklogComposer({
   );
 }
 
+/** Characters of description a row shows. One clipped line's worth: the row is
+ *  scanned for its title, and the preview is the hint that decides whether to
+ *  open it (MAIN-571 AC-4/5). */
+export const BACKLOG_PREVIEW_MAX = 120;
+
 function BacklogRow({
   task,
   workspaceName,
@@ -144,6 +149,7 @@ function BacklogRow({
 }) {
   const isEpic = task.type === "epic";
   const prio = priorityMeta(task.priority ?? 0);
+  const preview = previewText(task.description, BACKLOG_PREVIEW_MAX);
   const hitRef = useScrollToWhen<HTMLDivElement>(hit);
   return (
     <div
@@ -166,28 +172,42 @@ function BacklogRow({
           title="select"
         />
       )}
-      {!!task.priority && (
-        <span className="card-prio" style={{ color: prio.color }} title={`priority: ${prio.label}`}>
-          {prio.mark}
-        </span>
-      )}
-      {task.type && task.type !== "task" && <TypeBadge type={task.type} compact />}
-      <span className="card-key mono">{task.key ?? ""}</span>
+      {/* Every cell below is rendered whether or not it has content: priority 0,
+          a plain `task`'s type and a "No epic" row's status are all absent on
+          some rows, and collapsing those cells is what made each row start its
+          key — and then its title — at a different x (MAIN-571 AC-2). */}
+      <span className="backlog-row-prio">
+        {!!task.priority && (
+          <span
+            className="card-prio"
+            style={{ color: prio.color }}
+            title={`priority: ${prio.label}`}
+          >
+            {prio.mark}
+          </span>
+        )}
+      </span>
+      <span className="backlog-row-type">
+        {task.type && task.type !== "task" && <TypeBadge type={task.type} compact />}
+      </span>
+      <span className="card-key mono backlog-row-key">{task.key ?? ""}</span>
       <span className="backlog-row-title">{task.title}</span>
-      {status && <span className="backlog-status">{status}</span>}
-      {(task.labels ?? []).map((l) => (
-        <span key={l.id} className="card-label" style={{ borderColor: l.color, color: l.color }}>
-          {l.name}
-        </span>
-      ))}
-      {workspaceName && (
-        <span className="card-workspace" title={`workspace: ${workspaceName}`}>
-          {workspaceName}
-        </span>
-      )}
-      {previewText(task.description) && (
-        <span className="backlog-row-preview faint">{previewText(task.description)}</span>
-      )}
+      <span className="backlog-row-status">
+        {status && <span className="backlog-status">{status}</span>}
+      </span>
+      <span className="backlog-row-meta">
+        {(task.labels ?? []).map((l) => (
+          <span key={l.id} className="card-label" style={{ borderColor: l.color, color: l.color }}>
+            {l.name}
+          </span>
+        ))}
+        {workspaceName && (
+          <span className="card-workspace" title={`workspace: ${workspaceName}`}>
+            {workspaceName}
+          </span>
+        )}
+      </span>
+      <span className="backlog-row-preview faint">{preview}</span>
       {!readOnly && (
         <span className="backlog-row-actions" onClick={(e) => e.stopPropagation()}>
           {/* Epics are containers — not sent to the board or dispatched. */}
@@ -604,6 +624,9 @@ export function BoardBacklog({
       {/* Parentless backlog tasks — the "No epic" section (MAIN-83 AC-1). */}
       <div className="backlog-epic">
         <div className="backlog-epic-head no-epic">
+          {/* No chevron — there is no epic here to collapse — but its width is
+              reserved, or this head sits 26px left of every real one (AC-3). */}
+          <span className="backlog-epic-chevron-spacer" aria-hidden="true" />
           <span className="backlog-epic-title faint">No epic</span>
           <span className="backlog-epic-progress faint">{groups.noEpic.length}</span>
         </div>

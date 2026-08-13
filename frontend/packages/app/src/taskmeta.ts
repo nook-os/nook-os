@@ -40,8 +40,14 @@ export function priorityRank(value: number | null | undefined): number {
  * raw on a card produced literal `## Acceptance - [ ] **AC-1** …`, which is
  * both ugly and useless at that size — the card should say what the task is,
  * and the detail panel is where the spec is read.
+ *
+ * `max` caps the result at that many characters, cut on a word boundary. It is
+ * optional because the kanban card clamps to two lines in CSS and must keep the
+ * text that clamp is measured against; a caller with one line and an ellipsis
+ * has no such need, and passing no cap there puts the whole of a 4000-character
+ * spec body in the DOM for CSS to hide (MAIN-571 AC-4).
  */
-export function previewText(md: string | null | undefined): string {
+export function previewText(md: string | null | undefined, max?: number): string {
   if (!md) return "";
   let out = md;
   // Frontmatter is metadata for a machine, never a summary for a person.
@@ -59,5 +65,16 @@ export function previewText(md: string | null | undefined): string {
     .join(" ");
   // Emphasis and code ticks: keep the text, drop the punctuation.
   out = out.replace(/\*\*([^*]+)\*\*/g, "$1").replace(/`([^`]+)`/g, "$1");
-  return out.replace(/\s+/g, " ").trim();
+  const flat = out.replace(/\s+/g, " ").trim();
+  return max === undefined ? flat : truncate(flat, max);
+}
+
+/** Cut to `max` characters at the last word boundary, with an ellipsis. A word
+ *  longer than the whole cap is cut mid-word — a cap that a single long token
+ *  could opt out of is not a cap. */
+function truncate(s: string, max: number): string {
+  if (s.length <= max) return s;
+  const cut = s.slice(0, max);
+  const space = cut.lastIndexOf(" ");
+  return `${(space > 0 ? cut.slice(0, space) : cut).trimEnd()}…`;
 }
