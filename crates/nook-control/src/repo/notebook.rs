@@ -84,6 +84,25 @@ pub struct FolderEdit {
     pub parent: Option<Option<UserNoteFolderId>>,
 }
 
+/// What a folder delete did — or refused to do, and why (MAIN-574).
+///
+/// Deleting a folder MOVES its contents to the folder's own parent, and a move
+/// is subject to the uniqueness index like any other. Two folders named
+/// `Archive` under different parents are legal — that is the case the index is
+/// designed to permit — so a delete that would put one beside the other has to
+/// say so, not abort in the driver and reach the client as `500 internal
+/// error`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FolderDeletion {
+    Deleted,
+    NoSuchFolder,
+    /// A child would land beside a `what` ("folder" / "note") of this name.
+    Collision {
+        what: &'static str,
+        name: String,
+    },
+}
+
 /// What a vault stores to check a password: a salt and a verifier, never the
 /// password and never a key derived from it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,6 +138,37 @@ pub trait NotebookRepository: Send + Sync {
 
     /// Is this one of the person's own folders? The guard on every move.
     async fn owns_folder(&self, person: Uuid, folder: UserNoteFolderId) -> ApiResult<bool>;
+
+    /// One of the person's folders by id — the current name and parent an
+    /// update has to resolve against before it can say what a rename or a move
+    /// would collide with. `None` = no such folder, or not theirs.
+    async fn get_folder(
+        &self,
+        person: Uuid,
+        id: UserNoteFolderId,
+    ) -> ApiResult<Option<UserNoteFolder>>;
+
+    /// Is a folder name already taken under this parent (`None` = the notebook
+    /// root), ignoring `except` — the folder being renamed or moved? What the
+    /// 409 is answered from (MAIN-574 AC-4). The unique index is what makes the
+    /// answer binding; this is what lets the caller name the taken name.
+    async fn folder_name_taken(
+        &self,
+        person: Uuid,
+        parent: Option<UserNoteFolderId>,
+        name: &str,
+        except: Option<UserNoteFolderId>,
+    ) -> ApiResult<bool>;
+
+    /// The note twin of [`Self::folder_name_taken`], keyed on the containing
+    /// folder (`None` = the notebook root).
+    async fn note_title_taken(
+        &self,
+        person: Uuid,
+        folder: Option<UserNoteFolderId>,
+        title: &str,
+        except: Option<UserNoteId>,
+    ) -> ApiResult<bool>;
 
     /// Note summaries, optionally filtered by a case-insensitive substring over
     /// title + folder path (`q` empty = all). **Bodies stay encrypted and are
@@ -180,14 +230,15 @@ pub trait NotebookRepository: Send + Sync {
 
     /// Delete a folder, **reparenting its contents to its own parent** (root if
     /// it had none) — it never cascade-deletes notes (MAIN-84 AC-4). Notes and
-    /// child folders rise one level, then the folder goes. All three writes are
-    /// one transaction inside this method, so a partial failure cannot orphan
-    /// anything. `Ok(false)` = no such folder.
+    /// child folders rise one level, then the folder goes. Every write is one
+    /// transaction inside this method, so a partial failure cannot orphan
+    /// anything, and a name clash at the destination refuses the whole delete
+    /// rather than half-performing it (MAIN-574).
     async fn delete_folder_reparenting(
         &self,
         person: Uuid,
         id: UserNoteFolderId,
-    ) -> ApiResult<bool>;
+    ) -> ApiResult<FolderDeletion>;
 
     // ── a workspace's shared notes ──────────────────────────────────────────
 
@@ -321,6 +372,41 @@ fn to_note(r: NoteRow) -> StoredUserNote {
     }
 }
 
+/// The two clauses a "is this name taken here?" query varies by: where the row
+/// sits, and which row to ignore.
+///
+/// The container arm is spelled `IS NULL` rather than `= $n` when the row sits
+/// at the root, because `= NULL` matches nothing and two root folders sharing a
+/// name are exactly the collision this refuses (MAIN-574 AC-2) — the same
+/// NULL-equating the index does, asked as a query.
+fn taken_clauses(
+    container: Option<Uuid>,
+    except: Option<Uuid>,
+    column: &str,
+    person: Uuid,
+    name: &str,
+) -> (String, String, Vec<nook_db::DbValue>) {
+    let mut binds = params![person, name];
+    let mut n = 2;
+    let container_sql = match container {
+        Some(id) => {
+            n += 1;
+            binds.push(nook_db::IntoDbValue::into_db_value(id));
+            format!("{column} = ${n}")
+        }
+        None => format!("{column} IS NULL"),
+    };
+    let except_sql = match except {
+        Some(id) => {
+            n += 1;
+            binds.push(nook_db::IntoDbValue::into_db_value(id));
+            format!(" AND id <> ${n}")
+        }
+        None => String::new(),
+    };
+    (container_sql, except_sql, binds)
+}
+
 pub struct DbNotebookRepository {
     db: DbPool,
 }
@@ -364,6 +450,72 @@ impl NotebookRepository for DbNotebookRepository {
             )
             .await?;
         Ok(found.is_some())
+    }
+
+    async fn get_folder(
+        &self,
+        person: Uuid,
+        id: UserNoteFolderId,
+    ) -> ApiResult<Option<UserNoteFolder>> {
+        Ok(self
+            .db
+            .query_opt(
+                "SELECT * FROM user_note_folders WHERE id = $1 AND person_id = $2",
+                params![id, person],
+            )
+            .await?)
+    }
+
+    async fn folder_name_taken(
+        &self,
+        person: Uuid,
+        parent: Option<UserNoteFolderId>,
+        name: &str,
+        except: Option<UserNoteFolderId>,
+    ) -> ApiResult<bool> {
+        let (parent_sql, except_sql, binds) = taken_clauses(
+            parent.map(|p| p.0),
+            except.map(|e| e.0),
+            "parent_id",
+            person,
+            name,
+        );
+        Ok(self
+            .db
+            .query_scalar(
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM user_note_folders
+                      WHERE person_id = $1 AND name = $2 AND {parent_sql}{except_sql})"
+                ),
+                binds,
+            )
+            .await?)
+    }
+
+    async fn note_title_taken(
+        &self,
+        person: Uuid,
+        folder: Option<UserNoteFolderId>,
+        title: &str,
+        except: Option<UserNoteId>,
+    ) -> ApiResult<bool> {
+        let (folder_sql, except_sql, binds) = taken_clauses(
+            folder.map(|f| f.0),
+            except.map(|e| e.0),
+            "folder_id",
+            person,
+            title,
+        );
+        Ok(self
+            .db
+            .query_scalar(
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM user_notes
+                      WHERE person_id = $1 AND title = $2 AND {folder_sql}{except_sql})"
+                ),
+                binds,
+            )
+            .await?)
     }
 
     async fn list_note_summaries(&self, person: Uuid, q: &str) -> ApiResult<Vec<UserNoteSummary>> {
@@ -594,26 +746,131 @@ impl NotebookRepository for DbNotebookRepository {
         &self,
         person: Uuid,
         id: UserNoteFolderId,
-    ) -> ApiResult<bool> {
+    ) -> ApiResult<FolderDeletion> {
         let mut tx = self.db.begin().await.map_err(nook_db::DbError::from)?;
-        let parent: Option<(Option<UserNoteFolderId>,)> = tx
+        let folder: Option<(Option<UserNoteFolderId>, String)> = tx
             .query_opt(
-                "SELECT parent_id FROM user_note_folders WHERE id = $1 AND person_id = $2",
+                "SELECT parent_id, name FROM user_note_folders WHERE id = $1 AND person_id = $2",
                 params![id, person],
             )
             .await?;
-        let Some((parent_id,)) = parent else {
+        let Some((parent_id, folder_name)) = folder else {
             tx.rollback().await?;
-            return Ok(false);
+            return Ok(FolderDeletion::NoSuchFolder);
         };
+        // Where the contents are going, spelled so that NULL means the root
+        // rather than matching nothing.
+        let dest = |alias: &str, column: &str, n: usize| match parent_id {
+            Some(_) => format!("{alias}.{column} = ${n}"),
+            None => format!("{alias}.{column} IS NULL"),
+        };
+        let dest_bind = |binds: &mut Vec<nook_db::DbValue>| {
+            if let Some(p) = parent_id {
+                binds.push(nook_db::IntoDbValue::into_db_value(p.0));
+            }
+        };
+
+        // A child landing beside a row of the same name is refused whole. The
+        // folder itself sits at the destination and is about to go, so it is
+        // never the row that blocks its own contents.
+        let mut binds = params![id, person];
+        dest_bind(&mut binds);
+        let clash: Option<(String,)> = tx
+            .query_opt(
+                &format!(
+                    "SELECT c.name FROM user_note_folders c
+                      WHERE c.parent_id = $1 AND c.person_id = $2
+                        AND EXISTS (SELECT 1 FROM user_note_folders s
+                                     WHERE s.person_id = $2 AND s.name = c.name
+                                       AND s.id <> $1 AND {})
+                      ORDER BY c.name",
+                    dest("s", "parent_id", 3)
+                ),
+                binds,
+            )
+            .await?;
+        if let Some((name,)) = clash {
+            tx.rollback().await?;
+            return Ok(FolderDeletion::Collision {
+                what: "folder",
+                name,
+            });
+        }
+        let mut binds = params![id, person];
+        dest_bind(&mut binds);
+        let clash: Option<(String,)> = tx
+            .query_opt(
+                &format!(
+                    "SELECT c.title FROM user_notes c
+                      WHERE c.folder_id = $1 AND c.person_id = $2
+                        AND EXISTS (SELECT 1 FROM user_notes s
+                                     WHERE s.person_id = $2 AND s.title = c.title AND {})
+                      ORDER BY c.title",
+                    dest("s", "folder_id", 3)
+                ),
+                binds,
+            )
+            .await?;
+        if let Some((title,)) = clash {
+            tx.rollback().await?;
+            return Ok(FolderDeletion::Collision {
+                what: "note",
+                name: title,
+            });
+        }
+
+        // A child folder may carry the DELETED folder's own name — `Work/Work`
+        // is legal, they have different parents — and it cannot move while the
+        // row it is named after still occupies that name at the destination. It
+        // therefore travels last, after the delete, riding the foreign key's
+        // ON DELETE SET NULL to the root and then up. At most one child can be
+        // named this, since children are unique among themselves.
+        let same_named: Option<(UserNoteFolderId,)> = tx
+            .query_opt(
+                "SELECT id FROM user_note_folders
+                  WHERE parent_id = $1 AND person_id = $2 AND name = $3",
+                params![id, person, folder_name.clone()],
+            )
+            .await?;
+        // That detour passes through the root, so when the destination is NOT
+        // the root the name has to be free there too. Refused rather than left
+        // to fail mid-transaction; the person's fix is the same rename.
+        if let (Some(_), Some(_)) = (&same_named, &parent_id) {
+            let transit: Option<(String,)> = tx
+                .query_opt(
+                    "SELECT name FROM user_note_folders
+                      WHERE person_id = $1 AND parent_id IS NULL AND name = $2 AND id <> $3",
+                    params![person, folder_name.clone(), id],
+                )
+                .await?;
+            if let Some((name,)) = transit {
+                tx.rollback().await?;
+                return Ok(FolderDeletion::Collision {
+                    what: "folder",
+                    name,
+                });
+            }
+        }
+
         tx.exec(
             "UPDATE user_notes SET folder_id = $3 WHERE folder_id = $1 AND person_id = $2",
             params![id, person, parent_id.map(|f| f.0)],
         )
         .await?;
+        let mut binds = params![id, person, parent_id.map(|f| f.0)];
+        let except = match &same_named {
+            Some((child,)) => {
+                binds.push(nook_db::IntoDbValue::into_db_value(child.0));
+                " AND id <> $4"
+            }
+            None => "",
+        };
         tx.exec(
-            "UPDATE user_note_folders SET parent_id = $3 WHERE parent_id = $1 AND person_id = $2",
-            params![id, person, parent_id.map(|f| f.0)],
+            &format!(
+                "UPDATE user_note_folders SET parent_id = $3
+                  WHERE parent_id = $1 AND person_id = $2{except}"
+            ),
+            binds,
         )
         .await?;
         tx.exec(
@@ -621,8 +878,15 @@ impl NotebookRepository for DbNotebookRepository {
             params![id, person],
         )
         .await?;
+        if let (Some((child,)), Some(_)) = (&same_named, &parent_id) {
+            tx.exec(
+                "UPDATE user_note_folders SET parent_id = $2 WHERE id = $1",
+                params![*child, parent_id.map(|f| f.0)],
+            )
+            .await?;
+        }
         tx.commit().await?;
-        Ok(true)
+        Ok(FolderDeletion::Deleted)
     }
 
     async fn list_workspace_notes(
@@ -1028,6 +1292,45 @@ impl NotebookRepository for FakeNotebookRepository {
             .any(|f| f.id == folder && f.person_id == person))
     }
 
+    async fn get_folder(
+        &self,
+        person: Uuid,
+        id: UserNoteFolderId,
+    ) -> ApiResult<Option<UserNoteFolder>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .folders
+            .iter()
+            .find(|f| f.id == id && f.person_id == person)
+            .cloned())
+    }
+
+    async fn folder_name_taken(
+        &self,
+        person: Uuid,
+        parent: Option<UserNoteFolderId>,
+        name: &str,
+        except: Option<UserNoteFolderId>,
+    ) -> ApiResult<bool> {
+        Ok(self.inner.lock().unwrap().folders.iter().any(|f| {
+            f.person_id == person && f.parent_id == parent && f.name == name && Some(f.id) != except
+        }))
+    }
+
+    async fn note_title_taken(
+        &self,
+        person: Uuid,
+        folder: Option<UserNoteFolderId>,
+        title: &str,
+        except: Option<UserNoteId>,
+    ) -> ApiResult<bool> {
+        Ok(self.inner.lock().unwrap().notes.iter().any(|(p, n)| {
+            *p == person && n.folder_id == folder && n.title == title && Some(n.id) != except
+        }))
+    }
+
     async fn list_note_summaries(&self, person: Uuid, q: &str) -> ApiResult<Vec<UserNoteSummary>> {
         let s = self.inner.lock().unwrap();
         // The folder path, built the way the recursive CTE does.
@@ -1251,16 +1554,72 @@ impl NotebookRepository for FakeNotebookRepository {
         &self,
         person: Uuid,
         id: UserNoteFolderId,
-    ) -> ApiResult<bool> {
+    ) -> ApiResult<FolderDeletion> {
         let mut s = self.inner.lock().unwrap();
-        let Some(parent_id) = s
+        let Some((parent_id, folder_name)) = s
             .folders
             .iter()
             .find(|f| f.id == id && f.person_id == person)
-            .map(|f| f.parent_id)
+            .map(|f| (f.parent_id, f.name.clone()))
         else {
-            return Ok(false);
+            return Ok(FolderDeletion::NoSuchFolder);
         };
+        // The move the delete performs is subject to uniqueness like any other
+        // (MAIN-574): a child landing beside a row of the same name refuses the
+        // whole delete. The folder itself is leaving, so it never blocks its
+        // own contents — which is what makes `Work/Work` deletable.
+        let clash = s
+            .folders
+            .iter()
+            .filter(|c| c.person_id == person && c.parent_id == Some(id))
+            .find(|c| {
+                s.folders.iter().any(|other| {
+                    other.person_id == person
+                        && other.parent_id == parent_id
+                        && other.name == c.name
+                        && other.id != id
+                })
+            })
+            .map(|c| c.name.clone());
+        if let Some(name) = clash {
+            return Ok(FolderDeletion::Collision {
+                what: "folder",
+                name,
+            });
+        }
+        let clash = s
+            .notes
+            .iter()
+            .filter(|(p, n)| *p == person && n.folder_id == Some(id))
+            .find(|(_, n)| {
+                s.notes.iter().any(|(p, other)| {
+                    *p == person && other.folder_id == parent_id && other.title == n.title
+                })
+            })
+            .map(|(_, n)| n.title.clone());
+        if let Some(name) = clash {
+            return Ok(FolderDeletion::Collision { what: "note", name });
+        }
+        // The same-named child travels through the root when the destination is
+        // not the root, so the name has to be free there too.
+        let same_named = s
+            .folders
+            .iter()
+            .any(|c| c.person_id == person && c.parent_id == Some(id) && c.name == folder_name);
+        if same_named && parent_id.is_some() {
+            let transit = s.folders.iter().any(|f| {
+                f.person_id == person
+                    && f.parent_id.is_none()
+                    && f.name == folder_name
+                    && f.id != id
+            });
+            if transit {
+                return Ok(FolderDeletion::Collision {
+                    what: "folder",
+                    name: folder_name,
+                });
+            }
+        }
         // Contents RISE one level — they are never cascade-deleted.
         for (p, n) in s.notes.iter_mut() {
             if *p == person && n.folder_id == Some(id) {
@@ -1273,7 +1632,7 @@ impl NotebookRepository for FakeNotebookRepository {
             }
         }
         s.folders.retain(|f| !(f.id == id && f.person_id == person));
-        Ok(true)
+        Ok(FolderDeletion::Deleted)
     }
 
     async fn list_workspace_notes(

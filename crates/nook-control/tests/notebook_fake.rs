@@ -12,8 +12,8 @@
 //! stopped.
 
 use nook_control::repo::notebook::{
-    FakeNotebookRepository, FakeVaultRepository, FolderEdit, NewPasskey, NewUserNote,
-    NotebookRepository, SealedBody, UserNoteEdit, VaultChallenge, VaultRepository,
+    FakeNotebookRepository, FakeVaultRepository, FolderDeletion, FolderEdit, NewPasskey,
+    NewUserNote, NotebookRepository, SealedBody, UserNoteEdit, VaultChallenge, VaultRepository,
 };
 use nook_control::services::notebook_queries;
 use nook_types::*;
@@ -54,7 +54,10 @@ async fn deleting_a_folder_lifts_its_contents_instead_of_destroying_them() {
     let deep = repo.create_folder(p, Some(inner.id), "deep").await.unwrap();
     let in_inner = note(&repo, p, Some(inner.id), "kept").await;
 
-    assert!(repo.delete_folder_reparenting(p, inner.id).await.unwrap());
+    assert_eq!(
+        repo.delete_folder_reparenting(p, inner.id).await.unwrap(),
+        FolderDeletion::Deleted
+    );
 
     assert_eq!(
         repo.note_count(),
@@ -86,7 +89,10 @@ async fn deleting_a_root_folder_sends_its_contents_to_the_root() {
     let top = repo.create_folder(p, None, "top").await.unwrap();
     let n = note(&repo, p, Some(top.id), "note").await;
 
-    assert!(repo.delete_folder_reparenting(p, top.id).await.unwrap());
+    assert_eq!(
+        repo.delete_folder_reparenting(p, top.id).await.unwrap(),
+        FolderDeletion::Deleted
+    );
     assert_eq!(
         repo.folder_of(n),
         Some(None),
@@ -95,13 +101,62 @@ async fn deleting_a_root_folder_sends_its_contents_to_the_root() {
     assert_eq!(repo.note_count(), 1);
 }
 
+/// The reparenting a delete performs is a MOVE, so it obeys the uniqueness the
+/// index enforces (MAIN-574): a child landing beside a row of the same name
+/// refuses the whole delete, and the folder — which is leaving — never blocks
+/// its own contents.
+#[tokio::test]
+async fn deleting_a_folder_refuses_when_a_child_name_is_taken_where_it_would_land() {
+    let repo = FakeNotebookRepository::new();
+    let p = person();
+    let work = repo.create_folder(p, None, "Work").await.unwrap();
+    repo.create_folder(p, None, "Archive").await.unwrap();
+    repo.create_folder(p, Some(work.id), "Archive")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        repo.delete_folder_reparenting(p, work.id).await.unwrap(),
+        FolderDeletion::Collision {
+            what: "folder",
+            name: "Archive".into()
+        }
+    );
+    assert_eq!(
+        repo.folder_count(),
+        3,
+        "nothing moved and nothing was deleted"
+    );
+}
+
+/// A child carrying the deleted folder's OWN name is NOT a collision — the row
+/// it would clash with is the one going away — so `Work/Work` stays deletable.
+#[tokio::test]
+async fn a_child_named_after_the_folder_being_deleted_still_rises() {
+    let repo = FakeNotebookRepository::new();
+    let p = person();
+    let work = repo.create_folder(p, None, "Work").await.unwrap();
+    let inner = repo.create_folder(p, Some(work.id), "Work").await.unwrap();
+
+    assert_eq!(
+        repo.delete_folder_reparenting(p, work.id).await.unwrap(),
+        FolderDeletion::Deleted
+    );
+    let left = repo.list_folders(p).await.unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!((left[0].id, left[0].parent_id), (inner.id, None));
+}
+
 #[tokio::test]
 async fn deleting_a_folder_that_is_not_yours_reports_not_found_and_changes_nothing() {
     let repo = FakeNotebookRepository::new();
     let (mine, theirs) = (person(), person());
     let f = repo.create_folder(theirs, None, "theirs").await.unwrap();
 
-    assert!(!repo.delete_folder_reparenting(mine, f.id).await.unwrap());
+    assert_eq!(
+        repo.delete_folder_reparenting(mine, f.id).await.unwrap(),
+        FolderDeletion::NoSuchFolder
+    );
     assert_eq!(repo.folder_count(), 1);
 }
 
