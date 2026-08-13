@@ -115,10 +115,12 @@ bootstrap loop from `CLAUDE.md`, and it destroys real data.
 hostname something has to route — so it works only where a reverse proxy sits in
 front of the control plane. Direct Compose, `docker run`, systemd + native
 binary and the desktop app have no proxy at all, so tunnels cannot work on them
-until you put one there. Compose behind Traefik and the Helm chart do have one,
-but **neither ships the wildcard router or ingress rule**, and neither sets
-`TUNNEL_DOMAIN` — on those two the proxy exists and the rule is still yours to
-add. No mode serves tunnels out of the box.
+until you put one there. The two modes that have one write the rule when you
+name the zone: Compose behind Traefik generates the wildcard router when `nook
+server init` is given a tunnel domain, and the Helm chart renders a `*.<zone>`
+ingress rule pointed at the **control-plane** Service when `ingress.tunnelHost`
+is set. Both set `TUNNEL_DOMAIN` from that same value, and both leave you the
+wildcard DNS record and the certificate.
 
 [`tunnel-proxy.md`](tunnel-proxy.md) is the contract to configure a proxy to —
 whole path space to the control plane, `Host` preserved, upgrades forwarded —
