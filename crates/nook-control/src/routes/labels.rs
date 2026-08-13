@@ -126,10 +126,12 @@ pub async fn remove(
     Path((ident, label)): Path<(String, String)>,
 ) -> ApiResult<Json<Vec<Label>>> {
     let task = tasks::resolve_id(state.tasks.as_ref(), auth.tenant_id, &ident).await?;
-    let label_id = resolve_label(&state, auth.tenant_id, &label).await?;
-    let res = state.tasks.detach_label_id(task, label_id).await?;
-    if res > 0 {
-        record(&state, &auth, task, &label, "task.label.removed").await;
+    // By NAME, because what removing a label MEANS is keyed on the name and
+    // this route also accepts a uuid — `needs-human-review` removed by id used
+    // to slip past MAIN-386 AC-5's reset entirely.
+    let name = resolve_label_name(&state, auth.tenant_id, &label).await?;
+    if tasks::detach_label(&state, auth.tenant_id, task, &name).await? {
+        record(&state, &auth, task, &name, "task.label.removed").await;
     }
     labels_of(&state, task).await.map(Json)
 }
@@ -137,10 +139,21 @@ pub async fn remove(
 /// Accept a label id **or** a name, because an agent knows `agent-ready` and
 /// not its uuid.
 async fn resolve_label(state: &AppState, tenant: TenantId, ident: &str) -> ApiResult<uuid::Uuid> {
+    let name = resolve_label_name(state, tenant, ident).await?;
+    state
+        .tasks
+        .label_id_by_name(tenant, &name)
+        .await?
+        .ok_or(ApiError::NotFound)
+}
+
+/// The same acceptance, answering with the NAME — what the detach seam and the
+/// activity event are both keyed on.
+async fn resolve_label_name(state: &AppState, tenant: TenantId, ident: &str) -> ApiResult<String> {
     if let Ok(id) = ident.parse::<uuid::Uuid>() {
         return state
             .tasks
-            .label_id_by_uuid(id, tenant)
+            .label_name_by_uuid(id, tenant)
             .await?
             .ok_or(ApiError::NotFound);
     }
@@ -149,7 +162,8 @@ async fn resolve_label(state: &AppState, tenant: TenantId, ident: &str) -> ApiRe
         .tasks
         .label_id_by_name(tenant, &name)
         .await?
-        .ok_or(ApiError::NotFound)
+        .ok_or(ApiError::NotFound)?;
+    Ok(name)
 }
 
 pub async fn labels_of(state: &AppState, task: TaskId) -> ApiResult<Vec<Label>> {

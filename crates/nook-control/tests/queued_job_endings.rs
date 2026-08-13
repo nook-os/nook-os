@@ -504,7 +504,7 @@ async fn an_escalated_card_leaves_the_repair_candidate_set() {
 
     let candidates: Vec<TaskId> = state
         .tasks
-        .tasks_with_pr(tenant, ws)
+        .tasks_with_pr(tenant, ws, None)
         .await
         .expect("repair candidates")
         .into_iter()

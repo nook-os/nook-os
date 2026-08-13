@@ -169,19 +169,23 @@ pub struct BuildWork<'a> {
     /// moves: that fingerprint would clear its own answer and raise a second
     /// repair before any reviewer looked.
     pub rejected_heads: std::collections::HashMap<i64, crate::repo::jobs::RejectedHead>,
-    /// A card the manual trigger named AND the loop itself escalated — the one
-    /// case where the `blocked` exclusion stands down, see
-    /// [`BuildWork::fresh_items`]. `None` on the reconciler's own passes, and
-    /// for a card a human blocked for their own reason.
+    /// The card the manual trigger named — the one case where the
+    /// `needs-human-review` exclusion stands down, in BOTH lanes. `None` on the
+    /// reconciler's own passes, which is every auto-fire.
     pub unblock_task: Option<TaskId>,
 }
 
 /// The pick contract as code (MAIN-458 AC-1a / NG-1): `agent-ready` is the
 /// human approval gate and the converger NEVER reads a card without it;
-/// `blocked`, assigned, still-blocked, backlog, done and epic cards are excluded
-/// exactly as `nook tasks`' server-side filters exclude them (MAIN-80,
-/// MAIN-464) — the filtering is the query's, not re-implemented here, which is
-/// what stops the two drifting.
+/// `blocked`, `needs-human-review`, assigned, still-blocked, backlog, done and
+/// epic cards are excluded exactly as `nook tasks`' server-side filters exclude
+/// them (MAIN-80, MAIN-464) — the filtering is the query's, not re-implemented
+/// here, which is what stops the two drifting.
+///
+/// `needs-human-review` is MAIN-386 AC-4's stop, and it belongs beside
+/// `blocked` rather than in the ladder: by the time the label is on, the ladder
+/// has already said everything it has to say, and a card a HUMAN escalated for
+/// their own reason must be excluded by exactly the same rule.
 ///
 /// A named constructor rather than a literal inside `fresh_items`, so a test
 /// proving what the fresh pick excludes runs THESE parameters instead of a copy
@@ -195,7 +199,7 @@ pub fn fresh_pick_params(workspace: Option<WorkspaceId>) -> crate::repo::tasks::
         unassigned_only: true,
         assignee: None,
         labels: vec!["agent-ready".into()],
-        not_labels: vec!["blocked".into()],
+        not_labels: vec!["blocked".into(), "needs-human-review".into()],
         is_blocked: Some(false),
         created_after: None,
         limit: 200,
@@ -211,18 +215,23 @@ pub fn fresh_pick_params(workspace: Option<WorkspaceId>) -> crate::repo::tasks::
 }
 
 impl BuildWork<'_> {
-    /// Exactly one rule stands down, for the manual trigger (MAIN-489 AC-5): a
-    /// human naming a card the LOOP blocked after three concluded-nothing runs
-    /// is overruling the loop's own escalation, the way a forced re-review
-    /// overrules an already-verdicted head (MAIN-473) — which is how such a
-    /// card is nudged back without anybody editing its labels. The caller
-    /// decides that (the strike count is the permission) and narrows the result
+    /// Exactly one rule stands down, for the manual trigger (MAIN-489 AC-5,
+    /// MAIN-386 AC-6): a human naming a card the ladder stopped is overruling
+    /// the loop's own escalation, the way a forced re-review overrules an
+    /// already-verdicted head (MAIN-473) — which is how such a card is nudged
+    /// back without anybody editing its labels. The caller narrows the result
     /// to the one named card; everything else still comes from
     /// [`fresh_pick_params`], so there is still one definition of the contract.
+    ///
+    /// `blocked` is NOT in that stand-down, and the asymmetry is the whole
+    /// point. `needs-human-review` is what the LOOP writes when it gives up, so
+    /// lifting it for a card a person is asking for right now is the loop
+    /// deferring to them; `blocked` is a person's own hold on the work, which
+    /// the loop no longer writes at all and is not this trigger's to lift.
     async fn fresh_items(&self, workspace: WorkspaceId) -> Option<Vec<WorkItem>> {
         let mut params = fresh_pick_params(Some(workspace));
         if self.unblock_task.is_some() {
-            params.not_labels.clear();
+            params.not_labels.retain(|l| l != "needs-human-review");
         }
         let rows = self
             .tasks
@@ -251,7 +260,11 @@ impl BuildWork<'_> {
     /// on the forge, and holding the whole board because GitHub blinked would
     /// invert the review loop's own outage rule for no gain.
     async fn repair_items(&self, workspace: WorkspaceId, remote: Option<&str>) -> Vec<WorkItem> {
-        let Ok(cards) = self.tasks.tasks_with_pr(self.tenant, workspace).await else {
+        let Ok(cards) = self
+            .tasks
+            .tasks_with_pr(self.tenant, workspace, self.unblock_task)
+            .await
+        else {
             return Vec::new();
         };
         if cards.is_empty() {

@@ -460,8 +460,7 @@ async fn mirror_to_card(
         "loop-changes-requested",
     )
     .await?;
-    crate::services::tasks::detach_label(state.tasks.as_ref(), tenant, task, "loop-approved")
-        .await?;
+    crate::services::tasks::detach_label(state, tenant, task, "loop-approved").await?;
 
     // The route's rule, kept exactly: a comment's event carries an excerpt and
     // human key ONLY for a non-private card — a private card's body must not

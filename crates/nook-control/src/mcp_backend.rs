@@ -717,7 +717,7 @@ impl NookBackend for McpBackend {
         let id =
             crate::services::tasks::resolve_id(self.state.tasks.as_ref(), tenant, &task).await?;
         let name = label.trim().to_lowercase();
-        crate::services::tasks::detach_label(self.state.tasks.as_ref(), tenant, id, &name).await?;
+        crate::services::tasks::detach_label(&self.state, tenant, id, &name).await?;
         self.state
             .registry
             .publish(tenant, nook_proto::UiEvent::TaskChanged { task_id: id });
