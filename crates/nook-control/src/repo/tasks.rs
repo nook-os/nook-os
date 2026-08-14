@@ -287,7 +287,7 @@ pub trait TaskRepository: Send + Sync {
         tenant: TenantId,
         workspace: WorkspaceId,
         unstopped: Option<TaskId>,
-    ) -> ApiResult<Vec<(TaskId, i64, String)>>;
+    ) -> ApiResult<Vec<(TaskId, i64, String, Option<chrono::DateTime<chrono::Utc>>)>>;
 
     /// The same cards, narrowed to those still IN FLIGHT — in a column whose
     /// type is neither `completed` nor `canceled` — as `(id, pr_url)`.
@@ -590,6 +590,15 @@ pub trait TaskRepository: Send + Sync {
     /// A timestamp rather than a counter because the count itself is derived
     /// from `loop_jobs` (NG-2) — this only says where to start reading.
     async fn clear_build_ladder(&self, id: TaskId, tenant: TenantId) -> ApiResult<()>;
+
+    /// Stamp the moment a human ruled on a stopped card (MAIN-584 AC-4).
+    ///
+    /// Its sibling above answers the FAILURE ladder; this answers the DEDUPE.
+    /// A `blocked` outcome is a recorded outcome, so the card's fingerprint is
+    /// already what the last concluded run saw — and the fingerprint is
+    /// title+description only, which no ruling changes. Without this instant
+    /// the card is re-armed and still never picked.
+    async fn unblock(&self, tenant: TenantId, id: TaskId) -> ApiResult<()>;
 
     /// Attach or detach the `agent-ready` label, creating it if new. One method
     /// because the upsert exists only to feed the attach/detach.
@@ -1050,14 +1059,14 @@ impl TaskRepository for DbTaskRepository {
         tenant: TenantId,
         workspace: WorkspaceId,
         unstopped: Option<TaskId>,
-    ) -> ApiResult<Vec<(TaskId, i64, String)>> {
+    ) -> ApiResult<Vec<(TaskId, i64, String, Option<chrono::DateTime<chrono::Utc>>)>> {
         // `number` is INT4 on Postgres: decode the column's own width and
         // widen in Rust, or the whole read dies with a ColumnDecode there
         // (SQLite is untyped enough not to notice).
-        let rows: Vec<(Uuid, i32, String)> = self
+        let rows: Vec<(Uuid, i32, String, Option<chrono::DateTime<chrono::Utc>>)> = self
             .db
             .query_all(
-                "SELECT t.id, t.number, t.pr_url FROM tasks t
+                "SELECT t.id, t.number, t.pr_url, t.unblocked_at FROM tasks t
                    JOIN board_columns c ON c.id = t.column_id
                   WHERE t.tenant_id = $1 AND t.workspace_id = $2
                     AND t.pr_url IS NOT NULL AND t.archived_at IS NULL
@@ -1073,7 +1082,7 @@ impl TaskRepository for DbTaskRepository {
             .await?;
         Ok(rows
             .into_iter()
-            .map(|(id, n, url)| (TaskId(id), i64::from(n), url))
+            .map(|(id, n, url, unblocked)| (TaskId(id), i64::from(n), url, unblocked))
             .collect())
     }
 
@@ -2124,6 +2133,20 @@ impl TaskRepository for DbTaskRepository {
             .exec(
                 &format!(
                     "UPDATE tasks SET build_ladder_cleared_at = {}
+                      WHERE id = $1 AND tenant_id = $2",
+                    type_mapping(self.db.engine()).now()
+                ),
+                params![id, tenant],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn unblock(&self, tenant: TenantId, id: TaskId) -> ApiResult<()> {
+        self.db
+            .exec(
+                &format!(
+                    "UPDATE tasks SET unblocked_at = {}
                       WHERE id = $1 AND tenant_id = $2",
                     type_mapping(self.db.engine()).now()
                 ),
@@ -3202,7 +3225,7 @@ impl TaskRepository for FakeTaskRepository {
         tenant: TenantId,
         workspace: WorkspaceId,
         unstopped: Option<TaskId>,
-    ) -> ApiResult<Vec<(TaskId, i64, String)>> {
+    ) -> ApiResult<Vec<(TaskId, i64, String, Option<chrono::DateTime<chrono::Utc>>)>> {
         let st = self.inner.lock().unwrap();
         Ok(st
             .tasks
@@ -3221,7 +3244,14 @@ impl TaskRepository for FakeTaskRepository {
                     && !stopped("blocked")
                     && (unstopped == Some(t.id) || !stopped("needs-human-review"))
             })
-            .filter_map(|t| Some((t.id, i64::from(t.number?), t.pr_url.clone()?)))
+            .filter_map(|t| {
+                Some((
+                    t.id,
+                    i64::from(t.number?),
+                    t.pr_url.clone()?,
+                    t.unblocked_at,
+                ))
+            })
             .collect())
     }
 
@@ -3272,6 +3302,7 @@ impl TaskRepository for FakeTaskRepository {
             parent_task_id: new.parent_task_id.map(TaskId),
             assigned_node_id: None,
             claim_expires_at: None,
+            unblocked_at: None,
             branch: None,
             worktree_path: None,
             worktree_node_id: None,
@@ -3994,6 +4025,18 @@ impl TaskRepository for FakeTaskRepository {
     async fn clear_build_ladder(&self, id: TaskId, _tenant: TenantId) -> ApiResult<()> {
         let mut st = self.inner.lock().unwrap();
         st.build_ladder_cleared.insert(id.0, chrono::Utc::now());
+        Ok(())
+    }
+
+    async fn unblock(&self, tenant: TenantId, id: TaskId) -> ApiResult<()> {
+        let mut st = self.inner.lock().unwrap();
+        if let Some(t) = st
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == id && t.tenant_id == tenant)
+        {
+            t.unblocked_at = Some(chrono::Utc::now());
+        }
         Ok(())
     }
 

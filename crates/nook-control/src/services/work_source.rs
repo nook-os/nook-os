@@ -46,6 +46,11 @@ pub struct WorkItem {
     /// repair item's card already sits claimed-and-parked in In Review, and
     /// re-claiming it would drag the board around under a human's feet.
     pub claim_first: bool,
+    /// When a human last restarted the item's card (MAIN-584 AC-2), for the one
+    /// thing the fingerprint cannot say: a run concluded before this instant no
+    /// longer speaks for the card. `None` for review items, whose unit is a PR
+    /// and which nobody blocks.
+    pub unblocked_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Where managed work comes from.
@@ -106,6 +111,7 @@ impl WorkSource for ReviewWork<'_> {
                     label: format!("PR #{}", pr.number),
                     target_task_id: None,
                     claim_first: false,
+                    unblocked_at: None,
                 })
                 .collect(),
         )
@@ -247,6 +253,7 @@ impl BuildWork<'_> {
                         label: t.key.clone().unwrap_or_else(|| t.id.0.to_string()),
                         target_task_id: Some(t.id),
                         claim_first: true,
+                        unblocked_at: t.unblocked_at,
                     })
                 })
                 .collect(),
@@ -279,7 +286,7 @@ impl BuildWork<'_> {
         };
         cards
             .into_iter()
-            .filter_map(|(task, number, pr_url)| {
+            .filter_map(|(task, number, pr_url, unblocked_at)| {
                 let pr_number: u64 = pr_url.rsplit('/').next()?.parse().ok()?;
                 let pr = prs.iter().find(|p| p.number == pr_number)?;
                 if !pr.labels.iter().any(|l| l == "loop-changes-requested") {
@@ -302,6 +309,7 @@ impl BuildWork<'_> {
                     // The card already sits claimed-and-parked in In Review;
                     // re-claiming would drag the board under a human's feet.
                     claim_first: false,
+                    unblocked_at,
                 })
             })
             .collect()

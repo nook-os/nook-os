@@ -400,6 +400,7 @@ async fn the_rebase_clears_the_repair_and_hands_the_new_head_to_review() {
         label: format!("PR #{PR}"),
         target_task_id: None,
         claim_first: false,
+        unblocked_at: None,
     };
     let now = chrono::Utc::now();
     assert!(

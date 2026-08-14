@@ -696,6 +696,7 @@ async fn a_repair_run_that_concludes_nothing_leaves_its_card_alone() {
             label: "repair PR #7".into(),
             target_task_id: Some(card.id),
             claim_first: false,
+            unblocked_at: None,
         },
         None,
         false,

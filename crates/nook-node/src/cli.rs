@@ -2792,25 +2792,43 @@ async fn task_revisions(client: &Client, key: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// `nook comment <key> <body>` — where the reasoning goes.
-pub async fn comment(key: &str, body: &str) -> Result<()> {
+/// `nook comment <key> [--unblock] <body>` — where the reasoning goes, and
+/// where a ruling that restarts a stopped card goes with it (MAIN-584 AC-9).
+pub async fn comment(key: &str, body: &str, unblock: bool) -> Result<()> {
     let client = Client::from_config()?;
-    let host = sysinfo::System::host_name().unwrap_or_else(|| "unknown".into());
     client
         .post(
             &format!("/api/v1/tasks/{key}/comments"),
-            serde_json::json!({
-                "body_md": body,
-                "author_name": format!("nook cli on {host}"),
-            }),
+            comment_body(body, unblock),
         )
         .await?;
     println!(
-        "{} commented on {}",
+        "{} {} {}",
         crate::style::ok_c("✓"),
+        if unblock {
+            "commented and unblocked"
+        } else {
+            "commented on"
+        },
         crate::style::bold(key)
     );
     Ok(())
+}
+
+/// The request, built apart from the send so a test can read it: without the
+/// flag it carries no `clear_escalation` at all, which is what makes "an
+/// ordinary comment is unchanged" (NG-4) a property of the wire and not of a
+/// server-side default.
+fn comment_body(body: &str, unblock: bool) -> serde_json::Value {
+    let host = sysinfo::System::host_name().unwrap_or_else(|| "unknown".into());
+    let mut req = serde_json::json!({
+        "body_md": body,
+        "author_name": format!("nook cli on {host}"),
+    });
+    if unblock {
+        req["clear_escalation"] = serde_json::json!(true);
+    }
+    req
 }
 
 /// The argv body of `set-description`, honouring the Unix stdin convention
@@ -4040,6 +4058,23 @@ mod git_ssh_tests {
 #[cfg(test)]
 mod tests {
     use super::unique_id_len;
+
+    /// MAIN-584 NG-4: the flag is the whole difference on the wire. Without it
+    /// the request must not carry `clear_escalation` at all, so a question can
+    /// still be asked on a stopped card from the CLI.
+    #[test]
+    fn only_the_unblock_flag_puts_clear_escalation_on_the_wire() {
+        let plain = super::comment_body("just asking", false);
+        assert_eq!(plain["body_md"], "just asking");
+        assert!(
+            plain.get("clear_escalation").is_none(),
+            "an ordinary comment is unchanged: {plain}"
+        );
+
+        let ruling = super::comment_body("build it as specified", true);
+        assert_eq!(ruling["body_md"], "build it as specified");
+        assert_eq!(ruling["clear_escalation"], serde_json::json!(true));
+    }
 
     #[test]
     fn distinct_ids_stop_at_the_floor() {

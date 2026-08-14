@@ -5158,6 +5158,16 @@ export interface components {
              */
             author_name?: string | null;
             body_md: string;
+            /**
+             * @description Post this comment AND restart the card (MAIN-584): every escalation
+             *     label the card carries comes off, `agent-ready` goes on, and
+             *     `unblocked_at` is stamped so the loop's fingerprint dedupe stops
+             *     honouring the run that stopped it.
+             *
+             *     Absent or false is an ordinary comment, byte for byte — a question can
+             *     still be asked on a stopped card without restarting it.
+             */
+            clear_escalation?: boolean;
         };
         CreateGitCredentialRequest: {
             /** @description …or let the server generate an ed25519 keypair. */
@@ -8326,6 +8336,14 @@ export interface components {
              *     `type`.
              */
             type?: string;
+            /**
+             * Format: date-time
+             * @description When a human last ruled on this card and told the loop to carry on
+             *     (MAIN-584). Read by `run_reconcile::owed`: a run that concluded before
+             *     this instant no longer speaks for the card, so a restart survives the
+             *     fingerprint dedupe that a comment and a label change cannot move.
+             */
+            unblocked_at?: string | null;
             /** Format: date-time */
             updated_at: string;
             /**
@@ -14437,6 +14455,12 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["TaskComment"];
                 };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             404: {
                 headers: {

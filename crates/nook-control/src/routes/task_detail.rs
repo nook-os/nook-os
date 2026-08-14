@@ -23,6 +23,15 @@ use crate::error::{ApiError, ApiResult};
 use crate::services::tasks;
 use crate::state::AppState;
 
+/// Why an unblock with no body is refused (MAIN-584 AC-5): the whole point of
+/// riding the comment endpoint is that the ruling which released the card ends
+/// up ON the card. An unblock nobody can read is a card that restarted for no
+/// stated reason.
+///
+/// Shared with the MCP door, which enforces the same rule from the same string.
+pub const UNBLOCK_NEEDS_A_RULING: &str =
+    "an unblock needs a comment body — the ruling that releases the card is what goes on it";
+
 // ── comments ────────────────────────────────────────────────────────────────
 
 #[utoipa::path(get, path = "/api/v1/tasks/{id}/comments",
@@ -76,15 +85,21 @@ pub async fn list_revisions(
 #[utoipa::path(post, path = "/api/v1/tasks/{id}/comments",
     operation_id = "create_comment", params(("id" = String, Path,)),
     request_body = CreateCommentRequest,
-    responses((status = 200, body = TaskComment), (status = 404)))]
+    responses((status = 200, body = TaskComment), (status = 400), (status = 404)))]
 pub async fn create_comment(
     State(state): State<AppState>,
     auth: AuthCtx,
     Path(ident): Path<String>,
     Json(req): Json<CreateCommentRequest>,
 ) -> ApiResult<Json<TaskComment>> {
+    // Before anything is written, so an unblock refused here leaves the card
+    // exactly as it was — no comment, no label change, no stamp (MAIN-584 AC-5).
     if req.body_md.trim().is_empty() {
-        return Err(ApiError::BadRequest("a comment needs a body".into()));
+        return Err(ApiError::BadRequest(if req.clear_escalation {
+            UNBLOCK_NEEDS_A_RULING.into()
+        } else {
+            "a comment needs a body".into()
+        }));
     }
     let task = tasks::resolve_id(state.tasks.as_ref(), auth.tenant_id, &ident).await?;
 
@@ -112,45 +127,22 @@ pub async fn create_comment(
         })
         .await?;
 
-    // Comments are the content; events remain the timeline. Both, so the
-    // activity feed still shows that something was said without becoming the
-    // place the saying is stored.
-    //
-    // A NON-private card's comment carries an excerpt + human key so the
-    // notification bridge (MAIN-91) can raise a notification; a PRIVATE card's
-    // event carries neither — its body must not reach the tenant-wide feed or a
-    // channel, and the absence of an excerpt is exactly what keeps it silent
-    // (NG-4, matching MAIN-76's title omission).
-    let meta = state
-        .tasks
-        .task_visibility_naming(task, auth.tenant_id)
-        .await?;
-    let mut payload = serde_json::json!({ "task_id": task, "author": name });
-    if let Some((visibility, number, board_key)) = meta {
-        if visibility != "private" {
-            // One line, trimmed, capped — a teaser, not the whole comment.
-            let excerpt: String = req
-                .body_md
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-                .chars()
-                .take(140)
-                .collect();
-            payload["excerpt"] = serde_json::json!(excerpt);
-            if let (Some(k), Some(n)) = (board_key, number) {
-                payload["key"] = serde_json::json!(format!("{k}-{n}"));
-            }
-        }
-    }
-    crate::events::record(
+    tasks::record_comment_created(
         &state,
         auth.tenant_id,
-        crate::events::EventDraft::new("task.comment.created")
-            .actor("user", auth.user_id.0)
-            .payload(payload),
+        task,
+        auth.user_id,
+        &name,
+        &req.body_md,
     )
-    .await;
+    .await?;
+
+    // The ruling is on the card BEFORE the card is restarted: a run raised
+    // against a card whose reason is not yet written would read a stop with no
+    // answer under it (MAIN-584 AC-4).
+    if req.clear_escalation {
+        tasks::unblock(&state, auth.tenant_id, auth.user_id, task).await?;
+    }
 
     state.registry.publish(
         auth.tenant_id,

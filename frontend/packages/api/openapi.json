@@ -6534,6 +6534,9 @@
               }
             }
           },
+          "400": {
+            "description": ""
+          },
           "404": {
             "description": ""
           }
@@ -11792,6 +11795,10 @@
           },
           "body_md": {
             "type": "string"
+          },
+          "clear_escalation": {
+            "type": "boolean",
+            "description": "Post this comment AND restart the card (MAIN-584): every escalation\nlabel the card carries comes off, `agent-ready` goes on, and\n`unblocked_at` is stamped so the loop's fingerprint dedupe stops\nhonouring the run that stopped it.\n\nAbsent or false is an ordinary comment, byte for byte — a question can\nstill be asked on a stopped card without restarting it."
           }
         }
       },
@@ -18084,6 +18091,14 @@
           "type": {
             "type": "string",
             "description": "Issue type: one of `task`, `bug`, `epic`, `story`, `chore` (MAIN-59).\nNamed `type_` because `type` is a Rust keyword; the wire/column name is\n`type`."
+          },
+          "unblocked_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When a human last ruled on this card and told the loop to carry on\n(MAIN-584). Read by `run_reconcile::owed`: a run that concluded before\nthis instant no longer speaks for the card, so a restart survives the\nfingerprint dedupe that a comment and a label change cannot move."
           },
           "updated_at": {
             "type": "string",

@@ -754,6 +754,7 @@ async fn the_stop_still_reports_when_the_label_was_already_on() {
             label: "already stopped".into(),
             target_task_id: Some(card.id),
             claim_first: false,
+            unblocked_at: None,
         },
         None,
         false,

@@ -366,6 +366,59 @@ pub async fn insert_agent_comment(
         .await
 }
 
+/// Put a posted comment on the activity timeline.
+///
+/// Comments are the content; events remain the timeline. Both, so the activity
+/// feed still shows that something was said without becoming the place the
+/// saying is stored.
+///
+/// A NON-private card's comment carries an excerpt + human key so the
+/// notification bridge (MAIN-91) can raise a notification; a PRIVATE card's
+/// event carries neither — its body must not reach the tenant-wide feed or a
+/// channel, and the absence of an excerpt is exactly what keeps it silent
+/// (NG-4, matching MAIN-76's title omission).
+///
+/// Shared with the MCP door rather than written twice (MAIN-584 AC-11): MCP
+/// published only a UI refresh, so a comment made there — and now an UNBLOCK
+/// made there, on the one surface where an agent can clear its own stop — never
+/// reached the feed a human audits.
+pub async fn record_comment_created(
+    state: &crate::state::AppState,
+    tenant: TenantId,
+    task_id: TaskId,
+    actor: UserId,
+    author_name: &str,
+    body_md: &str,
+) -> ApiResult<()> {
+    let meta = state.tasks.task_visibility_naming(task_id, tenant).await?;
+    let mut payload = serde_json::json!({ "task_id": task_id, "author": author_name });
+    if let Some((visibility, number, board_key)) = meta {
+        if visibility != "private" {
+            // One line, trimmed, capped — a teaser, not the whole comment.
+            let excerpt: String = body_md
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .take(140)
+                .collect();
+            payload["excerpt"] = serde_json::json!(excerpt);
+            if let (Some(k), Some(n)) = (board_key, number) {
+                payload["key"] = serde_json::json!(format!("{k}-{n}"));
+            }
+        }
+    }
+    crate::events::record(
+        state,
+        tenant,
+        crate::events::EventDraft::new("task.comment.created")
+            .actor("user", actor.0)
+            .payload(payload),
+    )
+    .await;
+    Ok(())
+}
+
 /// Get-or-create a label by name and attach it to a task.
 pub async fn attach_label(
     repo: &dyn TaskRepository,
@@ -386,6 +439,12 @@ pub async fn attach_label(
 /// still carrying its three failures, to be re-escalated by the first one
 /// after.
 ///
+/// The reset answers ALL THREE escalation labels, not just the ladder's own
+/// (MAIN-584 AC-6). They are raised by different machinery — the agent's
+/// `blocked` outcome, the starved-queue reaper, the ladder — but they say one
+/// thing between them, "a person must look at this", and a card lifted out of
+/// any of them is equally owed a clean first rung.
+///
 /// Answers whether anything was actually removed, so a caller can record an
 /// event only when the board really changed.
 pub async fn detach_label(
@@ -400,8 +459,65 @@ pub async fn detach_label(
     if state.tasks.detach_label_id(task_id, label_id).await? == 0 {
         return Ok(false);
     }
-    if name == crate::services::build_ladder::ESCALATION_LABEL {
+    if crate::events::ESCALATION_LABELS.contains(&name) {
         crate::services::build_ladder::on_stop_lifted(state, tenant, task_id).await;
     }
     Ok(true)
+}
+
+/// Restart a card a human has just ruled on (MAIN-584 AC-4).
+///
+/// Three writes, and the card needs all three: every escalation label off (so
+/// the pick query stops excluding it), `agent-ready` on (so the pick query
+/// starts including it), and [`crate::repo::tasks::TaskRepository::unblock`]'s
+/// stamp — which is the one that actually restarts anything, because a
+/// `blocked` outcome leaves the card's fingerprint already recorded as done and
+/// no label change moves a fingerprint.
+///
+/// Idempotent by construction (AC-8): a card carrying no escalation is asking
+/// for the same end state and gets it, having named nothing cleared.
+///
+/// The COLUMN and the CLAIM are deliberately untouched (AC-7, NG-2). A card a
+/// human left in In Progress stays there; dragging a board somebody arranged is
+/// not part of answering a question.
+///
+/// Records ONE event naming the labels that actually came off (AC-13), which is
+/// what tells a human's restart from an agent's label churn — an agent removes
+/// one label at a time and stamps nothing. Here rather than at each door so the
+/// three surfaces cannot record it differently, or forget to.
+pub async fn unblock(
+    state: &crate::state::AppState,
+    tenant: TenantId,
+    actor: UserId,
+    task_id: TaskId,
+) -> ApiResult<()> {
+    let mut cleared = Vec::new();
+    for name in crate::events::ESCALATION_LABELS {
+        if detach_label(state, tenant, task_id, name).await? {
+            cleared.push(name.to_string());
+        }
+    }
+    state.tasks.set_agent_ready(tenant, task_id, true).await?;
+    state.tasks.unblock(tenant, task_id).await?;
+
+    let meta = state.tasks.task_naming(task_id).await.ok().flatten();
+    let (title, key) = match meta {
+        Some((title, Some(n), Some(k))) => (title, format!("{k}-{n}")),
+        Some((title, _, _)) => (title, String::new()),
+        None => (String::new(), String::new()),
+    };
+    crate::events::record(
+        state,
+        tenant,
+        crate::events::EventDraft::new("task.unblocked")
+            .actor("user", actor.0)
+            .payload(serde_json::json!({
+                "task_id": task_id,
+                "task": title,
+                "key": key,
+                "cleared": cleared,
+            })),
+    )
+    .await;
+    Ok(())
 }

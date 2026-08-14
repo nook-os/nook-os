@@ -508,7 +508,7 @@ async fn an_escalated_card_leaves_the_repair_candidate_set() {
         .await
         .expect("repair candidates")
         .into_iter()
-        .map(|(id, _, _)| id)
+        .map(|(id, _, _, _)| id)
         .collect();
     assert_eq!(
         candidates,

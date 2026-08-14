@@ -57,6 +57,9 @@ pub const FAILURE_BACKOFF: chrono::Duration = crate::services::build_ladder::FIR
 /// hold — see [`FAILURE_BACKOFF`], whose length grows with the item's run of
 /// failures. A push changes the fingerprint and clears the hold immediately,
 /// so a real fix never waits on the timer.
+///
+/// The one exception to the fingerprint rule is a human's ruling — see
+/// [`overruled`].
 pub fn owed<'a>(
     items: &'a [WorkItem],
     heads: &[crate::repo::jobs::RunHeads],
@@ -73,8 +76,12 @@ pub fn owed<'a>(
                 // fingerprint says. The new head is picked up when this finishes.
                 Some(h) if h.live_head.is_some() => false,
                 Some(h) => {
-                    // Reviewed at this exact head: nothing owing until it moves.
-                    if h.done_head.as_deref() == Some(item.fingerprint.as_str()) {
+                    // Reviewed at this exact head: nothing owing until it moves
+                    // — unless a human has ruled since, which no fingerprint
+                    // can express.
+                    if h.done_head.as_deref() == Some(item.fingerprint.as_str())
+                        && !overruled(item, h)
+                    {
                         return false;
                     }
                     // Attempted at this exact head recently — failed, or ended
@@ -100,6 +107,25 @@ pub fn owed<'a>(
     let withheld = owed.len().saturating_sub(room);
     owed.truncate(room);
     (owed, withheld, live)
+}
+
+/// Has a human overruled the run that concluded this item (MAIN-584 AC-2)?
+///
+/// A `blocked` outcome IS a recorded outcome, so a card the loop handed back
+/// carries a `done_head` equal to its own fingerprint — and the fingerprint is
+/// title and description only, which no ruling moves. Comment, label and
+/// `agent-ready` all change, and the card is still never picked. The stamp is
+/// what says the last conclusion is spent; comparing it against the run's own
+/// time is what stops the stamp disabling the dedupe for that card forever,
+/// because the next run to conclude concludes after it.
+fn overruled(item: &WorkItem, heads: &crate::repo::jobs::RunHeads) -> bool {
+    match (item.unblocked_at, heads.done_at) {
+        (Some(unblocked), Some(done)) => done < unblocked,
+        // No stamp is the ordinary case; a `done_head` with no time is a row
+        // written before the column existed, and re-running every one of those
+        // on sight would be a stampede at deploy.
+        _ => false,
+    }
 }
 
 /// Raise the runs one workspace is owed.
@@ -168,6 +194,7 @@ mod tests {
             label: format!("PR #{key}"),
             target_task_id: None,
             claim_first: false,
+            unblocked_at: None,
         }
     }
 
@@ -197,6 +224,52 @@ mod tests {
         let items = [item(341, "aaa")];
         let done = RunHeads {
             done_head: Some("aaa".into()),
+            ..heads(341)
+        };
+        assert!(owed(&items, &[done], 2, now()).0.is_empty());
+    }
+
+    /// MAIN-584 AC-2, and the defect the whole card turns on: a `blocked`
+    /// outcome records a `done_head`, and the fingerprint is title+description
+    /// — so a ruling on the card moves nothing the dedupe reads, and the card
+    /// stays unpickable however many labels come off it.
+    #[test]
+    fn a_human_ruling_defeats_the_dedupe_at_an_unchanged_fingerprint() {
+        let done = RunHeads {
+            done_head: Some("aaa".into()),
+            done_at: Some(now() - chrono::Duration::hours(1)),
+            ..heads(341)
+        };
+        let blocked = [item(341, "aaa")];
+        assert!(
+            owed(&blocked, std::slice::from_ref(&done), 2, now())
+                .0
+                .is_empty(),
+            "the card the loop handed back is not owed a run on its own"
+        );
+
+        let ruled = [WorkItem {
+            unblocked_at: Some(now() - chrono::Duration::minutes(1)),
+            ..item(341, "aaa")
+        }];
+        assert_eq!(
+            owed(&ruled, &[done], 2, now()).0.len(),
+            1,
+            "a ruling re-arms it with the fingerprint still identical"
+        );
+    }
+
+    /// So the stamp does not permanently disable the dedupe for that card: the
+    /// run the ruling asked for concludes after it, and quiets the card again.
+    #[test]
+    fn a_run_that_concluded_after_the_ruling_suppresses_the_item_again() {
+        let items = [WorkItem {
+            unblocked_at: Some(now() - chrono::Duration::hours(1)),
+            ..item(341, "aaa")
+        }];
+        let done = RunHeads {
+            done_head: Some("aaa".into()),
+            done_at: Some(now() - chrono::Duration::minutes(1)),
             ..heads(341)
         };
         assert!(owed(&items, &[done], 2, now()).0.is_empty());

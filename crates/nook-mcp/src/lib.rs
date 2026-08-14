@@ -138,6 +138,7 @@ pub trait NookBackend: Send + Sync + 'static {
         task: String,
         body_md: String,
         author_name: Option<String>,
+        clear_escalation: bool,
     ) -> anyhow::Result<serde_json::Value>;
     /// Safely replace a task's description. Reads the current version and writes
     /// with an optimistic-concurrency guard, retrying on a concurrent edit — so
@@ -443,6 +444,10 @@ pub struct CommentParams {
     pub body_md: String,
     /// Which tool is speaking, e.g. "loop-review on azul".
     pub author_name: Option<String>,
+    /// Post this comment AND RESTART the card: every escalation label comes
+    /// off, `agent-ready` goes back on, and the build loop will pick the card
+    /// up again. Leave it unset to comment without restarting anything.
+    pub clear_escalation: Option<bool>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -1206,7 +1211,12 @@ impl NookMcp {
     #[tool(
         description = "Comment on a task in markdown. This is where reasoning belongs: a \
                        blocking question, a review verdict, why an approach was abandoned. \
-                       Set author_name to say which tool you are (e.g. \"loop-build on azul\")."
+                       Set author_name to say which tool you are (e.g. \"loop-build on azul\"). \
+                       Setting clear_escalation RESTARTS THE CARD: it clears every escalation \
+                       label (`blocked`, `spec-blocked`, `needs-human-review`), puts \
+                       `agent-ready` back on, and makes the build loop pick the card up again. \
+                       Use it only to record a RULING that resolves the stop — the comment body \
+                       is required and becomes the card's stated reason for restarting."
     )]
     async fn comment_task(
         &self,
@@ -1215,7 +1225,12 @@ impl NookMcp {
         to_result(
             &self
                 .backend
-                .comment_task(p.task, p.body_md, p.author_name)
+                .comment_task(
+                    p.task,
+                    p.body_md,
+                    p.author_name,
+                    p.clear_escalation.unwrap_or(false),
+                )
                 .await
                 .map_err(backend_err)?,
         )
