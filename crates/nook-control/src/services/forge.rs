@@ -81,6 +81,12 @@ pub struct PrDetails {
     /// to its board card.
     pub body: String,
     pub merge_state: MergeState,
+    /// The head this read saw. Here rather than only on [`PullRequest`]
+    /// because a human ruling `changes_requested` (MAIN-591) fingerprints on
+    /// the head, and the open-PR list it would otherwise come from is cached:
+    /// a ruling recorded against a stale head suppresses the review of a head
+    /// nobody looked at.
+    pub head_sha: String,
 }
 
 /// A pull request the MERGE QUEUE threw out, at the head it threw out
@@ -776,6 +782,12 @@ impl Forge for GithubForge {
                 .unwrap_or_default()
                 .to_string(),
             merge_state: merge_state(&json),
+            head_sha: json
+                .get("head")
+                .and_then(|h| h.get("sha"))
+                .and_then(|s| s.as_str())
+                .unwrap_or_default()
+                .to_string(),
         })
     }
 

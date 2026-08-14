@@ -379,6 +379,31 @@ pub async fn record_verdict(
         ));
     };
 
+    // A human's ruling at this exact head stands until the head moves
+    // (MAIN-591 AC-7). Checked BEFORE any forge write, so a refused run posts
+    // nothing: without it a run already live when the person ruled would
+    // conclude `approved` seconds later, restore `loop-approved` through
+    // `recorded_review_verdicts`, and hand the pull request to yolo.
+    //
+    // Only the three POSTING verdicts are refused. A `skipped` says "defer to
+    // a review already on this pull request", which is exactly what a human
+    // ruling is — refusing it would leave a live run no honest way to end.
+    if label.is_some()
+        && human_hold_refuses(
+            &job,
+            state
+                .jobs
+                .human_rejection_at(tenant, workspace, pr, head)
+                .await?,
+        )
+    {
+        return Err(ApiError::Conflict(format!(
+            "a person requested changes on PR #{pr} at {head}; that ruling stands until the \
+             head moves — re-review it deliberately with `nook reviews enqueue <workspace> \
+             --pr {pr} --force`"
+        )));
+    }
+
     if let Some(label) = label {
         let body = req
             .body
@@ -455,6 +480,257 @@ pub async fn record_verdict(
     .await
     .ok();
     state.jobs.reload(job_id).await
+}
+
+/// Whether a human's ruling stands this agent verdict down (MAIN-591 AC-7),
+/// given when — if ever — a person ruled at the run's own head.
+///
+/// A named function rather than a condition inside [`record_verdict`], because
+/// it is AC-8's whole rule and the half of it no test can otherwise reach: the
+/// verdict path posts to GitHub before it returns, so the case that is NOT
+/// refused ends in a forge call no test should be making.
+///
+/// `--force` is the override, and only for a run raised AFTER the ruling: a
+/// run created before it was already in flight when the person spoke, and is
+/// exactly the run the refusal exists to stop. So a person is never trapped by
+/// their own hold — they re-review it deliberately — and cannot have it lifted
+/// by a race.
+pub fn human_hold_refuses(job: &LoopJob, ruled_at: Option<chrono::DateTime<chrono::Utc>>) -> bool {
+    match ruled_at {
+        None => false,
+        Some(at) => !(job.review_forced && job.created_at > at),
+    }
+}
+
+/// Everything a human's `changes_requested` needs, resolved from stored data
+/// alone (MAIN-591) — no forge call, so a card that cannot carry a ruling is
+/// refused before anything is asked of GitHub, let alone written.
+pub struct ChangesRequestTarget {
+    pub workspace: WorkspaceId,
+    pub repo: crate::services::forge::Repo,
+    pub pr: u64,
+    pub forge: crate::services::forge::GithubForge,
+}
+
+/// AC-2's first half: the card must name a pull request in a workspace whose
+/// remote is a GitHub repository this deployment can write to.
+///
+/// Every refusal is a 400 that names WHICH — a person who has just typed a
+/// ruling deserves to be told what is missing, not that "something" is.
+pub async fn changes_request_target(
+    state: &AppState,
+    tenant: TenantId,
+    task: &TaskItem,
+) -> ApiResult<ChangesRequestTarget> {
+    let workspace = task.workspace_id.ok_or_else(|| {
+        ApiError::BadRequest(
+            "this card has no workspace, so there is no repository to request changes on".into(),
+        )
+    })?;
+    let pr_url = task.pr_url.as_deref().ok_or_else(|| {
+        ApiError::BadRequest(
+            "this card records no pull request — there is nothing to request changes on".into(),
+        )
+    })?;
+    let pr = crate::services::merge_reconcile::pr_number(pr_url).ok_or_else(|| {
+        ApiError::BadRequest(format!(
+            "this card's recorded URL names no pull request: {pr_url}"
+        ))
+    })?;
+    let ws = state
+        .workspaces
+        .get(tenant, workspace)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let repo = ws
+        .git_remote_url
+        .as_deref()
+        .and_then(crate::services::forge::github_repo)
+        .ok_or_else(|| {
+            ApiError::BadRequest("this workspace's remote is not a GitHub repository".into())
+        })?;
+    let forge = match crate::services::workspace_gh_token(state, tenant, workspace).await {
+        Some(t) => crate::services::forge::GithubForge::from_token(&t),
+        None => crate::services::forge::GithubForge::from_env().ok_or_else(|| {
+            ApiError::BadRequest(
+                "no GitHub token — set one on the workspace (or NOOK_GH_TOKEN for the fleet); \
+                 the request cannot be posted, so it is not recorded"
+                    .into(),
+            )
+        })?,
+    };
+    Ok(ChangesRequestTarget {
+        workspace,
+        repo,
+        pr,
+        forge,
+    })
+}
+
+/// AC-2's second half, and AC-4's head: the pull request must be OPEN, and the
+/// head it is open AT is read HERE.
+///
+/// Fresh, never a cached value, and the two facts come from ONE read for the
+/// same reason: a ruling recorded against a head the pull request has already
+/// moved past would suppress the review of a head nobody looked at, and
+/// re-arm nothing, because the repair fingerprints on that same stale head.
+///
+/// A forge that cannot answer is a 400 rather than a guess — the pull request
+/// may well have merged while the person was typing.
+pub async fn open_pr_head(
+    forge: &dyn crate::services::forge::Forge,
+    repo: &crate::services::forge::Repo,
+    pr: u64,
+) -> ApiResult<String> {
+    let details = forge
+        .pr_details(repo, pr)
+        .await
+        .map_err(|e| ApiError::BadRequest(format!("could not read PR #{pr}: {e}")))?;
+    match details.merge_state {
+        crate::services::forge::MergeState::Open => {}
+        crate::services::forge::MergeState::Merged => {
+            return Err(ApiError::BadRequest(format!(
+                "PR #{pr} is already merged — there is nothing left to request changes on"
+            )))
+        }
+        crate::services::forge::MergeState::ClosedUnmerged => {
+            return Err(ApiError::BadRequest(format!(
+                "PR #{pr} is closed — there is nothing left to request changes on"
+            )))
+        }
+    }
+    if details.head_sha.trim().is_empty() {
+        return Err(ApiError::BadRequest(format!(
+            "PR #{pr} reported no head — a ruling with no head to hold suppresses nothing"
+        )));
+    }
+    Ok(details.head_sha)
+}
+
+/// The marker a human's ruling carries on the pull request, mirroring the
+/// reviewer's `Loop review of <sha>` — one line a reader (and the builder's
+/// repair pass) can tell a person's ruling from an agent's verdict by.
+pub fn human_request_marker(head: &str) -> String {
+    format!("Changes requested by a human at {head}")
+}
+
+/// One human's ruling, as one value — the pull request it is about, and the
+/// person and card it came from.
+pub struct HumanChangesRequest<'a> {
+    pub tenant: TenantId,
+    pub actor: UserId,
+    pub task: &'a TaskItem,
+    pub workspace: WorkspaceId,
+    pub pr: u64,
+    /// Read fresh by [`open_pr_head`] — never a cached value.
+    pub head: &'a str,
+    pub body: &'a str,
+}
+
+/// A human ruling `changes_requested` on a pull request (MAIN-591 AC-3/AC-4).
+///
+/// **GitHub first, the database second** — [`record_verdict`]'s ordering, for
+/// the reason its doc gives: a ruling stored but unposted is invisible to
+/// everyone working in GitHub, while a ruling posted but unstored is one
+/// review run raised at this head, which then reads the comment sitting on it.
+///
+/// The forge is a parameter rather than resolved in here so a test can drive
+/// the whole path — the same seam the hygiene pass and the merge reconciler
+/// use.
+///
+/// AC-2's "nothing is written" is about the refusals it enumerates, every one
+/// of which is settled before this is called. It does NOT extend to a forge
+/// that fails here: the caller has already put the ruling on the CARD, and
+/// that comment is the one write a failed ruling can leave behind. Deliberate
+/// — the card comment is the person's text, and losing it to a GitHub outage
+/// would be the worse failure.
+pub async fn request_changes(
+    state: &AppState,
+    forge: &dyn crate::services::forge::Forge,
+    repo: &crate::services::forge::Repo,
+    r: HumanChangesRequest<'_>,
+) -> ApiResult<()> {
+    let HumanChangesRequest {
+        tenant,
+        actor,
+        task,
+        workspace,
+        pr,
+        head,
+        body,
+    } = r;
+    let key = task
+        .number
+        .zip(task.key.as_deref())
+        .map(|(n, k)| format!("{k}-{n}"))
+        .unwrap_or_default();
+    let who = state
+        .identity
+        .get_user(actor)
+        .await
+        .ok()
+        .flatten()
+        .map(|u| u.display_name)
+        .unwrap_or_else(|| "a person".into());
+
+    forge
+        .comment(
+            repo,
+            pr,
+            &format!("{}\n\n{body}", human_request_marker(head)),
+        )
+        .await
+        .map_err(|e| ApiError::BadRequest(format!("posting the request failed: {e}")))?;
+    // The same replace the verdict path performs, so the pull request can
+    // never carry two verdict labels — and an APPROVED one loses
+    // `loop-approved`, which is what makes it ineligible for yolo (AC-11).
+    forge
+        .set_verdict_label(repo, pr, "loop-changes-requested")
+        .await
+        .map_err(|e| ApiError::BadRequest(format!("labelling the pull request failed: {e}")))?;
+
+    let row = JobId::new();
+    let recorded = state
+        .jobs
+        .record_human_rejection(crate::repo::jobs::HumanRejection {
+            id: row,
+            tenant,
+            workspace,
+            requested_by: actor,
+            pr: pr as i64,
+            head: head.to_string(),
+            seed: format!("{who} requested changes on PR #{pr} at {head}"),
+        })
+        .await?;
+    // Both gated on the row, so the feed and the ledger cannot disagree: a
+    // second ruling at a head already ruled is deduped away, and an event
+    // announcing a ruling with no row behind it would show two where the
+    // ledger holds one. The PR still gets both comments — that is the
+    // person's text, and it is theirs to repeat.
+    if recorded {
+        // A run nobody executed still shows a person what it was about — an
+        // empty transcript beside a verdict reads as an agent that reviewed
+        // and found nothing.
+        append_transcript(state, row, "human", body).await.ok();
+        events::record(
+            state,
+            tenant,
+            EventDraft::new("task.changes_requested")
+                .actor("user", actor.0)
+                .workspace(workspace)
+                .payload(json!({
+                    "task_id": task.id,
+                    "key": key,
+                    "task": task.title,
+                    "pr": pr,
+                    "head": head,
+                    "pr_url": task.pr_url,
+                    "by": who,
+                })),
+        )
+        .await;
+    }
+    Ok(())
 }
 
 /// Converge BUILD runs for one workspace (MAIN-458): one live run per owed

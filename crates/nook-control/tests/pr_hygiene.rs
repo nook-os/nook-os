@@ -227,6 +227,7 @@ async fn a_conflicted_pr_is_requeued_once_and_mirrored_to_its_card() {
             mergeable: Some(false),
             body: format!("What changed\n\nCloses {}\n\nRisk: Low", f.key),
             merge_state: MergeState::Open,
+            head_sha: String::new(),
         },
     );
     // The card still says loop-approved — the exact drift from PR #353's story.
@@ -347,6 +348,7 @@ async fn a_rebase_that_clears_the_conflict_lifts_the_state() {
             mergeable: Some(true),
             body: format!("Closes {}", f.key),
             merge_state: MergeState::Open,
+            head_sha: String::new(),
         },
     );
     // The builder's repair removed the label when it pushed the rebase.
@@ -392,6 +394,7 @@ async fn a_stripped_verdict_label_is_restored_from_the_recorded_verdict() {
             mergeable: Some(true),
             body: String::new(),
             merge_state: MergeState::Open,
+            head_sha: String::new(),
         },
     );
     let healed = pr_hygiene::heal(
@@ -433,6 +436,7 @@ async fn no_applicable_verdict_never_labels() {
                 mergeable: Some(true),
                 body: String::new(),
                 merge_state: MergeState::Open,
+                head_sha: String::new(),
             },
         );
     }
@@ -474,6 +478,7 @@ async fn a_card_that_missed_its_mirror_catches_up_without_a_new_pr_comment() {
             mergeable: Some(false),
             body: format!("Closes {}", f.key),
             merge_state: MergeState::Open,
+            head_sha: String::new(),
         },
     );
     // The PR side was already announced on a previous pass; the card was not.

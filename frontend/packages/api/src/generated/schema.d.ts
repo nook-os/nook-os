@@ -5168,6 +5168,20 @@ export interface components {
              *     still be asked on a stopped card without restarting it.
              */
             clear_escalation?: boolean;
+            /**
+             * @description Post this comment AND rule `changes_requested` on the card's pull
+             *     request (MAIN-591): the body goes on the PR, `loop-changes-requested`
+             *     replaces whatever verdict label was there, and a `review` job row
+             *     records the ruling so the review loop holds off and the build loop
+             *     picks up the repair.
+             *
+             *     Requires a `pr_url` resolving to an OPEN pull request and a non-empty
+             *     body — the ruling is the whole thing the builder acts on. Independent
+             *     of `clear_escalation`; both true is valid and does both.
+             *
+             *     Absent or false is an ordinary comment, byte for byte.
+             */
+            request_changes?: boolean;
         };
         CreateGitCredentialRequest: {
             /** @description …or let the server generate an ed25519 keypair. */

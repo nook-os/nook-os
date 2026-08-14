@@ -11799,6 +11799,10 @@
           "clear_escalation": {
             "type": "boolean",
             "description": "Post this comment AND restart the card (MAIN-584): every escalation\nlabel the card carries comes off, `agent-ready` goes on, and\n`unblocked_at` is stamped so the loop's fingerprint dedupe stops\nhonouring the run that stopped it.\n\nAbsent or false is an ordinary comment, byte for byte — a question can\nstill be asked on a stopped card without restarting it."
+          },
+          "request_changes": {
+            "type": "boolean",
+            "description": "Post this comment AND rule `changes_requested` on the card's pull\nrequest (MAIN-591): the body goes on the PR, `loop-changes-requested`\nreplaces whatever verdict label was there, and a `review` job row\nrecords the ruling so the review loop holds off and the build loop\npicks up the repair.\n\nRequires a `pr_url` resolving to an OPEN pull request and a non-empty\nbody — the ruling is the whole thing the builder acts on. Independent\nof `clear_escalation`; both true is valid and does both.\n\nAbsent or false is an ordinary comment, byte for byte."
           }
         }
       },

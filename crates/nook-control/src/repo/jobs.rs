@@ -208,6 +208,17 @@ pub const CONFLICT_VERDICT_SOURCE: &str = "conflict";
 /// recorder (MAIN-542 AC-9).
 pub const EJECTION_VERDICT_SOURCE: &str = "queue_ejection";
 
+/// Its third sibling, and the only one a PERSON puts there (MAIN-591): a human
+/// ruled `changes_requested` on a pull request through the card's comment
+/// surface, without any review run having concluded it.
+///
+/// Read twice, for two different jobs. `repair_label` phrases the builder's
+/// seed from it, because a human's ruling is on the PR as a comment rather
+/// than as a verdict body. And `record_verdict` refuses an agent verdict at
+/// the same head from it — which is the whole point of the value: an agent
+/// run already live when the human ruled must not be able to overwrite them.
+pub const HUMAN_VERDICT_SOURCE: &str = "human";
+
 /// A `changes_requested` nobody reviewed: the control plane concluded it, from
 /// a cause of its own, and put the pull request back in the repair queue —
 /// which reads this ledger and not the PR's labels (MAIN-516).
@@ -230,6 +241,34 @@ pub struct ControlPlaneRejection {
     /// The machine-readable half of what `seed` says in prose, and the one
     /// thing a reader cannot get by parsing it.
     pub source: &'static str,
+}
+
+/// A `changes_requested` a PERSON ruled (MAIN-591), recorded in the same
+/// ledger an agent's verdict lands in — because that ledger, not the PR's
+/// labels, is what both loops read.
+///
+/// Deliberately its own recorder rather than a [`ControlPlaneRejection`] with
+/// a third source. That one declines when ANY `changes_requested` already sits
+/// at the head, which is right for a hygiene pass finding a PR already in the
+/// repair queue and wrong here: [`HUMAN_VERDICT_SOURCE`] is what stands an
+/// agent verdict down, so a human ruling on a head an agent already rejected
+/// must still leave a row saying a human ruled.
+#[derive(Debug, Clone)]
+pub struct HumanRejection {
+    pub id: JobId,
+    pub tenant: TenantId,
+    pub workspace: WorkspaceId,
+    /// The person who ruled — `requested_by` on the row, which is what makes
+    /// the ledger able to say WHO.
+    pub requested_by: UserId,
+    pub pr: i64,
+    /// The head the ruling is AT, read fresh from the forge at the moment it
+    /// was made. This is what suppresses the review (it becomes the PR's
+    /// `done_head`) and what the repair fingerprints on, so a fix that moves
+    /// the head clears both by itself.
+    pub head: String,
+    /// What a reader of the ledger sees this row was about.
+    pub seed: String,
 }
 
 /// A job the reaper found stranded on a node that stopped reporting, with the
@@ -526,6 +565,28 @@ pub trait LoopJobRepository: Send + Sync {
         &self,
         rejection: ControlPlaneRejection,
     ) -> ApiResult<bool>;
+
+    /// Record a human's `changes_requested` for a pull request at a head
+    /// (MAIN-591). Answers whether it wrote one — `false` is the idempotent
+    /// case, a human ruling already recorded for this exact PR and head.
+    ///
+    /// See [`HumanRejection`] for why this is not the recorder above.
+    async fn record_human_rejection(&self, rejection: HumanRejection) -> ApiResult<bool>;
+
+    /// When a human last ruled `changes_requested` for this PR at this head,
+    /// or `None` if none has (MAIN-591).
+    ///
+    /// The instant, not merely the fact, because `--force` stands the refusal
+    /// down for a run raised AFTER the ruling and only for one: a run created
+    /// before it was in flight when the human spoke, and is exactly the run
+    /// the refusal exists to stop.
+    async fn human_rejection_at(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+        pr: i64,
+        head: &str,
+    ) -> ApiResult<Option<chrono::DateTime<chrono::Utc>>>;
 
     /// The live epic-run for this epic, if one is in flight (MAIN-144 AC-3) —
     /// the dedupe that keeps "one deliberate enqueue per pass" true.
@@ -992,6 +1053,87 @@ impl LoopJobRepository for DbLoopJobRepository {
             Err(e) if e.is_unique_violation() => Ok(false),
             Err(e) => Err(e.into()),
         }
+    }
+
+    async fn record_human_rejection(&self, r: HumanRejection) -> ApiResult<bool> {
+        // Dedupe on the HUMAN source alone — see `HumanRejection`. A ruling on
+        // a head an agent already rejected is still a ruling, and it is the
+        // row `record_verdict` refuses against.
+        let already: Option<JobId> = self
+            .db
+            .query_scalar_opt(
+                "SELECT id FROM loop_jobs
+                  WHERE tenant_id = $1 AND workspace_id = $2 AND kind = 'review'
+                    AND review_pr_number = $3 AND review_head_sha = $4
+                    AND review_verdict = 'changes_requested'
+                    AND review_verdict_source = $5",
+                params![
+                    r.tenant,
+                    r.workspace.0,
+                    r.pr,
+                    r.head.clone(),
+                    HUMAN_VERDICT_SOURCE
+                ],
+            )
+            .await?;
+        if already.is_some() {
+            return Ok(false);
+        }
+        // `completed` with a verdict and no executor, exactly as the control
+        // plane's own rejection is written: a conclusion nobody ran, stated as
+        // one. That state is also what makes it a `done_head`, which is the
+        // whole of AC-5 — the review loop skips this PR with no rule of its
+        // own about human rulings.
+        match self
+            .db
+            .exec(
+                &format!(
+                    "INSERT INTO loop_jobs
+                        (id, tenant_id, kind, workspace_id, requested_by, state, seed,
+                         review_pr_number, review_head_sha, review_verdict,
+                         review_verdict_source, created_at, updated_at)
+                     VALUES ($1, $2, 'review', $3, $4, 'completed', $5, $6, $7,
+                             'changes_requested', $8, {now}, {now})",
+                    now = type_mapping(self.db.engine()).now()
+                ),
+                params![
+                    r.id,
+                    r.tenant,
+                    r.workspace.0,
+                    r.requested_by,
+                    r.seed,
+                    r.pr,
+                    r.head,
+                    HUMAN_VERDICT_SOURCE
+                ],
+            )
+            .await
+        {
+            Ok(n) => Ok(n > 0),
+            Err(e) if e.is_unique_violation() => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    async fn human_rejection_at(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+        pr: i64,
+        head: &str,
+    ) -> ApiResult<Option<chrono::DateTime<chrono::Utc>>> {
+        self.db
+            .query_scalar_opt(
+                "SELECT created_at FROM loop_jobs
+                  WHERE tenant_id = $1 AND workspace_id = $2 AND kind = 'review'
+                    AND review_pr_number = $3 AND review_head_sha = $4
+                    AND review_verdict = 'changes_requested'
+                    AND review_verdict_source = $5
+                  ORDER BY created_at DESC, id DESC LIMIT 1",
+                params![tenant, workspace.0, pr, head, HUMAN_VERDICT_SOURCE],
+            )
+            .await
+            .map_err(Into::into)
     }
 
     async fn rejected_review_heads(
@@ -2042,6 +2184,69 @@ impl LoopJobRepository for FakeLoopJobRepository {
             build_fingerprint: None,
         });
         Ok(true)
+    }
+
+    async fn record_human_rejection(&self, r: HumanRejection) -> ApiResult<bool> {
+        let mut s = self.inner.lock().unwrap();
+        if s.jobs.iter().any(|j| {
+            j.tenant_id == r.tenant
+                && j.workspace_id == Some(r.workspace)
+                && j.kind == "review"
+                && j.review_pr_number == Some(r.pr)
+                && j.review_head_sha.as_deref() == Some(r.head.as_str())
+                && j.review_verdict.as_deref() == Some("changes_requested")
+                && j.review_verdict_source.as_deref() == Some(HUMAN_VERDICT_SOURCE)
+        }) {
+            return Ok(false);
+        }
+        let now = chrono::Utc::now();
+        s.jobs.push(LoopJob {
+            id: r.id,
+            tenant_id: r.tenant,
+            kind: "review".into(),
+            target_task_id: None,
+            workspace_id: Some(r.workspace),
+            requested_by: r.requested_by,
+            state: "completed".into(),
+            executor_node_id: None,
+            predecessor_job_id: None,
+            queued_reason: None,
+            queued_reason_kind: None,
+            seed: Some(r.seed),
+            created_at: now,
+            updated_at: now,
+            review_pr_number: Some(r.pr),
+            review_head_sha: Some(r.head),
+            review_verdict: Some("changes_requested".into()),
+            review_verdict_source: Some(HUMAN_VERDICT_SOURCE.into()),
+            review_forced: false,
+            build_outcome: None,
+            build_fingerprint: None,
+        });
+        Ok(true)
+    }
+
+    async fn human_rejection_at(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+        pr: i64,
+        head: &str,
+    ) -> ApiResult<Option<chrono::DateTime<chrono::Utc>>> {
+        let s = self.inner.lock().unwrap();
+        Ok(s.jobs
+            .iter()
+            .filter(|j| {
+                j.tenant_id == tenant
+                    && j.workspace_id == Some(workspace)
+                    && j.kind == "review"
+                    && j.review_pr_number == Some(pr)
+                    && j.review_head_sha.as_deref() == Some(head)
+                    && j.review_verdict.as_deref() == Some("changes_requested")
+                    && j.review_verdict_source.as_deref() == Some(HUMAN_VERDICT_SOURCE)
+            })
+            .map(|j| j.created_at)
+            .max())
     }
 
     async fn rejected_review_heads(

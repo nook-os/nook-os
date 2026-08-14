@@ -164,6 +164,13 @@ enum Command {
         /// that released it, and is required.
         #[arg(long)]
         unblock: bool,
+        /// Also rule CHANGES REQUESTED on this card's pull request: post the
+        /// body there as well, replace its verdict label with
+        /// `loop-changes-requested`, hold the review loop off that head, and
+        /// send the builder back to repair it. The body is the ruling, and is
+        /// required; a lone `-` reads it from stdin. Needs an open PR.
+        #[arg(long)]
+        request_changes: bool,
         /// The comment body (markdown).
         body: Vec<String>,
     },
@@ -666,9 +673,12 @@ async fn main() -> Result<()> {
             json,
             revisions,
         } => cli::task(&key, json, revisions).await,
-        Command::Comment { key, unblock, body } => {
-            cli::comment(&key, &body.join(" "), unblock).await
-        }
+        Command::Comment {
+            key,
+            unblock,
+            request_changes,
+            body,
+        } => cli::comment(&key, &body, unblock, request_changes).await,
         Command::SetDescription {
             key,
             description,

@@ -116,6 +116,14 @@ impl Forge for FakeForge {
                 .cloned()
                 .unwrap_or_default(),
             merge_state: MergeState::Open,
+            head_sha: self
+                .prs
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|p| p.number == number)
+                .map(|p| p.head_sha.clone())
+                .unwrap_or_default(),
         })
     }
     async fn queue_ejection(

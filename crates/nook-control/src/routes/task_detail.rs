@@ -20,6 +20,7 @@ use nook_types::*;
 
 use crate::auth::{AuthCtx, Principal};
 use crate::error::{ApiError, ApiResult};
+use crate::services::jobs;
 use crate::services::tasks;
 use crate::state::AppState;
 
@@ -31,6 +32,12 @@ use crate::state::AppState;
 /// Shared with the MCP door, which enforces the same rule from the same string.
 pub const UNBLOCK_NEEDS_A_RULING: &str =
     "an unblock needs a comment body — the ruling that releases the card is what goes on it";
+
+/// Its twin for a change request (MAIN-591 AC-2). The body IS the contract the
+/// builder's repair pass works from, so a bodyless request would put a pull
+/// request back in the repair queue with nothing to repair.
+pub const A_REQUEST_NEEDS_A_RULING: &str =
+    "requesting changes needs a comment body — it is what the builder is told to fix";
 
 // ── comments ────────────────────────────────────────────────────────────────
 
@@ -95,13 +102,32 @@ pub async fn create_comment(
     // Before anything is written, so an unblock refused here leaves the card
     // exactly as it was — no comment, no label change, no stamp (MAIN-584 AC-5).
     if req.body_md.trim().is_empty() {
-        return Err(ApiError::BadRequest(if req.clear_escalation {
+        return Err(ApiError::BadRequest(if req.request_changes {
+            A_REQUEST_NEEDS_A_RULING.into()
+        } else if req.clear_escalation {
             UNBLOCK_NEEDS_A_RULING.into()
         } else {
             "a comment needs a body".into()
         }));
     }
     let task = tasks::resolve_id(state.tasks.as_ref(), auth.tenant_id, &ident).await?;
+
+    // Every one of AC-2's conditions is settled HERE, before the first write:
+    // a refused request must leave the card exactly as it was — no comment, no
+    // label, no verdict row. Resolving the pull request afterwards would post
+    // the ruling to the card and then discover there was nowhere to send it.
+    let changes = if req.request_changes {
+        let row = state
+            .tasks
+            .get_row(auth.tenant_id, task)
+            .await?
+            .ok_or(ApiError::NotFound)?;
+        let target = jobs::changes_request_target(&state, auth.tenant_id, &row).await?;
+        let head = jobs::open_pr_head(&target.forge, &target.repo, target.pr).await?;
+        Some((row, target, head))
+    } else {
+        None
+    };
 
     // See the module note. A node is `system` because a machine reporting on
     // its own work is not a person; a user token is `user` even when a tool is
@@ -136,6 +162,27 @@ pub async fn create_comment(
         &req.body_md,
     )
     .await?;
+
+    // After the card comment, for MAIN-584's reason read the other way round:
+    // the ruling the builder is sent to read is on the card before the pull
+    // request is put back in the repair queue that will send it.
+    if let Some((row, target, head)) = changes {
+        jobs::request_changes(
+            &state,
+            &target.forge,
+            &target.repo,
+            jobs::HumanChangesRequest {
+                tenant: auth.tenant_id,
+                actor: auth.user_id,
+                task: &row,
+                workspace: target.workspace,
+                pr: target.pr,
+                head: &head,
+                body: &req.body_md,
+            },
+        )
+        .await?;
+    }
 
     // The ruling is on the card BEFORE the card is restarted: a run raised
     // against a card whose reason is not yet written would read a stop with no

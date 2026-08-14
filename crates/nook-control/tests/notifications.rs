@@ -144,6 +144,7 @@ async fn comments_and_escalation_labels_notify() {
             body_md: "can someone review this?".into(),
             author_name: None,
             clear_escalation: false,
+            request_changes: false,
         }),
     )
     .await
@@ -175,6 +176,7 @@ async fn comments_and_escalation_labels_notify() {
             body_md: "for my eyes only".into(),
             author_name: None,
             clear_escalation: false,
+            request_changes: false,
         }),
     )
     .await

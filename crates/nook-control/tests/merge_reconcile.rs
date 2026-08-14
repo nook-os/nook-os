@@ -86,6 +86,7 @@ impl Forge for FakeForge {
                 .details
                 .get(&number)
                 .unwrap_or_else(|| panic!("no answer staged for PR {number}")),
+            head_sha: String::new(),
         })
     }
 
