@@ -14,6 +14,7 @@ mod enroll;
 mod gitops;
 mod job_adapter;
 mod loop_job;
+mod notebook;
 mod pinning;
 mod resources;
 mod runtime_auth;
@@ -228,6 +229,19 @@ enum Command {
     /// A new noun group, per docs/cli-style.md — the top level stays frozen.
     #[command(subcommand)]
     Attachments(AttachmentsCommand),
+    /// Your personal notebook (MAIN-66) at a terminal.
+    ///
+    ///     nook notebook folders                     the tree
+    ///     nook notebook create --folder "A/B" …     writing it makes A and B
+    ///     nook notebook append "A/B/note" …         adds a block to the end
+    ///
+    /// Person-owned and private: this is YOUR notebook in every org you belong
+    /// to, and a machine credential is refused rather than answered as the
+    /// tenant owner. Notes and folders are addressed by slash-delimited path
+    /// or by id. A new noun group, per docs/cli-style.md — the top level stays
+    /// frozen.
+    #[command(subcommand)]
+    Notebook(NotebookCommand),
     /// Loop reviews of a workspace (MAIN-408).
     ///
     /// A review job is raised automatically by the board-signal sweep when a
@@ -772,6 +786,27 @@ async fn main() -> Result<()> {
         Command::Attachments(AttachmentsCommand::Get { id, out, force }) => {
             attachments::get(&id, out.as_deref(), force).await
         }
+        Command::Notebook(NotebookCommand::List { folder, json }) => {
+            notebook::list(folder.as_deref(), json).await
+        }
+        Command::Notebook(NotebookCommand::Read { note, json }) => {
+            notebook::read(&note, json).await
+        }
+        Command::Notebook(NotebookCommand::Create {
+            title,
+            folder,
+            content,
+            json,
+        }) => notebook::create(&title, folder.as_deref(), content.as_deref(), json).await,
+        Command::Notebook(NotebookCommand::Append {
+            note,
+            content,
+            json,
+        }) => notebook::append(&note, &content, json).await,
+        Command::Notebook(NotebookCommand::Delete { note, json }) => {
+            notebook::delete(&note, json).await
+        }
+        Command::Notebook(NotebookCommand::Folders { json }) => notebook::folders(json).await,
         Command::Notify {
             title,
             body,
@@ -1330,6 +1365,73 @@ enum BuildsCommand {
         /// for `blocked`; `-` reads stdin.
         #[arg(long)]
         question: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum NotebookCommand {
+    /// Every note, or just the ones in one folder.
+    List {
+        /// Narrow to this folder, by path ("Nook/Ideas") or id. Resolved, not
+        /// created — a listing never writes.
+        #[arg(long)]
+        folder: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print a note's body.
+    Read {
+        /// The note, by path ("Nook/Ideas/2026-08-13") or id.
+        note: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Write a new note. Missing `--folder` levels are created, `mkdir -p`
+    /// style, and repeating the identical command succeeds rather than
+    /// conflicting.
+    Create {
+        /// The note's title — the last segment of the path it will answer to.
+        #[arg(long)]
+        title: String,
+        /// Where it goes, by path or id. Omit for the notebook root.
+        #[arg(long)]
+        folder: Option<String>,
+        /// The body. `-` reads stdin. Omit for an empty note.
+        #[arg(long)]
+        content: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add a block to the end of a note, a blank line after what is there.
+    ///
+    /// Read-modify-write, and BEST-EFFORT by design. The note is re-read
+    /// immediately before the write and the append aborts, having written
+    /// nothing, if the body moved underneath — it never merges over somebody
+    /// else's edit. It cannot close the window entirely: an edit landing in
+    /// the last moment before the write is still overwritten, because the
+    /// notebook API has no compare-and-set for a client to use. MAIN-590 adds
+    /// one. Until then this is not a lock — for a note two people edit at
+    /// once, the web UI is the safer surface.
+    Append {
+        /// The note, by path or id.
+        note: String,
+        /// The block to add. `-` reads stdin.
+        #[arg(long)]
+        content: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete a note. Notes only — folders stay where they are.
+    Delete {
+        /// The note, by path or id.
+        note: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// The folder tree, indented.
+    Folders {
+        #[arg(long)]
+        json: bool,
     },
 }
 
