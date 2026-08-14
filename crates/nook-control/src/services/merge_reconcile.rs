@@ -359,7 +359,7 @@ async fn announce(
 
 /// The pull request number a recorded `pr_url` names, the same way the repair
 /// queue reads one: the trailing path segment.
-fn pr_number(pr_url: &str) -> Option<u64> {
+pub(crate) fn pr_number(pr_url: &str) -> Option<u64> {
     pr_url
         .trim_end_matches('/')
         .rsplit('/')

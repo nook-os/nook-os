@@ -146,7 +146,21 @@ pub fn repair_fingerprint(head_sha: &str) -> String {
 /// AC-5), because the thing that failed is not a thing this branch can run:
 /// the PR's own checks are green, and a builder that goes looking at them
 /// concludes there is nothing to fix and hands the card back.
+///
+/// A HUMAN's ruling (MAIN-591) is the second: its contract is on the pull
+/// request too, but as an ordinary comment rather than under the
+/// `Loop review of <sha>` marker the repair pass looks for — so a builder told
+/// only "repair PR #N" would find no verdict, conclude there was nothing to
+/// answer, and hand the card back.
 pub fn repair_label(pr: u64, source: Option<&str>) -> String {
+    if source == Some(crate::repo::jobs::HUMAN_VERDICT_SOURCE) {
+        return format!(
+            "repair PR #{pr} — a PERSON requested the changes, not the review agent. Their \
+             ruling is an ordinary comment on the pull request, NOT under a \
+             `Loop review of <sha>` marker: read the newest human comment there and treat it \
+             as the must-fix list."
+        );
+    }
     if source == Some(crate::repo::jobs::EJECTION_VERDICT_SOURCE) {
         return format!(
             "repair PR #{pr} — the merge queue EJECTED it. Its own checks passed against the \

@@ -2792,34 +2792,49 @@ async fn task_revisions(client: &Client, key: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// `nook comment <key> [--unblock] <body>` — where the reasoning goes, and
-/// where a ruling that restarts a stopped card goes with it (MAIN-584 AC-9).
-pub async fn comment(key: &str, body: &str, unblock: bool) -> Result<()> {
+/// `nook comment <key> [--unblock] [--request-changes] <body>` — where the
+/// reasoning goes, and where a ruling that restarts a stopped card (MAIN-584
+/// AC-9) or rejects its pull request (MAIN-591 AC-9) goes with it.
+pub async fn comment(
+    key: &str,
+    argv: &[String],
+    unblock: bool,
+    request_changes: bool,
+) -> Result<()> {
+    // Only for a change request, which is the shape that carries a written
+    // ruling and is routinely piped in. An ordinary `nook comment X -` still
+    // means the one-character comment it always did (AC-9's second sentence).
+    let body = if request_changes {
+        set_description_body(argv, || std::io::read_to_string(std::io::stdin()))?
+    } else {
+        argv.join(" ")
+    };
     let client = Client::from_config()?;
     client
         .post(
             &format!("/api/v1/tasks/{key}/comments"),
-            comment_body(body, unblock),
+            comment_body(&body, unblock, request_changes),
         )
         .await?;
     println!(
         "{} {} {}",
         crate::style::ok_c("✓"),
-        if unblock {
-            "commented and unblocked"
-        } else {
-            "commented on"
+        match (unblock, request_changes) {
+            (true, true) => "commented, requested changes and unblocked",
+            (true, false) => "commented and unblocked",
+            (false, true) => "commented and requested changes on",
+            (false, false) => "commented on",
         },
         crate::style::bold(key)
     );
     Ok(())
 }
 
-/// The request, built apart from the send so a test can read it: without the
-/// flag it carries no `clear_escalation` at all, which is what makes "an
-/// ordinary comment is unchanged" (NG-4) a property of the wire and not of a
-/// server-side default.
-fn comment_body(body: &str, unblock: bool) -> serde_json::Value {
+/// The request, built apart from the send so a test can read it: without a
+/// flag it carries neither `clear_escalation` nor `request_changes` at all,
+/// which is what makes "an ordinary comment is unchanged" (MAIN-584 NG-4,
+/// MAIN-591 AC-9) a property of the wire and not of a server-side default.
+fn comment_body(body: &str, unblock: bool, request_changes: bool) -> serde_json::Value {
     let host = sysinfo::System::host_name().unwrap_or_else(|| "unknown".into());
     let mut req = serde_json::json!({
         "body_md": body,
@@ -2827,6 +2842,9 @@ fn comment_body(body: &str, unblock: bool) -> serde_json::Value {
     });
     if unblock {
         req["clear_escalation"] = serde_json::json!(true);
+    }
+    if request_changes {
+        req["request_changes"] = serde_json::json!(true);
     }
     req
 }
@@ -4059,21 +4077,30 @@ mod git_ssh_tests {
 mod tests {
     use super::unique_id_len;
 
-    /// MAIN-584 NG-4: the flag is the whole difference on the wire. Without it
-    /// the request must not carry `clear_escalation` at all, so a question can
-    /// still be asked on a stopped card from the CLI.
+    /// MAIN-584 NG-4 and MAIN-591 AC-9: the flags are the whole difference on
+    /// the wire. Without them the request must carry neither field at all, so
+    /// a question can still be asked on a stopped card from the CLI.
     #[test]
-    fn only_the_unblock_flag_puts_clear_escalation_on_the_wire() {
-        let plain = super::comment_body("just asking", false);
+    fn only_the_flags_put_their_fields_on_the_wire() {
+        let plain = super::comment_body("just asking", false, false);
         assert_eq!(plain["body_md"], "just asking");
         assert!(
-            plain.get("clear_escalation").is_none(),
+            plain.get("clear_escalation").is_none() && plain.get("request_changes").is_none(),
             "an ordinary comment is unchanged: {plain}"
         );
 
-        let ruling = super::comment_body("build it as specified", true);
-        assert_eq!(ruling["body_md"], "build it as specified");
+        let ruling = super::comment_body("build it as specified", true, false);
         assert_eq!(ruling["clear_escalation"], serde_json::json!(true));
+        assert!(ruling.get("request_changes").is_none());
+
+        let rejection = super::comment_body("AC-2 is not met", false, true);
+        assert_eq!(rejection["request_changes"], serde_json::json!(true));
+        assert!(rejection.get("clear_escalation").is_none());
+
+        // Both is valid and does both — they are independent (AC-1).
+        let both = super::comment_body("ruled, and fix the resolver", true, true);
+        assert_eq!(both["clear_escalation"], serde_json::json!(true));
+        assert_eq!(both["request_changes"], serde_json::json!(true));
     }
 
     #[test]

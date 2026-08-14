@@ -94,6 +94,14 @@ impl Forge for FakeForge {
                 .unwrap_or(Some(true)),
             body: self.body.to_string(),
             merge_state: MergeState::Open,
+            head_sha: self
+                .prs
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|p| p.number == number)
+                .map(|p| p.head_sha.clone())
+                .unwrap_or_default(),
         })
     }
     async fn issue_comment_bodies(&self, _repo: &Repo, number: u64) -> anyhow::Result<Vec<String>> {

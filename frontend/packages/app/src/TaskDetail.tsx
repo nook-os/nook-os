@@ -64,9 +64,34 @@ export function isEscalated(labels: TaskLabel[] | undefined): boolean {
 /** The request the composer sends. Without the unblock button it must carry no
  *  `clear_escalation` AT ALL, not `false`: an ordinary comment reaches the
  *  server exactly as it always did, so a question can still be asked on a
- *  stopped card (MAIN-584 NG-4). */
-export function commentRequestBody(body_md: string, unblock?: boolean) {
-  return unblock ? { body_md, clear_escalation: true } : { body_md };
+ *  stopped card (MAIN-584 NG-4). `request_changes` (MAIN-591) is the same
+ *  shape, and the two are independent. */
+export function commentRequestBody(
+  body_md: string,
+  unblock?: boolean,
+  requestChanges?: boolean,
+) {
+  return {
+    body_md,
+    ...(unblock ? { clear_escalation: true } : {}),
+    ...(requestChanges ? { request_changes: true } : {}),
+  };
+}
+
+/** Whether "request changes" is offered at all (MAIN-591 AC-10): the card
+ *  records a pull request, and that pull request is still open.
+ *
+ *  Openness is read from the CARD'S COLUMN rather than from GitHub, because the
+ *  task detail carries no PR state and asking the forge from here would be a
+ *  request per render. `merge_reconcile` moves a card to a done column when its
+ *  PR merges or closes, so the two agree in every case the loop produces — and
+ *  the server reads the pull request itself before writing anything (AC-2), so
+ *  a board that has drifted only ever offers a button that then refuses. */
+export function canRequestChanges(
+  prUrl: string | null | undefined,
+  columnType: string | undefined,
+): boolean {
+  return !!prUrl && columnType !== "completed" && columnType !== "canceled";
 }
 
 export function TaskDetail({
@@ -174,11 +199,19 @@ export function TaskDetail({
     (attachments ?? []).filter((a) => a.parent_kind === kind && a.parent_id === id);
 
   const comment = useMutation({
-    mutationFn: async ({ body_md, unblock }: { body_md: string; unblock?: boolean }) => {
+    mutationFn: async ({
+      body_md,
+      unblock,
+      requestChanges,
+    }: {
+      body_md: string;
+      unblock?: boolean;
+      requestChanges?: boolean;
+    }) => {
       const created = (
         await api.POST("/api/v1/tasks/{id}/comments", {
           params: { path: { id: taskId } },
-          body: commentRequestBody(body_md, unblock),
+          body: commentRequestBody(body_md, unblock, requestChanges),
         })
       ).data;
       // The comment exists now, so its waiting files can be hung on it. A
@@ -192,10 +225,20 @@ export function TaskDetail({
           });
         }
       }
+      return created;
     },
-    onSuccess: () => {
-      setBody("");
-      setPending([]);
+    // Clear the composer only when a comment actually exists. `api.POST` does
+    // not throw on a 4xx — the refusal goes to the shared write-failure path
+    // and this still resolves — so an unconditional reset threw away the text
+    // the server had just refused. Request-changes is what made that routine:
+    // the button is offered from the card's column, and the server checks the
+    // pull request (MAIN-591 AC-2), so a refusal is an expected answer rather
+    // than a corner.
+    onSuccess: (created) => {
+      if (created) {
+        setBody("");
+        setPending([]);
+      }
       void bustAttachments();
       bust();
     },
@@ -412,6 +455,10 @@ export function TaskDetail({
   const linked = [...blocked_by, ...blocking, ...related];
   const isEpic = task.type === "epic";
   const escalated = isEscalated(task.labels);
+  const canReject = canRequestChanges(
+    task.pr_url,
+    columns.find((c) => c.id === task.column_id)?.type,
+  );
 
   return (
     <Shell onClose={onClose}>
@@ -871,14 +918,42 @@ export function TaskDetail({
                 {task.pr_url && (
                   <>
                     <span className="faint small">PR</span>
-                    <a
-                      className="small side-wrap"
-                      href={task.pr_url}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      {task.pr_url.replace(/^https?:\/\//, "")} ↗
-                    </a>
+                    <div className="side-wrap">
+                      <a
+                        className="small"
+                        href={task.pr_url}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        {task.pr_url.replace(/^https?:\/\//, "")} ↗
+                      </a>
+                      {/* The same authority the review agent has, exercised by
+                          a person (MAIN-591 AC-10). It submits the comment box
+                          below, because the ruling IS what the builder is sent
+                          to fix — which is why it is dead until something is
+                          typed there. */}
+                      {canReject && (
+                        <div style={{ marginTop: 4 }}>
+                          <button
+                            className="btn small"
+                            disabled={!body.trim() || comment.isPending}
+                            title={
+                              body.trim()
+                                ? "Post the comment below on the pull request, mark it changes-requested, and send the builder back to it"
+                                : "Type the ruling in the comment box first — it is what the builder is told to fix"
+                            }
+                            onClick={() =>
+                              comment.mutate({
+                                body_md: body.trim(),
+                                requestChanges: true,
+                              })
+                            }
+                          >
+                            request changes
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   </>
                 )}
               </div>

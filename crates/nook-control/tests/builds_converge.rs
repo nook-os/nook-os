@@ -434,6 +434,7 @@ impl nook_control::services::forge::Forge for BodyForge {
                 mergeable: Some(true),
                 body: body.clone(),
                 merge_state: nook_control::services::forge::MergeState::Open,
+                head_sha: String::new(),
             }),
             Err(e) => anyhow::bail!("{e}"),
         }
