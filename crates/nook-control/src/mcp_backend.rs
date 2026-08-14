@@ -668,9 +668,16 @@ impl NookBackend for McpBackend {
         task: String,
         body_md: String,
         author_name: Option<String>,
+        clear_escalation: bool,
     ) -> anyhow::Result<serde_json::Value> {
         let tenant = self.tenant().await?;
         let user = self.user().await?;
+        // The same refusal the REST door makes, from the same string (MAIN-584
+        // AC-5), and before anything is written. Only when unblocking: an
+        // ordinary MCP comment keeps whatever it did before (NG-4).
+        if clear_escalation && body_md.trim().is_empty() {
+            anyhow::bail!(crate::routes::task_detail::UNBLOCK_NEEDS_A_RULING);
+        }
         let id =
             crate::services::tasks::resolve_id(self.state.tasks.as_ref(), tenant, &task).await?;
         // `agent` here, not `user`: MCP is the one caller we DO know is a tool
@@ -686,6 +693,22 @@ impl NookBackend for McpBackend {
             &body_md,
         )
         .await?;
+        // AC-11: this door published only a UI refresh, so nothing it said ever
+        // reached the activity feed. It is also the door where an agent can
+        // clear its OWN stop, which is precisely the write a human must be able
+        // to audit afterwards.
+        crate::services::tasks::record_comment_created(
+            &self.state,
+            tenant,
+            id,
+            user,
+            &name,
+            &body_md,
+        )
+        .await?;
+        if clear_escalation {
+            crate::services::tasks::unblock(&self.state, tenant, user, id).await?;
+        }
         self.state
             .registry
             .publish(tenant, nook_proto::UiEvent::TaskChanged { task_id: id });

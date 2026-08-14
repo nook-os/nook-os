@@ -62,7 +62,7 @@ never_called! {
     fn get_task(String) -> anyhow::Result<Value>;
     fn claim_task(String, Option<String>) -> anyhow::Result<TaskItem>;
     fn release_task(String) -> anyhow::Result<TaskItem>;
-    fn comment_task(String, String, Option<String>) -> anyhow::Result<Value>;
+    fn comment_task(String, String, Option<String>, bool) -> anyhow::Result<Value>;
     fn set_task_description(String, String) -> anyhow::Result<TaskItem>;
     fn add_label(String, String) -> anyhow::Result<Value>;
     fn remove_label(String, String) -> anyhow::Result<Value>;

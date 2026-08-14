@@ -47,7 +47,27 @@ import { LoopPanel } from "./LoopPanel";
 const NO_WORKSPACE = "";
 /** The "no epic" option's value (MAIN-83) — same empty-string convention. */
 const NO_EPIC = "";
+/** The three labels that STOP a card, mirroring the server's `ESCALATION_LABELS`
+ *  — raised by different machinery (an agent's `blocked` outcome, the starved
+ *  queue reaper, the failure ladder) but saying one thing between them: a person
+ *  must look at this. A card carrying any of them is one "Comment and unblock"
+ *  can restart. */
+const ESCALATION_LABELS = ["blocked", "spec-blocked", "needs-human-review"];
 
+/** Whether "Comment and unblock" is offered at all (MAIN-584 AC-12). A LABEL
+ *  stop, which is a different mechanism from the `blocks` relation graph the
+ *  banner reads — that one is untouched (NG-9). */
+export function isEscalated(labels: TaskLabel[] | undefined): boolean {
+  return (labels ?? []).some((l) => ESCALATION_LABELS.includes(l.name));
+}
+
+/** The request the composer sends. Without the unblock button it must carry no
+ *  `clear_escalation` AT ALL, not `false`: an ordinary comment reaches the
+ *  server exactly as it always did, so a question can still be asked on a
+ *  stopped card (MAIN-584 NG-4). */
+export function commentRequestBody(body_md: string, unblock?: boolean) {
+  return unblock ? { body_md, clear_escalation: true } : { body_md };
+}
 
 export function TaskDetail({
   taskId,
@@ -154,11 +174,11 @@ export function TaskDetail({
     (attachments ?? []).filter((a) => a.parent_kind === kind && a.parent_id === id);
 
   const comment = useMutation({
-    mutationFn: async (body_md: string) => {
+    mutationFn: async ({ body_md, unblock }: { body_md: string; unblock?: boolean }) => {
       const created = (
         await api.POST("/api/v1/tasks/{id}/comments", {
           params: { path: { id: taskId } },
-          body: { body_md },
+          body: commentRequestBody(body_md, unblock),
         })
       ).data;
       // The comment exists now, so its waiting files can be hung on it. A
@@ -391,6 +411,7 @@ export function TaskDetail({
   const taskAttachments = forParent("task", task.id);
   const linked = [...blocked_by, ...blocking, ...related];
   const isEpic = task.type === "epic";
+  const escalated = isEscalated(task.labels);
 
   return (
     <Shell onClose={onClose}>
@@ -668,7 +689,7 @@ export function TaskDetail({
               <MarkdownEditor
                 value={body}
                 onChange={setBody}
-                onSave={() => body.trim() && comment.mutate(body.trim())}
+                onSave={() => body.trim() && comment.mutate({ body_md: body.trim() })}
                 placeholder="Add a comment…"
                 minHeight={70}
                 autoFocus={false}
@@ -687,10 +708,24 @@ export function TaskDetail({
             )}
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 5, marginTop: 5 }}>
               <AttachButton onFiles={commentUploads.add} />
+              {/* Only on a card something actually stopped (MAIN-584 AC-12).
+                  On every other card it would be a button that restarts what
+                  was never stopped, and the answer to "what did that do?" is
+                  "nothing you can see". */}
+              {escalated && (
+                <button
+                  className="btn small"
+                  disabled={!body.trim() || comment.isPending}
+                  title="Post this ruling, clear the escalation, and let the loop pick the card up again"
+                  onClick={() => comment.mutate({ body_md: body.trim(), unblock: true })}
+                >
+                  comment and unblock
+                </button>
+              )}
               <button
                 className="btn small primary"
                 disabled={!body.trim() || comment.isPending}
-                onClick={() => comment.mutate(body.trim())}
+                onClick={() => comment.mutate({ body_md: body.trim() })}
               >
                 {comment.isPending ? "posting…" : "comment"}
               </button>

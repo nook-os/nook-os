@@ -157,6 +157,12 @@ enum Command {
     /// Comment on a task.
     Comment {
         key: String,
+        /// Also RESTART the card: clear every escalation label (`blocked`,
+        /// `spec-blocked`, `needs-human-review`), put `agent-ready` back on,
+        /// and let the build loop pick it up again. The body is the ruling
+        /// that released it, and is required.
+        #[arg(long)]
+        unblock: bool,
         /// The comment body (markdown).
         body: Vec<String>,
     },
@@ -646,7 +652,9 @@ async fn main() -> Result<()> {
             json,
             revisions,
         } => cli::task(&key, json, revisions).await,
-        Command::Comment { key, body } => cli::comment(&key, &body.join(" ")).await,
+        Command::Comment { key, unblock, body } => {
+            cli::comment(&key, &body.join(" "), unblock).await
+        }
         Command::SetDescription {
             key,
             description,

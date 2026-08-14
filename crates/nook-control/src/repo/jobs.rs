@@ -109,6 +109,11 @@ pub struct RunHeads {
     /// The head of the newest run that actually finished. A PR whose forge head
     /// still equals this has been reviewed as it stands.
     pub done_head: Option<String>,
+    /// When that run concluded, so `owed` can tell a done run that still speaks
+    /// for the card from one a human has since overruled (MAIN-584 AC-2). The
+    /// fingerprint cannot express that: a ruling moves neither title nor
+    /// description, so without a time the dedupe outlives the restart.
+    pub done_at: Option<chrono::DateTime<chrono::Utc>>,
     /// How long the item's current run of FAILURES is (MAIN-386 AC-1) — what
     /// sets the length of the hold above, so a repo that cannot build backs
     /// off instead of retrying every five minutes all night. Zero for review
@@ -1101,10 +1106,10 @@ impl LoopJobRepository for DbLoopJobRepository {
             )
             .await?;
 
-        let done: Vec<Head> = self
+        let done: Vec<AttemptedHead> = self
             .db
             .query_all(
-                "SELECT t.number AS item_key, j.build_fingerprint AS fingerprint
+                "SELECT t.number AS item_key, j.build_fingerprint AS fingerprint, j.updated_at
                    FROM loop_jobs j JOIN tasks t ON t.id = j.target_task_id
                   WHERE j.tenant_id = $1 AND j.workspace_id = $2 AND j.kind = 'build'
                     AND j.state = 'completed' AND j.build_outcome IS NOT NULL
@@ -1156,7 +1161,9 @@ impl LoopJobRepository for DbLoopJobRepository {
         for h in done {
             let k = keyed(h.item_key, &h.fingerprint);
             entry(&mut by_key, k);
-            by_key.get_mut(&k).unwrap().done_head = h.fingerprint;
+            let e = by_key.get_mut(&k).unwrap();
+            e.done_head = h.fingerprint;
+            e.done_at = Some(h.updated_at);
         }
         for h in attempted {
             let k = keyed(h.item_key, &h.fingerprint);
@@ -2102,7 +2109,8 @@ impl LoopJobRepository for FakeLoopJobRepository {
                     e.live_head = j.build_fingerprint.clone()
                 }
                 "completed" if j.build_outcome.is_some() => {
-                    e.done_head = j.build_fingerprint.clone()
+                    e.done_head = j.build_fingerprint.clone();
+                    e.done_at = Some(j.updated_at);
                 }
                 "failed" | "canceled" | "completed" => {
                     e.attempted_head = j.build_fingerprint.clone();

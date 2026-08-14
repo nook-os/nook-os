@@ -2237,6 +2237,12 @@ pub struct TaskItem {
     /// unleased card is never examined, moved or labelled by it.
     #[serde(default)]
     pub claim_expires_at: Option<DateTime<Utc>>,
+    /// When a human last ruled on this card and told the loop to carry on
+    /// (MAIN-584). Read by `run_reconcile::owed`: a run that concluded before
+    /// this instant no longer speaks for the card, so a restart survives the
+    /// fingerprint dedupe that a comment and a label change cannot move.
+    #[serde(default)]
+    pub unblocked_at: Option<DateTime<Utc>>,
     pub pr_url: Option<String>,
     /// Transient dispatch signal (MAIN-227), not a stored column: `true` when the
     /// just-assigned node has no clone checkout of the task's workspace, so the
@@ -2361,6 +2367,15 @@ pub struct CreateCommentRequest {
     /// and the underlying `author_id` remains the real user.
     #[serde(default)]
     pub author_name: Option<String>,
+    /// Post this comment AND restart the card (MAIN-584): every escalation
+    /// label the card carries comes off, `agent-ready` goes on, and
+    /// `unblocked_at` is stamped so the loop's fingerprint dedupe stops
+    /// honouring the run that stopped it.
+    ///
+    /// Absent or false is an ordinary comment, byte for byte — a question can
+    /// still be asked on a stopped card without restarting it.
+    #[serde(default)]
+    pub clear_escalation: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, ToSchema)]
