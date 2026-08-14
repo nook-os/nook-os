@@ -107,11 +107,12 @@ fn no_operator_route_destroys_tenant_data() {
 
 /// The operator surface is not reachable from MCP.
 ///
-/// Decided deliberately: `mcp_auth` accepts a shared static token and
-/// `McpBackend` acts as the first user in the first tenant, so it never builds
-/// an `AuthCtx` and `require()` cannot run. Operator tools there would be a
-/// shared credential carrying deployment-wide authority with misattributed
-/// audit. This asserts the exclusion instead of relying on remembering it.
+/// Decided deliberately: `mcp_auth` also accepts a shared static token, and an
+/// operator tool carries deployment-wide authority — draining a node or
+/// rotating a CA is not something a credential no single person answers for
+/// should reach. MCP tools acting for a resolved caller (MAIN-592) does not
+/// change that. This asserts the exclusion instead of relying on remembering
+/// it.
 #[test]
 fn mcp_exposes_no_operator_tools() {
     let mcp = fs::read_to_string(concat!(

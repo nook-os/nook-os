@@ -41,16 +41,27 @@ pub struct McpCaller {
     pub tenant_id: TenantId,
 }
 
-/// Everything the MCP surface is allowed to do, pre-scoped to a tenant.
+/// Everything the MCP surface is allowed to do, on behalf of one caller.
+///
+/// Every tenant-scoped method takes the resolved [`McpCaller`] rather than
+/// reading a tenant out of the instance: MCP used to serve the FIRST
+/// tenant's data to whoever asked (MAIN-592), and a signature that cannot
+/// express the caller is what let that happen. The person-scoped notebook
+/// methods take the caller's `person_id` for the same reason.
 #[async_trait]
 pub trait NookBackend: Send + Sync + 'static {
-    async fn list_workspaces(&self) -> anyhow::Result<Vec<WorkspaceDetail>>;
-    async fn list_nodes(&self) -> anyhow::Result<Vec<Node>>;
-    async fn list_sessions(&self, active_only: bool) -> anyhow::Result<Vec<Session>>;
+    async fn list_workspaces(&self, caller: McpCaller) -> anyhow::Result<Vec<WorkspaceDetail>>;
+    async fn list_nodes(&self, caller: McpCaller) -> anyhow::Result<Vec<Node>>;
+    async fn list_sessions(
+        &self,
+        caller: McpCaller,
+        active_only: bool,
+    ) -> anyhow::Result<Vec<Session>>;
     /// Start a session in `workspace` (name or slug). Picks an online node
     /// with a checkout when `node` is not given.
     async fn start_session(
         &self,
+        caller: McpCaller,
         workspace: String,
         node: Option<String>,
         runtime: String,
@@ -58,23 +69,40 @@ pub trait NookBackend: Send + Sync + 'static {
     /// Inject text into a running session's terminal (the "task injection"
     /// primitive). AI recommends; a human watching the session can always
     /// interrupt or take over.
-    async fn send_to_session(&self, session_id: String, text: String) -> anyhow::Result<()>;
+    async fn send_to_session(
+        &self,
+        caller: McpCaller,
+        session_id: String,
+        text: String,
+    ) -> anyhow::Result<()>;
     /// Read a session's terminal screen (plus history tail) as plain text —
     /// the observe half of send_to_session, enabling send → read → act loops.
-    async fn read_session(&self, session_id: String, history_lines: u32) -> anyhow::Result<String>;
+    async fn read_session(
+        &self,
+        caller: McpCaller,
+        session_id: String,
+        history_lines: u32,
+    ) -> anyhow::Result<String>;
     /// End a session for real (kills the tmux session on the node).
-    async fn kill_session(&self, session_id: String) -> anyhow::Result<()>;
+    async fn kill_session(&self, caller: McpCaller, session_id: String) -> anyhow::Result<()>;
     async fn get_activity(
         &self,
+        caller: McpCaller,
         workspace: Option<String>,
         limit: i64,
     ) -> anyhow::Result<Vec<Event>>;
-    async fn get_notes(&self, workspace: String) -> anyhow::Result<Vec<Note>>;
-    async fn append_note(&self, workspace: String, content: String) -> anyhow::Result<Note>;
+    async fn get_notes(&self, caller: McpCaller, workspace: String) -> anyhow::Result<Vec<Note>>;
+    async fn append_note(
+        &self,
+        caller: McpCaller,
+        workspace: String,
+        content: String,
+    ) -> anyhow::Result<Note>;
     // `parent` (MAIN-81): file under an epic — a uuid or key of a `type='epic'`
     // task on the same board; omit for a top-level task.
     async fn create_task(
         &self,
+        caller: McpCaller,
         title: String,
         description: Option<String>,
         parent: Option<String>,
@@ -82,12 +110,23 @@ pub trait NookBackend: Send + Sync + 'static {
 
     // ── Git-powerhouse management (drive workspace/project creation) ─────────
     /// Clone a repo onto a node (name or slug). Returns a status message.
-    async fn clone_repo(&self, url: String, node: Option<String>) -> anyhow::Result<String>;
+    async fn clone_repo(
+        &self,
+        caller: McpCaller,
+        url: String,
+        node: Option<String>,
+    ) -> anyhow::Result<String>;
     /// Create a new empty git project on a node.
-    async fn create_project(&self, name: String, node: Option<String>) -> anyhow::Result<String>;
+    async fn create_project(
+        &self,
+        caller: McpCaller,
+        name: String,
+        node: Option<String>,
+    ) -> anyhow::Result<String>;
     /// Add a worktree (branch) of a workspace on a node.
     async fn add_worktree(
         &self,
+        caller: McpCaller,
         workspace: String,
         branch: String,
         node: Option<String>,
@@ -109,9 +148,19 @@ pub trait NookBackend: Send + Sync + 'static {
         node: Option<String>,
     ) -> anyhow::Result<Session>;
     /// Move a task to a named column (Triage/Todo/In Progress/Done).
-    async fn move_task(&self, task_id: String, column: String) -> anyhow::Result<TaskItem>;
+    async fn move_task(
+        &self,
+        caller: McpCaller,
+        task_id: String,
+        column: String,
+    ) -> anyhow::Result<TaskItem>;
     /// Record a PR for a task and move it to Done.
-    async fn submit_pr(&self, task_id: String, pr_url: Option<String>) -> anyhow::Result<TaskItem>;
+    async fn submit_pr(
+        &self,
+        caller: McpCaller,
+        task_id: String,
+        pr_url: Option<String>,
+    ) -> anyhow::Result<TaskItem>;
 
     // ── The agent loop's primitives ─────────────────────────────────────────
     //
@@ -122,19 +171,21 @@ pub trait NookBackend: Send + Sync + 'static {
     /// tasks in a `backlog` column, tasks in a `completed`/`canceled` column and
     /// `type='epic'` tasks — the backlog is a human refinement space, a finished
     /// card is over, and an epic is a container; none is buildable.
-    async fn list_tasks(&self, f: TaskQuery) -> anyhow::Result<Vec<TaskItem>>;
+    async fn list_tasks(&self, caller: McpCaller, f: TaskQuery) -> anyhow::Result<Vec<TaskItem>>;
     /// One whole issue: body, labels, comments, relations, blocked state.
-    async fn get_task(&self, task: String) -> anyhow::Result<serde_json::Value>;
+    async fn get_task(&self, caller: McpCaller, task: String) -> anyhow::Result<serde_json::Value>;
     /// Take a task, atomically. Fails if somebody else got there first.
     async fn claim_task(
         &self,
+        caller: McpCaller,
         task: String,
         column_type: Option<String>,
     ) -> anyhow::Result<TaskItem>;
     /// Give a task back so somebody else can pick it up.
-    async fn release_task(&self, task: String) -> anyhow::Result<TaskItem>;
+    async fn release_task(&self, caller: McpCaller, task: String) -> anyhow::Result<TaskItem>;
     async fn comment_task(
         &self,
+        caller: McpCaller,
         task: String,
         body_md: String,
         author_name: Option<String>,
@@ -145,21 +196,39 @@ pub trait NookBackend: Send + Sync + 'static {
     /// a body-edit from an agent never silently clobbers a human's change.
     async fn set_task_description(
         &self,
+        caller: McpCaller,
         task: String,
         description: String,
     ) -> anyhow::Result<TaskItem>;
-    async fn add_label(&self, task: String, label: String) -> anyhow::Result<serde_json::Value>;
-    async fn remove_label(&self, task: String, label: String) -> anyhow::Result<serde_json::Value>;
-    async fn set_priority(&self, task: String, priority: i32) -> anyhow::Result<TaskItem>;
+    async fn add_label(
+        &self,
+        caller: McpCaller,
+        task: String,
+        label: String,
+    ) -> anyhow::Result<serde_json::Value>;
+    async fn remove_label(
+        &self,
+        caller: McpCaller,
+        task: String,
+        label: String,
+    ) -> anyhow::Result<serde_json::Value>;
+    async fn set_priority(
+        &self,
+        caller: McpCaller,
+        task: String,
+        priority: i32,
+    ) -> anyhow::Result<TaskItem>;
     /// File a task under an epic, or detach it (MAIN-81). `parent` is a uuid or
     /// key of a `type='epic'` task on the same board; omit `parent` to detach.
     async fn set_task_parent(
         &self,
+        caller: McpCaller,
         task: String,
         parent: Option<String>,
     ) -> anyhow::Result<TaskItem>;
     async fn link_tasks(
         &self,
+        caller: McpCaller,
         from: String,
         to: String,
         kind: String,
@@ -172,10 +241,18 @@ pub trait NookBackend: Send + Sync + 'static {
     // one. Uploading stays a person's act (NG-1).
     /// Every file on a ticket AND on its comments — metadata only, never bytes,
     /// so listing twenty screenshots costs one small answer.
-    async fn list_task_attachments(&self, task: String) -> anyhow::Result<Vec<TaskAttachment>>;
+    async fn list_task_attachments(
+        &self,
+        caller: McpCaller,
+        task: String,
+    ) -> anyhow::Result<Vec<TaskAttachment>>;
     /// One attachment's content, when it is text small enough to belong in a
     /// reply. Anything else comes back as a pointer to the CLI.
-    async fn read_task_attachment(&self, attachment: String) -> anyhow::Result<AttachmentContent>;
+    async fn read_task_attachment(
+        &self,
+        caller: McpCaller,
+        attachment: String,
+    ) -> anyhow::Result<AttachmentContent>;
 
     // ── Build runs (MAIN-525) ───────────────────────────────────────────────
     //
@@ -218,10 +295,10 @@ pub trait NookBackend: Send + Sync + 'static {
     async fn stop_tunnel(&self, caller: McpCaller, label: String) -> anyhow::Result<()>;
 
     // ── Notebook (person-scoped; MAIN-102) ──────────────────────────────────
-    // Unlike every method above (pre-scoped to the instance's first tenant),
-    // these take a resolved `person` (a `users.person_id`) — the notebook is
-    // private to a person, so there is no instance fallback. They route through
-    // the notebook module's own service paths (validation, encryption, decrypt).
+    // A notebook is private to a PERSON, not shared across their tenant, so
+    // these take the caller's resolved `person` (a `users.person_id`) where the
+    // methods above take the whole caller. They route through the notebook
+    // module's own service paths (validation, encryption, decrypt).
     async fn notebook_list_notes(
         &self,
         person: Uuid,
@@ -736,24 +813,40 @@ impl NookMcp {
     #[tool(
         description = "List workspaces with their locations (which nodes have them checked out)"
     )]
-    async fn list_workspaces(&self) -> Result<CallToolResult, McpError> {
-        to_result(&self.backend.list_workspaces().await.map_err(backend_err)?)
+    async fn list_workspaces(
+        &self,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = require_caller(&parts)?;
+        to_result(
+            &self
+                .backend
+                .list_workspaces(caller)
+                .await
+                .map_err(backend_err)?,
+        )
     }
 
     #[tool(description = "List nodes (machines) with status and capabilities")]
-    async fn list_nodes(&self) -> Result<CallToolResult, McpError> {
-        to_result(&self.backend.list_nodes().await.map_err(backend_err)?)
+    async fn list_nodes(
+        &self,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = require_caller(&parts)?;
+        to_result(&self.backend.list_nodes(caller).await.map_err(backend_err)?)
     }
 
     #[tool(description = "List terminal/AI sessions")]
     async fn list_sessions(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<ListSessionsParams>,
     ) -> Result<CallToolResult, McpError> {
+        let caller = require_caller(&parts)?;
         to_result(
             &self
                 .backend
-                .list_sessions(p.active_only)
+                .list_sessions(caller, p.active_only)
                 .await
                 .map_err(backend_err)?,
         )
@@ -764,12 +857,14 @@ impl NookMcp {
     )]
     async fn start_session(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<StartSessionParams>,
     ) -> Result<CallToolResult, McpError> {
+        let caller = require_caller(&parts)?;
         to_result(
             &self
                 .backend
-                .start_session(p.workspace, p.node, p.runtime)
+                .start_session(caller, p.workspace, p.node, p.runtime)
                 .await
                 .map_err(backend_err)?,
         )
@@ -778,10 +873,12 @@ impl NookMcp {
     #[tool(description = "Type text into a running session's terminal (task injection)")]
     async fn send_to_session(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<SendToSessionParams>,
     ) -> Result<CallToolResult, McpError> {
+        let caller = require_caller(&parts)?;
         self.backend
-            .send_to_session(p.session_id, p.text)
+            .send_to_session(caller, p.session_id, p.text)
             .await
             .map_err(backend_err)?;
         Ok(CallToolResult::success(vec![ContentBlock::text("sent")]))
@@ -793,11 +890,13 @@ impl NookMcp {
     )]
     async fn read_session(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<ReadSessionParams>,
     ) -> Result<CallToolResult, McpError> {
+        let caller = require_caller(&parts)?;
         let text = self
             .backend
-            .read_session(p.session_id, p.history_lines.unwrap_or(100))
+            .read_session(caller, p.session_id, p.history_lines.unwrap_or(100))
             .await
             .map_err(backend_err)?;
         Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
@@ -806,10 +905,12 @@ impl NookMcp {
     #[tool(description = "Kill a session (ends its tmux session on the node for real)")]
     async fn kill_session(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<KillSessionParams>,
     ) -> Result<CallToolResult, McpError> {
+        let caller = require_caller(&parts)?;
         self.backend
-            .kill_session(p.session_id)
+            .kill_session(caller, p.session_id)
             .await
             .map_err(backend_err)?;
         Ok(CallToolResult::success(vec![ContentBlock::text("killed")]))
@@ -818,12 +919,14 @@ impl NookMcp {
     #[tool(description = "Get the activity timeline (chronological events)")]
     async fn get_activity(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<GetActivityParams>,
     ) -> Result<CallToolResult, McpError> {
+        let caller = require_caller(&parts)?;
         to_result(
             &self
                 .backend
-                .get_activity(p.workspace, p.limit)
+                .get_activity(caller, p.workspace, p.limit)
                 .await
                 .map_err(backend_err)?,
         )
@@ -832,12 +935,14 @@ impl NookMcp {
     #[tool(description = "Read a workspace's rolling notes")]
     async fn get_notes(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<WorkspaceParams>,
     ) -> Result<CallToolResult, McpError> {
+        let caller = require_caller(&parts)?;
         to_result(
             &self
                 .backend
-                .get_notes(p.workspace)
+                .get_notes(caller, p.workspace)
                 .await
                 .map_err(backend_err)?,
         )
@@ -846,12 +951,14 @@ impl NookMcp {
     #[tool(description = "Append markdown to a workspace's rolling note")]
     async fn append_note(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<AppendNoteParams>,
     ) -> Result<CallToolResult, McpError> {
+        let caller = require_caller(&parts)?;
         to_result(
             &self
                 .backend
-                .append_note(p.workspace, p.content)
+                .append_note(caller, p.workspace, p.content)
                 .await
                 .map_err(backend_err)?,
         )
@@ -860,12 +967,14 @@ impl NookMcp {
     #[tool(description = "Create a task on the local board")]
     async fn create_task(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<CreateTaskParams>,
     ) -> Result<CallToolResult, McpError> {
+        let caller = require_caller(&parts)?;
         to_result(
             &self
                 .backend
-                .create_task(p.title, p.description, p.parent)
+                .create_task(caller, p.title, p.description, p.parent)
                 .await
                 .map_err(backend_err)?,
         )
@@ -876,11 +985,13 @@ impl NookMcp {
     )]
     async fn clone_repo(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<CloneRepoParams>,
     ) -> Result<CallToolResult, McpError> {
+        let caller = require_caller(&parts)?;
         let msg = self
             .backend
-            .clone_repo(p.url, p.node)
+            .clone_repo(caller, p.url, p.node)
             .await
             .map_err(backend_err)?;
         Ok(CallToolResult::success(vec![ContentBlock::text(msg)]))
@@ -889,11 +1000,13 @@ impl NookMcp {
     #[tool(description = "Create a new empty git project on a node")]
     async fn create_project(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<CreateProjectParams>,
     ) -> Result<CallToolResult, McpError> {
+        let caller = require_caller(&parts)?;
         let msg = self
             .backend
-            .create_project(p.name, p.node)
+            .create_project(caller, p.name, p.node)
             .await
             .map_err(backend_err)?;
         Ok(CallToolResult::success(vec![ContentBlock::text(msg)]))
@@ -902,11 +1015,13 @@ impl NookMcp {
     #[tool(description = "Add a git worktree (branch) of a workspace on a node")]
     async fn add_worktree(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<AddWorktreeParams>,
     ) -> Result<CallToolResult, McpError> {
+        let caller = require_caller(&parts)?;
         let msg = self
             .backend
-            .add_worktree(p.workspace, p.branch, p.node)
+            .add_worktree(caller, p.workspace, p.branch, p.node)
             .await
             .map_err(backend_err)?;
         Ok(CallToolResult::success(vec![ContentBlock::text(msg)]))
@@ -1064,12 +1179,14 @@ impl NookMcp {
     #[tool(description = "Move a task to a named column (Triage/Todo/In Progress/Done)")]
     async fn move_task(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<MoveTaskParams>,
     ) -> Result<CallToolResult, McpError> {
+        let caller = require_caller(&parts)?;
         to_result(
             &self
                 .backend
-                .move_task(p.task_id, p.column)
+                .move_task(caller, p.task_id, p.column)
                 .await
                 .map_err(backend_err)?,
         )
@@ -1080,12 +1197,14 @@ impl NookMcp {
     )]
     async fn set_task_description(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<SetDescriptionParams>,
     ) -> Result<CallToolResult, McpError> {
+        let caller = require_caller(&parts)?;
         to_result(
             &self
                 .backend
-                .set_task_description(p.task, p.description)
+                .set_task_description(caller, p.task, p.description)
                 .await
                 .map_err(backend_err)?,
         )
@@ -1094,12 +1213,14 @@ impl NookMcp {
     #[tool(description = "Record a PR for a task and move it to Done")]
     async fn submit_pr(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<SubmitPrParams>,
     ) -> Result<CallToolResult, McpError> {
+        let caller = require_caller(&parts)?;
         to_result(
             &self
                 .backend
-                .submit_pr(p.task_id, p.pr_url)
+                .submit_pr(caller, p.task_id, p.pr_url)
                 .await
                 .map_err(backend_err)?,
         )
@@ -1120,9 +1241,17 @@ impl NookMcp {
     )]
     async fn list_tasks(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<TaskQuery>,
     ) -> Result<CallToolResult, McpError> {
-        to_result(&self.backend.list_tasks(p).await.map_err(backend_err)?)
+        let caller = require_caller(&parts)?;
+        to_result(
+            &self
+                .backend
+                .list_tasks(caller, p)
+                .await
+                .map_err(backend_err)?,
+        )
     }
 
     #[tool(
@@ -1132,9 +1261,17 @@ impl NookMcp {
     )]
     async fn get_task(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<TaskRefParams>,
     ) -> Result<CallToolResult, McpError> {
-        to_result(&self.backend.get_task(p.task).await.map_err(backend_err)?)
+        let caller = require_caller(&parts)?;
+        to_result(
+            &self
+                .backend
+                .get_task(caller, p.task)
+                .await
+                .map_err(backend_err)?,
+        )
     }
 
     #[tool(
@@ -1145,12 +1282,14 @@ impl NookMcp {
     )]
     async fn list_task_attachments(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<TaskRefParams>,
     ) -> Result<CallToolResult, McpError> {
+        let caller = require_caller(&parts)?;
         to_result(
             &self
                 .backend
-                .list_task_attachments(p.task)
+                .list_task_attachments(caller, p.task)
                 .await
                 .map_err(backend_err)?,
         )
@@ -1164,12 +1303,14 @@ impl NookMcp {
     )]
     async fn read_task_attachment(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<AttachmentRefParams>,
     ) -> Result<CallToolResult, McpError> {
+        let caller = require_caller(&parts)?;
         to_result(
             &self
                 .backend
-                .read_task_attachment(p.attachment)
+                .read_task_attachment(caller, p.attachment)
                 .await
                 .map_err(backend_err)?,
         )
@@ -1183,12 +1324,14 @@ impl NookMcp {
     )]
     async fn claim_task(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<ClaimParams>,
     ) -> Result<CallToolResult, McpError> {
+        let caller = require_caller(&parts)?;
         to_result(
             &self
                 .backend
-                .claim_task(p.task, p.column_type)
+                .claim_task(caller, p.task, p.column_type)
                 .await
                 .map_err(backend_err)?,
         )
@@ -1197,12 +1340,14 @@ impl NookMcp {
     #[tool(description = "Release a claimed task so somebody else can pick it up")]
     async fn release_task(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<TaskRefParams>,
     ) -> Result<CallToolResult, McpError> {
+        let caller = require_caller(&parts)?;
         to_result(
             &self
                 .backend
-                .release_task(p.task)
+                .release_task(caller, p.task)
                 .await
                 .map_err(backend_err)?,
         )
@@ -1220,12 +1365,15 @@ impl NookMcp {
     )]
     async fn comment_task(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<CommentParams>,
     ) -> Result<CallToolResult, McpError> {
+        let caller = require_caller(&parts)?;
         to_result(
             &self
                 .backend
                 .comment_task(
+                    caller,
                     p.task,
                     p.body_md,
                     p.author_name,
@@ -1244,8 +1392,10 @@ impl NookMcp {
     )]
     async fn add_label(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<LabelParams>,
     ) -> Result<CallToolResult, McpError> {
+        let caller = require_caller(&parts)?;
         // Enforced, not merely documented. A description is guidance; this is
         // the property the whole human-in-the-loop design rests on, and
         // guidance is not what you protect a safety gate with.
@@ -1259,7 +1409,7 @@ impl NookMcp {
         to_result(
             &self
                 .backend
-                .add_label(p.task, p.label)
+                .add_label(caller, p.task, p.label)
                 .await
                 .map_err(backend_err)?,
         )
@@ -1271,12 +1421,14 @@ impl NookMcp {
     )]
     async fn remove_label(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<LabelParams>,
     ) -> Result<CallToolResult, McpError> {
+        let caller = require_caller(&parts)?;
         to_result(
             &self
                 .backend
-                .remove_label(p.task, p.label)
+                .remove_label(caller, p.task, p.label)
                 .await
                 .map_err(backend_err)?,
         )
@@ -1285,12 +1437,14 @@ impl NookMcp {
     #[tool(description = "Set a task's priority: 0 none, 1 urgent, 2 high, 3 medium, 4 low")]
     async fn set_priority(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<PriorityParams>,
     ) -> Result<CallToolResult, McpError> {
+        let caller = require_caller(&parts)?;
         to_result(
             &self
                 .backend
-                .set_priority(p.task, p.priority)
+                .set_priority(caller, p.task, p.priority)
                 .await
                 .map_err(backend_err)?,
         )
@@ -1302,12 +1456,14 @@ impl NookMcp {
     )]
     async fn set_task_parent(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<SetTaskParentParams>,
     ) -> Result<CallToolResult, McpError> {
+        let caller = require_caller(&parts)?;
         to_result(
             &self
                 .backend
-                .set_task_parent(p.task, p.parent)
+                .set_task_parent(caller, p.task, p.parent)
                 .await
                 .map_err(backend_err)?,
         )
@@ -1320,12 +1476,14 @@ impl NookMcp {
     )]
     async fn link_tasks(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<LinkParams>,
     ) -> Result<CallToolResult, McpError> {
+        let caller = require_caller(&parts)?;
         to_result(
             &self
                 .backend
-                .link_tasks(p.from, p.to, p.kind)
+                .link_tasks(caller, p.from, p.to, p.kind)
                 .await
                 .map_err(backend_err)?,
         )
@@ -1583,8 +1741,50 @@ impl NookMcp {
     }
 }
 
+/// The tools offered to a caller whose identity did not resolve (AC-5).
+///
+/// Empty, and that is the answer rather than an oversight: every tool on this
+/// surface reads or writes one tenant's or one person's data, so the static
+/// `MCP_TOKEN` — which resolves neither — is offered nothing instead of a menu
+/// it would be refused on calling. A list rather than a hardcoded empty answer,
+/// so a genuinely identity-free tool can join it without unpicking the filter.
+const CALLER_FREE_TOOLS: &[&str] = &[];
+
+/// Whether this request carries a resolved caller. The identity rides in the
+/// HTTP request's extensions, and the streamable-HTTP transport forwards the
+/// `Parts` into the request context — the same place `Extension<Parts>` reads
+/// it from inside a tool.
+fn is_authenticated(context: &rmcp::service::RequestContext<rmcp::RoleServer>) -> bool {
+    context
+        .extensions
+        .get::<Parts>()
+        .is_some_and(|parts| parts.extensions.get::<McpCaller>().is_some())
+}
+
 #[tool_handler]
 impl ServerHandler for NookMcp {
+    /// `tools/list`, filtered to what this caller can actually use (AC-5).
+    ///
+    /// `#[tool_handler]` generates this method only when the impl does not
+    /// already define it, so writing it here replaces the offer-everything
+    /// default while leaving `call_tool` generated. The list is the only thing
+    /// most clients read: handing a static-token client all 47 tools and then
+    /// refusing every call is a promise the server does not keep.
+    async fn list_tools(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListToolsResult, McpError> {
+        let authenticated = is_authenticated(&context);
+        Ok(rmcp::model::ListToolsResult::with_all_items(
+            Self::tool_router()
+                .list_all()
+                .into_iter()
+                .filter(|t| authenticated || CALLER_FREE_TOOLS.contains(&t.name.as_ref()))
+                .collect(),
+        ))
+    }
+
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
@@ -1712,6 +1912,65 @@ mod tests {
         assert!(matches!(parse_parent(Some("".into())), Ok(None)));
         assert_eq!(parse_parent(Some(id.to_string())).unwrap(), Some(id));
         assert!(parse_parent(Some("not-a-uuid".into())).is_err());
+    }
+
+    /// MAIN-592 AC-1/AC-2/AC-4: EVERY tool resolves the caller, or is named in
+    /// [`CALLER_FREE_TOOLS`] as one that needs no identity. Read off the source
+    /// text, because the regression this guards is a tool added LATER that
+    /// forgets — and a per-tool test only ever covers the tools somebody
+    /// remembered to write one for. A tool that skips this reaches whichever
+    /// tenant the backend picks, which is the whole of MAIN-592.
+    #[test]
+    fn every_tool_resolves_its_caller() {
+        for (name, body) in tool_bodies() {
+            if CALLER_FREE_TOOLS.contains(&name.as_str()) {
+                continue;
+            }
+            let head = &body[..body.find(".backend").unwrap_or(body.len())];
+            assert!(
+                head.contains("require_caller(&parts)?")
+                    || head.contains("require_person(&parts)?"),
+                "the tool `{name}` reaches the backend without resolving a caller — \
+                 add `require_caller`, or name it in CALLER_FREE_TOOLS and say why"
+            );
+        }
+    }
+
+    /// AC-5: a caller the request could not resolve is offered only the tools it
+    /// could actually call, and there are none — every tool on this surface
+    /// reads or writes one tenant's or one person's data. Asserted against the
+    /// guard above rather than a hardcoded 0, so the two cannot disagree.
+    #[test]
+    fn a_static_token_is_offered_only_the_tools_it_can_use() {
+        let offered: Vec<String> = tool_bodies()
+            .into_iter()
+            .map(|(name, _)| name)
+            .filter(|n| CALLER_FREE_TOOLS.contains(&n.as_str()))
+            .collect();
+        assert!(
+            offered.is_empty(),
+            "CALLER_FREE_TOOLS names {offered:?} — if that is deliberate, this \
+             test should assert the list, not that it is empty"
+        );
+    }
+
+    /// Every `#[tool]` method in the tool impl block, as (name, source body).
+    fn tool_bodies() -> Vec<(String, &'static str)> {
+        let src = include_str!("lib.rs");
+        // The tool impls only: the trait declares methods of the same names
+        // further up, and they take an already-resolved caller.
+        let section = src
+            .split_once("#[tool_router]")
+            .expect("the tool impl block")
+            .1
+            .split_once("#[tool_handler]")
+            .expect("the end of the tool impl block")
+            .0;
+        section
+            .split("\n    async fn ")
+            .skip(1)
+            .map(|body| (body.chars().take_while(|c| *c != '(').collect(), body))
+            .collect()
     }
 
     /// MAIN-210 AC-6: EVERY notebook tool is person-scoped, so every one of them

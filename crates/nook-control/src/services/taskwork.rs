@@ -104,9 +104,9 @@ pub async fn dispatch(
         return Err(ApiError::NotFound);
     }
     // Auto-placement is confined to the requester's OWN nodes (MAIN-131): `user`
-    // is the acting identity (None on the MCP path, which then has no eligible
-    // node rather than a tenant-wide pick), distinct from `viewer`, which the
-    // MCP path fills with the tenant owner for visibility only.
+    // is the acting identity, distinct from `viewer`, which decides only what
+    // the requester may see. Every door now names a real person for both — MCP
+    // included, since it stopped acting as the first tenant's owner (MAIN-592).
     let placement = crate::services::schedule::pick(state, tenant, user, task.workspace_id).await?;
     let node = placement.node_id();
     // MAIN-227 AC-3: when the chosen node has no clone checkout of the workspace,
