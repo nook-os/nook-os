@@ -1,5 +1,14 @@
 //! The control plane's implementation of the MCP tool surface. Delegates to
 //! the same service layer the REST handlers use.
+//!
+//! Every tenant-scoped method reads its tenant and its actor from the
+//! `McpCaller` the request resolved to, and nothing else. Two helpers here
+//! used to answer both questions from the INSTANCE instead — the first tenant
+//! and its owner — which served that tenant's board to every caller and
+//! attributed every MCP write to a person who had not made it (MAIN-592).
+//! Nothing in this file may reach `identity::first_tenant` or
+//! `identity::first_user` again; `tests/mcp_tenant_isolation.rs` fails the
+//! build if it does.
 
 use async_trait::async_trait;
 use nook_mcp::{McpCaller, NookBackend};
@@ -14,22 +23,6 @@ pub struct McpBackend {
 }
 
 impl McpBackend {
-    /// M1: the MCP token maps to the instance's first tenant (dev). Per-user
-    /// MCP OAuth is post-M1.
-    async fn tenant(&self) -> anyhow::Result<TenantId> {
-        crate::services::identity::first_tenant(self.state.identity.as_ref()).await
-    }
-
-    /// Who an MCP call acts as.
-    ///
-    /// There is no per-user MCP identity yet — the token maps to the instance,
-    /// so the honest answer is the tenant's owner. Recorded rather than left
-    /// null so a comment or a claim has an author that can be revoked.
-    async fn user(&self) -> anyhow::Result<UserId> {
-        let tenant = self.tenant().await?;
-        crate::services::identity::first_user(self.state.identity.as_ref(), tenant).await
-    }
-
     /// Resolve a workspace by **id or slug** (both unique), falling back to name
     /// as a documented convenience that errors on ambiguity rather than silently
     /// picking one (MAIN-223 AC-3). The old `slug = $2 OR name = $2` conflated the
@@ -112,21 +105,26 @@ impl McpBackend {
 
 #[async_trait]
 impl NookBackend for McpBackend {
-    async fn list_workspaces(&self) -> anyhow::Result<Vec<WorkspaceDetail>> {
-        let tenant = self.tenant().await?;
+    async fn list_workspaces(&self, caller: McpCaller) -> anyhow::Result<Vec<WorkspaceDetail>> {
+        let tenant = caller.tenant_id;
         Ok(workspace_queries::list_workspaces(&*self.state.workspaces, tenant).await?)
     }
 
-    async fn list_nodes(&self) -> anyhow::Result<Vec<Node>> {
-        let tenant = self.tenant().await?;
-        // MCP acts for the tenant, not a single member — the whole fleet.
-        // No owner leg: MCP has no per-user identity to own anything with
-        // (MAIN-102), so it sees the tenant's fleet and nothing else.
+    async fn list_nodes(&self, caller: McpCaller) -> anyhow::Result<Vec<Node>> {
+        let tenant = caller.tenant_id;
+        // The caller's whole fleet, not just the machines they own: an agent
+        // asked "where can this run" wants every node its tenant has. The
+        // narrowing that matters is the tenant, and that now comes from the
+        // caller (MAIN-592) rather than from the instance.
         Ok(self.state.nodes.list(tenant, None, None).await?)
     }
 
-    async fn list_sessions(&self, active_only: bool) -> anyhow::Result<Vec<Session>> {
-        let tenant = self.tenant().await?;
+    async fn list_sessions(
+        &self,
+        caller: McpCaller,
+        active_only: bool,
+    ) -> anyhow::Result<Vec<Session>> {
+        let tenant = caller.tenant_id;
         // MCP acts tenant-wide, not as one member — all sessions (MAIN-133).
         Ok(session_queries::list_sessions(
             &*self.state.sessions,
@@ -141,11 +139,12 @@ impl NookBackend for McpBackend {
 
     async fn start_session(
         &self,
+        caller: McpCaller,
         workspace: String,
         node: Option<String>,
         runtime: String,
     ) -> anyhow::Result<Session> {
-        let tenant = self.tenant().await?;
+        let tenant = caller.tenant_id;
         let workspace_id = self.resolve_workspace(tenant, &workspace).await?;
 
         // Pick the requested node, or any online node with a checkout.
@@ -179,9 +178,14 @@ impl NookBackend for McpBackend {
         Ok(session)
     }
 
-    async fn send_to_session(&self, session_id: String, text: String) -> anyhow::Result<()> {
+    async fn send_to_session(
+        &self,
+        caller: McpCaller,
+        session_id: String,
+        text: String,
+    ) -> anyhow::Result<()> {
         use base64::Engine;
-        let tenant = self.tenant().await?;
+        let tenant = caller.tenant_id;
         let id: SessionId = session_id
             .parse()
             .map_err(|_| anyhow::anyhow!("bad session id"))?;
@@ -216,8 +220,13 @@ impl NookBackend for McpBackend {
         Ok(())
     }
 
-    async fn read_session(&self, session_id: String, history_lines: u32) -> anyhow::Result<String> {
-        let tenant = self.tenant().await?;
+    async fn read_session(
+        &self,
+        caller: McpCaller,
+        session_id: String,
+        history_lines: u32,
+    ) -> anyhow::Result<String> {
+        let tenant = caller.tenant_id;
         let id: SessionId = session_id
             .parse()
             .map_err(|_| anyhow::anyhow!("bad session id"))?;
@@ -239,8 +248,8 @@ impl NookBackend for McpBackend {
         .await
     }
 
-    async fn kill_session(&self, session_id: String) -> anyhow::Result<()> {
-        let tenant = self.tenant().await?;
+    async fn kill_session(&self, caller: McpCaller, session_id: String) -> anyhow::Result<()> {
+        let tenant = caller.tenant_id;
         let id: SessionId = session_id
             .parse()
             .map_err(|_| anyhow::anyhow!("bad session id"))?;
@@ -266,10 +275,11 @@ impl NookBackend for McpBackend {
 
     async fn get_activity(
         &self,
+        caller: McpCaller,
         workspace: Option<String>,
         limit: i64,
     ) -> anyhow::Result<Vec<Event>> {
-        let tenant = self.tenant().await?;
+        let tenant = caller.tenant_id;
         let workspace_id = match workspace {
             Some(w) => Some(self.resolve_workspace(tenant, &w).await?),
             None => None,
@@ -287,14 +297,19 @@ impl NookBackend for McpBackend {
         Ok(page.events)
     }
 
-    async fn get_notes(&self, workspace: String) -> anyhow::Result<Vec<Note>> {
-        let tenant = self.tenant().await?;
+    async fn get_notes(&self, caller: McpCaller, workspace: String) -> anyhow::Result<Vec<Note>> {
+        let tenant = caller.tenant_id;
         let workspace_id = self.resolve_workspace(tenant, &workspace).await?;
         Ok(notebook_queries::list_notes(&*self.state.notebook, tenant, workspace_id).await?)
     }
 
-    async fn append_note(&self, workspace: String, content: String) -> anyhow::Result<Note> {
-        let tenant = self.tenant().await?;
+    async fn append_note(
+        &self,
+        caller: McpCaller,
+        workspace: String,
+        content: String,
+    ) -> anyhow::Result<Note> {
+        let tenant = caller.tenant_id;
         let workspace_id = self.resolve_workspace(tenant, &workspace).await?;
         let existing =
             notebook_queries::latest_rolling_note(&*self.state.notebook, tenant, workspace_id)
@@ -328,11 +343,12 @@ impl NookBackend for McpBackend {
 
     async fn create_task(
         &self,
+        caller: McpCaller,
         title: String,
         description: Option<String>,
         parent: Option<String>,
     ) -> anyhow::Result<TaskItem> {
-        let tenant = self.tenant().await?;
+        let tenant = caller.tenant_id;
         let boards = self.state.kanban.all_boards(tenant).await?;
         let board = boards
             .first()
@@ -342,7 +358,7 @@ impl NookBackend for McpBackend {
             .kanban
             .get(&board.provider)
             .ok_or_else(|| anyhow::anyhow!("provider missing"))?;
-        let creator = self.user().await?;
+        let creator = caller.user_id;
         let task = provider
             .create_task(
                 tenant,
@@ -370,8 +386,13 @@ impl NookBackend for McpBackend {
         Ok(task)
     }
 
-    async fn clone_repo(&self, url: String, node: Option<String>) -> anyhow::Result<String> {
-        let tenant = self.tenant().await?;
+    async fn clone_repo(
+        &self,
+        caller: McpCaller,
+        url: String,
+        node: Option<String>,
+    ) -> anyhow::Result<String> {
+        let tenant = caller.tenant_id;
         let node_id = self.resolve_node(tenant, node).await?;
         let tenant_slug = crate::services::tenant_slug(&self.state, tenant).await;
         self.run_op(
@@ -388,8 +409,13 @@ impl NookBackend for McpBackend {
         .await
     }
 
-    async fn create_project(&self, name: String, node: Option<String>) -> anyhow::Result<String> {
-        let tenant = self.tenant().await?;
+    async fn create_project(
+        &self,
+        caller: McpCaller,
+        name: String,
+        node: Option<String>,
+    ) -> anyhow::Result<String> {
+        let tenant = caller.tenant_id;
         let node_id = self.resolve_node(tenant, node).await?;
         self.run_op(
             node_id,
@@ -401,11 +427,12 @@ impl NookBackend for McpBackend {
 
     async fn add_worktree(
         &self,
+        caller: McpCaller,
         workspace: String,
         branch: String,
         node: Option<String>,
     ) -> anyhow::Result<String> {
-        let tenant = self.tenant().await?;
+        let tenant = caller.tenant_id;
         let workspace_id = self.resolve_workspace(tenant, &workspace).await?;
         let node_id = self.resolve_node(tenant, node).await?;
         let repo_path: String = workspace_queries::clone_path_on_node(
@@ -478,16 +505,26 @@ impl NookBackend for McpBackend {
         Ok(session)
     }
 
-    async fn move_task(&self, task_id: String, column: String) -> anyhow::Result<TaskItem> {
-        let tenant = self.tenant().await?;
+    async fn move_task(
+        &self,
+        caller: McpCaller,
+        task_id: String,
+        column: String,
+    ) -> anyhow::Result<TaskItem> {
+        let tenant = caller.tenant_id;
         let id: TaskId = task_id
             .parse()
             .map_err(|_| anyhow::anyhow!("bad task id"))?;
         Ok(crate::services::taskwork::move_task(&self.state, tenant, id, &column).await?)
     }
 
-    async fn submit_pr(&self, task_id: String, pr_url: Option<String>) -> anyhow::Result<TaskItem> {
-        let tenant = self.tenant().await?;
+    async fn submit_pr(
+        &self,
+        caller: McpCaller,
+        task_id: String,
+        pr_url: Option<String>,
+    ) -> anyhow::Result<TaskItem> {
+        let tenant = caller.tenant_id;
         let id: TaskId = task_id
             .parse()
             .map_err(|_| anyhow::anyhow!("bad task id"))?;
@@ -496,17 +533,18 @@ impl NookBackend for McpBackend {
 
     async fn set_task_description(
         &self,
+        caller: McpCaller,
         task: String,
         description: String,
     ) -> anyhow::Result<TaskItem> {
         use crate::services::kanban::ProviderError;
-        let tenant = self.tenant().await?;
+        let tenant = caller.tenant_id;
         let id =
             crate::services::tasks::resolve_id(self.state.tasks.as_ref(), tenant, &task).await?;
         // Through the task's OWN board provider, not a hardwired local one
         // (MAIN-86 AC-2).
         let provider = self.provider_for_task(tenant, id).await?;
-        let viewer = self.user().await?;
+        let viewer = caller.user_id;
         // Read-guard-retry: base the write on the version just read, and on a
         // concurrent edit re-read and try again a bounded number of times, so an
         // agent's body edit never silently clobbers a human's change (AC-3).
@@ -562,9 +600,13 @@ impl NookBackend for McpBackend {
     // pickable" would drift, and the one an agent uses is the one that decides
     // what work happens.
 
-    async fn list_tasks(&self, f: nook_mcp::TaskQuery) -> anyhow::Result<Vec<TaskItem>> {
-        let tenant = self.tenant().await?;
-        let viewer = self.user().await?;
+    async fn list_tasks(
+        &self,
+        caller: McpCaller,
+        f: nook_mcp::TaskQuery,
+    ) -> anyhow::Result<Vec<TaskItem>> {
+        let tenant = caller.tenant_id;
+        let viewer = caller.user_id;
         let rows = crate::routes::task_query::pick(
             &self.state,
             tenant,
@@ -600,27 +642,35 @@ impl NookBackend for McpBackend {
         Ok(rows)
     }
 
-    async fn get_task(&self, task: String) -> anyhow::Result<serde_json::Value> {
-        let tenant = self.tenant().await?;
-        let viewer = self.user().await?;
+    async fn get_task(&self, caller: McpCaller, task: String) -> anyhow::Result<serde_json::Value> {
+        let tenant = caller.tenant_id;
+        let viewer = caller.user_id;
         let id =
             crate::services::tasks::resolve_id(self.state.tasks.as_ref(), tenant, &task).await?;
         let detail = crate::routes::task_detail::detail(&self.state, tenant, viewer, id).await?;
         Ok(serde_json::to_value(detail)?)
     }
 
-    async fn list_task_attachments(&self, task: String) -> anyhow::Result<Vec<TaskAttachment>> {
-        let tenant = self.tenant().await?;
-        let viewer = self.user().await?;
+    async fn list_task_attachments(
+        &self,
+        caller: McpCaller,
+        task: String,
+    ) -> anyhow::Result<Vec<TaskAttachment>> {
+        let tenant = caller.tenant_id;
+        let viewer = caller.user_id;
         Ok(
             crate::services::attachments::list_thread_readable(&self.state, tenant, viewer, &task)
                 .await?,
         )
     }
 
-    async fn read_task_attachment(&self, attachment: String) -> anyhow::Result<AttachmentContent> {
-        let tenant = self.tenant().await?;
-        let viewer = self.user().await?;
+    async fn read_task_attachment(
+        &self,
+        caller: McpCaller,
+        attachment: String,
+    ) -> anyhow::Result<AttachmentContent> {
+        let tenant = caller.tenant_id;
+        let viewer = caller.user_id;
         // Parsed here rather than let the repository match nothing: an id that
         // is not a uuid is a caller mistake and deserves to say so, while a
         // well-formed id that finds nothing is the 404 AC-4 is about.
@@ -633,20 +683,21 @@ impl NookBackend for McpBackend {
 
     async fn claim_task(
         &self,
+        caller: McpCaller,
         task: String,
         column_type: Option<String>,
     ) -> anyhow::Result<TaskItem> {
-        let tenant = self.tenant().await?;
-        let user = self.user().await?;
+        let tenant = caller.tenant_id;
+        let user = caller.user_id;
         Ok(
             crate::routes::task_query::claim_inner(&self.state, tenant, user, &task, column_type)
                 .await?,
         )
     }
 
-    async fn release_task(&self, task: String) -> anyhow::Result<TaskItem> {
-        let tenant = self.tenant().await?;
-        let viewer = self.user().await?;
+    async fn release_task(&self, caller: McpCaller, task: String) -> anyhow::Result<TaskItem> {
+        let tenant = caller.tenant_id;
+        let viewer = caller.user_id;
         let id =
             crate::services::tasks::resolve_id(self.state.tasks.as_ref(), tenant, &task).await?;
         let t =
@@ -665,13 +716,14 @@ impl NookBackend for McpBackend {
 
     async fn comment_task(
         &self,
+        caller: McpCaller,
         task: String,
         body_md: String,
         author_name: Option<String>,
         clear_escalation: bool,
     ) -> anyhow::Result<serde_json::Value> {
-        let tenant = self.tenant().await?;
-        let user = self.user().await?;
+        let tenant = caller.tenant_id;
+        let user = caller.user_id;
         // The same refusal the REST door makes, from the same string (MAIN-584
         // AC-5), and before anything is written. Only when unblocking: an
         // ordinary MCP comment keeps whatever it did before (NG-4).
@@ -715,8 +767,13 @@ impl NookBackend for McpBackend {
         Ok(serde_json::to_value(row)?)
     }
 
-    async fn add_label(&self, task: String, label: String) -> anyhow::Result<serde_json::Value> {
-        let tenant = self.tenant().await?;
+    async fn add_label(
+        &self,
+        caller: McpCaller,
+        task: String,
+        label: String,
+    ) -> anyhow::Result<serde_json::Value> {
+        let tenant = caller.tenant_id;
         // Belt and braces with the tool-layer refusal. A backend that would
         // happily apply `agent-ready` is one bug away from an agent approving
         // its own work, and this is the property the whole design rests on.
@@ -735,8 +792,13 @@ impl NookBackend for McpBackend {
         Ok(serde_json::json!({ "task": task, "label": name, "added": true }))
     }
 
-    async fn remove_label(&self, task: String, label: String) -> anyhow::Result<serde_json::Value> {
-        let tenant = self.tenant().await?;
+    async fn remove_label(
+        &self,
+        caller: McpCaller,
+        task: String,
+        label: String,
+    ) -> anyhow::Result<serde_json::Value> {
+        let tenant = caller.tenant_id;
         let id =
             crate::services::tasks::resolve_id(self.state.tasks.as_ref(), tenant, &task).await?;
         let name = label.trim().to_lowercase();
@@ -747,9 +809,14 @@ impl NookBackend for McpBackend {
         Ok(serde_json::json!({ "task": task, "label": name, "removed": true }))
     }
 
-    async fn set_priority(&self, task: String, priority: i32) -> anyhow::Result<TaskItem> {
-        let tenant = self.tenant().await?;
-        let viewer = self.user().await?;
+    async fn set_priority(
+        &self,
+        caller: McpCaller,
+        task: String,
+        priority: i32,
+    ) -> anyhow::Result<TaskItem> {
+        let tenant = caller.tenant_id;
+        let viewer = caller.user_id;
         let id =
             crate::services::tasks::resolve_id(self.state.tasks.as_ref(), tenant, &task).await?;
         let t = crate::services::tasks::set_priority_row(
@@ -773,10 +840,11 @@ impl NookBackend for McpBackend {
 
     async fn set_task_parent(
         &self,
+        caller: McpCaller,
         task: String,
         parent: Option<String>,
     ) -> anyhow::Result<TaskItem> {
-        let tenant = self.tenant().await?;
+        let tenant = caller.tenant_id;
         let id =
             crate::services::tasks::resolve_id(self.state.tasks.as_ref(), tenant, &task).await?;
         // Through the task's OWN board provider, not a hardwired local one
@@ -801,7 +869,7 @@ impl NookBackend for McpBackend {
         };
         // The caller is the viewer, so a parent that is a private epic they
         // cannot see is refused (MAIN-76/81).
-        let viewer = self.user().await?;
+        let viewer = caller.user_id;
         let t = provider
             .update_task(tenant, Some(viewer), id, req)
             .await
@@ -820,12 +888,13 @@ impl NookBackend for McpBackend {
 
     async fn link_tasks(
         &self,
+        caller: McpCaller,
         from: String,
         to: String,
         kind: String,
     ) -> anyhow::Result<serde_json::Value> {
-        let tenant = self.tenant().await?;
-        let viewer = self.user().await?;
+        let tenant = caller.tenant_id;
+        let viewer = caller.user_id;
         let f =
             crate::services::tasks::resolve_id(self.state.tasks.as_ref(), tenant, &from).await?;
         let t = crate::services::tasks::resolve_id(self.state.tasks.as_ref(), tenant, &to).await?;

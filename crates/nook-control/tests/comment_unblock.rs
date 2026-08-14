@@ -20,7 +20,7 @@ use nook_control::services::kanban::{KanbanProvider, LocalBoardProvider};
 use nook_control::services::work_source::card_fingerprint;
 use nook_control::state::AppState;
 use nook_db::{params, Db, DbPool};
-use nook_mcp::NookBackend;
+use nook_mcp::{McpCaller, NookBackend};
 use nook_testkit::TestBed;
 use nook_types::*;
 use uuid::Uuid;
@@ -609,14 +609,11 @@ async fn an_unblock_over_mcp_restarts_the_card_and_is_auditable() {
         return;
     };
     let state = bed.app_state().await;
-    // `comment_task` resolves its own tenant the way every MCP call does — the
-    // instance's first, since MCP has no per-user identity yet — so the card
-    // has to live THERE for this to exercise the real door rather than a
-    // scoping the tool does not have.
-    let tenant = nook_control::services::identity::first_tenant(state.identity.as_ref())
-        .await
-        .expect("the instance's tenant");
-    let (user, _) = bed.user(tenant, "member").await;
+    // `comment_task` acts in the CALLER's tenant (MAIN-592), so an ordinary
+    // tenant of this bed's own is the real door — it used to have to be the
+    // instance's first tenant, which is precisely the bug that fixed.
+    let tenant = bed.tenant("mcpunblock").await;
+    let (user, person) = bed.user(tenant, "member").await;
     let ws = bed.workspace(tenant).await;
     let board = board_fixture(&bed.db(), tenant).await;
     let card = approved_card(&bed.db(), tenant, board, ws, user, "mcp ruling").await;
@@ -629,8 +626,14 @@ async fn an_unblock_over_mcp_restarts_the_card_and_is_auditable() {
     let backend = McpBackend {
         state: state.clone(),
     };
+    let caller = McpCaller {
+        person_id: person,
+        user_id: user,
+        tenant_id: tenant,
+    };
     backend
         .comment_task(
+            caller.clone(),
             card.id.to_string(),
             "Ruled over MCP.".into(),
             Some("an agent".into()),
@@ -660,7 +663,7 @@ async fn an_unblock_over_mcp_restarts_the_card_and_is_auditable() {
     // AC-5 holds on this door too, and refuses before anything is written.
     assert!(
         backend
-            .comment_task(card.id.to_string(), "  ".into(), None, true)
+            .comment_task(caller, card.id.to_string(), "  ".into(), None, true)
             .await
             .is_err(),
         "an unblock over MCP still needs a ruling"

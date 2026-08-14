@@ -40,37 +40,37 @@ macro_rules! never_called {
 }
 
 never_called! {
-    fn list_workspaces() -> anyhow::Result<Vec<WorkspaceDetail>>;
-    fn list_nodes() -> anyhow::Result<Vec<Node>>;
-    fn list_sessions(bool) -> anyhow::Result<Vec<Session>>;
-    fn start_session(String, Option<String>, String) -> anyhow::Result<Session>;
-    fn send_to_session(String, String) -> anyhow::Result<()>;
-    fn read_session(String, u32) -> anyhow::Result<String>;
-    fn kill_session(String) -> anyhow::Result<()>;
-    fn get_activity(Option<String>, i64) -> anyhow::Result<Vec<Event>>;
-    fn get_notes(String) -> anyhow::Result<Vec<Note>>;
-    fn append_note(String, String) -> anyhow::Result<Note>;
-    fn create_task(String, Option<String>, Option<String>) -> anyhow::Result<TaskItem>;
-    fn clone_repo(String, Option<String>) -> anyhow::Result<String>;
-    fn create_project(String, Option<String>) -> anyhow::Result<String>;
-    fn add_worktree(String, String, Option<String>) -> anyhow::Result<String>;
+    fn list_workspaces(McpCaller) -> anyhow::Result<Vec<WorkspaceDetail>>;
+    fn list_nodes(McpCaller) -> anyhow::Result<Vec<Node>>;
+    fn list_sessions(McpCaller, bool) -> anyhow::Result<Vec<Session>>;
+    fn start_session(McpCaller, String, Option<String>, String) -> anyhow::Result<Session>;
+    fn send_to_session(McpCaller, String, String) -> anyhow::Result<()>;
+    fn read_session(McpCaller, String, u32) -> anyhow::Result<String>;
+    fn kill_session(McpCaller, String) -> anyhow::Result<()>;
+    fn get_activity(McpCaller, Option<String>, i64) -> anyhow::Result<Vec<Event>>;
+    fn get_notes(McpCaller, String) -> anyhow::Result<Vec<Note>>;
+    fn append_note(McpCaller, String, String) -> anyhow::Result<Note>;
+    fn create_task(McpCaller, String, Option<String>, Option<String>) -> anyhow::Result<TaskItem>;
+    fn clone_repo(McpCaller, String, Option<String>) -> anyhow::Result<String>;
+    fn create_project(McpCaller, String, Option<String>) -> anyhow::Result<String>;
+    fn add_worktree(McpCaller, String, String, Option<String>) -> anyhow::Result<String>;
     fn dispatch_task(McpCaller, String) -> anyhow::Result<TaskItem>;
     fn start_work(McpCaller, String, Option<String>, Option<String>) -> anyhow::Result<Session>;
-    fn move_task(String, String) -> anyhow::Result<TaskItem>;
-    fn submit_pr(String, Option<String>) -> anyhow::Result<TaskItem>;
-    fn list_tasks(TaskQuery) -> anyhow::Result<Vec<TaskItem>>;
-    fn get_task(String) -> anyhow::Result<Value>;
-    fn claim_task(String, Option<String>) -> anyhow::Result<TaskItem>;
-    fn release_task(String) -> anyhow::Result<TaskItem>;
-    fn comment_task(String, String, Option<String>, bool) -> anyhow::Result<Value>;
-    fn set_task_description(String, String) -> anyhow::Result<TaskItem>;
-    fn add_label(String, String) -> anyhow::Result<Value>;
-    fn remove_label(String, String) -> anyhow::Result<Value>;
-    fn set_priority(String, i32) -> anyhow::Result<TaskItem>;
-    fn set_task_parent(String, Option<String>) -> anyhow::Result<TaskItem>;
-    fn link_tasks(String, String, String) -> anyhow::Result<Value>;
-    fn list_task_attachments(String) -> anyhow::Result<Vec<TaskAttachment>>;
-    fn read_task_attachment(String) -> anyhow::Result<AttachmentContent>;
+    fn move_task(McpCaller, String, String) -> anyhow::Result<TaskItem>;
+    fn submit_pr(McpCaller, String, Option<String>) -> anyhow::Result<TaskItem>;
+    fn list_tasks(McpCaller, TaskQuery) -> anyhow::Result<Vec<TaskItem>>;
+    fn get_task(McpCaller, String) -> anyhow::Result<Value>;
+    fn claim_task(McpCaller, String, Option<String>) -> anyhow::Result<TaskItem>;
+    fn release_task(McpCaller, String) -> anyhow::Result<TaskItem>;
+    fn comment_task(McpCaller, String, String, Option<String>, bool) -> anyhow::Result<Value>;
+    fn set_task_description(McpCaller, String, String) -> anyhow::Result<TaskItem>;
+    fn add_label(McpCaller, String, String) -> anyhow::Result<Value>;
+    fn remove_label(McpCaller, String, String) -> anyhow::Result<Value>;
+    fn set_priority(McpCaller, String, i32) -> anyhow::Result<TaskItem>;
+    fn set_task_parent(McpCaller, String, Option<String>) -> anyhow::Result<TaskItem>;
+    fn link_tasks(McpCaller, String, String, String) -> anyhow::Result<Value>;
+    fn list_task_attachments(McpCaller, String) -> anyhow::Result<Vec<TaskAttachment>>;
+    fn read_task_attachment(McpCaller, String) -> anyhow::Result<AttachmentContent>;
     fn list_build_runs(McpCaller, BuildRunQuery) -> anyhow::Result<Vec<LoopRunSummary>>;
     fn get_build_run(McpCaller, String, u32) -> anyhow::Result<LoopRunLookup>;
     fn open_tunnel(McpCaller, String, u16) -> anyhow::Result<TunnelView>;
@@ -92,9 +92,35 @@ never_called! {
 }
 
 /// POST one JSON-RPC message with the headers a spec-following client sends and
-/// nothing more. `extra` adds the header a case is actually about.
+/// nothing more, as a caller whose OIDC token resolved. `extra` adds the header
+/// a case is actually about.
 async fn post(body: Value, extra: &[(&str, &str)]) -> (StatusCode, String) {
+    post_as(Some(a_caller()), body, extra).await
+}
+
+/// A resolved MCP identity, as `mcp_auth` inserts one into the request's
+/// extensions. `post_as(None, …)` is the static `MCP_TOKEN` path, which
+/// resolves nobody.
+fn a_caller() -> McpCaller {
+    McpCaller {
+        person_id: Uuid::now_v7(),
+        user_id: nook_types::UserId::new(),
+        tenant_id: nook_types::TenantId::new(),
+    }
+}
+
+async fn post_as(
+    caller: Option<McpCaller>,
+    body: Value,
+    extra: &[(&str, &str)],
+) -> (StatusCode, String) {
     let router = nook_mcp::router(Arc::new(NeverCalled), vec![HOST.to_string()]);
+    // The same place `mcp_auth` puts it: the request's extensions, which the
+    // transport forwards into every tool's request context.
+    let router = match caller {
+        Some(c) => router.layer(axum::Extension(c)),
+        None => router,
+    };
     let mut req = Request::builder()
         .method("POST")
         .uri("/")
@@ -128,6 +154,31 @@ fn sse_payload(body: &str) -> Value {
         .find_map(|line| line.strip_prefix("data: "))
         .unwrap_or_else(|| panic!("an SSE data frame in: {body}"));
     serde_json::from_str(data).unwrap()
+}
+
+/// MAIN-592 AC-5: `tools/list` is filtered per request, so the static
+/// `MCP_TOKEN` — which resolves no caller — is offered nothing rather than a
+/// menu of 47 tools it would be refused on calling. Served, not 422'd or 401'd:
+/// the credential is still valid (NG-6), it simply reaches nothing.
+#[tokio::test]
+async fn tools_list_offers_a_static_token_only_what_it_can_use() {
+    let (status, body) = post_as(
+        None,
+        json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+        &[],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let tools = sse_payload(&body)["result"]["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a tool list in: {body}"))
+        .clone();
+    assert!(
+        tools.is_empty(),
+        "every tool on this surface is tenant- or person-scoped, so an \
+         unresolved caller is offered none of them, got: {tools:?}"
+    );
 }
 
 /// MAIN-524 AC-2/AC-6: the exact request the connector sends — no session id,
