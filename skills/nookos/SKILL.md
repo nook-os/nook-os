@@ -1,7 +1,7 @@
 ---
 name: nookos
 description: "Run and drive coding agents on OTHER machines with `nook` — no ssh, no tmux. Start a Claude/Codex/bash session anywhere in the fleet, type into it, read its answer, and teach every agent in the fleet a skill at once."
-version: 1.5.0
+version: 1.6.0
 author: NookOS
 license: MIT
 platforms: [linux, macos]
@@ -329,6 +329,18 @@ it. Over MCP the same two moves are `list_task_attachments` and
 `read_task_attachment` — the latter hands back a text file's content directly,
 and points anything binary back at the CLI rather than spending your context on
 bytes you cannot read.
+
+Putting one ON a card is one command — the upload and the join together:
+
+```bash
+nook attachments add NOOK-42 ./shot.png             # upload, then attach
+nook attachments add NOOK-42 ./run.webm --replace   # one of this name per card
+nook attachments rm <ID>                            # takes the stored file too
+```
+
+The content type comes from the extension, so a `.webm` is stored as a video.
+Writing needs a person: `add` and `rm` refuse a node token and say so, while
+`list` and `get` answer either credential.
 
 **Take it.** Claiming is atomic, so two agents polling the same queue cannot
 both win:

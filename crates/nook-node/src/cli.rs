@@ -242,6 +242,54 @@ impl Client {
         self.send(reqwest::Method::POST, path, Some(body)).await
     }
 
+    /// POST a file as `multipart/form-data` — the one shape the upload route
+    /// accepts (MAIN-594).
+    ///
+    /// The body is built here rather than through reqwest's `multipart`
+    /// feature, which this workspace does not enable: the whole payload is a
+    /// filename, a content type and bytes already in memory, so composing it
+    /// costs a `Vec` and leaves the encoding — the part the server's parser
+    /// actually reads — a pure function a test can assert on.
+    ///
+    /// Failures surface the SERVER's sentence when it sent one. The upload cap
+    /// is configured server-side, so *"that file is larger than the 25 MiB
+    /// upload limit"* is the only account of it that can be right; a client
+    /// that guessed would be wrong on any deployment that retuned it.
+    pub async fn post_file(
+        &self,
+        path: &str,
+        filename: &str,
+        content_type: &str,
+        bytes: Vec<u8>,
+    ) -> Result<Value> {
+        let boundary = format!("nook{}", uuid::Uuid::now_v7().simple());
+        let body = multipart_body(&boundary, filename, content_type, bytes);
+        let url = format!("{}{path}", self.base);
+        let mut req = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.token)
+            .header("accept", "application/json")
+            .header(
+                "content-type",
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .body(body);
+        if let Some(t) = &self.tenant {
+            req = req.header("x-nook-tenant", t);
+        }
+        let resp = req
+            .send()
+            .await
+            .with_context(|| format!("could not reach {}", self.base))?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            bail!("{}", api_message(status.as_u16(), path, &text));
+        }
+        Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
+    }
+
     pub async fn delete(&self, path: &str) -> Result<Value> {
         self.send(reqwest::Method::DELETE, path, None).await
     }
@@ -273,6 +321,53 @@ impl Client {
             serde_json::from_str(&text).unwrap_or(Value::String(text)),
         ))
     }
+}
+
+/// One `multipart/form-data` part carrying a file, encoded exactly as the
+/// upload route's parser reads it.
+///
+/// **The `filename` is mandatory, not decorative.** `POST /user-content` skips
+/// every field without one — that is how it lets a form post a caption
+/// alongside its file — so a part sent without it uploads nothing and the
+/// request fails as "no file in the upload".
+///
+/// A quote or a newline in the name would end the header early, so both are
+/// replaced rather than escaped: the name is a label the server stores, and no
+/// caller has ever needed one to contain a `"`.
+fn multipart_body(boundary: &str, filename: &str, content_type: &str, bytes: Vec<u8>) -> Vec<u8> {
+    let name: String = filename
+        .chars()
+        .map(|c| {
+            if c == '"' || c == '\r' || c == '\n' {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let mut body = format!(
+        "--{boundary}\r\n\
+         Content-Disposition: form-data; name=\"file\"; filename=\"{name}\"\r\n\
+         Content-Type: {content_type}\r\n\r\n"
+    )
+    .into_bytes();
+    body.extend_from_slice(&bytes);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    body
+}
+
+/// What to print when a request failed: the server's own sentence when it sent
+/// one, the status and body when it did not.
+///
+/// A refusal these routes make is written for the person reading it — the
+/// upload cap, the "only the person who attached this" rule — and re-wording it
+/// here would mean maintaining a second copy of a policy that lives on the
+/// server. `{"error": …}` is the one body shape both services emit.
+fn api_message(status: u16, path: &str, text: &str) -> String {
+    serde_json::from_str::<Value>(text)
+        .ok()
+        .and_then(|v| v.get("error").and_then(Value::as_str).map(str::to_string))
+        .unwrap_or_else(|| format!("{status} {path}: {}", text.trim()))
 }
 
 /// `nook login --token nook_user_…` — act as yourself, not as this machine.
@@ -4750,4 +4845,85 @@ pub async fn issues_set_parent(key: &str, parent: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// The wire format `nook attachments add` sends, and the sentence it prints
+/// when the server refuses (MAIN-594).
+#[cfg(test)]
+mod upload_wire {
+    use super::*;
+
+    fn text(body: &[u8]) -> String {
+        String::from_utf8_lossy(body).to_string()
+    }
+
+    /// AC-2: the upload route SKIPS a field with no filename, so a part missing
+    /// one uploads nothing at all — and the type has to be the one we chose,
+    /// not whatever a default would be.
+    #[test]
+    fn the_part_carries_a_filename_and_the_chosen_type() {
+        let body = multipart_body(
+            "B0UND",
+            "run.webm",
+            "video/webm",
+            b"\x1a\x45\xdf\xa3".to_vec(),
+        );
+        let head = text(&body);
+        assert!(
+            head.starts_with(
+                "--B0UND\r\nContent-Disposition: form-data; name=\"file\"; \
+                              filename=\"run.webm\"\r\nContent-Type: video/webm\r\n\r\n"
+            ),
+            "{head}"
+        );
+        assert!(head.ends_with("\r\n--B0UND--\r\n"), "{head}");
+    }
+
+    /// Binary is what this carries — a video, a screenshot — so the bytes have
+    /// to arrive exactly as they left, with nothing re-encoded around them.
+    #[test]
+    fn the_bytes_survive_byte_for_byte() {
+        let bytes: Vec<u8> = (0u8..=255).collect();
+        let body = multipart_body(
+            "B0UND",
+            "blob.bin",
+            "application/octet-stream",
+            bytes.clone(),
+        );
+        let start = text(&body).find("\r\n\r\n").expect("a header break") + 4;
+        assert_eq!(
+            &body[start..body.len() - "\r\n--B0UND--\r\n".len()],
+            &bytes[..]
+        );
+    }
+
+    /// A quote or a newline in the name would close the header early and let a
+    /// filename write the rest of the part.
+    #[test]
+    fn a_filename_cannot_escape_its_header() {
+        let body = multipart_body("B0UND", "a\"b\r\nc.png", "image/png", vec![]);
+        let head = text(&body);
+        assert!(head.contains("filename=\"a_b__c.png\""), "{head}");
+        assert_eq!(head.matches("Content-Type:").count(), 1, "{head}");
+    }
+
+    /// AC-5: the cap is the server's, so its refusal is the only account of it
+    /// that can be right — reported verbatim rather than re-worded here.
+    #[test]
+    fn a_refusal_is_reported_in_the_servers_own_words() {
+        assert_eq!(
+            api_message(
+                413,
+                "/api/v1/user-content",
+                r#"{"error":"that file is larger than the 25 MiB upload limit"}"#
+            ),
+            "that file is larger than the 25 MiB upload limit"
+        );
+        // A body that is not one of ours still says what happened.
+        let fallback = api_message(502, "/api/v1/user-content", "<html>bad gateway</html>");
+        assert!(
+            fallback.contains("502") && fallback.contains("bad gateway"),
+            "{fallback}"
+        );
+    }
 }
