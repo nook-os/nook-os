@@ -32,6 +32,7 @@ ARG NODE_MAJOR=22
 ARG CLAUDE_VERSION=2.1.220
 ARG CODEX_VERSION=0.145.0
 ARG COPILOT_VERSION=1.0.75
+ARG PLAYWRIGHT_VERSION=1.62.1
 # Hermes ships its own install script (no npm/version manifest to pin against);
 # HERMES_REF is the single pin lever. Pinned to an immutable release TAG — never
 # a movable ref like `stable`/`main` — so the shipped build is reproducible
@@ -102,6 +103,30 @@ RUN mkdir -p -m 755 /etc/apt/keyrings \
     && apt-get update && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 
+# Playwright and Chromium — ONLY Chromium (MAIN-595). `--with-deps` is what
+# pulls the ~90 Debian shared libraries a browser needs onto a slim base; adding
+# firefox or webkit here would roughly triple that for engines nothing drives.
+#
+# The browsers live at a FIXED path rather than under HOME. This image runs as
+# root when released and as the host's uid in the dev stack, and Playwright's
+# default (`$HOME/.cache/ms-playwright`) would put them somewhere the second
+# user cannot read. `a+rX` afterwards is the other half of that: installed by
+# root at build time, launched by whoever the container runs as.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ENV NOOK_PLAYWRIGHT_VERSION=${PLAYWRIGHT_VERSION}
+RUN npm install -g "playwright@${PLAYWRIGHT_VERSION}" \
+    && playwright install --with-deps chromium \
+    && npm cache clean --force \
+    && chmod -R a+rX /ms-playwright \
+    && rm -rf /var/lib/apt/lists/*
+
+# Launch it now, in the image being built, so an image whose Chromium cannot
+# start fails HERE instead of at the first build run that needed a page. The
+# script stays on PATH so the same proof is re-runnable against a live
+# container (`docker compose exec operator-node nook-browser-check`).
+COPY deploy/docker/browser-check.js /usr/local/bin/nook-browser-check
+RUN chmod +x /usr/local/bin/nook-browser-check && nook-browser-check
+
 # The dev stack runs this image as the HOST's uid/gid, because it bind-mounts
 # `.nook-secrets/claude` out of the checkout and a root-written session file
 # there is one more thing an ordinary user's prune cannot delete (MAIN-537
@@ -127,7 +152,7 @@ RUN chmod +x /usr/local/bin/node-entrypoint.sh
 # The whole point of this image is that the toolchain is present. Fail the build
 # — loudly, at build time — if any expected binary is missing from PATH, so a
 # renamed package or a failed installer never ships as a silently-degraded node.
-RUN set -eux; for bin in git tmux ssh gh claude copilot codex nook; do \
+RUN set -eux; for bin in git tmux ssh gh claude copilot codex nook playwright nook-browser-check; do \
       command -v "$bin" >/dev/null || { echo "FATAL: '$bin' not on PATH"; exit 1; }; \
     done
 
@@ -143,6 +168,8 @@ RUN { \
       echo "codex=$(codex --version 2>/dev/null | head -1)"; \
       echo "copilot=$(copilot --version 2>/dev/null | head -1)"; \
       echo "hermes=$(hermes --version 2>/dev/null | head -1)"; \
+      echo "playwright=$(playwright --version 2>/dev/null | head -1)"; \
+      echo "chromium=$(ls "$PLAYWRIGHT_BROWSERS_PATH" | grep '^chromium-' | head -1)"; \
     } > /etc/nook-toolchain-versions
 LABEL org.opencontainers.image.title="nook-operator-node" \
       org.opencontainers.image.description="NookOS shared operator node with the loop toolchain (claude, hermes, codex, copilot) preinstalled" \
