@@ -16,6 +16,7 @@ mod job_adapter;
 mod loop_job;
 mod notebook;
 mod pinning;
+mod ports;
 mod resources;
 mod runtime_auth;
 mod selfupdate;
@@ -271,6 +272,14 @@ enum Command {
     /// A new noun group, per docs/cli-style.md — the top level stays frozen.
     #[command(subcommand)]
     Builds(BuildsCommand),
+    /// The listeners this workspace declared, and the numbers this process
+    /// holds for them (MAIN-597).
+    ///
+    /// The declaration is the workspace's and the leases are in the
+    /// environment; only here are the two joined into something openable. A
+    /// new noun group, per docs/cli-style.md — the top level stays frozen.
+    #[command(subcommand)]
+    Ports(PortsCommand),
     /// Board cards, by key — the verbs a skill used to reach for `curl` to
     /// perform (MAIN-138).
     ///
@@ -801,6 +810,11 @@ async fn main() -> Result<()> {
             url,
             question,
         }) => cli::builds_outcome(&conclusion, url.as_deref(), question.as_deref()).await,
+        Command::Ports(PortsCommand::List {
+            workspace,
+            browsable,
+            json,
+        }) => ports::list(workspace.as_deref(), browsable, json).await,
         Command::Attachments(AttachmentsCommand::List { task, json }) => {
             attachments::list(&task, json).await
         }
@@ -1510,6 +1524,26 @@ enum AttachmentsCommand {
     Rm {
         /// The attachment id, as `list` prints it.
         id: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum PortsCommand {
+    /// What this workspace declared, with the port each variable holds here.
+    ///
+    /// `--browsable` narrows it to the listeners that serve a UI — MAIN-596's
+    /// resolver answers which, so nothing re-derives the rule locally — and is
+    /// how a recorder finds the one URL it should open.
+    List {
+        /// The workspace, by name or id. Defaults to the one this session or
+        /// loop job is already in (`NOOK_WORKSPACE_ID`).
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Only the listeners something can be opened at.
+        #[arg(long)]
+        browsable: bool,
         #[arg(long)]
         json: bool,
     },

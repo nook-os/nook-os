@@ -8270,6 +8270,44 @@
         }
       }
     },
+    "/api/v1/workspaces/{id}/browsable": {
+      "get": {
+        "tags": [
+          "crate::routes::workspaces"
+        ],
+        "summary": "`GET /api/v1/workspaces/{id}/browsable` — what a person can open here.",
+        "description": "The client half of MAIN-596's resolver, and the reason it exists: a build\nrun that wants to record the feature it just built has to know WHICH of the\nlisteners it leased serves a UI, and it is on a machine that cannot call\n`port_leases::browsable_targets` in process. Answering with the declaration\nand letting each caller filter it would be three callers re-deriving a rule\nthat has three parts — which listeners, in what order, under what path.\n\nReturns the VARIABLE and not a number, exactly as the resolver does: the\ndeclaration is the same for every session, and the caller holding a leased\nenvironment is the one that can turn it into a URL.",
+        "operationId": "get_browsable_targets",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BrowsableTarget"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/workspaces/{id}/build-loop": {
       "get": {
         "tags": [

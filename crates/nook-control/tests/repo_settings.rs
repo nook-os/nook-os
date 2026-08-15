@@ -7,9 +7,14 @@
 //! alternative reads as "this repo binds nothing", which caps the workspace, and
 //! a silent cap for a typo is the worst outcome available here.
 
+use axum::body::Body;
+use axum::http::{header, Request, StatusCode};
+use nook_control::auth::{AuthCtx, Principal};
 use nook_control::services::{port_leases, repo_settings};
+use nook_db::{params, Db};
 use nook_testkit::TestBed;
 use nook_types::*;
+use tower::ServiceExt;
 
 /// What the API and the broker would see for this workspace.
 async fn stored(bed: &TestBed, tenant: TenantId, ws: WorkspaceId) -> Option<Vec<PortRequirement>> {
@@ -408,6 +413,170 @@ async fn a_browsable_udp_listener_leaves_the_stored_declaration_alone() {
     let got = stored(&bed, tenant, ws).await.expect("still declared");
     assert_eq!(got.len(), 1);
     assert_eq!(got[0].name, "web");
+
+    bed.teardown().await;
+}
+
+/// MAIN-597 AC-3: the resolver reached from OFF the machine.
+///
+/// A build run records what it built from a node, so it cannot call
+/// `browsable_targets` in process — and the alternative it would otherwise take
+/// is reading the declaration and filtering it itself, which is the
+/// re-derivation MAIN-596 wrote the resolver to prevent. The endpoint is
+/// therefore the resolver and nothing else: same order, same paths.
+#[tokio::test]
+async fn the_browsable_endpoint_answers_exactly_what_the_resolver_does() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("browsable-api").await;
+    let (user, _) = bed.user(tenant, "owner").await;
+    let ws = bed.workspace(tenant).await;
+    let state = bed.app_state().await;
+
+    let mut web = listener("web", "WEB_PORT");
+    web.browsable = true;
+    let mut admin = listener("admin", "ADMIN_PORT");
+    admin.browsable = true;
+    admin.path = "/admin".into();
+    declare(
+        &bed,
+        tenant,
+        ws,
+        vec![web, listener("api", "API_PORT"), admin],
+    )
+    .await;
+
+    let over_http = nook_control::routes::workspaces::get_browsable_targets(
+        axum::extract::State(state.clone()),
+        user_ctx(user, tenant),
+        axum::extract::Path(ws),
+    )
+    .await
+    .expect("browsable targets")
+    .0;
+    assert_eq!(
+        over_http,
+        port_leases::browsable_targets(&state, tenant, Some(ws))
+            .await
+            .expect("targets"),
+    );
+    assert_eq!(
+        over_http
+            .iter()
+            .map(|t| (t.name.as_str(), t.env.as_str(), t.path.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("web", "WEB_PORT", "/"), ("admin", "ADMIN_PORT", "/admin")],
+        "declaration order, and the API listener is not a target"
+    );
+
+    bed.teardown().await;
+}
+
+/// A workspace in another tenant is a 404, not an empty list: "nothing to open
+/// here" and "not yours to ask about" must not read the same to a caller
+/// deciding whether to record.
+#[tokio::test]
+async fn the_browsable_endpoint_refuses_another_tenants_workspace() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let mine = bed.tenant("browsable-mine").await;
+    let (user, _) = bed.user(mine, "owner").await;
+    let theirs = bed.tenant("browsable-theirs").await;
+    let ws = bed.workspace(theirs).await;
+    let state = bed.app_state().await;
+
+    let refused = nook_control::routes::workspaces::get_browsable_targets(
+        axum::extract::State(state.clone()),
+        user_ctx(user, mine),
+        axum::extract::Path(ws),
+    )
+    .await;
+    assert!(
+        refused.is_err(),
+        "another tenant's workspace is not visible"
+    );
+
+    bed.teardown().await;
+}
+
+fn user_ctx(user: UserId, tenant: TenantId) -> AuthCtx {
+    AuthCtx {
+        session_id: AuthSessionId(uuid::Uuid::nil()),
+        user_id: user,
+        tenant_id: tenant,
+        principal: Principal::User,
+        cookie_session: false,
+    }
+}
+
+/// The URL the CLI hardcodes, through the real router (MAIN-597 AC-3).
+///
+/// `nook ports list --browsable` names this path as a string on another
+/// machine, so nothing but a request through `build_router` can tell that the
+/// route is registered where the client asks for it. The handler tests above
+/// would pass just as happily with the route never mounted.
+#[tokio::test]
+async fn the_browsable_route_is_mounted_where_the_cli_asks_for_it() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("browsable-route").await;
+    let (user, _) = bed.user(tenant, "owner").await;
+    let ws = bed.workspace(tenant).await;
+    let state = bed.app_state().await;
+
+    let mut web = listener("web", "WEB_PORT");
+    web.browsable = true;
+    web.path = "/app".into();
+    declare(&bed, tenant, ws, vec![web]).await;
+
+    bed.db()
+        .exec(
+            "INSERT INTO tenant_members (id, tenant_id, principal_type, principal_id, role)
+             VALUES ($1, $2, 'user', $3, 'owner')",
+            params![uuid::Uuid::new_v4(), tenant, user],
+        )
+        .await
+        .expect("grant");
+    let sid = uuid::Uuid::new_v4();
+    let expires = nook_db::dialect::time_math(bed.db().engine()).now_plus_scaled("$4", "1 hour");
+    bed.db()
+        .exec(
+            &format!(
+                "INSERT INTO sessions_auth (id, user_id, tenant_id, expires_at)
+                 VALUES ($1, $2, $3, {expires})"
+            ),
+            params![sid, user, tenant, 1_i32],
+        )
+        .await
+        .expect("session");
+
+    let resp = nook_control::routes::build_router(state)
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/workspaces/{ws}/browsable"))
+                .header(header::COOKIE, format!("nook_session={sid}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("the route answers");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .expect("body");
+    let targets: Vec<BrowsableTarget> = serde_json::from_slice(&bytes).expect("the resolver shape");
+    assert_eq!(
+        targets,
+        vec![BrowsableTarget {
+            name: "web".into(),
+            env: "WEB_PORT".into(),
+            path: "/app".into()
+        }]
+    );
 
     bed.teardown().await;
 }

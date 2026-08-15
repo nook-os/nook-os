@@ -1,7 +1,7 @@
 ---
 name: nookos
 description: "Run and drive coding agents on OTHER machines with `nook` — no ssh, no tmux. Start a Claude/Codex/bash session anywhere in the fleet, type into it, read its answer, and teach every agent in the fleet a skill at once."
-version: 1.6.0
+version: 1.7.0
 author: NookOS
 license: MIT
 platforms: [linux, macos]
@@ -416,6 +416,19 @@ nook status                    # this machine's config and connectivity
 
 `nook get` takes `nodes | sessions | workspaces | secrets | tasks | events |
 themes`, and `--json` for any of them when you want to parse rather than read.
+
+**What is this session listening on?** A session's ports are leased, not
+hardcoded, and each arrives as the variable the WORKSPACE named — so the numbers
+are in your environment and the meaning is not:
+
+```bash
+nook ports list                # every declared listener, and the port it holds here
+nook ports list --browsable    # only the ones serving a UI, with a URL to open
+```
+
+`--browsable` is what to use before opening a page: it answers with the target's
+own variable and path, so you open what this repo declared rather than guessing
+at 3000 or at a web port some other stack is on.
 
 ---
 

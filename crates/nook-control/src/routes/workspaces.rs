@@ -1067,6 +1067,37 @@ pub async fn get_port_requirements(
     ))
 }
 
+/// `GET /api/v1/workspaces/{id}/browsable` — what a person can open here.
+///
+/// The client half of MAIN-596's resolver, and the reason it exists: a build
+/// run that wants to record the feature it just built has to know WHICH of the
+/// listeners it leased serves a UI, and it is on a machine that cannot call
+/// `port_leases::browsable_targets` in process. Answering with the declaration
+/// and letting each caller filter it would be three callers re-deriving a rule
+/// that has three parts — which listeners, in what order, under what path.
+///
+/// Returns the VARIABLE and not a number, exactly as the resolver does: the
+/// declaration is the same for every session, and the caller holding a leased
+/// environment is the one that can turn it into a URL.
+#[utoipa::path(get, path = "/api/v1/workspaces/{id}/browsable",
+    operation_id = "get_browsable_targets",
+    params(("id" = String, Path,)),
+    responses((status = 200, body = [BrowsableTarget]), (status = 404)))]
+pub async fn get_browsable_targets(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<WorkspaceId>,
+) -> ApiResult<Json<Vec<BrowsableTarget>>> {
+    state
+        .workspaces
+        .get(auth.tenant_id, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok(Json(
+        crate::services::port_leases::browsable_targets(&state, auth.tenant_id, Some(id)).await?,
+    ))
+}
+
 /// How long a checkout may carry `missing_at` and still yield its key.
 ///
 /// Discovery re-reports every node's checkouts on a 300s `DISCOVERY_INTERVAL`,

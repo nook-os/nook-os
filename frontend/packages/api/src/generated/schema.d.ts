@@ -3510,6 +3510,35 @@ export interface paths {
         patch: operations["rename_workspace"];
         trace?: never;
     };
+    "/api/v1/workspaces/{id}/browsable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/workspaces/{id}/browsable` — what a person can open here.
+         * @description The client half of MAIN-596's resolver, and the reason it exists: a build
+         *     run that wants to record the feature it just built has to know WHICH of the
+         *     listeners it leased serves a UI, and it is on a machine that cannot call
+         *     `port_leases::browsable_targets` in process. Answering with the declaration
+         *     and letting each caller filter it would be three callers re-deriving a rule
+         *     that has three parts — which listeners, in what order, under what path.
+         *
+         *     Returns the VARIABLE and not a number, exactly as the resolver does: the
+         *     declaration is the same for every session, and the caller holding a leased
+         *     environment is the one that can turn it into a URL.
+         */
+        get: operations["get_browsable_targets"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{id}/build-loop": {
         parameters: {
             query?: never;
@@ -15865,6 +15894,33 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_browsable_targets: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BrowsableTarget"][];
+                };
             };
             404: {
                 headers: {
