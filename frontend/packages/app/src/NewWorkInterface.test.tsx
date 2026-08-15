@@ -47,7 +47,12 @@ vi.mock("@nookos/api", () => ({
         };
       if (path === "/api/v1/auth/me") return { data: { person_id: "p-1" } };
       if (path === "/api/v1/workspaces")
-        return { data: [{ id: WORKSPACE, name: "dogfood", locations: [] }] };
+        return {
+          data: {
+            rows: [{ id: WORKSPACE, name: "dogfood", locations: [] }],
+            next_cursor: null,
+          },
+        };
       if (path === "/api/v1/workspaces/{id}")
         return { data: { id: WORKSPACE, name: "dogfood", locations: [] } };
       if (path === "/api/v1/git-credentials") return { data: [] };

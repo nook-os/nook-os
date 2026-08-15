@@ -16,6 +16,7 @@ export function SearchInput({
   initial = "",
   ariaLabel = "Search",
   iconTitle,
+  autoFocus = false,
 }: {
   onSearch: (q: string) => void;
   placeholder?: string;
@@ -26,6 +27,9 @@ export function SearchInput({
   /** Hover tooltip on the magnifier icon (MAIN-176 AC-2). Opt-in so callers that
    *  don't want it (e.g. Settings) are unchanged. */
   iconTitle?: string;
+  /** Take the caret on mount — for a picker whose search box IS the field you
+   *  opened it to type in. */
+  autoFocus?: boolean;
 }) {
   const [value, setValue] = useState(initial);
 
@@ -43,6 +47,7 @@ export function SearchInput({
       <input
         className="search-input-field"
         type="search"
+        autoFocus={autoFocus}
         value={value}
         placeholder={placeholder}
         aria-label={ariaLabel}

@@ -21,12 +21,13 @@
 // Epic is just another type here, which is what makes "New epic" fall out for
 // free: an epic routes to the decomposer rather than the spec interview,
 // because `loopAction` already keys on the type.
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import React, { useEffect, useRef, useState } from "react";
 import { Sparkles, X } from "lucide-react";
 import { api } from "@nookos/api";
-import { Select, TypeSelect } from "@nookos/ui";
+import { TypeSelect } from "@nookos/ui";
 import { createLoopJob, loopAction } from "./loop";
+import { WorkspacePicker } from "./WorkspacePicker";
+import { useWorkspaces } from "./workspaces";
 
 /** Where a freshly-filed idea belongs: the refinement queue, by SEMANTIC name.
  *  `column_type` exists precisely so a caller can say "the backlog" without
@@ -68,24 +69,15 @@ export function NewTicketModal({
     ref.current?.focus();
   }, []);
 
-  const { data: workspaces } = useQuery({
-    queryKey: ["workspaces"],
-    queryFn: async () => (await api.GET("/api/v1/workspaces")).data ?? [],
-  });
-
   // Preselect when there is exactly one: with a single repo the question has
-  // only one answer, and making somebody answer it anyway is ceremony.
+  // only one answer, and making somebody answer it anyway is ceremony. Asking
+  // for two rows is how "exactly one" stays answerable now that the collection
+  // is paged (MAIN-606) — a full page would only say "at least fifty".
+  const firstTwo = useWorkspaces({ limit: 2 });
   useEffect(() => {
-    if (!workspaceId && workspaces?.length === 1) setWorkspaceId(workspaces[0].id);
-  }, [workspaces, workspaceId]);
-
-  const options = useMemo(
-    () => [
-      { value: "", label: "No workspace" },
-      ...(workspaces ?? []).map((w) => ({ value: w.id, label: w.name })),
-    ],
-    [workspaces],
-  );
+    if (!workspaceId && !firstTwo.hasMore && firstTwo.rows.length === 1)
+      setWorkspaceId(firstTwo.rows[0].id);
+  }, [firstTwo.hasMore, firstTwo.rows, workspaceId]);
 
   // Which run this will be. Derived from the SAME helper the ticket page uses,
   // so the button cannot promise a different run from the one that starts.
@@ -170,10 +162,10 @@ export function NewTicketModal({
             </label>
             <label className="field">
               <span className="field-label">Workspace</span>
-              <Select
+              <WorkspacePicker
                 value={workspaceId}
-                options={options}
                 onChange={setWorkspaceId}
+                noneLabel="No workspace"
                 ariaLabel="Workspace"
               />
             </label>

@@ -47,6 +47,10 @@ const get = vi.hoisted(() =>
         response: OK,
       };
     }
+    // The collection is an ENVELOPE (MAIN-606); the catch-all array below would
+    // hand the picker a page with no `rows` and crash the card it lives on.
+    if (path === "/api/v1/workspaces")
+      return { data: { rows: [], next_cursor: null }, response: OK };
     return { data: [], response: OK };
   }),
 );
@@ -100,6 +104,10 @@ vi.mock("@nookos/ui", () => ({
     hostRef: { current: null },
     portal: (c: React.ReactNode) => c,
   }),
+  // The workspace field is a paged picker now (MAIN-606), and its search box
+  // comes from here — an unnamed export in a whole-module stub is a render
+  // crash, not a missing control.
+  SearchInput: () => null,
 }));
 vi.mock("./Interactions", () => ({ TaskInteractions: () => null }));
 vi.mock("./LoopPanel", () => ({ LoopPanel: () => null }));

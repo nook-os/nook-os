@@ -56,6 +56,7 @@ import {
   type NavPrefs,
 } from "./sessionNav";
 import { useViewportWidth } from "./compact";
+import { getWorkspace } from "./workspaces";
 
 /** Width, collapsed and pinned, stored against the PERSON rather than the
  *  browser (AC-6). A pane you arranged on your laptop is the pane you get on
@@ -204,14 +205,14 @@ export function SessionNavigator({ activeId }: { activeId?: string }) {
   const newTerminal = useNewTerminal();
   const showNewWork = useNewWork((s) => s.show);
   // A folder's key IS its workspace id (`tabGroups.groupTabs`), so the tree
-  // already knows which workspace you right-clicked — it just needs the row to
-  // find the checkouts.
-  const { data: workspaces } = useQuery({
-    queryKey: ["workspaces"],
-    queryFn: async () => (await api.GET("/api/v1/workspaces")).data ?? [],
-  });
-  const workspaceFor = (key: string) =>
-    key === ADHOC_GROUP ? undefined : (workspaces ?? []).find((w) => w.id === key);
+  // already knows which workspace you right-clicked; only the ACTION needs the
+  // row, which is therefore read by id at the moment one is chosen (MAIN-606).
+  // Finding it in a page of the collection is what would make "New Terminal
+  // Here" quietly disappear for a repo that is not on the first page.
+  const openTerminal = async (workspaceId: string) => {
+    const ws = await getWorkspace(workspaceId);
+    if (ws) await newTerminal(ws);
+  };
 
   const width = dragWidth ?? prefs.width;
   const mode = paneMode({
@@ -310,17 +311,17 @@ export function SessionNavigator({ activeId }: { activeId?: string }) {
   };
 
   const itemMenu = (t: (typeof tabs)[number]): ContextMenuItem[] => {
-    const ws = t.workspaceId ? workspaceFor(t.workspaceId) : undefined;
+    const wsId = t.workspaceId;
     return [
       // First, because it is the common thing. Stopping a managed session
       // removes it for good (MAIN-324), so the answer to "I killed it and I
       // want it back" should be one right-click from the session you killed —
       // not a trip to a clone form.
-      ...(ws
+      ...(wsId
         ? [
             {
               label: "New Terminal Here",
-              onSelect: () => void newTerminal(ws),
+              onSelect: () => void openTerminal(wsId),
             } satisfies ContextMenuItem,
             { separator: true } satisfies ContextMenuItem,
           ]
@@ -337,7 +338,7 @@ export function SessionNavigator({ activeId }: { activeId?: string }) {
 
   /** The folder header's menu — the workspace, not any one session in it. */
   const folderMenu = (key: string, label: string): ContextMenuItem[] => {
-    const ws = workspaceFor(key);
+    const wsId = key === ADHOC_GROUP ? null : key;
     const isShut = shut.includes(key);
     const toggle: ContextMenuItem = {
       label: isShut ? `Expand ${label}` : `Collapse ${label}`,
@@ -348,7 +349,7 @@ export function SessionNavigator({ activeId }: { activeId?: string }) {
     // The ad-hoc folder is workspace-less terminals gathered under one label.
     // There is no repo to open, and no checkout to put a shell in, so it gets
     // the two things that DO apply rather than four disabled rows.
-    if (!ws) {
+    if (!wsId) {
       return [
         { label: "New Work…", onSelect: () => showNewWork() },
         { separator: true },
@@ -357,10 +358,10 @@ export function SessionNavigator({ activeId }: { activeId?: string }) {
     }
 
     return [
-      { label: "New Terminal", onSelect: () => void newTerminal(ws) },
-      { label: "New Work…", onSelect: () => showNewWork({ workspaceId: ws.id }) },
+      { label: "New Terminal", onSelect: () => void openTerminal(wsId) },
+      { label: "New Work…", onSelect: () => showNewWork({ workspaceId: wsId }) },
       { separator: true },
-      { label: "Open Workspace", onSelect: () => navigate(`/workspaces/${ws.id}`) },
+      { label: "Open Workspace", onSelect: () => navigate(`/workspaces/${wsId}`) },
       toggle,
     ];
   };

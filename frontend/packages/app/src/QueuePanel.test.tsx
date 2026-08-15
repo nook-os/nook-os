@@ -37,10 +37,18 @@ const answers = vi.hoisted(() => new Map<string, unknown[]>());
 
 vi.mock("@nookos/api", () => ({
   api: {
-    GET: vi.fn(async (path: string, opts?: { params?: { query?: Record<string, unknown> } }) => {
+    GET: vi.fn(async (
+      path: string,
+      opts?: { params?: { query?: Record<string, unknown>; path?: { id?: string } } },
+    ) => {
       const query = opts?.params?.query ?? {};
       calls.push({ path, query });
-      if (path === "/api/v1/workspaces") return { data: WORKSPACES };
+      if (path === "/api/v1/workspaces")
+        return { data: { rows: WORKSPACES, next_cursor: null } };
+      if (path === "/api/v1/workspaces/{id}") {
+        const id = opts?.params?.path?.id;
+        return { data: WORKSPACES.find((w) => w.id === id) ?? null };
+      }
       if (path !== "/api/v1/tasks") return { data: [] };
       return { data: answers.get(signature(query)) ?? [] };
     }),

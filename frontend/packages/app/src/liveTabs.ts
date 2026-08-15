@@ -12,6 +12,7 @@ import { useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@nookos/api";
 import { deriveTabs, useSessionTabPrefs, type SessionTab } from "./sessionTabsStore";
+import { useWorkspaceNames } from "./workspaces";
 
 export interface LiveTabs {
   tabs: SessionTab[];
@@ -43,10 +44,6 @@ export function useLiveTabs(): LiveTabs {
     queryKey: ["me"],
     queryFn: async () => (await api.GET("/api/v1/auth/me")).data ?? null,
   });
-  const { data: workspaces } = useQuery({
-    queryKey: ["workspaces"],
-    queryFn: async () => (await api.GET("/api/v1/workspaces")).data ?? [],
-  });
   // Machine names for the per-tab badge (MAIN-323 AC-2). The session rows carry
   // only `node_id`, and "one repo across four VMs" is unreadable without this.
   const { data: nodes } = useQuery({
@@ -64,7 +61,10 @@ export function useLiveTabs(): LiveTabs {
   const mine = (sessions ?? []).filter(
     (s) => !mineId || !s.created_by || s.created_by === mineId,
   );
-  const names = Object.fromEntries((workspaces ?? []).map((w) => [w.id, w.name]));
+  const workspaceNames = useWorkspaceNames(mine.map((s) => s.workspace_id));
+  // The ids come from the sessions, so the names are read for exactly those
+  // ids (MAIN-606) rather than by fetching every repo and indexing it.
+  const names = Object.fromEntries(workspaceNames);
   const nodeNames = Object.fromEntries((nodes ?? []).map((n) => [n.id, n.name]));
   const tabs = deriveTabs(mine, names, prefs, nodeNames);
 

@@ -18,7 +18,7 @@
 // one would only pause it until the next reconcile pass.
 import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   Bot,
   ChevronDown,
@@ -46,6 +46,7 @@ import {
   type ContextMenuItem,
 } from "./contextMenu";
 import { useNewTerminal } from "./newTerminal";
+import { useWorkspace } from "./workspaces";
 
 export function SessionTabs({ activeId }: { activeId?: string }) {
   const navigate = useNavigate();
@@ -71,10 +72,9 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
   const ctxMenu = useContextMenuApi();
   const newTerminal = useNewTerminal();
   const selectedWorkspaceId = useWorkspaceContext((s) => s.selectedWorkspaceId);
-  const { data: workspaces } = useQuery({
-    queryKey: ["workspaces"],
-    queryFn: async () => (await api.GET("/api/v1/workspaces")).data ?? [],
-  });
+  // The repo you are scoped to, read by id (MAIN-606) — the collection is
+  // paged, and the one you are working in is not reliably on its first page.
+  const scopedWorkspace = useWorkspace(selectedWorkspaceId);
 
   // Closing a tab, from the ✕ and from a middle-click, through ONE definition.
   // Two copies is how the two controls drift into meaning different things —
@@ -429,7 +429,7 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
           aria-label="new terminal or new work"
           onClick={(e) => {
             const r = e.currentTarget.getBoundingClientRect();
-            const scoped = (workspaces ?? []).find((w) => w.id === selectedWorkspaceId);
+            const scoped = scopedWorkspace;
             ctxMenu.openAt(r.left, r.bottom + 4, [
               scoped
                 ? {

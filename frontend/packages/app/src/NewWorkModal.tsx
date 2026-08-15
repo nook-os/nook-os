@@ -18,6 +18,8 @@ import { WorkspaceLocations } from "./WorkspaceLocations";
 import { adoptEnvFromDisk, saveEnv } from "./envvault";
 import { requireAppPassword } from "./apppassword";
 import { fleetRuntimes } from "./fleetRuntimes";
+import { WorkspaceList } from "./WorkspacePicker";
+import { findWorkspaceByName, useWorkspace } from "./workspaces";
 
 const AUTO = "";
 type Tab = "new" | "existing";
@@ -75,7 +77,6 @@ function NewWorkModal() {
   // open (add-worktree, task) shows the existing view; everything else deploys.
   const [tab] = useState<Tab>(seed.workspaceId ? "existing" : "new");
   const [query, setQuery] = useState(""); // new-tab input (URL or name)
-  const [filter, setFilter] = useState(""); // existing-tab filter
   const [selectedId, setSelectedId] = useState<string | null>(seed.workspaceId ?? null);
   const [credentialId, setCredentialId] = useState("");
   const [worktree, setWorktree] = useState(seed.worktree ?? false);
@@ -102,10 +103,6 @@ function NewWorkModal() {
   const { data: me } = useQuery({
     queryKey: ["me"],
     queryFn: async () => (await api.GET("/api/v1/auth/me")).data ?? null,
-  });
-  const { data: workspaces } = useQuery({
-    queryKey: ["workspaces"],
-    queryFn: async () => (await api.GET("/api/v1/workspaces")).data ?? [],
   });
   const {
     data: credentials,
@@ -134,25 +131,23 @@ function NewWorkModal() {
       ? "clone"
       : "project";
 
-  const selectedWorkspace = (workspaces ?? []).find((w) => w.id === selectedId);
+  // The picked repo is read by ID (MAIN-606). The list below is a page of the
+  // collection and re-fetches as you search, so finding the selection in it
+  // would make the node list flicker empty the moment you typed.
+  const selectedWorkspace = useWorkspace(selectedId || null);
   const boundWorkspaceId = tab === "existing" ? selectedWorkspace?.id ?? "" : "";
-
-  const filtered = (workspaces ?? []).filter(
-    (w) => !filter.trim() || w.name.toLowerCase().includes(filter.trim().toLowerCase()),
-  );
 
   const eligibleNodes: NodeInfo[] = useMemo(() => {
     if (boundWorkspaceId) {
-      const ws = (workspaces ?? []).find((w) => w.id === boundWorkspaceId);
       const ids = new Set(
-        (ws?.locations ?? [])
+        (selectedWorkspace?.locations ?? [])
           .filter((l) => l.node_status === "online")
           .map((l) => l.node_id),
       );
       return online.filter((n) => ids.has(n.id));
     }
     return online;
-  }, [boundWorkspaceId, workspaces, online]);
+  }, [boundWorkspaceId, selectedWorkspace, online]);
 
   const { data: autoPick } = useQuery({
     queryKey: ["schedule-node", boundWorkspaceId || "any"],
@@ -244,13 +239,8 @@ function NewWorkModal() {
   /** Wait for discovery to surface a workspace. Cloned repos are named
    *  "owner/repo", so match the qualified name or its bare repo tail. */
   const pollWorkspace = async (name: string): Promise<string> => {
-    const wanted = name.toLowerCase();
-    const tail = (s: string) => s.toLowerCase().split("/").pop() ?? "";
     for (let i = 0; i < 20; i++) {
-      const ws = (await api.GET("/api/v1/workspaces")).data ?? [];
-      const match =
-        ws.find((w) => w.name.toLowerCase() === wanted) ??
-        ws.find((w) => tail(w.name) === tail(wanted));
+      const match = await findWorkspaceByName(name);
       if (match) return match.id;
       await new Promise((r) => setTimeout(r, 700));
     }
@@ -577,30 +567,12 @@ function NewWorkModal() {
           ) : (
             <div className="field">
               <label>Pick a workspace</label>
-              <input
-                className="input"
-                placeholder="filter…"
-                value={filter}
-                onChange={(e) => setFilter(e.target.value)}
+              <WorkspaceList
+                value={selectedId ?? ""}
+                onChange={setSelectedId}
                 autoFocus
+                hint={(w) => <WorkspaceLocations locations={w.locations} />}
               />
-              <div className="suggest-list" style={{ maxHeight: 220 }}>
-                {filtered.length === 0 && (
-                  <div className="empty" style={{ height: "auto", padding: 14 }}>
-                    no workspace matches
-                  </div>
-                )}
-                {filtered.map((w) => (
-                  <button
-                    key={w.id}
-                    className={`suggest-item${selectedId === w.id ? " active" : ""}`}
-                    onClick={() => setSelectedId(w.id)}
-                  >
-                    <span className="bright">{w.name}</span>
-                    <WorkspaceLocations locations={w.locations} />
-                  </button>
-                ))}
-              </div>
             </div>
           )}
 

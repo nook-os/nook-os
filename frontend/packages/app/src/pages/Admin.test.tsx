@@ -60,7 +60,7 @@ function seedApi(me: unknown = operatorMe) {
         return { data: me };
       // The Team sections' data — present so the default section renders.
       case "/api/v1/workspaces":
-        return { data: [] };
+        return { data: { rows: [], next_cursor: null } };
       case "/api/v1/events":
         return { data: { events: [] } };
       case "/api/v1/operator/orgs":

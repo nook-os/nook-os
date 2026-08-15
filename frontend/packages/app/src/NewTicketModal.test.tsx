@@ -11,14 +11,18 @@ import { NewTicketModal } from "./NewTicketModal";
 
 const posts: { path: string; body: Record<string, unknown> }[] = [];
 
+const WORKSPACES = [
+  { id: "ws-1", name: "acme/services", locations: [] },
+  { id: "ws-2", name: "acme/widgets", locations: [] },
+];
+
 vi.mock("@nookos/api", () => ({
   api: {
-    GET: vi.fn(async () => ({
-      data: [
-        { id: "ws-1", name: "acme/services" },
-        { id: "ws-2", name: "acme/widgets" },
-      ],
-    })),
+    GET: vi.fn(async (path: string, opts?: { params?: { path?: { id?: string } } }) => {
+      if (path === "/api/v1/workspaces/{id}")
+        return { data: WORKSPACES.find((w) => w.id === opts?.params?.path?.id) ?? null };
+      return { data: { rows: WORKSPACES, next_cursor: null } };
+    }),
     POST: vi.fn(async (path: string, opts: { body: Record<string, unknown> }) => {
       posts.push({ path, body: opts.body });
       return { data: { id: "task-1" } };
@@ -106,9 +110,9 @@ describe("starting a spec loop from the board", () => {
     wrap(<NewTicketModal boardId="b1" onClose={() => {}} onCreated={onCreated} />);
 
     await userEvent.type(box(), "Fix the widget");
-    // `Select` is a custom listbox (a native <select> cannot render an icon),
+    // The picker is a custom listbox over a PAGE of the collection (MAIN-606),
     // so this is click-the-trigger, click-the-option.
-    await userEvent.click(await screen.findByRole("button", { name: /workspace/i }));
+    await userEvent.click(await screen.findByRole("button", { name: /^workspace$/i }));
     await userEvent.click(await screen.findByRole("option", { name: /acme\/widgets/i }));
     await userEvent.click(screen.getByRole("button", { name: /start drafting/i }));
 

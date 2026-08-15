@@ -44,8 +44,7 @@ vi.mock("@nookos/api", () => ({
   api: {
     GET: vi.fn(async (path: string) => {
       if (path === "/api/v1/boards") return { data: state.boards };
-      if (path === "/api/v1/workspaces") return { data: state.workspaces };
-      if (path === "/api/v1/workspaces/page")
+      if (path === "/api/v1/workspaces")
         return { data: { rows: state.workspaces, next_cursor: null } };
       return { data: null };
     }),

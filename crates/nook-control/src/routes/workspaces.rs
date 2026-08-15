@@ -9,26 +9,17 @@ use crate::services::{forge_webhook, identity::slugify, workspace_queries};
 use crate::state::AppState;
 use nook_proto::ControlToNode;
 
+/// The tenant's repos, on the pagination contract — searched (name/slug/
+/// remote), sorted (name/created), cursor-walked. The envelope comes back with
+/// or without parameters (MAIN-606): a caller that has to know which of two
+/// URLs it wants before it can ask is a caller that has to narrow a union, and
+/// the unbounded twin this replaced handed every picker a whole tenant to fill
+/// a menu with.
 #[utoipa::path(get, path = "/api/v1/workspaces",
     operation_id = "list_workspaces",
-    responses((status = 200, body = [WorkspaceDetail])))]
-pub async fn list(
-    State(state): State<AppState>,
-    auth: AuthCtx,
-) -> ApiResult<Json<Vec<WorkspaceDetail>>> {
-    Ok(Json(
-        workspace_queries::list_workspaces(&*state.workspaces, auth.tenant_id).await?,
-    ))
-}
-
-/// The paged twin of the whole-list read — the table view's endpoint. The
-/// whole list stays for the pickers (workspace switcher, dispatch target),
-/// which genuinely want everything.
-#[utoipa::path(get, path = "/api/v1/workspaces/page",
-    operation_id = "workspaces_page",
     params(PageQuery),
     responses((status = 200, body = Page<WorkspaceDetail>)))]
-pub async fn page(
+pub async fn list(
     State(state): State<AppState>,
     auth: AuthCtx,
     Query(q): Query<PageQuery>,

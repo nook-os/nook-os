@@ -37,6 +37,8 @@ import { ControlPlaneTabs } from "./ControlPlaneTabs";
 import { askText, DialogHost, notify } from "./dialogs";
 import { JobsHud } from "./JobsHud";
 import { useNewWork } from "./newwork";
+import { WorkspaceList } from "./WorkspacePicker";
+import { useWorkspace, workspaceKey, workspacesKey } from "./workspaces";
 
 // Left rail: the permanent global nav. The top bar never repeats it — top is
 // for CONTEXT (the selected workspace's views).
@@ -158,10 +160,11 @@ function WorkspaceSwitcher() {
     if (/^\/sessions\/.+/.test(path) && path !== "/sessions/list") navigate("/sessions");
     else if (/^\/workspaces\/.+/.test(path) && id) navigate(`/workspaces/${id}`);
   };
-  const { data: workspaces } = useQuery({
-    queryKey: ["workspaces"],
-    queryFn: async () => (await api.GET("/api/v1/workspaces")).data ?? [],
-  });
+  // The label is the SELECTED ROW, read by id (MAIN-606). The menu below shows
+  // a page of repos, and the one you are in is routinely not on it — a switcher
+  // whose name goes blank when you scroll past your own repo is worse than one
+  // that costs a second request.
+  const current = useWorkspace(selectedWorkspaceId);
 
   useEffect(() => {
     const close = (e: MouseEvent) => {
@@ -170,8 +173,6 @@ function WorkspaceSwitcher() {
     document.addEventListener("mousedown", close);
     return () => document.removeEventListener("mousedown", close);
   }, []);
-
-  const current = (workspaces ?? []).find((w) => w.id === selectedWorkspaceId);
 
   // Renaming changes the label and nothing else — not the slug, not the
   // checkout on disk, not the remote. "acme/services" is the repo's name;
@@ -196,7 +197,8 @@ function WorkspaceSwitcher() {
       await notify("Could not rename", JSON.stringify(error));
       return;
     }
-    queryClient.invalidateQueries({ queryKey: ["workspaces"] });
+    queryClient.invalidateQueries({ queryKey: workspaceKey(current.id) });
+    queryClient.invalidateQueries({ queryKey: workspacesKey });
   };
 
   return (
@@ -218,18 +220,17 @@ function WorkspaceSwitcher() {
       )}
       {open && (
         <div className="ws-switcher-menu">
-          {(workspaces ?? []).map((w) => (
-            <button
-              key={w.id}
-              className={`ws-switcher-item${w.id === selectedWorkspaceId ? " current" : ""}`}
-              onClick={() => switchTo(w.id)}
-            >
-              <FolderGit2 size={14} /> {w.name}
+          <WorkspaceList
+            value={selectedWorkspaceId ?? ""}
+            onChange={switchTo}
+            autoFocus
+            maxHeight={260}
+            hint={(w) => (
               <span className="faint small" style={{ marginLeft: "auto" }}>
                 {w.locations.length}⨯
               </span>
-            </button>
-          ))}
+            )}
+          />
         </div>
       )}
     </div>
@@ -239,12 +240,8 @@ function WorkspaceSwitcher() {
 /** Chip shown on pages currently scoped to the selected workspace. */
 export function ScopeChip() {
   const { selectedWorkspaceId, select } = useWorkspaceContext();
-  const { data: workspaces } = useQuery({
-    queryKey: ["workspaces"],
-    queryFn: async () => (await api.GET("/api/v1/workspaces")).data ?? [],
-  });
+  const ws = useWorkspace(selectedWorkspaceId);
   if (!selectedWorkspaceId) return null;
-  const ws = (workspaces ?? []).find((w) => w.id === selectedWorkspaceId);
   return (
     <span className="scope-chip">
       ~/{ws?.name ?? "workspace"}

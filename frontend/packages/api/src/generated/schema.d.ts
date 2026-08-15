@@ -3456,30 +3456,17 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /**
+         * The tenant's repos, on the pagination contract — searched (name/slug/
+         *     remote), sorted (name/created), cursor-walked. The envelope comes back with
+         *     or without parameters (MAIN-606): a caller that has to know which of two
+         *     URLs it wants before it can ask is a caller that has to narrow a union, and
+         *     the unbounded twin this replaced handed every picker a whole tenant to fill
+         *     a menu with.
+         */
         get: operations["list_workspaces"];
         put?: never;
         post: operations["create_workspace"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/workspaces/page": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * The paged twin of the whole-list read — the table view's endpoint. The
-         *     whole list stays for the pickers (workspace switcher, dispatch target),
-         *     which genuinely want everything.
-         */
-        get: operations["workspaces_page"];
-        put?: never;
-        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -15738,48 +15725,6 @@ export interface operations {
     };
     list_workspaces: {
         parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["WorkspaceDetail"][];
-                };
-            };
-        };
-    };
-    create_workspace: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["CreateWorkspaceRequest"];
-            };
-        };
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Workspace"];
-                };
-            };
-        };
-    };
-    workspaces_page: {
-        parameters: {
             query?: {
                 /** @description Case-insensitive substring; the searched fields differ per list. */
                 q?: string | null;
@@ -15804,6 +15749,29 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Page_WorkspaceDetail"];
+                };
+            };
+        };
+    };
+    create_workspace: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateWorkspaceRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Workspace"];
                 };
             };
         };

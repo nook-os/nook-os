@@ -31,6 +31,7 @@ import { NodePlacement } from "../NodePlacement";
 import { NodePorts } from "../NodePorts";
 import { NodeCapacity } from "../NodeCapacity";
 import { SectionedPage, type PageSection } from "../SectionedPage";
+import { useWorkspaces } from "../workspaces";
 
 /** The caller's standing toward a node, mirroring the server's rules
  *  (MAIN-132/135/136) so we never offer a button that 403s: `terminal` on a
@@ -521,16 +522,16 @@ export function NodeDetail() {
         .data,
     enabled: !!id,
   });
-  const { data: workspaces } = useQuery({
-    queryKey: ["workspaces"],
-    queryFn: async () => (await api.GET("/api/v1/workspaces")).data ?? [],
-  });
+  // "Which repos live here" has no server-side filter, and inventing one is
+  // another card's job (MAIN-606 NG-4) — so this pages the collection and
+  // narrows each page, with the same Load more the tables use.
+  const workspaces = useWorkspaces();
   const expected = useControlPlaneVersion();
 
   if (!node) return <Empty>Loading…</Empty>;
   const status = nodeStatus[node.id] ?? node.status;
   const caps = node.capabilities as Record<string, unknown>;
-  const here = (workspaces ?? []).filter((w) =>
+  const here = workspaces.rows.filter((w) =>
     w.locations.some((l) => l.node_id === node.id),
   );
   const sshKey = caps?.ssh_public_key as string | undefined;
@@ -641,7 +642,7 @@ export function NodeDetail() {
       keywords: ["repos", "checkouts", "clones"],
       render: () => (
         <Panel title="Workspaces on this node">
-          {here.length === 0 ? (
+          {here.length === 0 && !workspaces.hasMore ? (
             <Empty>Nothing discovered here yet.</Empty>
           ) : (
             <table className="nook-table">
@@ -669,6 +670,18 @@ export function NodeDetail() {
                 })}
               </tbody>
             </table>
+          )}
+          {workspaces.hasMore && (
+            <div className="data-list-more">
+              <button
+                type="button"
+                className="data-list-more-btn"
+                onClick={workspaces.loadMore}
+                disabled={workspaces.loadingMore}
+              >
+                {workspaces.loadingMore ? "Loading…" : "Load more"}
+              </button>
+            </div>
           )}
         </Panel>
       ),

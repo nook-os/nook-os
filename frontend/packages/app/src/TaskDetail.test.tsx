@@ -52,7 +52,7 @@ vi.mock("@nookos/api", () => ({
     GET: vi.fn(async (path: string) => {
       if (path === "/api/v1/tasks/{id}") return { data: DETAIL };
       if (path === "/api/v1/labels") return { data: [] };
-      if (path === "/api/v1/workspaces") return { data: [] };
+      if (path === "/api/v1/workspaces") return { data: { rows: [], next_cursor: null } };
       if (path === "/api/v1/tasks/{id}/attachments") return { data: [] };
       return { data: null };
     }),
@@ -106,6 +106,10 @@ vi.mock("@nookos/ui", () => ({
     { value: "org", label: "Org", tooltip: "", Icon: () => null },
   ],
   useAnchoredMenu: () => ({ hostRef: { current: null }, portal: (c: React.ReactNode) => c }),
+  // The workspace field is a paged picker now (MAIN-606), and its search box
+  // comes from here — an unnamed export in a whole-module stub is a render
+  // crash, not a missing control.
+  SearchInput: () => null,
 }));
 
 vi.mock("./Interactions", () => ({ TaskInteractions: () => null }));
