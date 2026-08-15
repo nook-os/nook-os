@@ -769,6 +769,29 @@ export function TaskDetail({
                   comment and unblock
                 </button>
               )}
+              {/* The same authority the review agent has, exercised by a person
+                  (MAIN-591 AC-10), and sitting beside the button it submits
+                  (MAIN-608): the ruling IS what the builder is sent to fix,
+                  which is why it is dead until something is typed. */}
+              {canReject && (
+                <button
+                  className="btn small"
+                  disabled={!body.trim() || comment.isPending}
+                  title={
+                    body.trim()
+                      ? "Post the comment below on the pull request, mark it changes-requested, and send the builder back to it"
+                      : "Type the ruling in the comment box first — it is what the builder is told to fix"
+                  }
+                  onClick={() =>
+                    comment.mutate({
+                      body_md: body.trim(),
+                      requestChanges: true,
+                    })
+                  }
+                >
+                  request changes
+                </button>
+              )}
               <button
                 className="btn small primary"
                 disabled={!body.trim() || comment.isPending}
@@ -927,32 +950,6 @@ export function TaskDetail({
                       >
                         {task.pr_url.replace(/^https?:\/\//, "")} ↗
                       </a>
-                      {/* The same authority the review agent has, exercised by
-                          a person (MAIN-591 AC-10). It submits the comment box
-                          below, because the ruling IS what the builder is sent
-                          to fix — which is why it is dead until something is
-                          typed there. */}
-                      {canReject && (
-                        <div style={{ marginTop: 4 }}>
-                          <button
-                            className="btn small"
-                            disabled={!body.trim() || comment.isPending}
-                            title={
-                              body.trim()
-                                ? "Post the comment below on the pull request, mark it changes-requested, and send the builder back to it"
-                                : "Type the ruling in the comment box first — it is what the builder is told to fix"
-                            }
-                            onClick={() =>
-                              comment.mutate({
-                                body_md: body.trim(),
-                                requestChanges: true,
-                              })
-                            }
-                          >
-                            request changes
-                          </button>
-                        </div>
-                      )}
                     </div>
                   </>
                 )}
