@@ -64,6 +64,12 @@ rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
+# The IMAP poller (MAIN-333): a mailbox is fetched over implicit TLS, and the
+# messages it yields are RFC 5322 rather than a provider's pre-parsed JSON.
+# `webpki-roots` is pinned to the version nook-node already resolves, so trusting
+# the public roots on this outbound connection pulls no new crate.
+mail-parser = { workspace = true }
+webpki-roots = "0.26"
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 hmac = { workspace = true }

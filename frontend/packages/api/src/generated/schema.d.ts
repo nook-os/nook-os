@@ -610,6 +610,39 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/email/poller": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/email/poller` — the tenant's IMAP poller, or a 404.
+         * @description Never the password, and never the sealed bytes either: see
+         *     [`nook_types::EmailPoller`] for why the response type has no field they
+         *     could travel in.
+         */
+        get: operations["get_email_poller"];
+        /**
+         * `PUT /api/v1/email/poller` — configure the mailbox this tenant polls.
+         * @description The password is sealed with the deployment's vault key HERE, before it
+         *     reaches the repository, and the repository takes only sealed bytes — so
+         *     there is no path that stores a plaintext one by forgetting to (AC-4).
+         *
+         *     Gated on `tenant.manage` like every other tenant-wide setting: a poller
+         *     files cards on the tenant's board and spends its investigate runs, and the
+         *     credential it holds is the tenant's, not the writer's.
+         */
+        put: operations["put_email_poller"];
+        post?: never;
+        /** `DELETE /api/v1/email/poller` — stop polling and forget the credential. */
+        delete: operations["delete_email_poller"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/events": {
         parameters: {
             query?: never;
@@ -5775,6 +5808,34 @@ export interface components {
             workspace_id?: null | components["schemas"]["WorkspaceId"];
         };
         /**
+         * @description The IMAP mailbox a tenant polls for support mail (MAIN-333), as the API
+         *     reports it.
+         *
+         *     There is deliberately no password field. AC-4 puts the credential in the
+         *     vault, and a response type that could carry it is how a sealed secret ends
+         *     up in a browser's network tab, a log, or a support screenshot — `has_password`
+         *     answers the only question a caller actually has.
+         */
+        EmailPoller: {
+            enabled: boolean;
+            has_password: boolean;
+            host: string;
+            last_error?: string | null;
+            /**
+             * Format: date-time
+             * @description When the last poll ran, and what it said if it failed. Both are how an
+             *     operator sees a mailbox that has stopped working without a shell on the
+             *     box.
+             */
+            last_polled_at?: string | null;
+            mailbox: string;
+            /** Format: int32 */
+            poll_interval_secs: number;
+            /** Format: int32 */
+            port: number;
+            username: string;
+        };
+        /**
          * @description Whether the signed-in user's email is verified, and whether a local
          *     verification round-trip applies to them (MAIN-30).
          */
@@ -9195,6 +9256,32 @@ export interface components {
         UpdateCommentRequest: {
             body_md: string;
         };
+        /**
+         * @description Configure the poller. A full replacement, not a patch: the password is
+         *     required on every write because there is no read path to carry the old one
+         *     forward, and a partial update that silently kept a credential would make
+         *     "change the account" a two-call operation nobody would guess at.
+         */
+        UpdateEmailPollerRequest: {
+            /** @description Defaults to true. `false` keeps the configuration and stops the polling. */
+            enabled?: boolean | null;
+            host: string;
+            /** @description Defaults to `INBOX`. */
+            mailbox?: string | null;
+            /**
+             * @description Sealed with the deployment's vault key before it is stored, and never
+             *     returned by anything.
+             */
+            password: string;
+            /** Format: int32 */
+            poll_interval_secs?: number | null;
+            /**
+             * Format: int32
+             * @description Implicit TLS. Defaults to 993.
+             */
+            port?: number | null;
+            username: string;
+        };
         UpdateFeedbackRequest: {
             pr_url?: string | null;
             status?: string | null;
@@ -10747,6 +10834,107 @@ export interface operations {
                 content?: never;
             };
             413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_email_poller: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EmailPoller"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    put_email_poller: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateEmailPollerRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EmailPoller"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            428: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_email_poller: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

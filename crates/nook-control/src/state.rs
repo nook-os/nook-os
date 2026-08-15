@@ -75,6 +75,10 @@ pub struct AppState {
     /// What GitHub has delivered (MAIN-554). Written by the receiver and read
     /// by nobody yet — this card records, its children act.
     pub forge_deliveries: Arc<dyn crate::repo::forge_deliveries::ForgeDeliveryRepository>,
+    /// The IMAP mailbox a tenant polls, and the ledger of what it has already
+    /// ingested (MAIN-333). The sealed credential lives here; `vault` is what
+    /// opens it.
+    pub email_pollers: Arc<dyn crate::repo::email_pollers::EmailPollerRepository>,
     /// Tenant- and user-scoped settings rows (MAIN-258).
     pub settings: Arc<dyn crate::repo::admin::SettingRepository>,
     /// Org-visibility policy rows (MAIN-305).
@@ -205,6 +209,9 @@ impl AppState {
             forge_deliveries: Arc::new(
                 crate::repo::forge_deliveries::DbForgeDeliveryRepository::new(db.clone()),
             ),
+            email_pollers: Arc::new(crate::repo::email_pollers::DbEmailPollerRepository::new(
+                db.clone(),
+            )),
             notifications: Arc::new(crate::repo::notifications::DbNotificationRepository::new(
                 db.clone(),
             )),

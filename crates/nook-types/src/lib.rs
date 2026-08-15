@@ -1375,6 +1375,53 @@ pub struct EmailLink {
     pub created_at: DateTime<Utc>,
 }
 
+/// The IMAP mailbox a tenant polls for support mail (MAIN-333), as the API
+/// reports it.
+///
+/// There is deliberately no password field. AC-4 puts the credential in the
+/// vault, and a response type that could carry it is how a sealed secret ends
+/// up in a browser's network tab, a log, or a support screenshot — `has_password`
+/// answers the only question a caller actually has.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EmailPoller {
+    pub host: String,
+    pub port: i32,
+    pub username: String,
+    pub has_password: bool,
+    pub mailbox: String,
+    pub poll_interval_secs: i32,
+    pub enabled: bool,
+    /// When the last poll ran, and what it said if it failed. Both are how an
+    /// operator sees a mailbox that has stopped working without a shell on the
+    /// box.
+    pub last_polled_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+}
+
+/// Configure the poller. A full replacement, not a patch: the password is
+/// required on every write because there is no read path to carry the old one
+/// forward, and a partial update that silently kept a credential would make
+/// "change the account" a two-call operation nobody would guess at.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct UpdateEmailPollerRequest {
+    pub host: String,
+    /// Implicit TLS. Defaults to 993.
+    #[serde(default)]
+    pub port: Option<i32>,
+    pub username: String,
+    /// Sealed with the deployment's vault key before it is stored, and never
+    /// returned by anything.
+    pub password: String,
+    /// Defaults to `INBOX`.
+    #[serde(default)]
+    pub mailbox: Option<String>,
+    #[serde(default)]
+    pub poll_interval_secs: Option<i32>,
+    /// Defaults to true. `false` keeps the configuration and stops the polling.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
 /// A workspace's review-loop declaration (MAIN-445), as the API reports it.
 ///
 /// `max_replicas: null` is UNSET — the build's default ceiling of one applies.

@@ -8,8 +8,17 @@
 //! after normalization. [`EmailSource`] is the seam that keeps that true:
 //! everything below [`receive_authenticated`] is written once, against
 //! [`InboundEmail`], so a source is a `normalize` and nothing else.
-//! [`ProviderWebhookSource`] and [`SmtpSource`] (MAIN-334) are both exactly
-//! that; the IMAP source this epic adds later will be too.
+//! [`ProviderWebhookSource`], [`SmtpSource`] (MAIN-334) and [`ImapSource`]
+//! (MAIN-333) are all exactly that.
+//!
+//! Two axes vary, not one, and they are independent. **Authentication** is the
+//! split between [`receive`] and [`receive_authenticated`]. **Routing** is
+//! [`Routing`]: a webhook and an SMTP session both learn their recipient from
+//! the envelope, while a poller already knows whose mailbox it emptied — and
+//! for that one, `To:` is the wrong answer rather than a redundant one, because
+//! mail arriving by alias, mailing list or Bcc does not carry it.
+//!
+//! [`ImapSource`]: crate::services::email_imap::ImapSource
 //!
 //! ## The trust gate is the whole security story (HC-2)
 //!
@@ -76,6 +85,12 @@ pub const SETTING_KEY: &str = "email.inbound";
 
 /// The header the signature rides in.
 pub const SIGNATURE_HEADER: &str = "x-nook-signature";
+
+/// The one drop reason that is about the DEPLOYMENT rather than the message:
+/// mail was pulled for a tenant that has configured no allow-list, so nobody is
+/// trusted and nothing can be filed. Named, because the poller has to tell it
+/// apart from the others — see `email_imap::ingest`.
+pub const DROPPED_UNCONFIGURED: &str = "unconfigured";
 
 /// One attachment, decoded.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -639,6 +654,28 @@ pub enum Disposition {
     Dropped(&'static str),
 }
 
+/// How a delivery finds the tenant it belongs to (MAIN-333).
+///
+/// A SECOND axis, independent of the authentication split between [`receive`]
+/// and [`receive_authenticated`], and the only thing the IMAP source needed
+/// that the two transports before it did not.
+///
+/// A webhook delivery and an SMTP session both learn their recipient from the
+/// envelope, so the address routes them. A poller does not: it emptied a
+/// mailbox it holds the credentials for, and already knows whose it is. For
+/// that source `To:` is not a redundant way to reach the same answer, it is the
+/// WRONG one — mail arriving by alias, mailing list or Bcc does not carry the
+/// address at all, and routing by it would answer "unrouted" for mail that is
+/// plainly the tenant's.
+#[derive(Debug, Clone, Copy)]
+pub enum Routing {
+    /// By the address the message was sent to, across every tenant that
+    /// receives mail.
+    ByRecipient,
+    /// To the tenant whose mailbox this was pulled from.
+    ToMailboxOwner(TenantId),
+}
+
 /// The trust gate, then everything downstream of it (AC-2..AC-6).
 ///
 /// `signature` is the header value as it arrived, or `None` when the caller
@@ -670,7 +707,7 @@ pub async fn receive(
         return Err(ApiError::Unauthorized);
     }
 
-    receive_authenticated(state, source, raw).await
+    receive_authenticated(state, source, raw, Routing::ByRecipient).await
 }
 
 /// The gate and the pipeline, for a transport that has ALREADY authenticated
@@ -688,29 +725,48 @@ pub async fn receive_authenticated(
     state: &AppState,
     source: &dyn EmailSource,
     raw: &[u8],
+    routing: Routing,
 ) -> ApiResult<Disposition> {
     let email = source.normalize(raw).await?;
 
-    let (tenant, cfg) = match route(state, &email.to).await? {
-        Route::To(tenant, cfg) => (tenant, cfg),
-        Route::NoTenant => {
-            tracing::info!(
-                source = source.id(),
-                to = ?email.to,
-                "inbound email dropped: no tenant receives mail at that address"
-            );
-            return Ok(Disposition::Dropped("unrouted"));
-        }
-        Route::Ambiguous(tenants) => {
-            tracing::error!(
-                source = source.id(),
-                ?tenants,
-                to = ?email.to,
-                "inbound email dropped: more than one tenant claims this address, and \
-                 delivering to either would hand one tenant's support mail to another"
-            );
-            return Ok(Disposition::Dropped("ambiguous-address"));
-        }
+    let (tenant, cfg) = match routing {
+        Routing::ByRecipient => match route(state, &email.to).await? {
+            Route::To(tenant, cfg) => (tenant, cfg),
+            Route::NoTenant => {
+                tracing::info!(
+                    source = source.id(),
+                    to = ?email.to,
+                    "inbound email dropped: no tenant receives mail at that address"
+                );
+                return Ok(Disposition::Dropped("unrouted"));
+            }
+            Route::Ambiguous(tenants) => {
+                tracing::error!(
+                    source = source.id(),
+                    ?tenants,
+                    to = ?email.to,
+                    "inbound email dropped: more than one tenant claims this address, and \
+                     delivering to either would hand one tenant's support mail to another"
+                );
+                return Ok(Disposition::Dropped("ambiguous-address"));
+            }
+        },
+        Routing::ToMailboxOwner(tenant) => match tenant_config(state, tenant).await? {
+            Some(cfg) => (tenant, cfg),
+            // The poller is configured and `email.inbound` is not, so there is
+            // no allow-list — and an absent allow-list allows nobody. Dropping
+            // is the same answer `InboundConfig::allows` would give; saying it
+            // here is what makes the log name the actual gap.
+            None => {
+                tracing::warn!(
+                    source = source.id(),
+                    %tenant,
+                    "inbound email dropped: this tenant polls a mailbox but has no \
+                     `email.inbound` allow-list, so no sender is trusted"
+                );
+                return Ok(Disposition::Dropped(DROPPED_UNCONFIGURED));
+            }
+        },
     };
 
     if !cfg.allows(&email.from) {
@@ -770,6 +826,15 @@ async fn route(state: &AppState, to: &[String]) -> ApiResult<Route> {
         }
         _ => Route::Ambiguous(matched.into_iter().map(|(t, _)| t).collect()),
     })
+}
+
+/// One tenant's own `email.inbound`, for a delivery that is already routed.
+async fn tenant_config(state: &AppState, tenant: TenantId) -> ApiResult<Option<InboundConfig>> {
+    Ok(state
+        .settings
+        .tenant_value(tenant, SETTING_KEY)
+        .await?
+        .and_then(|v| serde_json::from_value::<InboundConfig>(v).ok()))
 }
 
 /// Is this address free for `tenant` to claim?

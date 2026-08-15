@@ -562,7 +562,8 @@ async fn deliver(
         envelope_to: tx.to,
         authserv_id: authserv_id.map(str::to_string),
     };
-    match inbound::receive_authenticated(state, &source, &raw).await {
+    match inbound::receive_authenticated(state, &source, &raw, inbound::Routing::ByRecipient).await
+    {
         // Byte-identical, not merely the same code. The key used to be named
         // here, which made the reply itself the oracle the paragraph above says
         // does not exist — "filed as NOOK-42" separates routed-and-allow-listed
