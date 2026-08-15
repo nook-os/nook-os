@@ -805,6 +805,13 @@ pub async fn authorize(
 ) -> ApiResult<Json<Session>> {
     use crate::auth::perm::{Permission, Scope};
 
+    // Handing a runtime credential to a machine is a person's decision, and the
+    // owner leg below resolves the CALLER's person — which a node token borrows
+    // from the tenant owner (MAIN-577). Its siblings on this file's other
+    // node-mutating routes say the same thing; this one and `/runtime-auth` are
+    // the two that reach `require_person_owns_node` without it.
+    auth.require_user()?;
+
     // Unknown/invisible node is a 404, not a 403 — no existence oracle.
     let Some((sharing, caps)) = state
         .nodes

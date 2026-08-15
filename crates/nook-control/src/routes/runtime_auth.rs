@@ -59,6 +59,11 @@ pub async fn start(
 ) -> ApiResult<(StatusCode, Json<RuntimeAuthAccepted>)> {
     use crate::auth::perm::{Permission, Scope};
 
+    // Same rule as the session-based twin (`nodes::authorize`): the owner leg
+    // resolves the caller's person, and a node token carries the tenant
+    // owner's (MAIN-577).
+    auth.require_user()?;
+
     // The REQUEST is validated before any node is authorized, deliberately: a
     // 400 about the runtime or an empty list leaks nothing, whereas the node
     // check reveals whether a node exists. Doing the harmless refusal first
