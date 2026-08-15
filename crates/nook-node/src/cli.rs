@@ -567,7 +567,7 @@ pub fn logout() -> Result<()> {
 /// `keys` is the fields worth matching for this resource. The id is matched by
 /// PREFIX, like a short git sha; everything else must match in full, because a
 /// prefix match on names would make `bash` ambiguous with every `bash session`.
-fn pick_one(rows: Vec<Value>, want: &str, keys: &[&str], resource: &str) -> Result<Value> {
+pub fn pick_one(rows: Vec<Value>, want: &str, keys: &[&str], resource: &str) -> Result<Value> {
     let hit = |r: &Value| {
         keys.iter().any(|k| {
             r.get(*k).and_then(Value::as_str).is_some_and(|v| match *k {

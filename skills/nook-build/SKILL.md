@@ -1,7 +1,7 @@
 ---
 name: nook-build
 description: "Build the one NookOS card a run is directed at, end to end: read the contract, implement it in a branch, verify, open a PR, and report the outcome. Judgment only — the control plane picks, claims, moves cards and records. Designed for directed build runs; never merges."
-version: 2.4.0
+version: 2.5.0
 author: NookOS
 license: MIT
 platforms: [linux, macos]
@@ -69,7 +69,7 @@ somewhere else. Fetched files are scratch: keep them out of the commit unless a
 criterion says otherwise.
 
 If an acceptance criterion is ambiguous, conflicts with a non-goal, or depends
-on something unresolved, do not guess — hand the decision to a human (§5,
+on something unresolved, do not guess — hand the decision to a human (§6,
 blocked, in either of its two shapes).
 
 If the card already records a PR, this run is a repair, not a rebuild — §2.
@@ -134,7 +134,7 @@ the merge queue).
 - Preserve behavior outside the issue contract.
 
 **One atomic commit per branch.** Its subject is byte-identical to the PR
-title from §5 — same sentence, same key, same trailing period. Further work on
+title from §6 — same sentence, same key, same trailing period. Further work on
 the card **amends** that commit; it does not stack a second one.
 
 **Bring in the default branch by REBASE only.** Never merge it into the PR
@@ -155,7 +155,118 @@ check, preserve the evidence, and disclose both results in the PR.
 Review `git diff` and `git status` before shipping. Stop if the diff contains
 unrelated work or generated secrets.
 
-## 5. Conclude — the structured ending
+## 5. Show what you built
+
+A run that produced something a person can drive ends by driving it: a video of
+the feature working, on the card. **The judgment is yours, it is made from your
+own diff, and it never blocks** (AC-2) — decide, write one line in the PR body
+saying which way you went, and carry on. If you cannot tell, pick one and
+continue. There is no question to ask and nothing to escalate here, and nothing
+in this section can fail a run, hold a PR, or gate a merge.
+
+**Decide: is there a flow worth watching?** The bar is a flow somebody would
+actually sit through — a page they open, a form they submit, a list that changes
+in front of them. Touching a frontend file is not the bar: a copy fix, a colour,
+a type-only change, a backend-only diff all skip. Either way the PR body carries
+one line, so the call is auditable (AC-1):
+
+```
+Walkthrough: recorded — the session navigator, at the `web` target.
+Walkthrough: skipped — backend only; the diff adds nothing a person can drive.
+```
+
+**Find the target, never a literal.** The workspace declares which of its
+listeners serve a UI; one command answers that and joins it to the ports this
+run leased:
+
+```bash
+nook ports list --browsable --json     # name, env, path, port, url
+```
+
+Open the `url` it gives you. Do not read `NOOK_WEB_PORT`, or any other variable,
+by name — which variable carries the UI is the workspace's choice, and a repo
+serving its app on `ADMIN_PORT` is the case the hardcoding gets wrong (AC-3).
+
+- **Several targets**: record the one your change affects and name it in the
+  decision line. Cannot tell which? Pick one and continue (AC-3b).
+- **No target**: record nothing and say `no browsable target declared` — that is
+  a gap in the declaration, not a failure of this run.
+- **One video per run**, whatever the repo's frontend count (NG-8).
+
+**Bring the app up** the way its own docs say, in the checkout you built in. The
+leased ports are already in your environment, so the app binds them by starting
+normally — nothing here needs a special mode.
+
+**Record the flow.** Playwright and headless Chromium ship in the executor image
+(`nook-browser-check` proves it in one command). Drive the flow from a scratch
+script **outside the repo** — `/tmp`, never the worktree — with video recording
+on the context:
+
+```js
+// /tmp/walkthrough.js — plain CommonJS, run with `node /tmp/walkthrough.js`.
+// Playwright is a GLOBAL install in the image, which node resolves only from
+// `npm root -g`; the async wrapper is what keeps this a CJS file (a top-level
+// `await` beside `require` parses as ESM and dies on the first line).
+const { execFileSync } = require('node:child_process');
+const root = execFileSync('npm', ['root', '-g'], { encoding: 'utf8' }).trim();
+const { chromium } = require(`${root}/playwright`);
+
+(async () => {
+  const browser = await chromium.launch();
+  const ctx = await browser.newContext({
+    viewport: { width: 1280, height: 720 },
+    recordVideo: { dir: '/tmp/walkthrough', size: { width: 1280, height: 720 } },
+  });
+  const page = await ctx.newPage();
+  // …drive the feature, and ASSERT what the card promised…
+  await ctx.close();   // the .webm is written HERE, not before
+  await browser.close();
+})().catch((err) => {
+  // A non-zero exit is how the flow says it did not pass — read it, because
+  // AC-4 turns on it: a failed assertion must leave no video behind.
+  console.error(err);
+  process.exit(1);
+});
+```
+
+Keep it to the flow itself — half a minute, one viewport, no tour of the app.
+That is how the file stays under the server's user-content cap (AC-9); there is
+no compression step to fall back on.
+
+**Assert, do not merely click.** Wait for the thing the acceptance criteria
+promised and check it is there. A recording of a broken feature clicked through
+in silence is worse than no recording.
+
+**A failing walkthrough is ordinary build work** (AC-7). It is a defect you just
+found in your own output, so fix it and run the flow again, exactly as for any
+red test. It is not an escalation and not a reason to skip.
+
+**Attach it only when the run passed end to end** (AC-4) — a partial run, an
+aborted run or a failed assertion produces no video:
+
+```bash
+nook attachments add "$NOOK_BUILD_TASK" /tmp/walkthrough/<file>.webm --replace
+```
+
+`--replace` is the whole of "one video per card": a repair pass replaces the
+video its earlier pass left rather than stacking a second one (AC-5).
+
+**Every harness failure is silent** (AC-6). No browser in the image, no display,
+a launch that crashes, an upload refused, a file over the cap: note the reason in
+the decision line and open the PR anyway.
+
+```
+Walkthrough: skipped — chromium did not launch (`nook-browser-check` fails here).
+```
+
+This step cannot become a reason a PR does not exist.
+
+**None of it is committed.** The script is scratch and the video is the artifact
+— nothing runs on a future head (NG-2). A Playwright spec joins the repo only
+when the card asks for one, and then it is ordinary work with ordinary tests
+(AC-8).
+
+## 6. Conclude — the structured ending
 
 Every run ends with exactly one outcome call, and it is the pass's LAST act.
 The control plane records it, mirrors it to the board — the card's comment,
@@ -185,6 +296,7 @@ The description must include:
   a PR whose body names the wrong card, or none, is refused.
 - A scope ledger: one evidence line per `AC-N`, one preservation line per
   `NG-N`, and `Other behavior changes: None`
+- The walkthrough line from §5 — recorded or skipped, and why
 - Numbered manual test steps matching what was actually built
 - Automated checks run and their results
 - Risk: Low / Medium / High

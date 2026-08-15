@@ -95,6 +95,7 @@ use utoipa::OpenApi;
         crate::routes::nodes::set_capacity,
         crate::routes::workspaces::get_port_requirements,
         crate::routes::workspaces::set_port_requirements,
+        crate::routes::workspaces::get_browsable_targets,
         crate::routes::workspaces::set_credential,
         crate::routes::nodes::authorize,
         // The sessionless replacement for `nodes::authorize` (MAIN-290). Both

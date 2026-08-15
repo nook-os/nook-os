@@ -207,6 +207,10 @@ pub fn build_router(state: AppState) -> Router {
             get(workspaces::get_port_requirements).put(workspaces::set_port_requirements),
         )
         .route(
+            "/workspaces/{id}/browsable",
+            get(workspaces::get_browsable_targets),
+        )
+        .route(
             "/workspaces/{id}/credential",
             put(workspaces::set_credential),
         )
