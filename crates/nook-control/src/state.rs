@@ -70,6 +70,8 @@ pub struct AppState {
     /// What automation has written on a card (MAIN-603). Markdown Nook stores
     /// and never parses.
     pub task_reports: Arc<dyn crate::repo::task_reports::TaskReportRepository>,
+    /// The chain from a support email to its ticket, run and PR (MAIN-330).
+    pub email_links: Arc<dyn crate::repo::email_links::EmailLinkRepository>,
     /// What GitHub has delivered (MAIN-554). Written by the receiver and read
     /// by nobody yet — this card records, its children act.
     pub forge_deliveries: Arc<dyn crate::repo::forge_deliveries::ForgeDeliveryRepository>,
@@ -195,6 +197,9 @@ impl AppState {
                 db.clone(),
             )),
             task_reports: Arc::new(crate::repo::task_reports::DbTaskReportRepository::new(
+                db.clone(),
+            )),
+            email_links: Arc::new(crate::repo::email_links::DbEmailLinkRepository::new(
                 db.clone(),
             )),
             forge_deliveries: Arc::new(

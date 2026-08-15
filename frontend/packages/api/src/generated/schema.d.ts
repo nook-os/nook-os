@@ -528,6 +528,44 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/email-links": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The inbox listing (AC-3): this workspace's chains, newest first. */
+        get: operations["list_email_links"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/email-links/lookup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * One chain, by the message that started it or by the card it became (AC-3).
+         * @description Exactly one of the two selectors: asking by both would be two questions with
+         *     one answer, and the caller could not tell which one was answered.
+         */
+        get: operations["lookup_email_link"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/email/inbound": {
         parameters: {
             query?: never;
@@ -5702,6 +5740,40 @@ export interface components {
             unread_count?: number;
         };
         /**
+         * @description The chain from one support email to the work it caused (MAIN-330).
+         *
+         *     Written when the inbound pipeline accepts a delivery and extended as the
+         *     work moves — the run when it is seeded, the PR when one is opened — so the
+         *     thread, the ticket, the investigation and the fix are one record rather than
+         *     four things a human correlates by eye.
+         *
+         *     It carries no message content. `storage_key` names the sealed original, and
+         *     the quoted excerpt is on the card; keeping the words out of here is what
+         *     lets this be listed to an inbox without decrypting anything (HC-4).
+         */
+        EmailLink: {
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            id: string;
+            /** @description What the message itself was a reply to, verbatim. */
+            in_reply_to?: string | null;
+            loop_job_id?: null | components["schemas"]["JobId"];
+            /**
+             * @description The delivery's `Message-Id`, the key a reply threads against. `None` when
+             *     the message carried none — nothing invents one, because an invented id
+             *     would go out on the wire in an `In-Reply-To`.
+             */
+            message_id?: string | null;
+            /** @description The PR that answered it, once one is opened against the card. */
+            pr_ref?: string | null;
+            /** @description Where the sealed raw message lives in the user-content store. */
+            storage_key: string;
+            /** @description The ticket the message became. The epic's `ticket_id`. */
+            task_id: components["schemas"]["TaskId"];
+            workspace_id?: null | components["schemas"]["WorkspaceId"];
+        };
+        /**
          * @description Whether the signed-in user's email is verified, and whether a local
          *     verification round-trip applies to them (MAIN-30).
          */
@@ -10520,6 +10592,74 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["DispatchSuggestion"];
                 };
+            };
+        };
+    };
+    list_email_links: {
+        parameters: {
+            query?: {
+                /**
+                 * @description Only this workspace's chains. Omit for the whole tenant's, which is what
+                 *     a tenant that scopes its support mail to no repository has.
+                 *
+                 *     A bare `Uuid` rather than the newtype: a query string is parsed by
+                 *     `serde_urlencoded`, whose value deserializer handles a string and not a
+                 *     newtype wrapper around one.
+                 */
+                workspace_id?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EmailLink"][];
+                };
+            };
+        };
+    };
+    lookup_email_link: {
+        parameters: {
+            query?: {
+                /**
+                 * @description The delivery's `Message-Id`, exactly as it arrived — angle brackets
+                 *     included.
+                 */
+                message_id?: string;
+                /** @description A task uuid or key (`NOOK-42`). */
+                task?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EmailLink"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

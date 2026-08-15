@@ -1061,6 +1061,90 @@
         }
       }
     },
+    "/api/v1/email-links": {
+      "get": {
+        "tags": [
+          "crate::routes::email_links"
+        ],
+        "summary": "The inbox listing (AC-3): this workspace's chains, newest first.",
+        "operationId": "list_email_links",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "query",
+            "description": "Only this workspace's chains. Omit for the whole tenant's, which is what\na tenant that scopes its support mail to no repository has.\n\nA bare `Uuid` rather than the newtype: a query string is parsed by\n`serde_urlencoded`, whose value deserializer handles a string and not a\nnewtype wrapper around one.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/EmailLink"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/email-links/lookup": {
+      "get": {
+        "tags": [
+          "crate::routes::email_links"
+        ],
+        "summary": "One chain, by the message that started it or by the card it became (AC-3).",
+        "description": "Exactly one of the two selectors: asking by both would be two questions with\none answer, and the caller could not tell which one was answered.",
+        "operationId": "lookup_email_link",
+        "parameters": [
+          {
+            "name": "message_id",
+            "in": "query",
+            "description": "The delivery's `Message-Id`, exactly as it arrived — angle brackets\nincluded.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "task",
+            "in": "query",
+            "description": "A task uuid or key (`NOOK-42`).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmailLink"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/email/inbound": {
       "post": {
         "tags": [
@@ -12857,6 +12941,77 @@
             "type": "integer",
             "format": "int64",
             "description": "Unread messages from the other participant(s) after the caller's read\ncursor (MAIN-117) — same semantics as [`ChatChannel::unread_count`]."
+          }
+        }
+      },
+      "EmailLink": {
+        "type": "object",
+        "description": "The chain from one support email to the work it caused (MAIN-330).\n\nWritten when the inbound pipeline accepts a delivery and extended as the\nwork moves — the run when it is seeded, the PR when one is opened — so the\nthread, the ticket, the investigation and the fix are one record rather than\nfour things a human correlates by eye.\n\nIt carries no message content. `storage_key` names the sealed original, and\nthe quoted excerpt is on the card; keeping the words out of here is what\nlets this be listed to an inbox without decrypting anything (HC-4).",
+        "required": [
+          "id",
+          "task_id",
+          "storage_key",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "in_reply_to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What the message itself was a reply to, verbatim."
+          },
+          "loop_job_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/JobId",
+                "description": "The investigate run seeded for it — `None` until it is seeded, and\npermanently `None` for a tenant with no owner to request it as."
+              }
+            ]
+          },
+          "message_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The delivery's `Message-Id`, the key a reply threads against. `None` when\nthe message carried none — nothing invents one, because an invented id\nwould go out on the wire in an `In-Reply-To`."
+          },
+          "pr_ref": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The PR that answered it, once one is opened against the card."
+          },
+          "storage_key": {
+            "type": "string",
+            "description": "Where the sealed raw message lives in the user-content store."
+          },
+          "task_id": {
+            "$ref": "#/components/schemas/TaskId",
+            "description": "The ticket the message became. The epic's `ticket_id`."
+          },
+          "workspace_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceId",
+                "description": "The repository the card was scoped to, when the tenant routes its\nsupport mail to one."
+              }
+            ]
           }
         }
       },

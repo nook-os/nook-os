@@ -1243,6 +1243,7 @@ pub async fn record_build_outcome(
                 )
                 .await?;
                 state.tasks.set_pr_url(task, url, review_col).await?;
+                crate::services::email_links::record_pr(state, tenant, task, url).await;
             }
             Concluded::Blocked(question) => {
                 // Question first, then the label, then the release — the

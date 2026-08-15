@@ -342,6 +342,7 @@ pub async fn submit_pr(
             }
         };
     let updated = state.tasks.set_pr_url(task_id, &url, target).await?;
+    crate::services::email_links::record_pr(state, tenant, task_id, &url).await;
 
     events::record(
         state,

@@ -5,6 +5,7 @@ pub mod config;
 pub mod dispatcher;
 pub mod dist;
 pub mod email;
+pub mod email_links;
 pub mod events;
 pub mod feedback;
 pub mod gitops;
@@ -319,6 +320,11 @@ pub fn build_router(state: AppState) -> Router {
             "/notification-channels/{id}/test",
             post(notifications::test_channel),
         )
+        // The chain from a support email to the work it caused (MAIN-330).
+        // `lookup` is its own path rather than a `{id}` segment because the
+        // selector is a sender-authored `Message-Id`, not an id of ours.
+        .route("/email-links", get(email_links::list))
+        .route("/email-links/lookup", get(email_links::lookup))
         .route("/labels", get(labels::list).post(labels::create))
         .route("/labels/{id}", delete_route(labels::delete))
         .route("/tasks", get(task_query::query))

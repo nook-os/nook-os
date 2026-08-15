@@ -1279,6 +1279,40 @@ pub struct InboundEmailAck {
     pub reason: Option<String>,
 }
 
+/// The chain from one support email to the work it caused (MAIN-330).
+///
+/// Written when the inbound pipeline accepts a delivery and extended as the
+/// work moves — the run when it is seeded, the PR when one is opened — so the
+/// thread, the ticket, the investigation and the fix are one record rather than
+/// four things a human correlates by eye.
+///
+/// It carries no message content. `storage_key` names the sealed original, and
+/// the quoted excerpt is on the card; keeping the words out of here is what
+/// lets this be listed to an inbox without decrypting anything (HC-4).
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
+pub struct EmailLink {
+    pub id: Uuid,
+    /// The repository the card was scoped to, when the tenant routes its
+    /// support mail to one.
+    pub workspace_id: Option<WorkspaceId>,
+    /// The ticket the message became. The epic's `ticket_id`.
+    pub task_id: TaskId,
+    /// The investigate run seeded for it — `None` until it is seeded, and
+    /// permanently `None` for a tenant with no owner to request it as.
+    pub loop_job_id: Option<JobId>,
+    /// The PR that answered it, once one is opened against the card.
+    pub pr_ref: Option<String>,
+    /// The delivery's `Message-Id`, the key a reply threads against. `None` when
+    /// the message carried none — nothing invents one, because an invented id
+    /// would go out on the wire in an `In-Reply-To`.
+    pub message_id: Option<String>,
+    /// What the message itself was a reply to, verbatim.
+    pub in_reply_to: Option<String>,
+    /// Where the sealed raw message lives in the user-content store.
+    pub storage_key: String,
+    pub created_at: DateTime<Utc>,
+}
+
 /// A workspace's review-loop declaration (MAIN-445), as the API reports it.
 ///
 /// `max_replicas: null` is UNSET — the build's default ceiling of one applies.

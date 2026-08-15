@@ -594,6 +594,22 @@ async fn file(
         }
     };
 
+    // The chain, recorded the moment both ends of it exist (MAIN-330 AC-2).
+    // Before the run is seeded rather than after, so a tenant with no owner —
+    // which seeds none — still leaves a link from the message to its card and
+    // its sealed original. The job is filled in below.
+    let link = state
+        .email_links
+        .create(crate::repo::email_links::NewEmailLink {
+            tenant,
+            workspace: cfg.workspace_id,
+            task: task.id,
+            message_id: email.message_id.clone(),
+            in_reply_to: email.in_reply_to.clone(),
+            storage_key: stored.raw_key.clone(),
+        })
+        .await?;
+
     let owner = state
         .identity
         .tenant_owner_user_id(tenant.0)
@@ -635,8 +651,8 @@ async fn file(
     // The tenant owner is the only standing identity an unauthenticated
     // delivery has. Without one the card is still filed and the gap is loud.
     let job = match owner {
-        Some(owner) => Some(
-            crate::services::jobs::seed_investigate(
+        Some(owner) => {
+            let job = crate::services::jobs::seed_investigate(
                 state,
                 tenant,
                 owner,
@@ -645,8 +661,10 @@ async fn file(
                 &brief(&task, email, &stored),
             )
             .await?
-            .id,
-        ),
+            .id;
+            state.email_links.set_job(tenant, link.id, job).await?;
+            Some(job)
+        }
         None => {
             tracing::warn!(
                 %tenant, task = %task.id,
