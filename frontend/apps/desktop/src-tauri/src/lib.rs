@@ -555,6 +555,79 @@ async fn local_stack(state: tauri::State<'_, LocalStackState>) -> Result<LocalSt
 /// The boot result, shared with the webview through `local_stack`.
 pub struct LocalStackState(pub std::sync::Mutex<LocalStack>);
 
+/// The two processes this app started, and whether it is on its way out
+/// (MAIN-400 AC-1).
+///
+/// The handles are held for one reason: to kill them when the app quits.
+/// Dropping a `CommandChild` does not stop the process it names, so the
+/// previous shape — `let (rx, _child) = spawn()` — left a control plane and a
+/// node running after the window closed. The control plane then kept the
+/// SQLite single-instance lock, and the NEXT launch was refused by the guard.
+///
+/// `quitting` is what stops the node supervisor treating a shutdown kill as a
+/// crash and restarting the thing we are trying to stop.
+#[derive(Default)]
+pub struct SidecarProcesses {
+    control_plane: std::sync::Mutex<Option<tauri_plugin_shell::process::CommandChild>>,
+    node: std::sync::Mutex<Option<tauri_plugin_shell::process::CommandChild>>,
+    quitting: std::sync::atomic::AtomicBool,
+}
+
+impl SidecarProcesses {
+    fn quitting(&self) -> bool {
+        self.quitting.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Keep a child so quitting can stop it — or, if the app is already on its
+    /// way out, stop it now. A node restart racing the quit is exactly how one
+    /// gets spawned after `stop_all` has already run.
+    fn hold(
+        slot: &std::sync::Mutex<Option<tauri_plugin_shell::process::CommandChild>>,
+        quitting: bool,
+        child: tauri_plugin_shell::process::CommandChild,
+    ) {
+        if quitting {
+            let _ = child.kill();
+            return;
+        }
+        if let Some(previous) = slot.lock().unwrap().replace(child) {
+            let _ = previous.kill();
+        }
+    }
+
+    fn hold_control_plane(&self, child: tauri_plugin_shell::process::CommandChild) {
+        Self::hold(&self.control_plane, self.quitting(), child);
+    }
+
+    fn hold_node(&self, child: tauri_plugin_shell::process::CommandChild) {
+        Self::hold(&self.node, self.quitting(), child);
+    }
+
+    /// Forget a node that has already stopped on its own, so the next quit does
+    /// not `kill` a pid the OS may since have handed to something else.
+    fn release_node(&self) {
+        let _ = self.node.lock().unwrap().take();
+    }
+
+    /// Stop both sidecars and refuse to start another (AC-1).
+    fn stop_all(&self) {
+        self.quitting
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        for slot in [&self.node, &self.control_plane] {
+            if let Some(child) = slot.lock().unwrap().take() {
+                let _ = child.kill();
+            }
+        }
+    }
+}
+
+/// Stop the sidecars, whether or not this app is managing any yet.
+fn stop_sidecars(app: &tauri::AppHandle) {
+    if let Some(state) = app.try_state::<SidecarProcesses>() {
+        state.stop_all();
+    }
+}
+
 #[tauri::command]
 fn sidecars(app: tauri::AppHandle) -> Vec<SidecarInfo> {
     use tauri_plugin_shell::ShellExt;
@@ -635,26 +708,46 @@ fn start_local_stack(app: tauri::AppHandle) {
             Ok(c) => c.envs(control_plane_env(&db, port, agent_port, &secrets)),
             Err(e) => return set(fail(format!("the bundled control plane is missing: {e}"))),
         };
-        let (mut rx, _child) = match cmd.spawn() {
+        let (mut rx, child) = match cmd.spawn() {
             Ok(v) => v,
             Err(e) => return set(fail(format!("could not start the control plane: {e}"))),
         };
+        // Held so quitting can stop it (AC-1). Dropping the handle would not.
+        if let Some(owned) = app.try_state::<SidecarProcesses>() {
+            owned.hold_control_plane(child);
+        }
 
         // Drain the child's output continuously. Reading it only on failure
         // would deadlock a chatty child on a full pipe, and the log is wanted
         // precisely in the case where it never becomes healthy.
         let log = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let sink = log.clone();
+        // A control plane that REFUSED to boot is the common failure, not a slow
+        // one: a second copy of the app is turned away by the single-instance
+        // guard (AC-4), and a migration an upgrade cannot apply aborts (AC-3).
+        // Both used to be reported only after the 60s health poll gave up, under
+        // a headline blaming the timeout. Watching for the exit says the child's
+        // own reason, at once.
+        let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let exited = stopped.clone();
         tauri::async_runtime::spawn(async move {
             while let Some(ev) = rx.recv().await {
                 let line = match ev {
                     CommandEvent::Stdout(b) | CommandEvent::Stderr(b) => {
                         String::from_utf8_lossy(&b).to_string()
                     }
+                    CommandEvent::Terminated(_) => {
+                        exited.store(true, std::sync::atomic::Ordering::SeqCst);
+                        continue;
+                    }
                     _ => continue,
                 };
                 push_tail(&mut sink.lock().unwrap(), &line);
             }
+            // `Terminated` is the ordinary ending, but the stream closing is the
+            // one signal that cannot be missed — so treat it as the ending too,
+            // rather than polling a port nothing will ever answer.
+            exited.store(true, std::sync::atomic::Ordering::SeqCst);
         });
 
         // Poll rather than parse the log for a ready line: /healthz answering is
@@ -671,6 +764,15 @@ fn start_local_stack(app: tauri::AppHandle) {
                 // before /healthz answers is a join that fails for a reason
                 // that has nothing to do with the node.
                 return supervise_local_node(app, base, secrets.join_token);
+            }
+            if stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                // Give the drain task the last of the pipe before quoting it;
+                // the exit and the final lines arrive in either order.
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                let tail = log.lock().unwrap().clone();
+                return set(fail(format!(
+                    "the local control plane stopped before it was ready\n\n{tail}"
+                )));
             }
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
@@ -748,7 +850,7 @@ async fn run_node_once(app: &tauri::AppHandle, dir: &std::path::Path) -> Result<
     use tauri_plugin_shell::process::CommandEvent;
     use tauri_plugin_shell::ShellExt;
 
-    let (mut rx, _child) = app
+    let (mut rx, child) = app
         .shell()
         .sidecar("nook")
         .map_err(|e| format!("the bundled node is missing: {e}"))?
@@ -756,6 +858,13 @@ async fn run_node_once(app: &tauri::AppHandle, dir: &std::path::Path) -> Result<
         .args(["run"])
         .spawn()
         .map_err(|e| format!("could not start the node: {e}"))?;
+    // Held for the same reason as the control plane, and released below: this
+    // loop restarts the node, so the handle a quit kills has to be the one
+    // currently running (AC-1).
+    let owned = app.try_state::<SidecarProcesses>();
+    if let Some(owned) = &owned {
+        owned.hold_node(child);
+    }
 
     let started = std::time::Instant::now();
     let mut tail = String::new();
@@ -763,6 +872,9 @@ async fn run_node_once(app: &tauri::AppHandle, dir: &std::path::Path) -> Result<
         if let CommandEvent::Stdout(b) | CommandEvent::Stderr(b) = ev {
             push_tail(&mut tail, &String::from_utf8_lossy(&b));
         }
+    }
+    if let Some(owned) = &owned {
+        owned.release_node();
     }
     Ok(NodeRun {
         ran_for: started.elapsed(),
@@ -792,9 +904,19 @@ fn supervise_local_node(app: tauri::AppHandle, base: String, token: String) {
             return node(Some(e));
         }
 
+        let quitting = || {
+            app.try_state::<SidecarProcesses>()
+                .is_some_and(|owned| owned.quitting())
+        };
+
         let mut consecutive = 0u32;
         let mut problem: Option<String> = None;
         loop {
+            // A node killed by the quit is not a node that crashed, and this
+            // loop's whole job is to bring one of those back (AC-1).
+            if quitting() {
+                return;
+            }
             // The standing complaint is NOT cleared here: starting the process
             // is not evidence it will stay up, and once this node is known to
             // be flapping, dropping the warning on every retry would blink it
@@ -821,6 +943,9 @@ fn supervise_local_node(app: tauri::AppHandle, base: String, token: String) {
                 )
             });
             node(problem.clone());
+            if quitting() {
+                return;
+            }
             tokio::time::sleep(restart_delay(consecutive)).await;
         }
     });
@@ -859,6 +984,7 @@ pub fn run() {
         .manage(LocalStackState(
             std::sync::Mutex::new(LocalStack::default()),
         ))
+        .manage(SidecarProcesses::default())
         .setup(|app| {
             for s in sidecars(app.handle().clone()) {
                 eprintln!(
@@ -872,8 +998,24 @@ pub fn run() {
             start_local_stack(app.handle().clone());
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running NookOS desktop");
+        // `build` + `run` rather than `run(context)`, purely to get at
+        // `RunEvent::Exit` — the last point at which this process can still stop
+        // the two it started (MAIN-400 AC-1). Nothing else reaches for a run
+        // event, and the alternative is a window that closes while a control
+        // plane and a node keep running: the control plane holds the SQLite
+        // single-instance lock, so the next launch is refused by the guard and
+        // the app looks broken from then on.
+        //
+        // A force-quit never gets here. That half is the sidecars' own
+        // exit-with-parent watchdog (`nook_desktop_env::exit_when_orphaned`),
+        // which the boot environments above ask for.
+        .build(tauri::generate_context!())
+        .expect("error while building NookOS desktop")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                stop_sidecars(app);
+            }
+        });
 }
 
 #[cfg(test)]

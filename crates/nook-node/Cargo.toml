@@ -10,6 +10,11 @@ path = "src/main.rs"
 
 [dependencies]
 nook-types = { workspace = true }
+# The policy a desktop install's shell supervises its sidecars with — `main`
+# installs the exit-with-parent watchdog from it, so a force-quit of the app
+# does not leave this node running against a control plane that is gone
+# (MAIN-400).
+nook-desktop-env = { workspace = true }
 nook-proto = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }

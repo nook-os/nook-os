@@ -32,6 +32,12 @@ async fn main() -> Result<()> {
     // structured record both land in the configured log (MAIN-273).
     nook_errors::install_panic_hook();
 
+    // A desktop install's shell asks for this (MAIN-400 AC-2); nothing else
+    // sets the variable, so a server deployment is untouched. It is what stops
+    // a force-quit of the app leaving this process holding the SQLite
+    // single-instance lock, which would refuse the next launch.
+    nook_desktop_env::exit_when_orphaned();
+
     let cli = Cli::parse();
     // Before anything reads config, so an operator whose deployment still sets a
     // retired variable hears about it in the same breath as the boot (MAIN-602).

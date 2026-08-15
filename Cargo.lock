@@ -2708,6 +2708,7 @@ dependencies = [
 name = "nook-desktop-env"
 version = "0.6.11"
 dependencies = [
+ "libc",
  "rand 0.9.5",
  "serde",
  "serde_json",
@@ -2799,6 +2800,7 @@ dependencies = [
  "clap",
  "futures-util",
  "libc",
+ "nook-desktop-env",
  "nook-proto",
  "nook-types",
  "portable-pty",

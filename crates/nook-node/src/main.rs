@@ -586,6 +586,12 @@ async fn main() -> Result<()> {
     // machine. Choose explicitly, at the top, before anything can need it.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
+    // A desktop install's shell asks for this (MAIN-400 AC-1); nothing else
+    // sets the variable, so a node under systemd or compose is untouched. It is
+    // what stops a force-quit of the app leaving this node running against a
+    // control plane that is gone.
+    nook_desktop_env::exit_when_orphaned();
+
     // Refuse a misspelled loop kind here rather than reporting a shorter list
     // than the operator configured (MAIN-142 AC-6). Silently dropping it would
     // leave them believing a stage was enabled — the failure would surface as
