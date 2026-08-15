@@ -292,6 +292,12 @@ pub struct StalledJob {
     /// `None` for a `review` job — it has no ticket.
     pub target_task_id: Option<TaskId>,
     pub last_progress_at: chrono::DateTime<chrono::Utc>,
+    /// The conclusion this run had ALREADY recorded — `pr_opened`, `approved`,
+    /// … — when the scan found it silent (MAIN-607). `Some` means it was moved
+    /// to `completed` rather than `failed`: a run that recorded an outcome has
+    /// concluded, whatever became of the completion signal that should have
+    /// followed. The caller reads it to keep such a job away from the handback.
+    pub recorded_outcome: Option<String>,
 }
 
 /// A job the reaper ended while it was still `queued` (MAIN-496), with what it
@@ -346,6 +352,31 @@ impl QueuedCandidate {
     }
 }
 
+/// The silence test, spelled once and used by BOTH halves of the stall scan:
+/// the candidate read, and the guard that read's write re-asserts. `j` is how
+/// the job row is named where the fragment lands (the outer table in the read,
+/// the implicit target in the write); `n` is the stall window's placeholder.
+fn silent(engine: nook_db::Engine, j: &str, n: &str) -> String {
+    let cutoff =
+        time_math(engine).now_minus_scaled(&type_mapping(engine).cast(n, "bigint"), "1 second");
+    format!(
+        "{j}.updated_at < {cutoff}
+         AND COALESCE((SELECT MAX(t.at) FROM loop_job_transcript t
+                        WHERE t.job_id = {j}.id), {j}.updated_at) < {cutoff}"
+    )
+}
+
+/// Its twin, and the reason a silent job is not always a failed one: a run that
+/// recorded its outcome has CONCLUDED, whatever became of the completion signal
+/// that should have followed (MAIN-607). Kind-wise, because the two run kinds
+/// record a conclusion in different columns and a `spec` run has neither.
+fn concluded(j: &str) -> String {
+    format!(
+        "(({j}.kind = 'build' AND {j}.build_outcome IS NOT NULL)
+          OR ({j}.kind = 'review' AND {j}.review_verdict IS NOT NULL))"
+    )
+}
+
 /// One silent in-flight job, read before the fail — for `QueuedCandidate`'s
 /// reason (SQLite's `RETURNING` reaches neither an alias nor a joined table).
 ///
@@ -361,6 +392,7 @@ struct StalledCandidate {
     target_task_id: Option<TaskId>,
     updated_at: chrono::DateTime<chrono::Utc>,
     last_entry_at: Option<chrono::DateTime<chrono::Utc>>,
+    recorded_outcome: Option<String>,
 }
 
 impl StalledCandidate {
@@ -373,6 +405,7 @@ impl StalledCandidate {
                 .last_entry_at
                 .unwrap_or(self.updated_at)
                 .max(self.updated_at),
+            recorded_outcome: self.recorded_outcome,
         }
     }
 }
@@ -680,7 +713,38 @@ pub trait LoopJobRepository: Send + Sync {
     ///
     /// `waiting_on_human` is excluded for the same reason it is excluded there:
     /// a paused run is silent by design, indefinitely.
-    async fn reap_stalled_jobs(&self, stall_secs: i64) -> ApiResult<Vec<StalledJob>>;
+    ///
+    /// A run that had already RECORDED its conclusion is completed instead of
+    /// failed (MAIN-607): it concluded, and only the completion signal after
+    /// its outcome call was lost. `StalledJob::recorded_outcome` says which of
+    /// the two happened to each row.
+    async fn reap_stalled_jobs(&self, stall_secs: i64) -> ApiResult<Vec<StalledJob>> {
+        let mut ended = Vec::new();
+        for c in self.stalled_candidates(stall_secs).await? {
+            if self.end_stalled_job(&c, stall_secs).await? {
+                ended.push(c);
+            }
+        }
+        Ok(ended)
+    }
+
+    /// The silent in-flight jobs [`Self::reap_stalled_jobs`] is about to end,
+    /// each carrying the conclusion it had already recorded — which is what
+    /// decides its ending.
+    ///
+    /// Public, and separate from the write, because the gap between the two is
+    /// the entire reason that write re-asserts its guards: a test can only
+    /// stand in an interleaving it can reach.
+    async fn stalled_candidates(&self, stall_secs: i64) -> ApiResult<Vec<StalledJob>>;
+
+    /// End one candidate as its recorded conclusion says — `completed` when it
+    /// has one, `failed` when it does not — re-asserting BOTH the silence and
+    /// the conclusion as the UPDATE's guard.
+    ///
+    /// `false` means the row stopped matching between the read and here: it
+    /// spoke, it finished, or it recorded an outcome. It keeps running, and the
+    /// next scan reads it afresh.
+    async fn end_stalled_job(&self, job: &StalledJob, stall_secs: i64) -> ApiResult<bool>;
 
     /// Cancel `tenant`'s `queued` jobs whose target card has reached a terminal
     /// column (MAIN-496 AC-1). A closed card is unambiguous evidence the run is
@@ -1710,62 +1774,62 @@ impl LoopJobRepository for DbLoopJobRepository {
             .collect())
     }
 
-    async fn reap_stalled_jobs(&self, stall_secs: i64) -> ApiResult<Vec<StalledJob>> {
-        // The silence test, spelled once and re-asserted as the UPDATE's guard.
-        // `{n}` is the stall window's placeholder; `{j}` is how the job row is
-        // named where the fragment lands (the outer table in the read, the
-        // implicit target in the write).
-        let silent = |j: &str, n: &str| {
-            let cutoff = time_math(self.db.engine()).now_minus_scaled(
-                &type_mapping(self.db.engine()).cast(n, "bigint"),
-                "1 second",
-            );
-            format!(
-                "{j}.updated_at < {cutoff}
-                 AND COALESCE((SELECT MAX(t.at) FROM loop_job_transcript t
-                                WHERE t.job_id = {j}.id), {j}.updated_at) < {cutoff}"
-            )
-        };
+    async fn stalled_candidates(&self, stall_secs: i64) -> ApiResult<Vec<StalledJob>> {
         let candidates: Vec<StalledCandidate> = self
             .db
             .query_all(
                 &format!(
                     "SELECT j.id, j.tenant_id, j.target_task_id, j.updated_at,
                             (SELECT MAX(t.at) FROM loop_job_transcript t
-                              WHERE t.job_id = j.id) AS last_entry_at
+                              WHERE t.job_id = j.id) AS last_entry_at,
+                            CASE WHEN {concluded}
+                                 THEN COALESCE(j.build_outcome, j.review_verdict)
+                            END AS recorded_outcome
                        FROM loop_jobs j
-                      WHERE j.state IN ('claimed', 'running') AND {}",
-                    silent("j", "$1")
+                      WHERE j.state IN ('claimed', 'running') AND {silent}",
+                    concluded = concluded("j"),
+                    silent = silent(self.db.engine(), "j", "$1")
                 ),
                 params![stall_secs],
             )
             .await?;
-        let mut stalled = Vec::new();
-        for c in candidates {
-            // Re-asserted, not assumed — the same exactly-once property the
-            // executor claim has, so every replica may scan. A job that spoke
-            // between the read and the write has its transcript (and, on a
-            // transition, its `updated_at`) at now, falls out of this guard,
-            // and keeps running.
-            let failed = self
-                .db
-                .exec(
-                    &format!(
-                        "UPDATE loop_jobs SET state = 'failed', updated_at = {now}
-                          WHERE id = $1 AND state IN ('claimed', 'running')
-                            AND {}",
-                        silent("loop_jobs", "$2"),
-                        now = type_mapping(self.db.engine()).now(),
-                    ),
-                    params![c.id, stall_secs],
-                )
-                .await?
-                > 0;
-            if failed {
-                stalled.push(c.into_stalled());
-            }
-        }
-        Ok(stalled)
+        Ok(candidates
+            .into_iter()
+            .map(StalledCandidate::into_stalled)
+            .collect())
+    }
+
+    async fn end_stalled_job(&self, job: &StalledJob, stall_secs: i64) -> ApiResult<bool> {
+        // Re-asserted, not assumed — the same exactly-once property the
+        // executor claim has, so every replica may scan. A job that spoke
+        // between the read and the write has its transcript (and, on a
+        // transition, its `updated_at`) at now, falls out of this guard, and
+        // keeps running.
+        //
+        // The conclusion is re-asserted for the same reason, and it matters
+        // more: a run that records its outcome in that gap must not be failed
+        // for a silence that is over (MAIN-607). So each ending carries the
+        // half of the test that chose it, and a row in the other half is left
+        // for the next scan to read as what it now is.
+        let (ending, conclusion) = if job.recorded_outcome.is_some() {
+            ("completed", concluded("loop_jobs"))
+        } else {
+            ("failed", format!("NOT {}", concluded("loop_jobs")))
+        };
+        Ok(self
+            .db
+            .exec(
+                &format!(
+                    "UPDATE loop_jobs SET state = '{ending}', updated_at = {now}
+                      WHERE id = $1 AND state IN ('claimed', 'running')
+                        AND {silent} AND {conclusion}",
+                    silent = silent(self.db.engine(), "loop_jobs", "$2"),
+                    now = type_mapping(self.db.engine()).now(),
+                ),
+                params![job.id, stall_secs],
+            )
+            .await?
+            > 0)
     }
 
     async fn cancel_queued_on_finished_cards(
@@ -1994,6 +2058,29 @@ struct FakeJobState {
     /// query's `tasks`/`board_columns` join, which this repository cannot see.
     finished_cards: Vec<TaskId>,
     seq: i64,
+}
+
+/// The fake's half of the stall scan's two tests, shared by its read and its
+/// write exactly as the SQL fragments above are.
+fn last_progress(
+    transcript: &[LoopJobTranscriptEntry],
+    job: &LoopJob,
+) -> chrono::DateTime<chrono::Utc> {
+    transcript
+        .iter()
+        .filter(|e| e.job_id == job.id)
+        .map(|e| e.at)
+        .max()
+        .unwrap_or(job.updated_at)
+        .max(job.updated_at)
+}
+
+fn recorded_outcome(job: &LoopJob) -> Option<String> {
+    match job.kind.as_str() {
+        "build" => job.build_outcome.clone(),
+        "review" => job.review_verdict.clone(),
+        _ => None,
+    }
 }
 
 /// The shared body of both queued-job endings: cancel every `queued` job the
@@ -2824,45 +2911,47 @@ impl LoopJobRepository for FakeLoopJobRepository {
         Ok(out)
     }
 
-    async fn reap_stalled_jobs(&self, stall_secs: i64) -> ApiResult<Vec<StalledJob>> {
+    async fn stalled_candidates(&self, stall_secs: i64) -> ApiResult<Vec<StalledJob>> {
+        let s = self.inner.lock().unwrap();
+        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(stall_secs);
+        Ok(s.jobs
+            .iter()
+            .filter(|j| matches!(j.state.as_str(), "claimed" | "running"))
+            .filter_map(|j| {
+                let progress = last_progress(&s.transcript, j);
+                (progress < cutoff).then(|| StalledJob {
+                    id: j.id,
+                    tenant: j.tenant_id,
+                    target_task_id: j.target_task_id,
+                    last_progress_at: progress,
+                    recorded_outcome: recorded_outcome(j),
+                })
+            })
+            .collect())
+    }
+
+    async fn end_stalled_job(&self, job: &StalledJob, stall_secs: i64) -> ApiResult<bool> {
         let mut s = self.inner.lock().unwrap();
         let cutoff = chrono::Utc::now() - chrono::Duration::seconds(stall_secs);
-        let last_entry: Vec<(JobId, chrono::DateTime<chrono::Utc>)> = s
-            .transcript
-            .iter()
-            .map(|e| (e.job_id, e.at))
-            .fold(Vec::new(), |mut acc, (job, at)| {
-                match acc.iter_mut().find(|(j, _)| *j == job) {
-                    Some((_, newest)) if *newest < at => *newest = at,
-                    Some(_) => {}
-                    None => acc.push((job, at)),
-                }
-                acc
-            });
-        let mut out = Vec::new();
-        for j in s.jobs.iter_mut() {
-            if !matches!(j.state.as_str(), "claimed" | "running") {
-                continue;
-            }
-            let progress = last_entry
-                .iter()
-                .find(|(id, _)| *id == j.id)
-                .map(|(_, at)| *at)
-                .unwrap_or(j.updated_at)
-                .max(j.updated_at);
-            if progress >= cutoff {
-                continue;
-            }
-            j.state = "failed".into();
-            j.updated_at = chrono::Utc::now();
-            out.push(StalledJob {
-                id: j.id,
-                tenant: j.tenant_id,
-                target_task_id: j.target_task_id,
-                last_progress_at: progress,
-            });
+        let transcript = s.transcript.clone();
+        let Some(j) = s.jobs.iter_mut().find(|j| j.id == job.id) else {
+            return Ok(false);
+        };
+        // The same two guards the SQL re-asserts, for the same reason.
+        if !matches!(j.state.as_str(), "claimed" | "running")
+            || last_progress(&transcript, j) >= cutoff
+            || recorded_outcome(j).is_some() != job.recorded_outcome.is_some()
+        {
+            return Ok(false);
         }
-        Ok(out)
+        j.state = if job.recorded_outcome.is_some() {
+            "completed"
+        } else {
+            "failed"
+        }
+        .into();
+        j.updated_at = chrono::Utc::now();
+        Ok(true)
     }
 
     async fn cancel_queued_on_finished_cards(

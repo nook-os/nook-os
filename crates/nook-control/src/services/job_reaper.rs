@@ -15,6 +15,13 @@
 //! scans the same in-flight set on the job's OWN progress instead, and is global
 //! and atomic for the same reasons.
 //!
+//! Silence is not always failure, either: a run that already RECORDED its
+//! conclusion has concluded, and losing the completion signal that should have
+//! followed does not un-conclude it (MAIN-607). That scan therefore completes
+//! such a job instead of failing it — so it stops holding loop capacity — and
+//! leaves the handback alone, because the card it would give back is finished,
+//! reviewed and carrying its PR.
+//!
 //! It also ends jobs that never got that far (MAIN-496). The reap above needs
 //! an `executor_node_id`, which a `queued` job does not have, so a job nothing
 //! could place had no exit at all: one scan cancels a queued job whose card has
@@ -74,9 +81,13 @@ async fn run(state: AppState, grace_secs: u64, starve_secs: u64, stall_secs: u64
         // After the liveness reap, never before: a job whose node genuinely went
         // away is also silent, and the offline node is the more specific — and
         // more useful — explanation to put on its transcript.
-        match jobs::reap_stalled_jobs(&state, stall_secs).await {
-            Ok(0) => {}
-            Ok(n) => tracing::warn!(reaped = n, "reaped loop jobs that stopped making progress"),
+        match jobs::scan_stalled_jobs(&state, stall_secs).await {
+            Ok(r) if r.failed == 0 && r.concluded == 0 => {}
+            Ok(r) => tracing::warn!(
+                failed = r.failed,
+                concluded = r.concluded,
+                "reaped loop jobs that stopped making progress"
+            ),
             Err(e) => tracing::warn!(error = %e, "stalled-job scan failed"),
         }
         for tenant in loops::enabled_tenants(&*state.settings).await {

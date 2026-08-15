@@ -129,6 +129,62 @@ async fn job(
     id
 }
 
+/// A `build` job — the conclusion test reads a different column per kind, so
+/// the `spec` rows above cannot express a concluded run.
+async fn build_job(
+    bed: &TestBed,
+    tenant: TenantId,
+    user: UserId,
+    target: TaskId,
+    node: NodeId,
+    state: &str,
+) -> JobId {
+    let id = JobId::new();
+    bed.db()
+        .exec(
+            "INSERT INTO loop_jobs (id, tenant_id, kind, target_task_id, requested_by, state, executor_node_id)
+         VALUES ($1,$2,'build',$3,$4,$5,$6)",
+            params![id, tenant, target, user, state, node],
+        )
+        .await
+        .expect("build job");
+    id
+}
+
+/// A `review` job: a workspace and no ticket, which is what
+/// `loop_jobs_target_check` requires of this kind.
+async fn review_job(
+    bed: &TestBed,
+    tenant: TenantId,
+    user: UserId,
+    workspace: WorkspaceId,
+    node: NodeId,
+    state: &str,
+) -> JobId {
+    let id = JobId::new();
+    bed.db()
+        .exec(
+            "INSERT INTO loop_jobs (id, tenant_id, kind, workspace_id, requested_by, state, executor_node_id)
+         VALUES ($1,$2,'review',$3,$4,$5,$6)",
+            params![id, tenant, workspace, user, state, node],
+        )
+        .await
+        .expect("review job");
+    id
+}
+
+/// Record a run's conclusion the way the outcome call does: the column, and
+/// deliberately NOT `state` (NG-4) — which is the shape this whole card is about.
+async fn record_conclusion(bed: &TestBed, id: JobId, column: &str, value: &str) {
+    bed.db()
+        .exec(
+            &format!("UPDATE loop_jobs SET {column} = $2 WHERE id = $1"),
+            params![id, value],
+        )
+        .await
+        .expect("record the conclusion");
+}
+
 async fn job_state(bed: &TestBed, id: JobId) -> String {
     bed.db()
         .query_scalar("SELECT state FROM loop_jobs WHERE id = $1", params![id])
@@ -418,6 +474,154 @@ async fn the_stall_reap_is_atomic_and_fails_a_job_once() {
 
     assert_eq!(job_state(&bed, finished).await, "completed", "untouched");
     assert_eq!(job_state(&bed, silent).await, "failed");
+
+    bed.teardown().await;
+}
+
+// ── Runs that already concluded (MAIN-607) ──────────────────────────────────
+//
+// Silence after an outcome is not failure: MAIN-600's run recorded `pr_opened`,
+// the PR was reviewed and approved, and the completion signal that normally
+// follows never arrived — after which the stall reaper failed the job and handed
+// the finished card back for a fresh build.
+
+#[tokio::test]
+async fn a_build_run_that_recorded_its_outcome_is_concluded_not_failed() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("stall").await;
+    let (user, _p) = bed.user(tenant, "owner").await;
+    let target = target_task(&bed, tenant, user).await;
+    let healthy = node_seen(&bed, tenant, 0).await;
+    let done = build_job(&bed, tenant, user, target, healthy, "running").await;
+    record_conclusion(&bed, done, "build_outcome", "pr_opened").await;
+    // Silent since, exactly as the anomaly left it.
+    entry(&bed, done, 7_200).await;
+    last_touched(&bed, done, 7_200).await;
+    let state = bed.app_state().await;
+
+    let reap = jobs::scan_stalled_jobs(&state, 3_600)
+        .await
+        .expect("stall scan");
+    assert_eq!(reap.concluded, 1, "AC-2");
+    assert_eq!(reap.failed, 0, "AC-1: a concluded run is not a stalled one");
+    assert_eq!(reap.handed_back, 0, "AC-3: the handback is not reached");
+    assert_eq!(job_state(&bed, done).await, "completed", "AC-2");
+
+    // AC-4: the operator can tell this apart from a stall failure, and the
+    // outcome it names is why.
+    let t = transcript_text(&bed, done).await;
+    assert!(
+        t.contains("already recorded its outcome (pr_opened)"),
+        "the transcript names the conclusion: {t:?}"
+    );
+    assert!(
+        !t.contains("reaped after"),
+        "and does not read as a stall failure: {t:?}"
+    );
+
+    // Exactly once, like every other ending here: a second replica's scan finds
+    // it terminal and does nothing.
+    let again = jobs::scan_stalled_jobs(&state, 3_600)
+        .await
+        .expect("second scan");
+    assert_eq!((again.concluded, again.failed), (0, 0));
+
+    bed.teardown().await;
+}
+
+#[tokio::test]
+async fn a_review_run_that_recorded_its_verdict_is_concluded_too() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("stall").await;
+    let (user, _p) = bed.user(tenant, "owner").await;
+    let workspace = bed.workspace(tenant).await;
+    let healthy = node_seen(&bed, tenant, 0).await;
+    let reviewed = review_job(&bed, tenant, user, workspace, healthy, "running").await;
+    record_conclusion(&bed, reviewed, "review_verdict", "approved").await;
+    last_touched(&bed, reviewed, 7_200).await;
+    let state = bed.app_state().await;
+
+    let reap = jobs::scan_stalled_jobs(&state, 3_600)
+        .await
+        .expect("stall scan");
+    assert_eq!((reap.concluded, reap.failed, reap.handed_back), (1, 0, 0));
+    assert_eq!(job_state(&bed, reviewed).await, "completed");
+    assert!(transcript_text(&bed, reviewed)
+        .await
+        .contains("already recorded its outcome (approved)"));
+
+    bed.teardown().await;
+}
+
+#[tokio::test]
+async fn a_build_run_with_no_recorded_outcome_is_still_failed_and_handed_back() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("stall").await;
+    let (user, _p) = bed.user(tenant, "owner").await;
+    let target = target_task(&bed, tenant, user).await;
+    let healthy = node_seen(&bed, tenant, 0).await;
+    // The orphan MAIN-506 was built for, unchanged (AC-6).
+    let orphan = build_job(&bed, tenant, user, target, healthy, "running").await;
+    last_touched(&bed, orphan, 7_200).await;
+    let state = bed.app_state().await;
+
+    let reap = jobs::scan_stalled_jobs(&state, 3_600)
+        .await
+        .expect("stall scan");
+    assert_eq!((reap.failed, reap.concluded), (1, 0));
+    assert_eq!(reap.handed_back, 1, "the handback is still reached");
+    assert_eq!(job_state(&bed, orphan).await, "failed");
+    assert!(transcript_text(&bed, orphan).await.contains("reaped after"));
+
+    bed.teardown().await;
+}
+
+#[tokio::test]
+async fn a_run_that_concludes_between_the_read_and_the_write_is_not_failed() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("stall").await;
+    let (user, _p) = bed.user(tenant, "owner").await;
+    let target = target_task(&bed, tenant, user).await;
+    let healthy = node_seen(&bed, tenant, 0).await;
+    let racing = build_job(&bed, tenant, user, target, healthy, "running").await;
+    last_touched(&bed, racing, 7_200).await;
+    let state = bed.app_state().await;
+
+    // Stand in the gap the guard exists for: the scan has read this job as
+    // unconcluded, and the run records `pr_opened` before the write lands.
+    let candidates = state
+        .jobs
+        .stalled_candidates(3_600)
+        .await
+        .expect("candidates");
+    assert_eq!(candidates.len(), 1);
+    assert!(candidates[0].recorded_outcome.is_none());
+    record_conclusion(&bed, racing, "build_outcome", "pr_opened").await;
+
+    assert!(
+        !state
+            .jobs
+            .end_stalled_job(&candidates[0], 3_600)
+            .await
+            .expect("end"),
+        "the re-asserted guard refuses a job that concluded in the gap"
+    );
+    assert_eq!(job_state(&bed, racing).await, "running");
+
+    // And the next scan reads it as what it now is.
+    let reap = jobs::scan_stalled_jobs(&state, 3_600)
+        .await
+        .expect("second scan");
+    assert_eq!((reap.concluded, reap.failed), (1, 0));
+    assert_eq!(job_state(&bed, racing).await, "completed");
 
     bed.teardown().await;
 }
