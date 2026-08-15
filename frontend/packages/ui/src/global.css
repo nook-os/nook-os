@@ -3431,6 +3431,21 @@ textarea.env-area.blurred {
   margin-left: auto;
 }
 
+/* The bundled node has stopped coming back (MAIN-398 AC-2). Same strip as the
+   update notice, in the danger colour: it is news too, but news that nothing
+   the person opens will run until it is dealt with. */
+.node-bar {
+  border-bottom-color: var(--nook-err);
+}
+.node-bar pre {
+  margin: 0;
+  max-height: 6.5em;
+  overflow: auto;
+  white-space: pre-wrap;
+  opacity: 0.8;
+  font-size: 11px;
+}
+
 /* ── Markdown ───────────────────────────────────────────────────────────── */
 
 .md {

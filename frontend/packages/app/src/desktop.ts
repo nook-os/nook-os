@@ -121,6 +121,25 @@ export interface LocalStack {
   ready: boolean;
   /** The child's own log tail, present only when it never became healthy. */
   error?: string;
+  /** The node's log tail, present once it has failed to STAY up repeatedly
+   *  (MAIN-398 AC-2). Absent while it is running, and during an ordinary
+   *  restart the shell has not given up on. */
+  node_error?: string;
+}
+
+/**
+ * What to tell the person about the bundled node, or `null` for nothing.
+ *
+ * Deliberately quiet during an ordinary restart: the shell only fills
+ * `node_error` once the node has failed to stay up several times over, and a
+ * bar that flickered on every blip would train people to ignore it. What it
+ * must never do is stay silent while sessions cannot start — that is the state
+ * MAIN-398 AC-2 exists to stop hiding.
+ *
+ * A shell predating the field reports neither, and reports nothing.
+ */
+export function localNodeProblem(stack: LocalStack | null): string | null {
+  return stack?.node_error ?? null;
 }
 
 /**
