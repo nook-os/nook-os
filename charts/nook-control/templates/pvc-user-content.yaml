@@ -1,0 +1,25 @@
+{{- if and .Values.userContent.persistence.enabled (not .Values.userContent.persistence.existingClaim) }}
+# Where uploads live (MAIN-598). Separate from the image, which bakes the release
+# binaries in read-only and is not writable by the uid the pod runs as — that is
+# the failure this claim exists to end.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "nook-control.componentName" (dict "root" . "component" "user-content") }}
+  labels:
+    {{- include "nook-control.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control
+  annotations:
+    # Uploads outlive the release: a `helm uninstall` must not take a tenant's
+    # attachments with it.
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    {{- toYaml .Values.userContent.persistence.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ .Values.userContent.persistence.size }}
+  {{- with .Values.userContent.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end }}

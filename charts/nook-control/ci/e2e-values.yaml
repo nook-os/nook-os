@@ -46,6 +46,13 @@ config:
   publicBaseUrl: http://localhost:18080
   webOrigin: http://localhost:18080
 
+# Uploads are not what this smoke test exercises, and a PVC would make it wait
+# on the cluster's storage provisioner to bind before the pod could start. The
+# emptyDir case is a supported configuration (MAIN-598), so this tests one.
+userContent:
+  persistence:
+    enabled: false
+
 # The e2e Secret carries SECRETS_KEY (64 hex); wire it so the crypto/vault path
 # uses an explicit key rather than deriving one from SESSION_SECRET.
 secretKeys:

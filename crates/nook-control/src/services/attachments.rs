@@ -45,7 +45,7 @@ pub async fn purge_content(
         if state.user_content.delete(*id, tenant).await? == 0 {
             continue;
         }
-        if let Err(e) = state.artifacts.delete(&row.storage_key).await {
+        if let Err(e) = state.user_content_store.delete(&row.storage_key).await {
             tracing::warn!(key = %row.storage_key, error = %e, "orphaned attachment: the row went but the object did not");
         }
     }
@@ -216,7 +216,7 @@ pub async fn read_content(
         .await?
         .ok_or(ApiError::NotFound)?;
     let bytes = state
-        .artifacts
+        .user_content_store
         .get(&stored.storage_key)
         .await
         .map_err(|e| {

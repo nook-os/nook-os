@@ -57,7 +57,7 @@ impl Drop for Scratch {
 
 async fn state_on(bed: &TestBed, scratch: &Scratch) -> AppState {
     let mut cfg = bed.config();
-    cfg.dist_dir = scratch.0.to_string_lossy().into_owned();
+    cfg.user_content_dir = scratch.0.to_string_lossy().into_owned();
     AppState::new(bed.db(), cfg, None).await
 }
 
@@ -172,7 +172,11 @@ async fn an_upload_round_trips_through_the_disk_store() {
         row.storage_key
     );
     assert_eq!(
-        state.artifacts.get(&row.storage_key).await.unwrap(),
+        state
+            .user_content_store
+            .get(&row.storage_key)
+            .await
+            .unwrap(),
         payload
     );
 
@@ -249,7 +253,7 @@ async fn an_oversized_upload_is_refused_and_stores_nothing() {
     };
     let scratch = Scratch::new("oversize");
     let mut cfg = bed.config();
-    cfg.dist_dir = scratch.0.to_string_lossy().into_owned();
+    cfg.user_content_dir = scratch.0.to_string_lossy().into_owned();
     cfg.user_content_max_bytes = 1024;
     let state = AppState::new(bed.db(), cfg, None).await;
     let tenant = bed.tenant("cap").await;
@@ -276,7 +280,7 @@ async fn an_oversized_upload_is_refused_and_stores_nothing() {
 
     // Nothing reached the store, and nothing reached the table.
     assert!(
-        state.artifacts.list("").await.unwrap().is_empty(),
+        state.user_content_store.list("").await.unwrap().is_empty(),
         "an over-cap upload must not write an object"
     );
 
@@ -386,7 +390,7 @@ async fn delete_removes_both_halves_and_is_gated() {
         StatusCode::NO_CONTENT
     );
     assert!(
-        state.artifacts.head(&key).await.unwrap().is_none(),
+        state.user_content_store.head(&key).await.unwrap().is_none(),
         "the bytes go with the row"
     );
 
@@ -472,7 +476,7 @@ async fn the_redirect_switch_decides_between_a_302_and_a_stream() {
     let (user, _) = bed.user(tenant, "member").await;
 
     let mut streaming = bed.app_state().await;
-    streaming.artifacts = store.clone();
+    streaming.user_content_store = store.clone();
     let rec = put(
         &streaming,
         ctx(user, tenant),
@@ -495,7 +499,7 @@ async fn the_redirect_switch_decides_between_a_302_and_a_stream() {
     let mut cfg = bed.config();
     cfg.user_content_redirect = true;
     let mut redirecting = AppState::new(bed.db(), cfg, None).await;
-    redirecting.artifacts = store.clone();
+    redirecting.user_content_store = store.clone();
 
     let res = serve(State(redirecting), ctx(user, tenant), Path(rec.id))
         .await
@@ -520,7 +524,7 @@ async fn a_disk_store_streams_even_with_the_switch_on() {
     };
     let scratch = Scratch::new("disk-redirect");
     let mut cfg = bed.config();
-    cfg.dist_dir = scratch.0.to_string_lossy().into_owned();
+    cfg.user_content_dir = scratch.0.to_string_lossy().into_owned();
     cfg.user_content_redirect = true;
     let state = AppState::new(bed.db(), cfg, None).await;
     let tenant = bed.tenant("disk").await;
@@ -533,5 +537,124 @@ async fn a_disk_store_streams_even_with_the_switch_on() {
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(body_of(res).await, b"plain");
 
+    bed.teardown().await;
+}
+
+/// MAIN-598 AC-1/AC-9: an upload round-trips through `NOOK_USER_CONTENT_DIR`,
+/// and the bytes are on disk THERE — not in `dist_dir`, which is the image's
+/// read-only release binaries and is the directory this whole card is about.
+#[tokio::test]
+async fn an_upload_lands_in_the_user_content_dir_and_never_in_the_dist_dir() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let uploads = Scratch::new("uploads");
+    let dist = Scratch::new("dist");
+    let mut cfg = bed.config();
+    cfg.user_content_dir = uploads.0.to_string_lossy().into_owned();
+    cfg.dist_dir = dist.0.to_string_lossy().into_owned();
+    let state = AppState::new(bed.db(), cfg, None).await;
+    let tenant = bed.tenant("dirs").await;
+    let (user, _) = bed.user(tenant, "member").await;
+
+    let payload = b"the bytes a person uploaded".to_vec();
+    let rec = put(
+        &state,
+        ctx(user, tenant),
+        "notes.txt",
+        "text/plain",
+        &payload,
+    )
+    .await;
+
+    let res = serve(State(state.clone()), ctx(user, tenant), Path(rec.id))
+        .await
+        .expect("the fetch succeeds");
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        body_of(res).await,
+        payload,
+        "POST then GET returns the bytes"
+    );
+
+    let row = state
+        .user_content
+        .get(rec.id, tenant)
+        .await
+        .expect("the row reads")
+        .expect("the row exists");
+    let on_disk = uploads.0.join(&row.storage_key);
+    assert_eq!(
+        std::fs::read(&on_disk).expect("the object is a real file at that path"),
+        payload,
+        "the object lives under NOOK_USER_CONTENT_DIR: {}",
+        on_disk.display()
+    );
+    assert!(
+        !dist.0.exists(),
+        "nothing may be written into the dist directory — it is read-only in \
+         every image (NG-1)"
+    );
+
+    bed.teardown().await;
+}
+
+/// MAIN-598 AC-5/AC-10: a store that cannot be written does not stop the boot,
+/// and does not turn into a 500 either.
+///
+/// The directory is unwritable in a way no uid can talk its way out of — its
+/// parent is a regular FILE, so `create_dir_all` is ENOTDIR for root too, and
+/// the test means the same thing whoever runs it.
+///
+/// `user_content_store_error` IS the value the boot WARN is emitted from
+/// (`nook_infra::storage::report`), so asserting on it asserts the log.
+#[tokio::test]
+async fn an_unwritable_store_boots_with_a_reason_and_answers_503() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let blocker = std::env::temp_dir().join(format!("nook-not-a-dir-{}", Uuid::now_v7().simple()));
+    std::fs::write(&blocker, b"a file where a directory would have to be").expect("the blocker");
+    let mut cfg = bed.config();
+    cfg.user_content_dir = blocker.join("uploads").to_string_lossy().into_owned();
+
+    // Boots. Nothing panics, and everything that is not an upload is unaffected.
+    let state = AppState::new(bed.db(), cfg, None).await;
+    let reason = state
+        .user_content_store_error
+        .clone()
+        .expect("the boot probe reports why the store is unusable");
+    assert!(
+        reason.contains(&blocker.to_string_lossy().to_string()),
+        "the operator's copy names the path: {reason}"
+    );
+
+    let tenant = bed.tenant("broken-store").await;
+    let (user, _) = bed.user(tenant, "member").await;
+    let err = upload(
+        State(state.clone()),
+        ctx(user, tenant),
+        multipart("x.png", "image/png", b"\x89PNG").await,
+    )
+    .await
+    .expect_err("an upload cannot succeed against a store that cannot be written");
+
+    let res = axum::response::IntoResponse::into_response(err);
+    assert_eq!(
+        res.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "503 — the server is misconfigured, the request was fine"
+    );
+    let body: serde_json::Value = serde_json::from_slice(&body_of(res).await).expect("a JSON body");
+    let message = body["error"].as_str().unwrap_or_default().to_string();
+    assert_eq!(message, "file storage is not configured");
+    assert!(
+        !message.contains(&blocker.to_string_lossy().to_string())
+            && !message.to_ascii_lowercase().contains("no such file")
+            && !message.to_ascii_lowercase().contains("not a directory"),
+        "no path and no OS detail in the body — that lives in the log: {message}"
+    );
+
+    let _ = std::fs::remove_file(&blocker);
     bed.teardown().await;
 }

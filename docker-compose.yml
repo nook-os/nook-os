@@ -143,6 +143,13 @@ services:
       #   cargo build --release -p nook-node \
       #     && cp target/release/nook dist/nook-linux-$(uname -m)
       NOOK_DIST_DIR: /app/dist
+      # What PEOPLE upload, and deliberately NOT NOOK_DIST_DIR (MAIN-598). The
+      # dist directory is the read-only set of release binaries an image bakes
+      # in; this is runtime data that has to outlive the container, so it gets
+      # a named volume of its own. Set explicitly because the built-in default
+      # is per-USER ($XDG_DATA_HOME) and compose runs these as a bare numeric
+      # uid with no passwd entry — HOME there is `/`, which nothing may write.
+      NOOK_USER_CONTENT_DIR: /var/lib/nook/user-content
       # The FLEET's GitHub token (MAIN-407), read here so the control plane can
       # size each repo's review loops to its open PRs (MAIN-448). Never a
       # literal — only the variable, so a real credential lives in .env. Empty
@@ -184,6 +191,7 @@ services:
       - .:/app
       - ./.cache/cargo-registry:/usr/local/cargo/registry
       - ./.cache/cargo-target:/app/target-docker
+      - user-content:/var/lib/nook/user-content
     depends_on:
       postgres:
         condition: service_healthy
@@ -485,6 +493,11 @@ networks:
 
 volumes:
   pgdata:
+  # Uploads (MAIN-598). Writable by the ${NOOK_UID}/${NOOK_GID} these services
+  # run as because dev-rust.Dockerfile creates the mount point a+rwX: Docker
+  # seeds a named volume's ownership and mode from the image directory it is
+  # mounted over, and a mount point that is not in the image arrives root-owned.
+  user-content:
   miniodata:
   demo-workspaces:
   node-config:

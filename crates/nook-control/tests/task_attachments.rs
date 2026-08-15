@@ -51,7 +51,7 @@ impl Drop for Scratch {
 
 async fn state_on(bed: &TestBed, scratch: &Scratch) -> AppState {
     let mut cfg = bed.config();
-    cfg.dist_dir = scratch.0.to_string_lossy().into_owned();
+    cfg.user_content_dir = scratch.0.to_string_lossy().into_owned();
     AppState::new(bed.db(), cfg, None).await
 }
 
@@ -183,7 +183,7 @@ async fn stored(state: &AppState, tenant: TenantId, content: Uuid) -> bool {
     else {
         return false;
     };
-    state.artifacts.get(&row.storage_key).await.is_ok()
+    state.user_content_store.get(&row.storage_key).await.is_ok()
 }
 
 fn status_of(err: nook_control::error::ApiError) -> StatusCode {

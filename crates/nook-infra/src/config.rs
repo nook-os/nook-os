@@ -118,6 +118,20 @@ pub struct Config {
     /// Key prefix for what PEOPLE upload, kept apart from the distributed
     /// binaries so the two can never collide in one bucket (MAIN-532).
     pub user_content_prefix: String,
+    /// Where an upload's bytes land when the store is `disk`, and the reason
+    /// this is not `dist_dir` (MAIN-598).
+    ///
+    /// `dist_dir` is inside the image: baked read-only at build time with the
+    /// release binaries, owned by root, and mounted by nothing. Writing user
+    /// content there failed on every disk-backed deployment. These are two
+    /// different lifetimes — one is built with the image, the other outlives
+    /// it — so they are two different directories.
+    ///
+    /// The default is a per-user data directory, because the property that
+    /// matters is that an ordinary non-root user can write it with nothing
+    /// pre-created and nothing configured. A deployment that wants the bytes
+    /// to survive the container says so with this variable.
+    pub user_content_dir: String,
     /// `artifact_redirect`'s twin for user content, and deliberately its own
     /// variable: binaries are fetched by a machine mid-install, uploads by a
     /// signed-in browser, and a deployment can reasonably want redirection for
@@ -342,6 +356,30 @@ fn env_opt(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.trim().is_empty())
 }
 
+/// `$XDG_DATA_HOME/nook/user-content`, or `~/.local/share/nook/user-content`
+/// (MAIN-598).
+///
+/// The one requirement is that an ordinary non-root user can write it having
+/// created nothing and configured nothing — so a plain binary, or a desktop /
+/// SQLite standalone install, accepts an upload out of the box. A path under
+/// `/var/lib` or `/usr/local/share` reads more like a server, and is exactly
+/// the class of path this card exists because of: not writable by the process
+/// that has to write it.
+///
+/// The temp-dir last resort is for a container run as a bare numeric uid with
+/// no passwd entry, where `HOME` is unset. It is writable and it is ephemeral;
+/// the deployments that must keep the bytes set `NOOK_USER_CONTENT_DIR`
+/// explicitly (docker-compose and the Helm chart both do).
+fn default_user_content_dir() -> String {
+    let base = env_opt("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| env_opt("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share")))
+        .unwrap_or_else(std::env::temp_dir);
+    base.join("nook/user-content")
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// The three states an OIDC configuration can be in at boot, which is one more
 /// than [`Config::oidc_configured`] can express — and the missing one is the
 /// only state an operator can be in by mistake.
@@ -407,6 +445,8 @@ impl Config {
                 .unwrap_or(false),
             user_content_prefix: env_opt("NOOK_USER_CONTENT_PREFIX")
                 .unwrap_or_else(|| "nook/user-content".into()),
+            user_content_dir: env_opt("NOOK_USER_CONTENT_DIR")
+                .unwrap_or_else(default_user_content_dir),
             user_content_redirect: env_opt("NOOK_USER_CONTENT_REDIRECT")
                 .map(|v| v == "true" || v == "1")
                 .unwrap_or(false),
@@ -635,6 +675,12 @@ impl Config {
             artifact_prefix: "nook".into(),
             artifact_redirect: false,
             user_content_prefix: "nook/user-content".into(),
+            // Under the temp dir rather than the caller's real data directory:
+            // a test that uploads must not leave objects in `~/.local/share`.
+            user_content_dir: std::env::temp_dir()
+                .join("nook-test-user-content")
+                .to_string_lossy()
+                .into_owned(),
             user_content_redirect: false,
             user_content_max_bytes: DEFAULT_USER_CONTENT_MAX_BYTES,
             s3_bucket: None,
@@ -704,6 +750,33 @@ fn check_redis_url(uses_redis: bool, env_name: &str, redis_url: Option<&str>) ->
     crate::redis_client::RedisClient::open(url)
         .with_context(|| format!("{env_name}=redis but NOOK_REDIS_URL is malformed"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod user_content_dir_tests {
+    use super::default_user_content_dir;
+
+    /// MAIN-598 AC-2: the shipped default is writable by whoever is running,
+    /// with nothing pre-created and nothing configured — which is the property
+    /// `/usr/local/share/nook/dist` did not have and this card exists over.
+    ///
+    /// It creates the directory, because that is the claim: a plain binary or a
+    /// standalone install takes an upload out of the box.
+    #[test]
+    fn the_default_is_a_per_user_directory_this_process_can_write() {
+        let dir = std::path::PathBuf::from(default_user_content_dir());
+        assert!(dir.ends_with("nook/user-content"), "{}", dir.display());
+        assert!(
+            !dir.starts_with("/usr") && !dir.starts_with("/opt"),
+            "never a path inside the image: {}",
+            dir.display()
+        );
+
+        std::fs::create_dir_all(&dir).expect("an ordinary user can create it");
+        let probe = dir.join(".write-probe");
+        std::fs::write(&probe, b"writable").expect("and write in it");
+        std::fs::remove_file(&probe).expect("and clean up after itself");
+    }
 }
 
 #[cfg(test)]
