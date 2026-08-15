@@ -125,13 +125,51 @@ pub async fn resolve_session_identity(
     ))
 }
 
+/// A bearer token's caller **and** the narrowing its row carries (MAIN-602).
+///
+/// Kept beside [`Resolved`] rather than inside it because `Resolved` is `Copy`
+/// and shared with the cookie path, which has no narrowing to carry: a session
+/// is its person, entire.
+#[derive(Debug, Clone)]
+pub struct BearerGrant {
+    pub resolved: Resolved,
+    /// The `user_tokens.scopes` column verbatim: space-separated `resource:verb`
+    /// names, or `None` for an unscoped token. Deliberately raw — this crate
+    /// validates credentials, and deciding what a scope *permits* is the calling
+    /// service's job, at its own single chokepoint.
+    pub scopes: Option<String>,
+    /// The workspace the token is narrowed to, if any.
+    pub workspace_id: Option<Uuid>,
+}
+
 /// Resolve a `nook_user_` bearer token, refreshing its last-used timestamp.
+///
+/// **Refuses a SCOPED token.** A narrowed credential is only safe in a service
+/// that enforces the narrowing, and this function is the door for every caller
+/// that does not — nook-chat, and the control plane's invite-accept path, which
+/// has no scope in the closed set. Handing them a caller resolved from a scoped
+/// token would silently widen it back to everything, which is the one outcome
+/// the narrowing exists to prevent. A service that DOES enforce takes
+/// [`resolve_bearer_grant`] instead.
 pub async fn resolve_bearer(pool: &DbPool, token: &str) -> Result<Resolved, AuthError> {
+    let grant = resolve_bearer_grant(pool, token).await?;
+    if grant.scopes.is_some() {
+        return Err(AuthError::Forbidden);
+    }
+    Ok(grant.resolved)
+}
+
+/// [`resolve_bearer`] without the scoped-token refusal, handing back the
+/// narrowing so the caller can enforce it.
+pub async fn resolve_bearer_grant(pool: &DbPool, token: &str) -> Result<BearerGrant, AuthError> {
     let hash = hash_token(token);
-    let row: Option<(Uuid, Uuid, Uuid)> = pool
+    // `(token id, user, tenant, scopes, workspace)` — named so the tuple stays
+    // readable at the call below.
+    type Row = (Uuid, Uuid, Uuid, Option<String>, Option<Uuid>);
+    let row: Option<Row> = pool
         .query_opt(
             &format!(
-                "SELECT id, user_id, tenant_id FROM user_tokens
+                "SELECT id, user_id, tenant_id, scopes, workspace_id FROM user_tokens
          WHERE token_hash = $1 AND (expires_at IS NULL OR expires_at > {now})",
                 now = type_mapping(pool.engine()).now()
             ),
@@ -139,7 +177,8 @@ pub async fn resolve_bearer(pool: &DbPool, token: &str) -> Result<Resolved, Auth
         )
         .await?;
 
-    let (token_id, user_id, tenant_id) = row.ok_or(AuthError::Unauthorized)?;
+    let (token_id, user_id, tenant_id, scopes, workspace_id) =
+        row.ok_or(AuthError::Unauthorized)?;
     // Best-effort touch — a failed update must not fail the request.
     let _ = pool
         .exec(
@@ -150,11 +189,15 @@ pub async fn resolve_bearer(pool: &DbPool, token: &str) -> Result<Resolved, Auth
             params![token_id],
         )
         .await;
-    Ok(Resolved {
-        session_id: token_id,
-        user_id,
-        tenant_id,
-        cookie_session: false,
+    Ok(BearerGrant {
+        resolved: Resolved {
+            session_id: token_id,
+            user_id,
+            tenant_id,
+            cookie_session: false,
+        },
+        scopes,
+        workspace_id,
     })
 }
 

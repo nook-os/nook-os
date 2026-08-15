@@ -149,11 +149,11 @@ tools:     list_workspaces · list_nodes · list_sessions · start_session ·
 ```
 
 **Every tool acts in the connecting person's tenant, and records them as the
-author of what it writes.** So the connection needs a per-user token. The static
-`MCP_TOKEN` in `.env` still authenticates, but it resolves no person and
-therefore no tenant: `tools/list` offers it nothing and every tool refuses it by
-name. That is the design rather than a gap — a shared credential that picked a
-tenant would be picking somebody's.
+author of what it writes.** So the connection needs a per-user credential: an
+OIDC access token, or a personal access token carrying the `mcp` scope. The old
+shared `MCP_TOKEN` is retired (MAIN-602) — it resolved no person and therefore no
+tenant, so `tools/list` offered it nothing and every tool refused it by name. A
+shared credential that picked a tenant would be picking somebody's.
 
 Build runs are readable from the same surface: `list_build_runs` answers "what is
 this repo building right now" and `get_build_run` answers "how is MAIN-42's build

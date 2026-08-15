@@ -33,6 +33,8 @@ async fn a_token_can_only_be_revoked_by_the_user_who_owns_it() {
         token_hash: "hash".into(),
         name: "laptop".into(),
         expires_at: None,
+        scopes: None,
+        workspace_id: None,
     })
     .await
     .unwrap();
@@ -68,6 +70,8 @@ async fn tokens_are_listed_only_to_their_owner() {
             token_hash: format!("h-{name}"),
             name: name.into(),
             expires_at: None,
+            scopes: None,
+            workspace_id: None,
         })
         .await
         .unwrap();

@@ -136,10 +136,27 @@ function AccessTokenSettings() {
   // is needed (AC-3), but the search stays consistent with the other tables.
   const term = search.trim().toLowerCase();
   const rows = (tokens ?? []).filter(
-    (t) => !term || (t.name ?? "").toLowerCase().includes(term),
+    (t) =>
+      !term ||
+      (t.name ?? "").toLowerCase().includes(term) ||
+      (t.scopes ?? []).some((s) => s.includes(term)) ||
+      (t.workspace_slug ?? "").toLowerCase().includes(term),
   );
   const columns: DataColumn<UserToken>[] = [
     { key: "name", header: "Name", className: "bright", cell: (t) => t.name || "unnamed" },
+    {
+      // What this credential may do, and where. "full access" is the unscoped
+      // token every one of these used to be — worth naming rather than leaving
+      // blank, because a blank cell reads as "nothing" and it is the opposite.
+      key: "scopes",
+      header: "Scope",
+      className: "muted",
+      cell: (t) => {
+        const scopes = t.scopes?.length ? t.scopes.join(" ") : "full access";
+        const where = t.workspace_slug ?? t.workspace_id;
+        return where ? `${scopes} · ${where}` : scopes;
+      },
+    },
     {
       key: "used",
       header: "Last used",

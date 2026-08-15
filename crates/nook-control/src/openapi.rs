@@ -302,6 +302,7 @@ use utoipa::OpenApi;
         nook_types::CreateUserTokenRequest,
         nook_types::CreateUserTokenResponse,
         nook_types::UserToken,
+        nook_types::TokenScope,
         nook_types::SessionInputRequest,
         nook_types::SessionOutputRequest,
         nook_types::SessionOutputResponse,

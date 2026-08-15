@@ -237,7 +237,6 @@ pub fn init(opts: InitOptions) -> Result<()> {
         database_url,
         session_secret: secret(),
         secrets_key: secret(),
-        mcp_token: secret(),
         oidc,
         dev_auth,
         tenant_name,
