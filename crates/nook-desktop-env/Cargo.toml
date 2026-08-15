@@ -1,0 +1,18 @@
+# The boot environment for a desktop install's bundled control plane, kept in
+# the workspace so the control plane's own suite can start the real binary with
+# it (MAIN-434). The Tauri shell is deliberately outside the workspace, so a map
+# written there can only ever be asserted against itself.
+[package]
+name = "nook-desktop-env"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "nook_desktop_env"
+path = "src/lib.rs"
+
+[dependencies]
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

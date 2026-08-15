@@ -4,6 +4,7 @@ members = [
     "crates/nook-types",
     "crates/nook-db",
     "crates/nook-db-derive",
+    "crates/nook-desktop-env",
     "crates/nook-proto",
     "crates/nook-auth",
     "crates/nook-chat",
@@ -29,6 +30,7 @@ nook-errors = { path = "crates/nook-errors" }
 nook-types = { path = "crates/nook-types" }
 nook-db = { path = "crates/nook-db" }
 nook-db-derive = { path = "crates/nook-db-derive" }
+nook-desktop-env = { path = "crates/nook-desktop-env" }
 nook-proto = { path = "crates/nook-proto" }
 nook-auth = { path = "crates/nook-auth" }
 nook-infra = { path = "crates/nook-infra" }

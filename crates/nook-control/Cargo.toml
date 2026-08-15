@@ -77,6 +77,9 @@ ipnet = "2"
 # Tests here build a defaulted Config via nook-infra's test-support helper,
 # which moved out with the config module in MAIN-146.
 nook-infra = { workspace = true, features = ["test-support"] }
+# The desktop shell's boot environment, so `desktop_local_boot.rs` can start
+# this binary with the very map a local install hands it (MAIN-434).
+nook-desktop-env = { workspace = true }
 # The shared test harness (MAIN-156). Cycle back to nook-control is dev-only.
 nook-testkit = { workspace = true }
 # The notebook seal test (MAIN-100) fabricates a client blob with

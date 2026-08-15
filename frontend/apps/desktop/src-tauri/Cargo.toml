@@ -25,6 +25,12 @@ serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio = { version = "1", features = ["time"] }
 tauri-plugin-shell = "2.3.5"
+# The bundled control plane's boot environment. It lives in the cargo workspace
+# so `nook-control`'s own suite can start the real binary with it — a map that
+# only this crate could see is how MAIN-396 shipped one that never booted
+# (MAIN-434). The crate itself is three dependencies deep, so it costs the
+# desktop build nothing.
+nook-desktop-env = { path = "../../../../crates/nook-desktop-env" }
 
 [lib]
 name = "nookos_desktop_lib"
