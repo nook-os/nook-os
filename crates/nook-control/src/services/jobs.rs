@@ -3065,35 +3065,81 @@ pub async fn reap_stale_executors(state: &AppState, grace_secs: u64) -> ApiResul
 /// so a build card whose run was orphaned comes back to the board and becomes
 /// eligible for a fresh — `--resume`-warm — run under the ordinary failure
 /// backoff.
+///
+/// Unless the run had already RECORDED its conclusion (MAIN-607), which is the
+/// one silent job none of that applies to: its work is done, pushed and on the
+/// card, and only the completion signal after the outcome call was lost. Such a
+/// job is completed rather than failed — so it stops holding a slot of the
+/// node's loop capacity — and deliberately does NOT reach the handback, which
+/// is what would re-open a finished card.
 pub async fn reap_stalled_jobs(state: &AppState, stall_secs: u64) -> ApiResult<u64> {
+    let reap = scan_stalled_jobs(state, stall_secs).await?;
+    Ok(reap.failed + reap.concluded)
+}
+
+/// What one stall scan did. Separate from [`reap_stalled_jobs`]'s count because
+/// `handed_back` is countable only HERE, at the call: `on_run_concluded` is a
+/// no-op for a run that recorded an outcome, so a test asserting on the card's
+/// resulting state cannot tell "not called" from "called and did nothing".
+pub struct StallReap {
+    /// Jobs failed as stalled — MAIN-506's orphan case, each of which reached
+    /// the handback.
+    pub failed: u64,
+    /// Jobs completed because they had already recorded a conclusion.
+    pub concluded: u64,
+    /// How many reached [`crate::services::build_handback::on_run_concluded`].
+    pub handed_back: u64,
+}
+
+/// [`reap_stalled_jobs`], reporting which ending each job got.
+pub async fn scan_stalled_jobs(state: &AppState, stall_secs: u64) -> ApiResult<StallReap> {
     let stalled = state.jobs.reap_stalled_jobs(stall_secs as i64).await?;
+    let mut reap = StallReap {
+        failed: 0,
+        concluded: 0,
+        handed_back: 0,
+    };
 
     for crate::repo::jobs::StalledJob {
         id,
         tenant,
         target_task_id: target,
         last_progress_at,
+        recorded_outcome,
     } in &stalled
     {
-        append_transcript(
-            state,
-            *id,
-            "system",
-            &format!(
-                "no progress since {} — the executor agent is no longer reading this run, \
-                 reaped after {stall_secs}s",
-                last_progress_at.to_rfc3339()
-            ),
-        )
-        .await
-        .ok();
+        let line = match recorded_outcome {
+            Some(outcome) => {
+                reap.concluded += 1;
+                format!(
+                    "no progress since {} — but this run had already recorded its outcome \
+                     ({outcome}), so it is concluded, not failed: only the completion signal \
+                     was lost",
+                    last_progress_at.to_rfc3339()
+                )
+            }
+            None => {
+                reap.failed += 1;
+                format!(
+                    "no progress since {} — the executor agent is no longer reading this run, \
+                     reaped after {stall_secs}s",
+                    last_progress_at.to_rfc3339()
+                )
+            }
+        };
+        append_transcript(state, *id, "system", &line).await.ok();
         if let Ok(job) = load(state, *tenant, *id).await {
             let private = target_is_private(state, *tenant, *target).await;
             record_job_event(state, *tenant, "job.state_changed", &job, private).await;
-            crate::services::build_handback::on_run_concluded(state, *tenant, &job).await;
+            // The handback ALREADY ran when the outcome was recorded; running
+            // it again is precisely what gives a finished card back.
+            if recorded_outcome.is_none() {
+                reap.handed_back += 1;
+                crate::services::build_handback::on_run_concluded(state, *tenant, &job).await;
+            }
         }
     }
-    Ok(stalled.len() as u64)
+    Ok(reap)
 }
 
 // The two ways a `queued` job ends without ever running (MAIN-496). Until this,
