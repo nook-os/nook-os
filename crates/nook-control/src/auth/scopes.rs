@@ -243,6 +243,14 @@ pub fn required_scope(method: &Method, path: &str) -> Option<TokenScope> {
         // is the grant the ticket opened on: enough for a CI job to say what it
         // found, and nothing else.
         ["tasks", _, "comments" | "attachments"] => Some(TokenScope::ReportsWrite),
+        ["tasks", _, "reports"] if read => Some(TokenScope::TasksRead),
+        // A report IS the thing this scope was minted for (MAIN-603): a CI job
+        // writes one, and DELETE is on the surface with PUT because retracting
+        // what you published is the same authority as publishing it — a
+        // producer that could only ever add would be the log file the per-card
+        // cap exists to prevent. Nothing here touches another producer's key
+        // any more than it touches the card.
+        ["tasks", _, "reports", _] if !read => Some(TokenScope::ReportsWrite),
         ["tasks", _, "revisions" | "jobs"] if read => Some(TokenScope::TasksRead),
         ["tasks", _, "claim" | "release" | "archive" | "unarchive" | "move"] => {
             Some(TokenScope::TasksWrite)
@@ -415,6 +423,22 @@ mod tests {
         assert_eq!(
             required_scope(&Method::PATCH, "/api/v1/tasks/MAIN-1"),
             Some(TokenScope::TasksWrite)
+        );
+    }
+
+    #[test]
+    fn a_report_key_is_writable_with_reports_write_and_readable_with_tasks_read() {
+        assert_eq!(
+            required_scope(&Method::PUT, "/api/v1/tasks/MAIN-1/reports/build"),
+            Some(TokenScope::ReportsWrite)
+        );
+        assert_eq!(
+            required_scope(&Method::DELETE, "/api/v1/tasks/MAIN-1/reports/build"),
+            Some(TokenScope::ReportsWrite)
+        );
+        assert_eq!(
+            required_scope(&Method::GET, "/api/v1/tasks/MAIN-1/reports"),
+            Some(TokenScope::TasksRead)
         );
     }
 

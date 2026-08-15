@@ -31,6 +31,7 @@ pub mod skills;
 pub mod task_attachments;
 pub mod task_detail;
 pub mod task_query;
+pub mod task_reports;
 pub mod taskwork;
 pub mod tenant_ca;
 pub mod tenants;
@@ -335,6 +336,11 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/tasks/{id}/attachments",
             get(task_attachments::list_for_task).post(task_attachments::attach_to_task),
+        )
+        .route("/tasks/{id}/reports", get(task_reports::list))
+        .route(
+            "/tasks/{id}/reports/{key}",
+            put(task_reports::put).delete(task_reports::delete),
         )
         .route(
             "/comments/{id}/attachments",

@@ -57,6 +57,9 @@ export type TaskComment = Schemas["TaskComment"];
 // Files on a ticket or one of its comments (MAIN-533). The bytes live in the
 // user-content store; this is the join, plus the metadata a list renders.
 export type TaskAttachment = Schemas["TaskAttachment"];
+// Automation-written Markdown metadata on a card (MAIN-603). Nook stores it and
+// never parses it — the meaning lives entirely with whatever produced it.
+export type TaskReport = Schemas["TaskReport"];
 export type RelatedTask = Schemas["RelatedTask"];
 export type EventItem = Schemas["Event"];
 export type Note = Schemas["Note"];

@@ -3989,6 +3989,31 @@ textarea.env-area.blurred {
 }
 .side-wrap { overflow-wrap: anywhere; }
 
+/* Reports (MAIN-603): a titled card per report, below the development sections.
+   The body is producer-written markdown of unknown length, so it scrolls inside
+   the card rather than stretching the sidebar. */
+.task-report-h {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.task-report-title {
+  overflow-wrap: anywhere;
+}
+.task-report-h .mono {
+  margin-left: auto;
+  flex: none;
+}
+.task-report .md {
+  max-height: 420px;
+  overflow: auto;
+}
+.task-report-foot {
+  margin-top: 6px;
+  border-top: 1px solid var(--nook-border);
+  padding-top: 5px;
+}
+
 /* ── Labels field ───────────────────────────────────────────────────────── */
 
 .task-labels-row {

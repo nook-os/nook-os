@@ -35,7 +35,7 @@ pub use state::AppState;
 // below replaces: the list froze at 0035 while the directory went on to 0069,
 // so a reader checking whether their file was embedded was reading a comment
 // that had been wrong for thirty-four migrations. The directory is the list.
-// Head of the set: 0075_user_token_scopes (MAIN-602).
+// Head of the set: 0076_task_reports (MAIN-603).
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 /// The SQLite track (MAIN-236 scaffolded it; MAIN-196 boots it). A parallel set,

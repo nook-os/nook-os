@@ -238,6 +238,55 @@ async fn a_narrowed_report_token_writes_where_it_may_and_nowhere_else() {
     bed.teardown().await;
 }
 
+/// MAIN-603 AC-9: writing a report needs `reports:write`, and a token without
+/// it is a 403 that NAMES the scope rather than a 404 that sends an automation
+/// author looking for a card that plainly exists.
+///
+/// Reading is deliberately the other side of the same line — a listing is
+/// `tasks:read`, because a report is content on a card and a credential that
+/// may read the card may read what is on it.
+#[tokio::test]
+async fn writing_a_report_needs_reports_write_and_reading_it_needs_tasks_read() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let state = bed.app_state().await;
+    let f = fixture(&bed, &state).await;
+    let reader = mint_raw(&state, f.tenant, f.user, Some("tasks:read"), None).await;
+    let writer = mint_raw(&state, f.tenant, f.user, Some("reports:write"), None).await;
+    let report = json!({ "title": "Build", "body_md": "| a |\n|---|\n| 1 |" });
+    let path = format!("/api/v1/tasks/{}/reports/build", f.task_a.0);
+
+    let (status, body) = send(&state, req("PUT", &reader, &path, Some(report.clone()))).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "tasks:read cannot write: {body}"
+    );
+    assert!(
+        body.contains("reports:write"),
+        "the refusal names the scope that is missing: {body}"
+    );
+
+    let (status, body) = send(&state, req("PUT", &writer, &path, Some(report))).await;
+    assert_eq!(status, StatusCode::OK, "reports:write may: {body}");
+
+    // ...and the listing is the read scope, for either credential.
+    let list = format!("/api/v1/tasks/{}/reports", f.task_a.0);
+    let (status, body) = send(&state, req("GET", &reader, &list, None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("\"key\":\"build\""), "{body}");
+
+    let (status, body) = send(&state, req("GET", &writer, &list, None)).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "reports:write is not a reading grant: {body}"
+    );
+
+    bed.teardown().await;
+}
+
 /// AC-7: a scope it does not hold is a 403 NAMING the scope. Both shapes: a
 /// route on the scoped surface that needs a different verb, and a route that is
 /// not on the surface at all.

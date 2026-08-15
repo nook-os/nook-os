@@ -67,6 +67,9 @@ pub struct AppState {
     /// Which uploads hang off which ticket or comment (MAIN-533). The join
     /// MAIN-532's store deliberately knows nothing about.
     pub attachments: Arc<dyn crate::repo::attachments::TaskAttachmentRepository>,
+    /// What automation has written on a card (MAIN-603). Markdown Nook stores
+    /// and never parses.
+    pub task_reports: Arc<dyn crate::repo::task_reports::TaskReportRepository>,
     /// What GitHub has delivered (MAIN-554). Written by the receiver and read
     /// by nobody yet — this card records, its children act.
     pub forge_deliveries: Arc<dyn crate::repo::forge_deliveries::ForgeDeliveryRepository>,
@@ -189,6 +192,9 @@ impl AppState {
                 db.clone(),
             )),
             attachments: Arc::new(crate::repo::attachments::DbTaskAttachmentRepository::new(
+                db.clone(),
+            )),
+            task_reports: Arc::new(crate::repo::task_reports::DbTaskReportRepository::new(
                 db.clone(),
             )),
             forge_deliveries: Arc::new(

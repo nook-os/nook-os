@@ -237,6 +237,43 @@ pub async fn enrich_one(
         .expect("enrich preserves length"))
 }
 
+/// The task an identifier names, refused as a **404** when this viewer may not
+/// see it (MAIN-76).
+///
+/// Here rather than beside any one caller because it is [`visible_to`] applied
+/// to a route's path parameter, and every surface that hangs content off a card
+/// — attachments (MAIN-533), reports (MAIN-603) — has to refuse in exactly the
+/// same place and with exactly the same status. A second copy of it is a second
+/// chance to leak a private card's existence through a list route that never
+/// names the card.
+pub async fn readable_task(
+    state: &crate::state::AppState,
+    tenant: TenantId,
+    viewer: UserId,
+    ident: &str,
+) -> ApiResult<TaskId> {
+    let id = resolve_id(state.tasks.as_ref(), tenant, ident).await?;
+    readable_task_id(state, tenant, viewer, id).await
+}
+
+/// The same rule for a task already resolved to its id.
+pub async fn readable_task_id(
+    state: &crate::state::AppState,
+    tenant: TenantId,
+    viewer: UserId,
+    id: TaskId,
+) -> ApiResult<TaskId> {
+    let row = state
+        .tasks
+        .get_row(tenant, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    if !visible_to(&row, viewer) {
+        return Err(ApiError::NotFound);
+    }
+    Ok(id)
+}
+
 /// Resolve a task by uuid **or** human key (`NOOK-42`, case-insensitively).
 ///
 /// Agents are told keys, not uuids — `Closes NOOK-42` is the join between a PR
