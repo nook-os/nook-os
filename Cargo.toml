@@ -115,6 +115,13 @@ cookie = { version = "0.18", features = ["key-expansion"] }
 # (a send is best-effort and one-shot).
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls-tls", "hostname"] }
 
+# MIME for the INBOUND direction (MAIN-334): the direct SMTP receiver is handed
+# a whole RFC 5322 message and must find its text, its HTML and its attachments
+# — nested multiparts, transfer encodings and RFC 2047 encoded words included.
+# lettre is the wrong half of that (it builds messages, it does not parse them),
+# and a hand-rolled parser here would be a security-relevant guess.
+mailparse = "0.16"
+
 # A build worktree's `target/` reached 120 GB, 96% of it debuginfo inside test
 # binaries: each of the 119 integration tests links its own full-DWARF copy of
 # the same dependency debuginfo (MAIN-492). `line-tables-only` keeps the

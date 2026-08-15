@@ -7,6 +7,10 @@ use anyhow::{Context, Result};
 /// 25 MiB, the shipped upload cap (MAIN-532 AC-6).
 pub const DEFAULT_USER_CONTENT_MAX_BYTES: u64 = 25 * 1024 * 1024;
 
+/// The SMTP receiver's default message cap — the webhook route's 25 MiB, so
+/// the same message is accepted or refused whichever door it arrives at.
+pub const DEFAULT_EMAIL_SMTP_MAX_BYTES: usize = 25 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub app_env: String,
@@ -233,6 +237,35 @@ pub struct Config {
     /// anything reads them; which tenant the mail belongs to is decided
     /// afterwards, from the recipient.
     pub email_inbound_secret: Option<String>,
+
+    /// Where the direct SMTP receiver listens, e.g. `0.0.0.0:2525` (MAIN-334).
+    /// `None` — the shipped default — means no listener is opened at all: this
+    /// is the only source that binds a port, so it is off until an operator
+    /// names an address.
+    pub email_smtp_listen: Option<String>,
+    /// The credential the relay in front must present. BOTH are required
+    /// whenever the listener is enabled, and the process refuses to boot
+    /// otherwise: an SMTP port that accepts unauthenticated transactions
+    /// accepts any envelope sender, and the support-staff allow-list is then a
+    /// comparison against a string the sender chose.
+    pub email_smtp_username: Option<String>,
+    pub email_smtp_password: Option<String>,
+    /// Implicit TLS for the receiver (the SMTPS shape, as on port 465). Both
+    /// set → the socket is wrapped before the greeting; both unset → the
+    /// listener is plaintext and must sit on a trusted network. Half-set is a
+    /// boot failure, exactly as the agent listener's pair is.
+    pub email_smtp_tls_cert: Option<String>,
+    pub email_smtp_tls_key: Option<String>,
+    /// The `authserv-id` the front MTA stamps its `Authentication-Results`
+    /// under — the name in the header, before the first `;`. Set it and a
+    /// verdict reported by anything else is refused; leave it unset and the
+    /// topmost header is trusted on position alone, which is the weaker rule
+    /// `email_inbound::require_verified_sender` explains.
+    pub email_smtp_authserv_id: Option<String>,
+    /// The largest message the receiver accepts, advertised as ESMTP `SIZE`
+    /// and enforced while `DATA` is being read. Matches the webhook route's
+    /// limit, because the pipeline below both is the same.
+    pub email_smtp_max_bytes: usize,
 
     // ── Postmark (HTTP mail provider) ───────────────────────────────────
     /// Server token for `mail_provider = postmark`, sent as the
@@ -513,6 +546,15 @@ impl Config {
             smtp_password: env_opt("SMTP_PASSWORD"),
 
             email_inbound_secret: env_opt("EMAIL_INBOUND_SECRET"),
+            email_smtp_listen: env_opt("EMAIL_SMTP_LISTEN"),
+            email_smtp_username: env_opt("EMAIL_SMTP_USERNAME"),
+            email_smtp_password: env_opt("EMAIL_SMTP_PASSWORD"),
+            email_smtp_tls_cert: env_opt("EMAIL_SMTP_TLS_CERT"),
+            email_smtp_tls_key: env_opt("EMAIL_SMTP_TLS_KEY"),
+            email_smtp_authserv_id: env_opt("EMAIL_SMTP_AUTHSERV_ID"),
+            email_smtp_max_bytes: env_opt("EMAIL_SMTP_MAX_BYTES")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(DEFAULT_EMAIL_SMTP_MAX_BYTES),
 
             postmark_token: env_opt("POSTMARK_TOKEN"),
             postmark_api_url: env_opt("POSTMARK_API_URL")
@@ -733,6 +775,13 @@ impl Config {
             smtp_username: None,
             smtp_password: None,
             email_inbound_secret: None,
+            email_smtp_listen: None,
+            email_smtp_username: None,
+            email_smtp_password: None,
+            email_smtp_tls_cert: None,
+            email_smtp_tls_key: None,
+            email_smtp_authserv_id: None,
+            email_smtp_max_bytes: DEFAULT_EMAIL_SMTP_MAX_BYTES,
             postmark_token: None,
             postmark_api_url: "https://api.postmarkapp.com/email".into(),
             mail_from: "NookOS <no-reply@localhost>".into(),

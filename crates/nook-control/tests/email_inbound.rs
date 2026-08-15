@@ -63,11 +63,22 @@ struct Fixture {
 /// owner for the seeded run to be requested by, and the `email.inbound`
 /// setting naming the address and the one allow-listed sender.
 async fn fixture(bed: &TestBed, secret: Option<&str>) -> Fixture {
+    fixture_with(bed, secret, |_| {}).await
+}
+
+/// The same, with a last word on the config — what the SMTP receiver's tests
+/// need, since enabling it is a deployment setting rather than a request.
+async fn fixture_with(
+    bed: &TestBed,
+    secret: Option<&str>,
+    tweak: impl FnOnce(&mut nook_control::Config),
+) -> Fixture {
     let scratch =
         Scratch(std::env::temp_dir().join(format!("nook-inbound-{}", Uuid::now_v7().simple())));
     let mut cfg = bed.config();
     cfg.user_content_dir = scratch.0.to_string_lossy().into_owned();
     cfg.email_inbound_secret = secret.map(str::to_string);
+    tweak(&mut cfg);
     let state = AppState::new(bed.db(), cfg, None).await;
 
     let tenant = receiving_tenant(bed, &state, SUPPORT).await;
@@ -684,6 +695,524 @@ async fn a_deployment_with_no_inbound_secret_receives_no_mail() {
     assert_eq!(status, StatusCode::NOT_FOUND, "{ack}");
     assert!(cards(&fx).await.is_empty());
     assert!(stored(&fx).await.is_empty());
+
+    bed.teardown().await;
+}
+
+// ── The direct SMTP receiver (MAIN-334) ─────────────────────────────────────
+//
+// These go over a REAL socket, for the reason the webhook cases go through the
+// real router: the trust story here is the SMTP dialogue itself — that `MAIL`
+// is refused before `AUTH`, that the envelope the transaction asserted is what
+// the allow-list sees — and a test that called `receive_authenticated` would
+// pass with the whole conversation unimplemented.
+
+const RELAY_USER: &str = "relay";
+const RELAY_PASS: &str = "relay-password";
+
+/// A fixture whose deployment also runs the SMTP receiver, bound on a loopback
+/// port the OS chose.
+struct SmtpFixture {
+    fx: Fixture,
+    addr: std::net::SocketAddr,
+    serving: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for SmtpFixture {
+    fn drop(&mut self) {
+        self.serving.abort();
+    }
+}
+
+async fn smtp_fixture(bed: &TestBed) -> SmtpFixture {
+    smtp_fixture_with(bed, |_| {}).await
+}
+
+async fn smtp_fixture_with(
+    bed: &TestBed,
+    tweak: impl FnOnce(&mut nook_control::Config),
+) -> SmtpFixture {
+    let fx = fixture_with(bed, Some(SECRET), |cfg| {
+        cfg.email_smtp_listen = Some("127.0.0.1:0".into());
+        cfg.email_smtp_username = Some(RELAY_USER.into());
+        cfg.email_smtp_password = Some(RELAY_PASS.into());
+        tweak(cfg);
+    })
+    .await;
+    let receiver = nook_control::services::email_smtp::bind(&fx.state.cfg)
+        .await
+        .expect("the receiver binds")
+        .expect("the receiver is enabled");
+    let addr = receiver.local_addr().expect("bound address");
+    let serving = tokio::spawn(nook_control::services::email_smtp::serve(
+        receiver,
+        fx.state.clone(),
+        std::future::pending(),
+    ));
+    SmtpFixture { fx, addr, serving }
+}
+
+/// One SMTP conversation, over the wire.
+struct Talk {
+    reader: tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>,
+    writer: tokio::net::tcp::OwnedWriteHalf,
+}
+
+impl Talk {
+    async fn connect(addr: std::net::SocketAddr) -> Talk {
+        let (r, w) = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("the receiver accepts")
+            .into_split();
+        Talk {
+            reader: tokio::io::BufReader::new(r),
+            writer: w,
+        }
+    }
+
+    /// Send a command and return the whole reply, continuation lines included.
+    async fn say(&mut self, line: &str) -> String {
+        use tokio::io::AsyncWriteExt as _;
+        self.writer
+            .write_all(format!("{line}\r\n").as_bytes())
+            .await
+            .expect("write");
+        self.reply().await
+    }
+
+    /// A reply is one or more `NNN-` lines then one `NNN ` line (RFC 5321).
+    async fn reply(&mut self) -> String {
+        use tokio::io::AsyncBufReadExt as _;
+        let mut out = String::new();
+        loop {
+            let mut line = String::new();
+            let n = self.reader.read_line(&mut line).await.expect("read");
+            assert!(n > 0, "the receiver closed mid-reply: {out}");
+            let done = line.as_bytes().get(3) != Some(&b'-');
+            out.push_str(&line);
+            if done {
+                return out;
+            }
+        }
+    }
+}
+
+fn auth_plain(user: &str, password: &str) -> String {
+    base64::engine::general_purpose::STANDARD.encode(format!("\0{user}\0{password}"))
+}
+
+/// One message as a front MTA hands it over: its verdict stamped on top, and
+/// `From:` deliberately disagreeing with the envelope so the test proves which
+/// one the gate reads.
+fn message(subject: &str, body: &str) -> String {
+    format!(
+        "Authentication-Results: mx.acme.example; spf=pass smtp.mailfrom={STAFF}\r\n\
+         From: Somebody Else <ceo@acme.example>\r\n\
+         To: {SUPPORT}\r\n\
+         Subject: {subject}\r\n\
+         Message-Id: <smtp-1@acme.example>\r\n\
+         \r\n\
+         {body}\r\n\
+         .\r\n"
+    )
+}
+
+/// Get through the greeting, `EHLO` and `AUTH` — the part every delivery
+/// shares.
+async fn authenticated(addr: std::net::SocketAddr) -> Talk {
+    let mut talk = Talk::connect(addr).await;
+    assert!(talk.reply().await.starts_with("220 "), "greeting");
+    let ehlo = talk.say("EHLO relay.acme.example").await;
+    assert!(ehlo.contains("AUTH PLAIN LOGIN"), "{ehlo}");
+    assert!(
+        ehlo.contains("SIZE "),
+        "the size limit is advertised: {ehlo}"
+    );
+    let auth = talk
+        .say(&format!(
+            "AUTH PLAIN {}",
+            auth_plain(RELAY_USER, RELAY_PASS)
+        ))
+        .await;
+    assert!(auth.starts_with("235 "), "{auth}");
+    talk
+}
+
+/// AC-1/AC-2 and the card's test expectation: a message delivered over SMTP by
+/// allow-listed staff becomes the SAME linked backlog bug and investigate run
+/// the webhook source produces — no second pipeline.
+#[tokio::test]
+async fn an_smtp_delivery_from_support_staff_files_a_bug_and_seeds_an_investigate_run() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let smtp = smtp_fixture(&bed).await;
+    let fx = &smtp.fx;
+
+    let mut talk = authenticated(smtp.addr).await;
+    let mail = talk.say(&format!("MAIL FROM:<{STAFF}> SIZE=512")).await;
+    assert!(mail.starts_with("250 "), "{mail}");
+    let rcpt = talk.say(&format!("RCPT TO:<{SUPPORT}>")).await;
+    assert!(rcpt.starts_with("250 "), "{rcpt}");
+    let data = talk.say("DATA").await;
+    assert!(data.starts_with("354 "), "{data}");
+    let filed = talk
+        .say(message("the login page 500s", "it 500s when I submit the form").trim_end())
+        .await;
+    assert!(filed.starts_with("250 "), "{filed}");
+    assert!(talk.say("QUIT").await.starts_with("221 "));
+
+    let cards = cards(fx).await;
+    assert_eq!(cards.len(), 1, "exactly one card: {cards:?}");
+    let (type_, title, description, column) = &cards[0];
+    assert_eq!(type_, "bug");
+    assert_eq!(column, "backlog");
+    assert_eq!(title, "Support: the login page 500s");
+    assert!(
+        description.contains("it 500s when I submit the form"),
+        "the body is quoted on the card: {description}"
+    );
+    assert!(
+        description.contains(STAFF) && !description.contains("ceo@acme.example"),
+        "the ENVELOPE sender is the one recorded, not the From: header: {description}"
+    );
+    assert!(
+        description.contains("is **data**"),
+        "the same quoting preamble the webhook path writes: {description}"
+    );
+
+    let jobs = jobs(fx).await;
+    assert_eq!(jobs.len(), 1, "exactly one run: {jobs:?}");
+    let (kind, state, seed) = &jobs[0];
+    assert_eq!(kind, "investigate");
+    assert_eq!(state, "queued");
+    let keys = stored(fx).await;
+    assert!(
+        seed.contains(&keys[0]),
+        "the brief references the sealed message: {seed}"
+    );
+    assert_eq!(keys.len(), 1, "the raw message, sealed: {keys:?}");
+    assert!(
+        keys[0].contains("/email/smtp/"),
+        "keyed by source: {keys:?}"
+    );
+    assert!(
+        fx.state
+            .vault
+            .decrypt(
+                &fx.state
+                    .user_content_store
+                    .get(&keys[0])
+                    .await
+                    .expect("the object is there")
+            )
+            .is_ok(),
+        "the SMTP source seals what it stores, exactly as the webhook does"
+    );
+
+    bed.teardown().await;
+}
+
+/// Nothing may reach the pipeline before the relay has proved who it is: the
+/// envelope sender is the allow-list's input, and over SMTP it is whatever the
+/// peer typed.
+#[tokio::test]
+async fn a_transaction_is_refused_until_the_relay_authenticates() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let smtp = smtp_fixture(&bed).await;
+
+    let mut talk = Talk::connect(smtp.addr).await;
+    assert!(talk.reply().await.starts_with("220 "));
+    assert!(talk.say("EHLO relay.acme.example").await.contains("250 "));
+    for command in [
+        format!("MAIL FROM:<{STAFF}>"),
+        format!("RCPT TO:<{SUPPORT}>"),
+        "DATA".to_string(),
+    ] {
+        let refused = talk.say(&command).await;
+        assert!(refused.starts_with("530 "), "{command} → {refused}");
+    }
+
+    let wrong = talk
+        .say(&format!("AUTH PLAIN {}", auth_plain(RELAY_USER, "not-it")))
+        .await;
+    assert!(wrong.starts_with("535 "), "{wrong}");
+    assert!(
+        talk.say(&format!("MAIL FROM:<{STAFF}>"))
+            .await
+            .starts_with("530 "),
+        "a failed AUTH leaves the session unauthenticated"
+    );
+
+    assert!(cards(&smtp.fx).await.is_empty());
+    bed.teardown().await;
+}
+
+/// A drop answers what an accept answers, BYTE FOR BYTE — the rule the
+/// webhook's 202 follows. A distinguishable reply would answer "is that person
+/// support staff" and "does this deployment serve that address" for free, in a
+/// line that ends up in the relay's mail log.
+///
+/// The accepted delivery is part of the comparison on purpose. Asserting only
+/// that a drop says `250 2.0.0 Ok` passes just as happily when the accept says
+/// `250 ... filed as NOOK-42`, which is the gap this test was written with.
+#[tokio::test]
+async fn a_dropped_smtp_delivery_is_indistinguishable_from_an_accepted_one() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let smtp = smtp_fixture(&bed).await;
+
+    // Allow-listed staff, to the tenant's address: this one is filed.
+    let accepted = one_delivery(smtp.addr, STAFF, SUPPORT).await;
+    assert_eq!(
+        cards(&smtp.fx).await.len(),
+        1,
+        "the accept really was filed"
+    );
+
+    for (from, to) in [
+        ("outsider@example.com", SUPPORT),
+        (STAFF, "nobody@elsewhere.example"),
+    ] {
+        let dropped = one_delivery(smtp.addr, from, to).await;
+        assert_eq!(
+            dropped, accepted,
+            "a drop must say exactly what an accept says ({from} -> {to})"
+        );
+    }
+
+    assert_eq!(
+        cards(&smtp.fx).await.len(),
+        1,
+        "neither dropped delivery may reach the board"
+    );
+    assert_eq!(
+        stored(&smtp.fx).await.len(),
+        1,
+        "nothing about a dropped message is kept"
+    );
+    bed.teardown().await;
+}
+
+/// One whole delivery on its own connection, returning the reply to the
+/// message.
+async fn one_delivery(addr: std::net::SocketAddr, from: &str, to: &str) -> String {
+    let mut talk = authenticated(addr).await;
+    assert!(talk
+        .say(&format!("MAIL FROM:<{from}>"))
+        .await
+        .starts_with("250 "));
+    assert!(talk
+        .say(&format!("RCPT TO:<{to}>"))
+        .await
+        .starts_with("250 "));
+    assert!(talk.say("DATA").await.starts_with("354 "));
+    let answer = talk.say(message("hello", "let me in").trim_end()).await;
+    assert!(talk.say("QUIT").await.starts_with("221 "));
+    answer.trim_end().to_string()
+}
+
+/// The reply must not name the card even when there IS one — that name is the
+/// oracle the test above exists to keep absent.
+#[tokio::test]
+async fn an_accepted_smtp_delivery_does_not_name_the_card_it_filed() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let smtp = smtp_fixture(&bed).await;
+
+    let filed = one_delivery(smtp.addr, STAFF, SUPPORT).await;
+    let cards = cards(&smtp.fx).await;
+    assert_eq!(cards.len(), 1, "the delivery was filed: {cards:?}");
+    assert_eq!(filed, "250 2.0.0 Ok", "the reply says nothing else");
+
+    bed.teardown().await;
+}
+
+/// An oversized upload costs the same to read as an accepted one, so it spends
+/// from the same per-connection budget. Without that, `MAX_TRANSACTIONS` bounds
+/// only the messages a peer got right.
+#[tokio::test]
+async fn an_oversized_message_spends_a_transaction() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let smtp = smtp_fixture_with(&bed, |cfg| cfg.email_smtp_max_bytes = 512).await;
+
+    let mut talk = authenticated(smtp.addr).await;
+    for i in 0..nook_control::services::email_smtp::MAX_TRANSACTIONS {
+        assert!(talk
+            .say(&format!("MAIL FROM:<{STAFF}>"))
+            .await
+            .starts_with("250 "));
+        assert!(talk
+            .say(&format!("RCPT TO:<{SUPPORT}>"))
+            .await
+            .starts_with("250 "));
+        assert!(talk.say("DATA").await.starts_with("354 "));
+        let answer = talk
+            .say(message("huge", &"x".repeat(4096)).trim_end())
+            .await;
+        assert!(answer.starts_with("552 "), "message {i}: {answer}");
+    }
+
+    // The budget is spent, and the goodbye was written on the heels of the last
+    // refusal — so it is already waiting to be read, no further command needed.
+    let ended = talk.reply().await;
+    assert!(
+        ended.starts_with("421 "),
+        "oversized messages never spent the connection's budget: {ended}"
+    );
+    assert!(cards(&smtp.fx).await.is_empty(), "none of them was filed");
+    bed.teardown().await;
+}
+
+/// AC-3, the fail-closed half of the sender check: with the relay named, a
+/// verdict reported by anything else is refused — including one the sender
+/// wrote themselves onto a message the relay never stamped.
+#[tokio::test]
+async fn a_named_relay_is_the_only_one_whose_verdict_counts() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let smtp = smtp_fixture_with(&bed, |cfg| {
+        cfg.email_smtp_authserv_id = Some("mx.acme.example".into())
+    })
+    .await;
+
+    let forged = stamped_delivery(smtp.addr, "attacker.example; spf=pass").await;
+    assert!(forged.starts_with("550 "), "{forged}");
+    assert!(cards(&smtp.fx).await.is_empty(), "nothing was filed");
+
+    let genuine = stamped_delivery(smtp.addr, "mx.acme.example; spf=pass").await;
+    assert!(genuine.starts_with("250 "), "{genuine}");
+    assert_eq!(cards(&smtp.fx).await.len(), 1);
+
+    bed.teardown().await;
+}
+
+/// One delivery carrying `stamp` as its whole `Authentication-Results`.
+async fn stamped_delivery(addr: std::net::SocketAddr, stamp: &str) -> String {
+    let mut talk = authenticated(addr).await;
+    assert!(talk
+        .say(&format!("MAIL FROM:<{STAFF}>"))
+        .await
+        .starts_with("250 "));
+    assert!(talk
+        .say(&format!("RCPT TO:<{SUPPORT}>"))
+        .await
+        .starts_with("250 "));
+    assert!(talk.say("DATA").await.starts_with("354 "));
+    talk.say(&format!(
+        "Authentication-Results: {stamp}\r\nFrom: <{STAFF}>\r\n\
+         Subject: stamped\r\n\r\nit broke\r\n."
+    ))
+    .await
+}
+
+/// The SMTP twin of the webhook's fail-closed sender check, proved over the
+/// wire: a message the relay did not stamp is refused permanently, so the relay
+/// does not retry it forever.
+#[tokio::test]
+async fn an_smtp_delivery_the_relay_did_not_check_is_refused() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let smtp = smtp_fixture(&bed).await;
+
+    let mut talk = authenticated(smtp.addr).await;
+    assert!(talk
+        .say(&format!("MAIL FROM:<{STAFF}>"))
+        .await
+        .starts_with("250 "));
+    assert!(talk
+        .say(&format!("RCPT TO:<{SUPPORT}>"))
+        .await
+        .starts_with("250 "));
+    assert!(talk.say("DATA").await.starts_with("354 "));
+    let refused = talk
+        .say(&format!(
+            "Subject: unstamped\r\nFrom: <{STAFF}>\r\n\r\nit broke\r\n."
+        ))
+        .await;
+    assert!(refused.starts_with("550 "), "{refused}");
+    assert!(
+        refused.lines().count() == 1,
+        "the reason cannot break out of its reply line: {refused:?}"
+    );
+
+    assert!(cards(&smtp.fx).await.is_empty());
+    bed.teardown().await;
+}
+
+/// A message over the cap is refused as it arrives, and the connection carries
+/// on — the relay has more to deliver and one oversized message is not a reason
+/// to make it reconnect.
+#[tokio::test]
+async fn an_oversized_message_is_refused_without_ending_the_session() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let smtp = smtp_fixture_with(&bed, |cfg| cfg.email_smtp_max_bytes = 512).await;
+
+    let mut talk = authenticated(smtp.addr).await;
+    assert!(talk
+        .say(&format!("MAIL FROM:<{STAFF}>"))
+        .await
+        .starts_with("250 "));
+    assert!(talk
+        .say(&format!("RCPT TO:<{SUPPORT}>"))
+        .await
+        .starts_with("250 "));
+    assert!(talk.say("DATA").await.starts_with("354 "));
+    let refused = talk
+        .say(message("huge", &"x".repeat(4096)).trim_end())
+        .await;
+    assert!(refused.starts_with("552 "), "{refused}");
+    assert!(cards(&smtp.fx).await.is_empty(), "nothing was filed");
+
+    // Same connection, a message that fits.
+    assert!(talk
+        .say(&format!("MAIL FROM:<{STAFF}>"))
+        .await
+        .starts_with("250 "));
+    assert!(talk
+        .say(&format!("RCPT TO:<{SUPPORT}>"))
+        .await
+        .starts_with("250 "));
+    assert!(talk.say("DATA").await.starts_with("354 "));
+    let filed = talk.say(message("small", "it broke").trim_end()).await;
+    assert!(filed.starts_with("250 "), "{filed}");
+    assert_eq!(cards(&smtp.fx).await.len(), 1);
+
+    bed.teardown().await;
+}
+
+/// A relay that has lost track of where it is must be told, not quietly
+/// forgiven: resetting would drop the recipients it already gave.
+#[tokio::test]
+async fn a_nested_mail_command_is_refused() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let smtp = smtp_fixture(&bed).await;
+
+    let mut talk = authenticated(smtp.addr).await;
+    assert!(talk
+        .say(&format!("MAIL FROM:<{STAFF}>"))
+        .await
+        .starts_with("250 "));
+    let nested = talk.say(&format!("MAIL FROM:<{STAFF}>")).await;
+    assert!(nested.starts_with("503 "), "{nested}");
+    // RSET is how a relay gets back to a clean transaction.
+    assert!(talk.say("RSET").await.starts_with("250 "));
+    assert!(talk
+        .say(&format!("MAIL FROM:<{STAFF}>"))
+        .await
+        .starts_with("250 "));
 
     bed.teardown().await;
 }
