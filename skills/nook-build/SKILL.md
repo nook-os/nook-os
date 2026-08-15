@@ -1,7 +1,7 @@
 ---
 name: nook-build
 description: "Build the one NookOS card a run is directed at, end to end: read the contract, implement it in a branch, verify, open a PR, and report the outcome. Judgment only — the control plane picks, claims, moves cards and records. Designed for directed build runs; never merges."
-version: 2.5.0
+version: 2.6.0
 author: NookOS
 license: MIT
 platforms: [linux, macos]
@@ -57,14 +57,17 @@ implementing without reading it is implementing from an incomplete brief. Fetch
 what the description depends on and nothing else:
 
 ```bash
-nook attachments list "$NOOK_BUILD_TASK"   # filename, type, size, id
-nook attachments get <ID>                  # into the working directory
-nook attachments get <ID> --out /tmp/spec.md
+nook issues attachments "$NOOK_BUILD_TASK"        # address, type, size, id
+nook issues download <ADDR>                       # into the working directory
+nook issues download <ADDR> --out /tmp/spec.md
 ```
+
+`<ADDR>` is what the listing prints — `MAIN-42/spec.md`, the card and the
+filename — or the attachment's uuid.
 
 Judgment, not a ritual: a mockup a criterion refers to is worth reading, a 12 MB
 video is not. Nothing downloads by itself, so a run only pays for what it asked
-for. `get` refuses to overwrite an existing file — pass `--out` to put it
+for. `download` refuses to overwrite an existing file — pass `--out` to put it
 somewhere else. Fetched files are scratch: keep them out of the commit unless a
 criterion says otherwise.
 
@@ -245,7 +248,7 @@ red test. It is not an escalation and not a reason to skip.
 aborted run or a failed assertion produces no video:
 
 ```bash
-nook attachments add "$NOOK_BUILD_TASK" /tmp/walkthrough/<file>.webm --replace
+nook issues attach "$NOOK_BUILD_TASK" /tmp/walkthrough/<file>.webm --replace
 ```
 
 `--replace` is the whole of "one video per card": a repair pass replaces the

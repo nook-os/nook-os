@@ -234,17 +234,14 @@ enum Command {
     /// human decision without losing it to a dropped connection (MAIN-159).
     #[command(subcommand)]
     Interactions(InteractionsCommand),
-    /// Files hung on a ticket or on one of its comments (MAIN-534, MAIN-594).
+    /// Deprecated: these verbs are `nook issues attach|attachments|download|
+    /// detach` now (MAIN-610). Kept for ONE release and hidden from `--help`,
+    /// so the new spelling is the only one anybody discovers.
     ///
-    ///     nook attachments list MAIN-42          what the card carries
-    ///     nook attachments get <id>              pull the one you want
-    ///     nook attachments add MAIN-42 shot.png  put one on the card
-    ///     nook attachments rm <id>               take it off again
-    ///
-    /// Reading answers a node token, because an agent reading its brief is what
-    /// it is for; writing needs a person, and says so.
-    /// A new noun group, per docs/cli-style.md — the top level stays frozen.
-    #[command(subcommand)]
+    /// Not politeness: loop agents are running right now with the old spelling
+    /// baked into skill text a fleet has not been re-taught, and a hard removal
+    /// breaks a build mid-run. Every invocation prints the replacement.
+    #[command(subcommand, hide = true)]
     Attachments(AttachmentsCommand),
     /// Your personal notebook (MAIN-66) at a terminal.
     ///
@@ -281,7 +278,12 @@ enum Command {
     #[command(subcommand)]
     Ports(PortsCommand),
     /// Board cards, by key — the verbs a skill used to reach for `curl` to
-    /// perform (MAIN-138).
+    /// perform (MAIN-138), and the files hung on them (MAIN-610).
+    ///
+    ///     nook issues attach MAIN-42 shot.png   put a file on the card
+    ///     nook issues attachments MAIN-42       what the card carries
+    ///     nook issues download MAIN-42/shot.png pull the one you want
+    ///     nook issues detach MAIN-42/shot.png   take it off again
     ///
     /// The CLI is the surface skills are meant to drive the board through: one
     /// tested client, fewer tokens, and no hand-built request body to get
@@ -772,6 +774,19 @@ async fn main() -> Result<()> {
         Command::Issues(IssuesCommand::SetParent { key, parent }) => {
             cli::issues_set_parent(&key, &parent).await
         }
+        Command::Issues(IssuesCommand::Attach {
+            key,
+            file,
+            replace,
+            json,
+        }) => attachments::add(&key, &file, replace, json).await,
+        Command::Issues(IssuesCommand::Attachments { key, json }) => {
+            attachments::list(&key, json).await
+        }
+        Command::Issues(IssuesCommand::Download { addr, out, force }) => {
+            attachments::get(&addr, out.as_deref(), force).await
+        }
+        Command::Issues(IssuesCommand::Detach { addr, json }) => attachments::rm(&addr, json).await,
         Command::Tunnels(TunnelsArgs {
             command: Some(TunnelsCommand::List { json }),
             ..
@@ -816,9 +831,11 @@ async fn main() -> Result<()> {
             json,
         }) => ports::list(workspace.as_deref(), browsable, json).await,
         Command::Attachments(AttachmentsCommand::List { task, json }) => {
+            attachments::deprecated("list");
             attachments::list(&task, json).await
         }
         Command::Attachments(AttachmentsCommand::Get { id, out, force }) => {
+            attachments::deprecated("get");
             attachments::get(&id, out.as_deref(), force).await
         }
         Command::Attachments(AttachmentsCommand::Add {
@@ -826,8 +843,12 @@ async fn main() -> Result<()> {
             file,
             replace,
             json,
-        }) => attachments::add(&task, &file, replace, json).await,
+        }) => {
+            attachments::deprecated("add");
+            attachments::add(&task, &file, replace, json).await
+        }
         Command::Attachments(AttachmentsCommand::Rm { id, json }) => {
+            attachments::deprecated("rm");
             attachments::rm(&id, json).await
         }
         Command::Notebook(NotebookCommand::List { folder, json }) => {
@@ -1307,6 +1328,54 @@ enum IssuesCommand {
         /// The epic, by key or uuid — or `none` to detach it entirely.
         parent: String,
     },
+    /// Put a local file on a card: upload it and attach it, in one command.
+    ///
+    /// The content type is taken from the extension, so a `.webm` is stored as
+    /// a video rather than as bytes nothing will play.
+    Attach {
+        /// The card, by key (MAIN-42) or id.
+        key: String,
+        /// The file to put on it.
+        file: String,
+        /// Take off anything on the card already carrying this filename first —
+        /// "one of these per card", rather than a pile of versions.
+        #[arg(long)]
+        replace: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Every file on a card and on its comments: address, type, size and the
+    /// id to fetch it with.
+    Attachments {
+        /// The card, by key (MAIN-42) or id.
+        key: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Download one attachment, preserving its original filename.
+    ///
+    /// Refuses rather than overwriting a file that is already there — a
+    /// download that silently replaced a file in a worktree would be the one
+    /// mistake nothing recovers from.
+    Download {
+        /// The attachment: `MAIN-42/shot.png` as `attachments` prints it, or
+        /// its uuid.
+        addr: String,
+        /// Where to put it: a path, or a directory to keep the name inside.
+        #[arg(long)]
+        out: Option<String>,
+        /// Overwrite what is already there.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Take one attachment off a card. Removes the stored file with it.
+    Detach {
+        /// The attachment: `MAIN-42/shot.png` as `attachments` prints it, or
+        /// its uuid.
+        addr: String,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -1479,6 +1548,9 @@ enum NotebookCommand {
     },
 }
 
+/// The retired `nook attachments …` spelling, kept for one release (MAIN-610
+/// AC-4). Every variant delegates to the `issues` verb that replaced it, so
+/// there is one implementation and the alias cannot drift from it.
 #[derive(Subcommand)]
 enum AttachmentsCommand {
     /// Every file on a ticket and on its comments: filename, type, size and
@@ -1495,7 +1567,7 @@ enum AttachmentsCommand {
     /// download that silently replaced a file in a worktree would be the one
     /// mistake nothing recovers from.
     Get {
-        /// The attachment id, as `list` prints it.
+        /// The attachment, by id or `MAIN-42/shot.png` address.
         id: String,
         /// Where to put it: a path, or a directory to keep the name inside.
         #[arg(long)]
@@ -1522,7 +1594,7 @@ enum AttachmentsCommand {
     },
     /// Take one attachment off a card. Removes the stored file with it.
     Rm {
-        /// The attachment id, as `list` prints it.
+        /// The attachment, by id or `MAIN-42/shot.png` address.
         id: String,
         #[arg(long)]
         json: bool,
@@ -2499,10 +2571,17 @@ mod cli_surface {
     /// Top-level entries split into `(flat verbs, noun groups)`. A group is a
     /// command that has subcommands of its own — `context`, `operator`, `k8s` —
     /// which is exactly what "put it under a noun" produces.
+    ///
+    /// Hidden entries are left out, because this reads the CLI a user actually
+    /// gets: a deprecated alias kept for one release (`attachments`, MAIN-610)
+    /// is not part of the surface, and counting it would make the guard say a
+    /// group is still there after the doc, the help and the skills all stopped
+    /// mentioning it.
     fn surface() -> (Vec<String>, Vec<String>) {
         let cmd = Cli::command();
         let (groups, leaves): (Vec<_>, Vec<_>) = cmd
             .get_subcommands()
+            .filter(|s| !s.is_hide_set())
             .partition(|s| s.get_subcommands().next().is_some());
         let name = |v: Vec<&clap::Command>| {
             let mut v: Vec<String> = v.into_iter().map(|s| s.get_name().to_string()).collect();
@@ -2615,6 +2694,84 @@ mod cli_surface {
              Sweep skills/ in THIS ticket — update every hit, bump each touched skill's\n\
              `version:`, and say in the PR that `nook teach` must be re-run.\n",
             unknown.join("\n  ")
+        );
+    }
+
+    /// MAIN-610 AC-7: the four attachment verbs are `issues` verbs now, and
+    /// the group they used to live in is gone from the surface.
+    ///
+    /// The flat set is untouched by the move — `FROZEN_LEAVES` above is the
+    /// proof — because a group folding into another group never reaches the
+    /// top level's leaves.
+    #[test]
+    fn attachment_verbs_live_under_issues() {
+        let (_, groups) = surface();
+        assert!(
+            !groups.contains(&"attachments".to_string()),
+            "`attachments` is folded into `issues`; found {groups:?}"
+        );
+        assert!(groups.contains(&"issues".to_string()));
+
+        let cmd = Cli::command();
+        let issues = cmd
+            .get_subcommands()
+            .find(|s| s.get_name() == "issues")
+            .expect("the issues group");
+        let verbs: Vec<&str> = issues.get_subcommands().map(|s| s.get_name()).collect();
+        for v in ["attach", "attachments", "download", "detach"] {
+            assert!(verbs.contains(&v), "nook issues {v} is missing: {verbs:?}");
+        }
+    }
+
+    /// AC-4: the retired spelling still PARSES, so a fleet running the old
+    /// skill text keeps working for one release — hidden, never removed.
+    #[test]
+    fn the_deprecated_attachments_group_still_routes() {
+        let cmd = Cli::command();
+        let old = cmd
+            .get_subcommands()
+            .find(|s| s.get_name() == "attachments")
+            .expect("the alias is kept for one release");
+        assert!(old.is_hide_set(), "the alias must not be discoverable");
+
+        for argv in [
+            vec!["nook", "attachments", "list", "MAIN-42"],
+            vec!["nook", "attachments", "get", "MAIN-42/shot.png"],
+            vec!["nook", "attachments", "add", "MAIN-42", "./shot.png"],
+            vec!["nook", "attachments", "rm", "MAIN-42/shot.png"],
+        ] {
+            Cli::try_parse_from(&argv).unwrap_or_else(|e| panic!("{argv:?} must route: {e}"));
+        }
+    }
+
+    /// AC-5: the sweep cannot silently rot.
+    ///
+    /// `every_verb_a_skill_teaches_exists` cannot catch this one — the alias
+    /// deliberately still exists, so the old spelling would pass it forever.
+    /// What must be true is narrower: no skill TEACHES the deprecated group,
+    /// because a fleet re-taught from these files should learn only the
+    /// spelling that survives the release.
+    #[test]
+    fn no_skill_teaches_the_deprecated_attachments_group() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills");
+        let mut stale: Vec<String> = Vec::new();
+        for entry in walkdir::WalkDir::new(&root)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name() == "SKILL.md")
+        {
+            let text = std::fs::read_to_string(entry.path()).expect("a readable skill");
+            for (n, line) in text.lines().enumerate() {
+                if line.contains("nook attachments") {
+                    stale.push(format!("{}:{}", entry.path().display(), n + 1));
+                }
+            }
+        }
+        assert!(
+            stale.is_empty(),
+            "\nSkills still teach `nook attachments`, which is deprecated:\n  {}\n\n\
+             It is `nook issues attach|attachments|download|detach` now (MAIN-610).\n",
+            stale.join("\n  ")
         );
     }
 
