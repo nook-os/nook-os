@@ -33,7 +33,8 @@
 //! without ports rather than an error: not every session runs a server.
 
 use nook_types::{
-    LeasedPort, NodeId, PortRange, PortRequirement, SessionId, TaskId, TenantId, WorkspaceId,
+    BrowsableTarget, LeasedPort, NodeId, PortRange, PortRequirement, SessionId, TaskId, TenantId,
+    WorkspaceId,
 };
 
 use crate::error::{ApiError, ApiResult};
@@ -64,6 +65,10 @@ pub fn default_requirements() -> Vec<PortRequirement> {
         // Every runtime: the zero-config default must keep behaving as it does
         // today for a repo that has declared nothing at all (AC-4).
         runtimes: Vec::new(),
+        // A workspace that has declared nothing has not said it serves a UI,
+        // and guessing would hand a recorder a port nothing is listening on.
+        browsable: false,
+        path: "/".into(),
     }]
 }
 
@@ -94,6 +99,37 @@ pub async fn requirements_of(
             }
         },
     }
+}
+
+/// What can a person open in this workspace, in declaration order (MAIN-596)?
+///
+/// **The one definition of the question.** Every caller that wants a frontend —
+/// a recorder, a link in the UI, a smoke check — asks here rather than reading
+/// the declaration and re-deriving the rule, because the rule has three parts
+/// (which listeners, in what order, under what path) and three callers deriving
+/// it independently is three chances to disagree about a repo with two
+/// frontends.
+///
+/// Reads the requirements IN FORCE, so it inherits their precedence: a
+/// `.nook.toml` wins where it declares, the stored workspace value fills in
+/// where it does not. It answers about the DECLARATION and not about any
+/// session, so it returns the variable rather than a number — the caller that
+/// has a session resolves the number from its leases.
+pub async fn browsable_targets(
+    state: &AppState,
+    tenant: TenantId,
+    workspace: Option<WorkspaceId>,
+) -> ApiResult<Vec<BrowsableTarget>> {
+    Ok(requirements_of(state, tenant, workspace)
+        .await?
+        .into_iter()
+        .filter(|r| r.browsable)
+        .map(|r| BrowsableTarget {
+            name: r.name,
+            env: r.env,
+            path: r.path,
+        })
+        .collect())
 }
 
 /// The range in force for a node, and where it came from.

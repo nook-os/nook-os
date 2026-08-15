@@ -344,6 +344,7 @@ use utoipa::OpenApi;
         nook_types::PortRange,
         nook_types::PortLease,
         nook_types::PortRequirement,
+        nook_types::BrowsableTarget,
         nook_types::LeasedPort,
         nook_types::SetPortRequirementsRequest,
         nook_types::SetWorkspaceCredentialRequest,

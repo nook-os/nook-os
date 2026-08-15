@@ -888,10 +888,51 @@ pub struct PortRequirement {
     /// the port, in a form its author can read.
     #[serde(default)]
     pub runtimes: Vec<String>,
+    /// Whether this listener serves a UI a person (or a recorder) can open
+    /// (MAIN-596).
+    ///
+    /// A repo can have several frontends — an app, an admin panel, a docs site
+    /// — so this is a field on each listener rather than one value on the
+    /// workspace, and MORE THAN ONE may carry it. The declaration is the
+    /// `[[ports]]` list, so "which frontends, in what order" is answered by the
+    /// order they are declared in.
+    ///
+    /// DECLARED, never detected: nothing scans a repo looking for a dev server.
+    /// Absent means not browsable, which is what keeps every declaration
+    /// written before this field parses unchanged.
+    #[serde(default)]
+    pub browsable: bool,
+    /// Where the browsable UI is served, so a caller does not have to guess a
+    /// prefix. `/` unless the repo says otherwise, and meaningless on a
+    /// listener that is not `browsable`.
+    #[serde(default = "default_path")]
+    pub path: String,
 }
 
 fn default_protocol() -> String {
     "tcp".into()
+}
+
+fn default_path() -> String {
+    "/".into()
+}
+
+/// One place a person can open, resolved from a workspace's declaration
+/// (MAIN-596 AC-7).
+///
+/// Name, variable and path — and deliberately not the NUMBER. Resolving what a
+/// workspace declares is a different question from what any one session leased,
+/// and folding them together would make the answer session-scoped for callers
+/// that have no session.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct BrowsableTarget {
+    /// The listener's name in the declaration — `web`, `admin`.
+    pub name: String,
+    /// The variable carrying the leased number, which is how a caller turns
+    /// this target into a URL for a given session.
+    pub env: String,
+    /// The path the UI is served under, `/` unless declared otherwise.
+    pub path: String,
 }
 
 /// A port actually leased to a session, as the node is told about it.

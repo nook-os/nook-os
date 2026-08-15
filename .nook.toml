@@ -107,12 +107,15 @@ env = "NOOK_AGENT_PORT"
 protocol = "tcp"
 required = true
 
-# The web app (Vite dev server) — the one a person actually opens.
+# The web app (Vite dev server) — the one a person actually opens, and the one
+# `browsable` names for anything that wants to open it (MAIN-596). The control
+# plane's own port is not marked: it serves the API, not a UI.
 [[ports]]
 name = "web"
 env = "NOOK_WEB_PORT"
 protocol = "tcp"
 required = true
+browsable = true
 
 # Team chat, its own service.
 [[ports]]

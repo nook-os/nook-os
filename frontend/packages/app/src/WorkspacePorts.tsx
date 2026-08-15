@@ -29,7 +29,14 @@ type Requirement = Schemas["PortRequirement"];
 /** A fresh row. `required` defaults false for the same reason the server's
  *  default declaration does: most sessions are a shell or an agent, and a node
  *  out of ports should not stop somebody opening a terminal. */
-const BLANK: Requirement = { name: "", env: "", protocol: "tcp", required: false };
+const BLANK: Requirement = {
+  name: "",
+  env: "",
+  protocol: "tcp",
+  required: false,
+  browsable: false,
+  path: "/",
+};
 
 /** Why `optional` is the setting whose consequence is invisible: the session
  *  starts either way and the variable is simply missing, so an app that falls
@@ -39,6 +46,14 @@ const REQUIRED_HELP =
   "optional: the session still starts and the variable is unset — the app must " +
   "fail fast rather than use a default, because that default is the literal " +
   "every other session would fall back to as well.";
+
+/** Marking a listener browsable says what it SERVES, not what it gets: leasing
+ *  is untouched either way (MAIN-596 NG-1). A repo may mark several — an app
+ *  and an admin panel are two frontends, not a conflict. */
+const BROWSABLE_HELP =
+  "browsable: this listener serves a UI somebody can open. Several listeners " +
+  "may be marked; the path is where the UI is served, `/` unless it sits " +
+  "under a prefix. Nothing about leasing changes.";
 
 /** The two collisions the API and the merged migration already depend on, found
  *  BEFORE the save so the message lands on the offending field (AC-3).
@@ -211,6 +226,8 @@ export function WorkspacePorts({
               <span>variable</span>
               <span>proto</span>
               <span title={REQUIRED_HELP}>required</span>
+              <span title={BROWSABLE_HELP}>browsable</span>
+              <span title={BROWSABLE_HELP}>path</span>
               <span />
             </div>
 
@@ -246,6 +263,26 @@ export function WorkspacePorts({
                     title={REQUIRED_HELP}
                     checked={!!r.required}
                     onChange={(e) => set(i, { required: e.target.checked })}
+                  />
+                  <input
+                    type="checkbox"
+                    aria-label={`listener ${i + 1} browsable`}
+                    title={BROWSABLE_HELP}
+                    checked={!!r.browsable}
+                    onChange={(e) => set(i, { browsable: e.target.checked })}
+                  />
+                  {/* Disabled rather than hidden when the listener is not
+                      browsable: a path on something nothing opens is inert, and
+                      a field that appears and disappears as a checkbox moves
+                      reads as a bug. */}
+                  <input
+                    className="input small mono"
+                    placeholder="/"
+                    aria-label={`listener ${i + 1} path`}
+                    title={BROWSABLE_HELP}
+                    disabled={!r.browsable}
+                    value={r.path ?? "/"}
+                    onChange={(e) => set(i, { path: e.target.value })}
                   />
                   <button
                     className="btn small icon"
@@ -287,7 +324,9 @@ export function WorkspacePorts({
                 invented here. */}
             <div className="ports-note faint small">
               If this repo commits a <span className="mono">.nook.toml</span>, the next scan
-              replaces what you save here — edit the file instead.
+              replaces what you save here — edit the file instead. The exception is a field the
+              file does not mention: <span className="mono">browsable</span> and its path survive
+              a scan of a file that says nothing about them.
             </div>
           </div>
         ) : declared === undefined ? (
@@ -317,6 +356,9 @@ export function WorkspacePorts({
                   <span className="faint small" title={REQUIRED_HELP}>
                     optional
                   </span>
+                )}
+                {r.browsable && (
+                  <Pill title={BROWSABLE_HELP}>browsable {r.path ?? "/"}</Pill>
                 )}
               </div>
             ))}

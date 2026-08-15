@@ -132,3 +132,43 @@ describe("saving refreshes both queries it reads from", () => {
     expect(keys).toContain(JSON.stringify(["workspaces", "ws-1"]));
   });
 });
+
+// An owner marking a frontend without touching the repo (MAIN-596 AC-6). The
+// assertion is on what reaches the API rather than on the checkbox, because the
+// checkbox rendering and the field being SENT are two different failures and
+// only the second one loses the setting.
+describe("marking a listener browsable", () => {
+  beforeEach(() => cleanup());
+
+  it("sends browsable and its path in the declaration", async () => {
+    const { api } = (await import("@nookos/api")) as unknown as {
+      api: { PUT: ReturnType<typeof vi.fn> };
+    };
+    api.PUT.mockClear();
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <WorkspacePorts workspaceId="ws-1" declaredRaw={undefined} />
+      </QueryClientProvider>,
+    );
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole("button", { name: "edit" }));
+    await user.click(await screen.findByRole("button", { name: /listener/ }));
+    await user.type(screen.getByLabelText("listener 1 name"), "admin");
+    await user.type(screen.getByLabelText("listener 1 variable"), "ADMIN_PORT");
+    // The path is inert until the listener is browsable, so it cannot be typed
+    // into first — which is the point of disabling it rather than hiding it.
+    const path = screen.getByLabelText("listener 1 path") as HTMLInputElement;
+    expect(path.disabled).toBe(true);
+    await user.click(screen.getByLabelText("listener 1 browsable"));
+    await user.clear(path);
+    await user.type(path, "/admin");
+    await user.click(screen.getByRole("button", { name: "save" }));
+
+    await waitFor(() => expect(api.PUT).toHaveBeenCalled());
+    expect(api.PUT.mock.calls[0][1].body.requirements).toEqual([
+      { name: "admin", env: "ADMIN_PORT", protocol: "tcp", required: false, browsable: true, path: "/admin" },
+    ]);
+  });
+});
