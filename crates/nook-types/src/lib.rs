@@ -3877,6 +3877,76 @@ pub struct EnrollResponse {
     pub tenant_slug: String,
 }
 
+/// What a *scoped* token may do — the closed set, and all of it (MAIN-602).
+///
+/// Closed rather than an open string on purpose. A credential's authority is
+/// not a place for free text: an unrecognised scope is either a typo that would
+/// silently grant nothing, or a name the enforcement side has never heard of
+/// and would therefore never check. Both fail quietly, which is the one failure
+/// mode a permission system may not have. Adding a member here is a deliberate
+/// change with an enforcement site attached (NG-5).
+///
+/// The wire form is `resource:verb`, which is what a person types and what the
+/// listing shows.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, ToSchema,
+)]
+pub enum TokenScope {
+    /// Write a run's report onto a card: a comment, and files attached to one.
+    /// The narrowest thing a CI job needs, and the case this ticket opened on.
+    #[serde(rename = "reports:write")]
+    ReportsWrite,
+    /// Read cards.
+    #[serde(rename = "tasks:read")]
+    TasksRead,
+    /// Create, edit, move, label, claim and archive cards.
+    #[serde(rename = "tasks:write")]
+    TasksWrite,
+    /// The `/mcp` door, whose surface is the whole MCP tool set.
+    #[serde(rename = "mcp")]
+    Mcp,
+}
+
+impl TokenScope {
+    /// Every member, which is also the answer to "what may I ask for?".
+    pub const ALL: [TokenScope; 4] = [
+        TokenScope::ReportsWrite,
+        TokenScope::TasksRead,
+        TokenScope::TasksWrite,
+        TokenScope::Mcp,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TokenScope::ReportsWrite => "reports:write",
+            TokenScope::TasksRead => "tasks:read",
+            TokenScope::TasksWrite => "tasks:write",
+            TokenScope::Mcp => "mcp",
+        }
+    }
+
+    /// Parse one wire name. `None` is the unknown-scope case a mint must refuse
+    /// by name rather than store — see `CreateUserTokenRequest::scopes`.
+    pub fn parse(s: &str) -> Option<Self> {
+        TokenScope::ALL.into_iter().find(|k| k.as_str() == s.trim())
+    }
+
+    /// Every member, comma-joined — the "did you mean" half of a rejection.
+    pub fn all_names() -> String {
+        TokenScope::ALL
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+impl std::fmt::Display for TokenScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Asking for a personal access token.
 #[derive(Debug, Clone, Default, Deserialize, ToSchema)]
 pub struct CreateUserTokenRequest {
@@ -3886,6 +3956,19 @@ pub struct CreateUserTokenRequest {
     /// Expire it after this many days. Omit for a token that doesn't expire.
     #[serde(default)]
     pub expires_in_days: Option<i64>,
+    /// Narrow this token to these scopes. Omit (or send an empty list) for the
+    /// unscoped credential that has always existed: everything its owner can do.
+    ///
+    /// Deliberately `String` rather than [`TokenScope`]: an unknown scope has to
+    /// come back as a 400 naming it, and a typed field would instead be a serde
+    /// rejection whose message is about the JSON, not about the scope.
+    #[serde(default)]
+    pub scopes: Option<Vec<String>>,
+    /// Narrow it further to one workspace, by id, slug or name. Absent means
+    /// tenant-wide. Only meaningful alongside `scopes` — an unscoped token is
+    /// already everything its owner can do.
+    #[serde(default)]
+    pub workspace: Option<String>,
 }
 
 /// The one and only time the token itself is readable.
@@ -3896,16 +3979,36 @@ pub struct CreateUserTokenResponse {
     pub id: String,
     pub name: String,
     pub expires_at: Option<DateTime<Utc>>,
+    /// Empty for an unscoped token.
+    #[serde(default)]
+    pub scopes: Vec<TokenScope>,
+    /// The workspace it was narrowed to, if any.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
 }
 
 /// A personal access token as listed back — everything except the secret.
-#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
+///
+/// Not `FromDbRow`: `scopes` is a space-separated column that becomes a typed
+/// list here, so the repo maps a private row struct onto this rather than the
+/// derive reading the column raw.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct UserToken {
     pub id: String,
     pub name: String,
     pub last_used_at: Option<DateTime<Utc>>,
     pub expires_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+    /// Empty for an unscoped token — the credential that can do everything its
+    /// owner can, which is what every token was before MAIN-602.
+    #[serde(default)]
+    pub scopes: Vec<TokenScope>,
+    /// Set only when the token is narrowed to one workspace.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    /// The narrowed workspace's slug, for a listing a person can read.
+    #[serde(default)]
+    pub workspace_slug: Option<String>,
 }
 
 /// Keystrokes for a session. What a script sends instead of attaching a

@@ -99,8 +99,7 @@ async fn post(body: Value, extra: &[(&str, &str)]) -> (StatusCode, String) {
 }
 
 /// A resolved MCP identity, as `mcp_auth` inserts one into the request's
-/// extensions. `post_as(None, …)` is the static `MCP_TOKEN` path, which
-/// resolves nobody.
+/// extensions. `post_as(None, …)` is a request that resolved nobody.
 fn a_caller() -> McpCaller {
     McpCaller {
         person_id: Uuid::now_v7(),
@@ -156,10 +155,10 @@ fn sse_payload(body: &str) -> Value {
     serde_json::from_str(data).unwrap()
 }
 
-/// MAIN-592 AC-5: `tools/list` is filtered per request, so the static
-/// `MCP_TOKEN` — which resolves no caller — is offered nothing rather than a
-/// menu of 47 tools it would be refused on calling. Served, not 422'd or 401'd:
-/// the credential is still valid (NG-6), it simply reaches nothing.
+/// MAIN-592 AC-5: `tools/list` is filtered per request, so a request that
+/// resolved no caller is offered nothing rather than a menu of 47 tools it would
+/// be refused on calling. Served, not 422'd or 401'd: the credential is still
+/// valid (NG-6), it simply reaches nothing.
 #[tokio::test]
 async fn tools_list_offers_a_static_token_only_what_it_can_use() {
     let (status, body) = post_as(

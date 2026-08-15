@@ -50,7 +50,6 @@ pub struct Config {
     pub default_tenant_name: String,
     pub auth_dev_mode: bool,
 
-    pub mcp_token: Option<String>,
     pub dev_join_token: Option<String>,
 
     /// Where node binaries live, served at `/dist/<artifact>`. The control
@@ -463,7 +462,6 @@ impl Config {
             s3_path_style: env_opt("NOOK_S3_PATH_STYLE")
                 .map(|v| v == "true" || v == "1")
                 .unwrap_or(true),
-            mcp_token: env_opt("MCP_TOKEN"),
             dev_join_token: env_opt("NOOK_DEV_JOIN_TOKEN"),
 
             cache_provider: env_opt("NOOK_CACHE_PROVIDER").unwrap_or_else(|| "memory".into()),
@@ -662,7 +660,6 @@ impl Config {
             session_ttl_hours: 168,
             default_tenant_name: "test".into(),
             auth_dev_mode: true,
-            mcp_token: None,
             dev_join_token: None,
             dist_dir: "/tmp".into(),
             releases_repo: "nook-os/nook-os".into(),
@@ -750,6 +747,63 @@ fn check_redis_url(uses_redis: bool, env_name: &str, redis_url: Option<&str>) ->
     crate::redis_client::RedisClient::open(url)
         .with_context(|| format!("{env_name}=redis but NOOK_REDIS_URL is malformed"))?;
     Ok(())
+}
+
+/// Settings this build no longer honours, each paired with what replaced it.
+///
+/// Held as DATA rather than as an `if` at the boot site so the warning and the
+/// replacement it names cannot drift apart, and so a test can assert every entry
+/// actually says what to do instead. A retired setting that warns "this is
+/// ignored" and stops there leaves an operator holding a broken deployment and a
+/// search box.
+pub const RETIRED_ENV: &[(&str, &str)] = &[(
+    "MCP_TOKEN",
+    "the static MCP token is retired (MAIN-602). /mcp now takes a personal access \
+     token carrying the 'mcp' scope — mint one with `POST /api/v1/tokens` \
+     {\"scopes\":[\"mcp\"]}, or from Settings → Access tokens — or an OIDC access \
+     token as before. It is safe to delete MCP_TOKEN from your environment.",
+)];
+
+/// Warn about every retired setting this process still finds in its environment.
+///
+/// Called at boot, after the subscriber is installed. A deployment that still
+/// sets one is not broken by it — the value is simply read by nobody — so this
+/// is a warning and never a refusal.
+pub fn warn_retired_env() {
+    for (name, replacement) in RETIRED_ENV {
+        if std::env::var(name).is_ok() {
+            tracing::warn!(
+                setting = name,
+                "{name} is set but no longer does anything: {replacement}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod retired_env_tests {
+    use super::RETIRED_ENV;
+
+    /// AC-5: a deployment still setting the retired variable is told what to
+    /// mint instead — the whole value of the warning is the second half.
+    #[test]
+    fn every_retired_setting_names_its_replacement() {
+        for (name, replacement) in RETIRED_ENV {
+            assert!(!replacement.is_empty(), "{name} says nothing");
+            assert!(
+                replacement.contains("MAIN-"),
+                "{name} does not name the change that retired it: {replacement}"
+            );
+        }
+        let (_, mcp) = RETIRED_ENV
+            .iter()
+            .find(|(n, _)| *n == "MCP_TOKEN")
+            .expect("MCP_TOKEN is retired");
+        assert!(
+            mcp.contains("'mcp' scope"),
+            "names the scope to mint: {mcp}"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -26,14 +26,15 @@ use nook_types::{
     UserNoteSummary, WorkspaceDetail,
 };
 
-/// The per-request MCP caller identity resolved from an OIDC bearer (MAIN-102).
+/// The per-request MCP caller identity (MAIN-102), resolved from an OIDC bearer
+/// or from a personal access token carrying the `mcp` scope (MAIN-602).
 ///
-/// The control plane's `mcp_auth` middleware resolves the token's userinfo to a
-/// NookOS user and inserts this into the HTTP request's extensions; rmcp
-/// forwards `http::request::Parts` into each tool's request context, so a
-/// notebook tool reads it back with `parts.extensions.get::<McpCaller>()`. The
-/// static `MCP_TOKEN` path inserts nothing — those calls have no person, and
-/// every notebook tool refuses them.
+/// The control plane's `mcp_auth` middleware resolves the credential to a NookOS
+/// user and inserts this into the HTTP request's extensions; rmcp forwards
+/// `http::request::Parts` into each tool's request context, so a notebook tool
+/// reads it back with `parts.extensions.get::<McpCaller>()`. A request that
+/// resolved nobody carries no `McpCaller`, and every tenant- or person-scoped
+/// tool refuses it.
 #[derive(Debug, Clone)]
 pub struct McpCaller {
     pub person_id: Uuid,
@@ -683,14 +684,14 @@ const GENERIC: &str = "internal error";
 pub const DEFAULT_TAIL_LINES: u32 = 100;
 
 /// The notebook caller's person, or the explicit not-authenticated error every
-/// notebook tool returns for the static `MCP_TOKEN` path (which carries no
-/// person). The identity rides in the request's extensions (see [`McpCaller`]).
+/// notebook tool returns for a request that resolved nobody. The identity rides
+/// in the request's extensions (see [`McpCaller`]).
 fn require_person(parts: &Parts) -> Result<Uuid, McpError> {
     require_caller(parts).map(|c| c.person_id)
 }
 
-/// The full authenticated MCP caller, or the same pointed refusal `require_person`
-/// gives the static-`MCP_TOKEN` path. Kanban work tools (dispatch/start-work) need
+/// The full authenticated MCP caller, or the same pointed refusal
+/// `require_person` gives an unresolved one. Kanban work tools (dispatch/start-work) need
 /// the caller's `user_id`/`tenant_id`, not just the person, to authorize exactly
 /// as the HTTP routes do (MAIN-223 AC-4).
 fn require_caller(parts: &Parts) -> Result<McpCaller, McpError> {
@@ -1490,7 +1491,7 @@ impl NookMcp {
     }
 
     // ── Notebook tools (person-scoped; MAIN-102) ────────────────────────────
-    // Each requires an OIDC-resolved person; the static MCP_TOKEN path gets the
+    // Each requires a resolved person; a request that carries none gets the
     // clear not-a-user error from `require_person`. The person rides in the
     // request extensions, which rmcp exposes via `Extension<Parts>`.
 
@@ -1744,9 +1745,9 @@ impl NookMcp {
 /// The tools offered to a caller whose identity did not resolve (AC-5).
 ///
 /// Empty, and that is the answer rather than an oversight: every tool on this
-/// surface reads or writes one tenant's or one person's data, so the static
-/// `MCP_TOKEN` — which resolves neither — is offered nothing instead of a menu
-/// it would be refused on calling. A list rather than a hardcoded empty answer,
+/// surface reads or writes one tenant's or one person's data, so a caller that
+/// resolves to neither is offered nothing instead of a menu it would be refused
+/// on calling. A list rather than a hardcoded empty answer,
 /// so a genuinely identity-free tool can join it without unpicking the filter.
 const CALLER_FREE_TOOLS: &[&str] = &[];
 
@@ -1879,8 +1880,8 @@ mod tests {
 
     #[test]
     fn require_person_refuses_with_a_pointed_error_when_unauthenticated() {
-        // No McpCaller in extensions — the MCP_TOKEN path. Every notebook tool
-        // takes this branch and must refuse (AC-3).
+        // No McpCaller in extensions. Every notebook tool takes this branch and
+        // must refuse (AC-3).
         let err = require_person(&parts_with(None)).unwrap_err();
         assert!(
             err.message.contains("not authenticated as a user"),
@@ -2020,8 +2021,8 @@ mod tests {
         assert_eq!(got.user_id, caller.user_id);
         assert_eq!(got.tenant_id, caller.tenant_id);
 
-        // The static MCP_TOKEN path carries no caller: the work tools refuse it
-        // with the same pointed error, never a silent dead end.
+        // A request that resolved no caller: the work tools refuse it with the
+        // same pointed error, never a silent dead end.
         let err = require_caller(&parts_with(None)).unwrap_err();
         assert!(
             err.message.contains("not authenticated as a user"),

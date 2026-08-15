@@ -113,9 +113,9 @@ pub struct AppState {
     /// Recently validated MCP bearer tokens (hash → validated-at), so OIDC
     /// access-token checks don't hit the IdP's userinfo endpoint per request.
     /// Cache of validated OIDC MCP bearer tokens → (when validated, the resolved
-    /// caller). Only OIDC tokens are cached here (the static `MCP_TOKEN` is a
-    /// direct compare, needing no userinfo round-trip); each entry is a person
-    /// the token resolved to (MAIN-102).
+    /// caller). Only OIDC tokens are cached here — the personal-access-token
+    /// door is a single indexed lookup and needs no userinfo round-trip to save;
+    /// each entry is a person the token resolved to (MAIN-102).
     pub mcp_auth_cache: Arc<dashmap::DashMap<u64, (std::time::Instant, nook_mcp::McpCaller)>>,
     /// How much review work each repo has, cached behind a TTL (MAIN-448).
     ///

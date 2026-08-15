@@ -33,6 +33,9 @@ async fn main() -> Result<()> {
     nook_errors::install_panic_hook();
 
     let cli = Cli::parse();
+    // Before anything reads config, so an operator whose deployment still sets a
+    // retired variable hears about it in the same breath as the boot (MAIN-602).
+    nook_infra::config::warn_retired_env();
     let cfg = Config::from_env()?;
 
     // One control plane per SQLite file (MAIN-197). Taken BEFORE the pool,

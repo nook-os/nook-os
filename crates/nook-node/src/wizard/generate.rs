@@ -37,7 +37,6 @@ pub struct ServerAnswers {
     pub database_url: Option<String>,
     pub session_secret: String,
     pub secrets_key: String,
-    pub mcp_token: String,
     pub oidc: Option<Oidc>,
     /// Sign-in with no identity provider. Refused in production by the control
     /// plane itself; offered here only so someone can look around first.
@@ -158,8 +157,7 @@ pub fn env_file(a: &ServerAnswers) -> String {
     let _ = writeln!(s, "SESSION_SECRET={}", a.session_secret);
     s.push_str("SESSION_TTL_HOURS=168\n");
     s.push_str("# At-rest encryption for stored secrets. LOSING THIS LOSES THEM.\n");
-    let _ = writeln!(s, "SECRETS_KEY={}", a.secrets_key);
-    let _ = writeln!(s, "MCP_TOKEN={}\n", a.mcp_token);
+    let _ = writeln!(s, "SECRETS_KEY={}\n", a.secrets_key);
 
     match &a.oidc {
         Some(o) => {
@@ -564,7 +562,6 @@ mod tests {
             database_url: None,
             session_secret: "s".repeat(64),
             secrets_key: "k".repeat(64),
-            mcp_token: "m".repeat(32),
             oidc: None,
             dev_auth: false,
             tenant_name: "acme".into(),

@@ -36,7 +36,7 @@ use nook_db::paging::{DbPage, ListSpec, PageArgs};
 use nook_db::{params, Db, DbPool};
 use nook_types::{
     AuthSessionId, DevAccount, IdentityId, Tenant, TenantId, TenantMemberItem, User, UserId,
-    UserToken,
+    UserToken, WorkspaceId,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -125,6 +125,64 @@ pub struct NewUserToken {
     pub token_hash: String,
     pub name: String,
     pub expires_at: Option<DateTime<Utc>>,
+    /// The narrowing (MAIN-602), in the column's storage form: space-separated
+    /// scope names, or `None` for the unscoped token every row was before.
+    pub scopes: Option<String>,
+    /// Narrowed to one workspace. Only meaningful alongside `scopes`.
+    pub workspace_id: Option<WorkspaceId>,
+}
+
+/// A `user_tokens` row as stored, before its `scopes` column becomes a typed
+/// list. Separate from [`UserToken`] because the derive reads columns verbatim
+/// and the API shape is a `Vec<TokenScope>`; mapping here keeps the parse in one
+/// place rather than in every caller.
+///
+/// The two uuids are read AS uuids and stringified here, never selected as
+/// `CAST(… AS text)` (MAIN-602). On SQLite every uuid this workspace writes is a
+/// 16-byte blob (MAIN-437), so casting one to text hands back those bytes and
+/// the decode dies `Utf8Error { valid_up_to: 1 }` — a 500 from
+/// `GET /api/v1/tokens`, which is the page a person revokes a credential from.
+/// `Uuid`'s own decoder already spans both engines and both SQLite storage
+/// shapes, so reading the column as what it is costs nothing and cannot drift.
+#[derive(Debug, Clone, nook_db::FromDbRow)]
+struct UserTokenRow {
+    id: Uuid,
+    name: String,
+    last_used_at: Option<DateTime<Utc>>,
+    expires_at: Option<DateTime<Utc>>,
+    created_at: DateTime<Utc>,
+    scopes: Option<String>,
+    workspace_id: Option<Uuid>,
+    workspace_slug: Option<String>,
+}
+
+/// The narrowing on one credential row, as stored (MAIN-602). Its own type
+/// rather than a tuple because the two `Option`s are easy to swap and mean
+/// opposite things.
+#[derive(Debug, Clone, Default)]
+pub struct TokenNarrowing {
+    /// Space-separated scope names; `None` is an unscoped token.
+    pub scopes: Option<String>,
+    pub workspace_id: Option<Uuid>,
+}
+
+impl UserTokenRow {
+    fn into_token(self) -> UserToken {
+        UserToken {
+            id: self.id.to_string(),
+            name: self.name,
+            last_used_at: self.last_used_at,
+            expires_at: self.expires_at,
+            created_at: self.created_at,
+            scopes: self
+                .scopes
+                .as_deref()
+                .map(|s| crate::auth::scopes::ScopeSet::parse_stored(s).to_vec())
+                .unwrap_or_default(),
+            workspace_id: self.workspace_id.map(|w| w.to_string()),
+            workspace_slug: self.workspace_slug,
+        }
+    }
 }
 
 #[async_trait]
@@ -371,6 +429,16 @@ pub trait IdentityRepository: Send + Sync {
     ) -> ApiResult<()>;
 
     async fn list_user_tokens(&self, user_id: UserId) -> ApiResult<Vec<UserToken>>;
+
+    /// The narrowing on ONE token, by its row id.
+    ///
+    /// Keyed on the credential rather than on its owner because that is the
+    /// question: what may *this credential* do. Reading it out of the owner's
+    /// listing would answer about the wrong row after a tenant switch, where the
+    /// caller's `user_id` is the person's sibling row in the other tenant and the
+    /// token's is not — and answering "no narrowing" there is the one wrong
+    /// answer, because it is the wide one.
+    async fn user_token_narrowing(&self, id: Uuid) -> ApiResult<Option<TokenNarrowing>>;
 
     /// Scoped to the owner: one user revoking another's credential is an
     /// administrative act, not a self-service one. Returns rows removed.
@@ -1246,15 +1314,18 @@ impl IdentityRepository for DbIdentityRepository {
     async fn create_user_token(&self, new: NewUserToken) -> ApiResult<()> {
         self.db
             .exec(
-                "INSERT INTO user_tokens (id, tenant_id, user_id, token_hash, name, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6)",
+                "INSERT INTO user_tokens
+             (id, tenant_id, user_id, token_hash, name, expires_at, scopes, workspace_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
                 params![
                     new.id,
                     new.tenant,
                     new.user_id,
                     new.token_hash,
                     new.name,
-                    new.expires_at
+                    new.expires_at,
+                    new.scopes,
+                    new.workspace_id.map(|w| w.0)
                 ],
             )
             .await?;
@@ -1282,18 +1353,34 @@ impl IdentityRepository for DbIdentityRepository {
         Ok(())
     }
 
+    /// No dialect call and no cast: see [`UserTokenRow`] for why casting a uuid
+    /// to text is the one thing this query must not do.
     async fn list_user_tokens(&self, user_id: UserId) -> ApiResult<Vec<UserToken>> {
-        Ok(self
+        let rows: Vec<UserTokenRow> = self
             .db
             .query_all(
-                &format!(
-                    "SELECT {}, name, last_used_at, expires_at, created_at
-         FROM user_tokens WHERE user_id = $1 ORDER BY created_at DESC",
-                    type_mapping(self.db.engine()).cast("id", "text")
-                ),
+                "SELECT t.id, t.name, t.last_used_at, t.expires_at, t.created_at,
+                 t.scopes, t.workspace_id, w.slug AS workspace_slug
+         FROM user_tokens t LEFT JOIN workspaces w ON w.id = t.workspace_id
+         WHERE t.user_id = $1 ORDER BY t.created_at DESC",
                 params![user_id],
             )
-            .await?)
+            .await?;
+        Ok(rows.into_iter().map(UserTokenRow::into_token).collect())
+    }
+
+    async fn user_token_narrowing(&self, id: Uuid) -> ApiResult<Option<TokenNarrowing>> {
+        let row: Option<(Option<String>, Option<Uuid>)> = self
+            .db
+            .query_opt(
+                "SELECT scopes, workspace_id FROM user_tokens WHERE id = $1",
+                params![id],
+            )
+            .await?;
+        Ok(row.map(|(scopes, workspace_id)| TokenNarrowing {
+            scopes,
+            workspace_id,
+        }))
     }
 
     async fn revoke_user_token(&self, id: Uuid, user_id: UserId) -> ApiResult<u64> {
@@ -2321,6 +2408,16 @@ impl IdentityRepository for FakeIdentityRepository {
             last_used_at: None,
             expires_at: new.expires_at,
             created_at: Utc::now(),
+            scopes: new
+                .scopes
+                .as_deref()
+                .map(|s| crate::auth::scopes::ScopeSet::parse_stored(s).to_vec())
+                .unwrap_or_default(),
+            workspace_id: new.workspace_id.map(|w| w.0.to_string()),
+            // The real query joins `workspaces` for this; the fake holds no
+            // workspaces, so it reports the id and no slug rather than inventing
+            // one.
+            workspace_slug: None,
         });
         Ok(())
     }
@@ -2341,6 +2438,8 @@ impl IdentityRepository for FakeIdentityRepository {
             name: name.into(),
             // The real impl's fixed 365-day policy, expressed as a value here.
             expires_at: Some(Utc::now() + chrono::Duration::days(365)),
+            scopes: None,
+            workspace_id: None,
         })
         .await
     }
@@ -2356,6 +2455,26 @@ impl IdentityRepository for FakeIdentityRepository {
         // Newest first, matching the real query's `ORDER BY created_at DESC`.
         v.sort_by_key(|t| std::cmp::Reverse(t.created_at));
         Ok(v)
+    }
+
+    async fn user_token_narrowing(&self, id: Uuid) -> ApiResult<Option<TokenNarrowing>> {
+        let st = self.inner.lock().unwrap();
+        let key = id.to_string();
+        Ok(st
+            .user_tokens
+            .iter()
+            .find(|t| t.id == key)
+            .map(|t| TokenNarrowing {
+                scopes: (!t.scopes.is_empty())
+                    .then(|| {
+                        t.scopes
+                            .iter()
+                            .copied()
+                            .collect::<crate::auth::scopes::ScopeSet>()
+                    })
+                    .map(|s| s.to_stored()),
+                workspace_id: t.workspace_id.as_deref().and_then(|w| w.parse().ok()),
+            }))
     }
 
     async fn revoke_user_token(&self, id: Uuid, user_id: UserId) -> ApiResult<u64> {

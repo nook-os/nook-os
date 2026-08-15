@@ -684,39 +684,60 @@ where
 }
 
 /// Bearer gate for the MCP endpoint. Two accepted credentials:
-/// 1. The static `MCP_TOKEN` (dev / simple header-configured clients).
+/// 1. A personal access token carrying the `mcp` scope — or an unscoped one,
+///    which is its owner entire. This is what replaced the static `MCP_TOKEN`
+///    (MAIN-602): a shared secret that resolved to nobody, could not be revoked
+///    without a redeploy, and since MAIN-592 could not reach tenant data at all.
 /// 2. An OIDC access token from the configured issuer, validated against the
 ///    provider's userinfo endpoint — provider-agnostic (works for JWT and
 ///    opaque tokens alike) and cached briefly.
+///
+/// Both resolve to a real [`nook_mcp::McpCaller`], so MAIN-592's tenant
+/// isolation applies to either without knowing which one it got.
 ///
 /// Failures answer with RFC 9728 discovery (`WWW-Authenticate` pointing at
 /// `/.well-known/oauth-protected-resource`) so OAuth-capable MCP clients
 /// (ChatGPT connectors, Claude custom connectors) can find the issuer.
 async fn mcp_auth(
     axum::extract::State(state): axum::extract::State<AppState>,
-    mut req: axum::extract::Request,
+    req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    let bearer = req
-        .headers()
+    let (mut parts, body) = req.into_parts();
+    let bearer = parts
+        .headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(str::to_string);
     if let Some(token) = bearer {
-        // The static MCP_TOKEN is valid but carries no person — notebook tools
-        // refuse it with a pointed error (MAIN-102 AC-3).
-        if state.cfg.mcp_token.as_deref() == Some(token.as_str()) {
-            return next.run(req).await;
+        if token.starts_with(crate::auth::USER_TOKEN_PREFIX) {
+            match mcp_caller_from_token(&state, &token, &mut parts).await {
+                Ok(caller) => {
+                    parts.extensions.insert(caller);
+                    return next
+                        .run(axum::extract::Request::from_parts(parts, body))
+                        .await;
+                }
+                // A real token refused by the scope gate gets that refusal, not
+                // the discovery challenge: it is a permission answer, and
+                // pointing an OAuth client at the issuer would send it to
+                // re-authenticate over a problem no login solves.
+                Err(Some(e)) => return e.into_response(),
+                Err(None) => {}
+            }
         }
         // An OIDC access token is validated against userinfo and resolved to the
         // caller's NookOS identity, which rides in the request extensions into
         // the MCP tool context (MAIN-102 AC-1).
         if let Some(caller) = resolve_mcp_caller(&state, &token).await {
-            req.extensions_mut().insert(caller);
-            return next.run(req).await;
+            parts.extensions.insert(caller);
+            return next
+                .run(axum::extract::Request::from_parts(parts, body))
+                .await;
         }
     }
+    let req = axum::extract::Request::from_parts(parts, body);
     let metadata_url = format!(
         "{}/.well-known/oauth-protected-resource",
         request_base(req.headers())
@@ -729,6 +750,41 @@ async fn mcp_auth(
             .insert(axum::http::header::WWW_AUTHENTICATE, v);
     }
     resp
+}
+
+/// Resolve a personal access token at the MCP door (MAIN-602 AC-6).
+///
+/// `Err(Some(e))` is a decided refusal worth returning verbatim — the scope gate
+/// naming what is missing. `Err(None)` means "not a credential I can resolve",
+/// so the caller falls through to the OIDC path and, failing that, to discovery.
+///
+/// The [`nook_mcp::McpCaller`] this builds is the same three fields the OIDC path
+/// builds, deliberately: MAIN-592's isolation reads tenant and person off the
+/// caller, and it must not be able to tell which door the request came in by.
+async fn mcp_caller_from_token(
+    state: &AppState,
+    token: &str,
+    parts: &mut axum::http::request::Parts,
+) -> Result<nook_mcp::McpCaller, Option<crate::error::ApiError>> {
+    let g = nook_auth::resolve_bearer_grant(&state.db, token)
+        .await
+        .map_err(|_| None)?;
+    let grant = crate::auth::scopes::TokenGrant::from_stored(g.scopes.as_deref(), g.workspace_id);
+    let tenant = nook_types::TenantId(g.resolved.tenant_id);
+    // The same gate the REST routes pass through — `/mcp` is one entry in its
+    // table, not a second rule written here (AC-4).
+    crate::auth::scopes::authorize(state, tenant, grant, parts)
+        .await
+        .map_err(Some)?;
+    let user_id = nook_types::UserId(g.resolved.user_id);
+    let person_id = crate::auth::person_id_of(state, user_id)
+        .await
+        .map_err(Some)?;
+    Ok(nook_mcp::McpCaller {
+        person_id,
+        user_id,
+        tenant_id: tenant,
+    })
 }
 
 /// Validate an OIDC access token against the issuer's userinfo endpoint AND

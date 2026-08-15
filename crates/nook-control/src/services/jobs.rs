@@ -3492,11 +3492,15 @@ fn job_token_name(id: JobId) -> String {
 /// attributing to the initiator is the honest option: they asked for this run,
 /// and every board action it takes is theirs.
 ///
-/// **This buys the right TENANT, not least privilege.** `user_tokens` can
-/// express only `tenant_id` and `expires_at`; inside that tenant the token can
-/// do whatever the initiator can. It is strictly better than a cross-tenant
-/// human credential on a shared box, and it is not a sandbox — the job-anchored
-/// design that would be is tracked as a follow-up.
+/// **This buys the right TENANT, not least privilege.** Inside that tenant the
+/// token can do whatever the initiator can. It is strictly better than a
+/// cross-tenant human credential on a shared box, and it is not a sandbox — the
+/// job-anchored design that would be is tracked as a follow-up.
+///
+/// Deliberately unscoped, even though MAIN-602 made narrowing expressible: a
+/// loop run drives the whole board — it moves cards, comments, reads workspaces
+/// and reports its own outcome — so the closed scope set does not describe it,
+/// and guessing a subset would break runs rather than confine them.
 ///
 /// The expiry is a backstop, not the mechanism: [`revoke_job_token`] runs when
 /// the job finishes. The window matches the node's own job timeout so a node
@@ -3517,6 +3521,8 @@ pub async fn mint_job_token(
         // The node stops a job at 60 minutes; two hours leaves room for the
         // finish report without leaving a long-lived credential lying around.
         expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(2)),
+        scopes: None,
+        workspace_id: None,
     };
     match state.identity.create_user_token(new).await {
         Ok(()) => Some(token),

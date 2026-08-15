@@ -7563,7 +7563,7 @@
         "tags": [
           "crate::routes::tokens"
         ],
-        "summary": "List this user's tokens. Never the tokens themselves — the point of the\nlist is deciding which one to revoke.",
+        "summary": "List this user's tokens: what each may do, where it may do it, and when it\nwas last used. Never the tokens themselves — the point of the list is\ndeciding which one to revoke.",
         "operationId": "list_user_tokens",
         "responses": {
           "200": {
@@ -7585,8 +7585,8 @@
         "tags": [
           "crate::routes::tokens"
         ],
-        "summary": "Mint a token for the signed-in user.",
-        "description": "Requires a *user* — a node token minting user tokens would be a machine\npromoting itself to its owner, which is the one thing node confinement\nexists to prevent.",
+        "summary": "Mint a token for the signed-in user, optionally narrowed (MAIN-602).",
+        "description": "Requires a *user* — a node token minting user tokens would be a machine\npromoting itself to its owner, which is the one thing node confinement\nexists to prevent.\n\n## Why a token can never exceed its minter (AC-3)\n\nTwo rules, and between them there is no way up:\n\n1. **A scoped token cannot mint at all.** Minting is not in the closed scope\n   set and never will be (NG-5), so `required_scope` refuses `POST /tokens`\n   for every narrowed credential before this handler runs. The check below is\n   the belt to that braces: it reads the minter's own row **unconditionally**\n   and refuses a scoped minter outright — including the empty-scope request,\n   which asks for a FULL token and is therefore the widest thing anyone could\n   ask for, not the narrowest. So the property survives anyone widening the\n   scoped surface later.\n2. **A workspace is resolved in the MINTER'S tenant.** `resolve_by_key` is\n   tenant-scoped, so naming someone else's workspace is a refusal, not a\n   grant — and the resulting narrowing can only ever point at something the\n   minter could already reach.",
         "operationId": "create_user_token",
         "requestBody": {
           "content": {
@@ -7608,6 +7608,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": ""
           },
           "403": {
             "description": ""
@@ -12360,6 +12363,23 @@
               "null"
             ],
             "description": "What it's for (\"laptop cli\", \"ci\"). Shown in the list you revoke from."
+          },
+          "scopes": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Narrow this token to these scopes. Omit (or send an empty list) for the\nunscoped credential that has always existed: everything its owner can do.\n\nDeliberately `String` rather than [`TokenScope`]: an unknown scope has to\ncome back as a 400 naming it, and a typed field would instead be a serde\nrejection whose message is about the JSON, not about the scope."
+          },
+          "workspace": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Narrow it further to one workspace, by id, slug or name. Absent means\ntenant-wide. Only meaningful alongside `scopes` — an unscoped token is\nalready everything its owner can do."
           }
         }
       },
@@ -12385,9 +12405,23 @@
           "name": {
             "type": "string"
           },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TokenScope"
+            },
+            "description": "Empty for an unscoped token."
+          },
           "token": {
             "type": "string",
             "description": "`nook_user_…` — store it now; the server keeps only its hash."
+          },
+          "workspace_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The workspace it was narrowed to, if any."
           }
         }
       },
@@ -18523,6 +18557,16 @@
           }
         }
       },
+      "TokenScope": {
+        "type": "string",
+        "description": "What a *scoped* token may do — the closed set, and all of it (MAIN-602).\n\nClosed rather than an open string on purpose. A credential's authority is\nnot a place for free text: an unrecognised scope is either a typo that would\nsilently grant nothing, or a name the enforcement side has never heard of\nand would therefore never check. Both fail quietly, which is the one failure\nmode a permission system may not have. Adding a member here is a deliberate\nchange with an enforcement site attached (NG-5).\n\nThe wire form is `resource:verb`, which is what a person types and what the\nlisting shows.",
+        "enum": [
+          "reports:write",
+          "tasks:read",
+          "tasks:write",
+          "mcp"
+        ]
+      },
       "Toleration": {
         "type": "object",
         "description": "Work's agreement to run somewhere despite a taint (MAIN-315).\n\nIts own type rather than a re-use of the node-side taint: they are the two\nhalves of one negotiation, and a shared struct makes it easy to pass one\nwhere the other belongs. Same fields today, free to diverge later.",
@@ -19662,7 +19706,7 @@
       },
       "UserToken": {
         "type": "object",
-        "description": "A personal access token as listed back — everything except the secret.",
+        "description": "A personal access token as listed back — everything except the secret.\n\nNot `FromDbRow`: `scopes` is a space-separated column that becomes a typed\nlist here, so the repo maps a private row struct onto this rather than the\nderive reading the column raw.",
         "required": [
           "id",
           "name",
@@ -19692,6 +19736,27 @@
           },
           "name": {
             "type": "string"
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TokenScope"
+            },
+            "description": "Empty for an unscoped token — the credential that can do everything its\nowner can, which is what every token was before MAIN-602."
+          },
+          "workspace_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set only when the token is narrowed to one workspace."
+          },
+          "workspace_slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The narrowed workspace's slug, for a listing a person can read."
           }
         }
       },

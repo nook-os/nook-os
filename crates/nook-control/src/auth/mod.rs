@@ -4,6 +4,7 @@
 pub mod password;
 
 pub mod perm;
+pub mod scopes;
 pub mod session_guard;
 
 use std::sync::Arc;
@@ -590,11 +591,20 @@ impl FromRequestParts<AppState> for AuthCtx {
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
         {
-            let ctx = if bearer.starts_with(USER_TOKEN_PREFIX) {
-                user_token_ctx(state, bearer).await?
-            } else {
-                node_token_ctx(state, bearer).await?
-            };
+            if bearer.starts_with(USER_TOKEN_PREFIX) {
+                let (ctx, grant) = user_token_ctx(state, bearer).await?;
+                let ctx = retenant(state, ctx, parts).await?;
+                // THE chokepoint (MAIN-602), and the reason it lives in the
+                // extractor: every REST route resolves an `AuthCtx`, so a route
+                // added tomorrow is covered without anyone remembering to cover
+                // it — and `required_scope` defaults to refusing, so the cost of
+                // forgetting is a scoped token that cannot reach the new route.
+                // Runs after `retenant` so the narrowing is checked against the
+                // tenant the request is actually answered in.
+                scopes::authorize(state, ctx.tenant_id, grant, parts).await?;
+                return Ok(ctx);
+            }
+            let ctx = node_token_ctx(state, bearer).await?;
             return retenant(state, ctx, parts).await;
         }
 
@@ -616,7 +626,13 @@ impl FromRequestParts<AppState> for AuthCtx {
             })
         {
             return if token.starts_with(USER_TOKEN_PREFIX) {
-                user_token_ctx(state, token).await
+                let (ctx, grant) = user_token_ctx(state, token).await?;
+                // A socket is not on the scoped surface: `required_scope` names
+                // no websocket path, so this refuses every scoped token by the
+                // same default-deny rule the HTTP path uses rather than by a
+                // second one written here.
+                scopes::authorize(state, ctx.tenant_id, grant, parts).await?;
+                Ok(ctx)
             } else {
                 node_token_ctx(state, token).await
             };
@@ -924,22 +940,32 @@ async fn retenant(state: &AppState, ctx: AuthCtx, parts: &Parts) -> Result<AuthC
     })
 }
 
-async fn user_token_ctx(state: &AppState, token: &str) -> Result<AuthCtx, ApiError> {
+async fn user_token_ctx(
+    state: &AppState,
+    token: &str,
+) -> Result<(AuthCtx, scopes::TokenGrant), ApiError> {
     // Shared with chat via `nook-auth`: the token hash + lookup + last-used
-    // touch are one implementation, so the two services cannot drift.
-    let r = nook_auth::resolve_bearer(&state.db, token)
+    // touch are one implementation, so the two services cannot drift. The
+    // *scoped* variant, because this service enforces the narrowing — see
+    // `resolve_bearer` for why the plain one refuses a scoped token outright.
+    let g = nook_auth::resolve_bearer_grant(&state.db, token)
         .await
         .map_err(auth_err)?;
-    Ok(AuthCtx {
-        // No browser session behind this; the token id (in `session_id`) gives
-        // anything keyed by session something stable and unique to hold.
-        session_id: AuthSessionId(r.session_id),
-        user_id: UserId(r.user_id),
-        tenant_id: TenantId(r.tenant_id),
-        principal: Principal::User,
-        // A bearer token, not a sessions_auth row: a switch cannot move it.
-        cookie_session: false,
-    })
+    let grant = scopes::TokenGrant::from_stored(g.scopes.as_deref(), g.workspace_id);
+    let r = g.resolved;
+    Ok((
+        AuthCtx {
+            // No browser session behind this; the token id (in `session_id`) gives
+            // anything keyed by session something stable and unique to hold.
+            session_id: AuthSessionId(r.session_id),
+            user_id: UserId(r.user_id),
+            tenant_id: TenantId(r.tenant_id),
+            principal: Principal::User,
+            // A bearer token, not a sessions_auth row: a switch cannot move it.
+            cookie_session: false,
+        },
+        grant,
+    ))
 }
 
 /// Resolve a node token to its tenant.

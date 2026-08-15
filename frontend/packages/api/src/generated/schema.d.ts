@@ -3203,16 +3203,34 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * List this user's tokens. Never the tokens themselves — the point of the
-         *     list is deciding which one to revoke.
+         * List this user's tokens: what each may do, where it may do it, and when it
+         *     was last used. Never the tokens themselves — the point of the list is
+         *     deciding which one to revoke.
          */
         get: operations["list_user_tokens"];
         put?: never;
         /**
-         * Mint a token for the signed-in user.
+         * Mint a token for the signed-in user, optionally narrowed (MAIN-602).
          * @description Requires a *user* — a node token minting user tokens would be a machine
          *     promoting itself to its owner, which is the one thing node confinement
          *     exists to prevent.
+         *
+         *     ## Why a token can never exceed its minter (AC-3)
+         *
+         *     Two rules, and between them there is no way up:
+         *
+         *     1. **A scoped token cannot mint at all.** Minting is not in the closed scope
+         *        set and never will be (NG-5), so `required_scope` refuses `POST /tokens`
+         *        for every narrowed credential before this handler runs. The check below is
+         *        the belt to that braces: it reads the minter's own row **unconditionally**
+         *        and refuses a scoped minter outright — including the empty-scope request,
+         *        which asks for a FULL token and is therefore the widest thing anyone could
+         *        ask for, not the narrowest. So the property survives anyone widening the
+         *        scoped surface later.
+         *     2. **A workspace is resolved in the MINTER'S tenant.** `resolve_by_key` is
+         *        tenant-scoped, so naming someone else's workspace is a refusal, not a
+         *        grant — and the resulting narrowing can only ever point at something the
+         *        minter could already reach.
          */
         post: operations["create_user_token"];
         delete?: never;
@@ -5436,6 +5454,21 @@ export interface components {
             expires_in_days?: number | null;
             /** @description What it's for ("laptop cli", "ci"). Shown in the list you revoke from. */
             name?: string | null;
+            /**
+             * @description Narrow this token to these scopes. Omit (or send an empty list) for the
+             *     unscoped credential that has always existed: everything its owner can do.
+             *
+             *     Deliberately `String` rather than [`TokenScope`]: an unknown scope has to
+             *     come back as a 400 naming it, and a typed field would instead be a serde
+             *     rejection whose message is about the JSON, not about the scope.
+             */
+            scopes?: string[] | null;
+            /**
+             * @description Narrow it further to one workspace, by id, slug or name. Absent means
+             *     tenant-wide. Only meaningful alongside `scopes` — an unscoped token is
+             *     already everything its owner can do.
+             */
+            workspace?: string | null;
         };
         /** @description The one and only time the token itself is readable. */
         CreateUserTokenResponse: {
@@ -5443,8 +5476,12 @@ export interface components {
             expires_at?: string | null;
             id: string;
             name: string;
+            /** @description Empty for an unscoped token. */
+            scopes?: components["schemas"]["TokenScope"][];
             /** @description `nook_user_…` — store it now; the server keeps only its hash. */
             token: string;
+            /** @description The workspace it was narrowed to, if any. */
+            workspace_id?: string | null;
         };
         CreateWorkspaceRequest: {
             description?: string | null;
@@ -8580,6 +8617,21 @@ export interface components {
             };
         };
         /**
+         * @description What a *scoped* token may do — the closed set, and all of it (MAIN-602).
+         *
+         *     Closed rather than an open string on purpose. A credential's authority is
+         *     not a place for free text: an unrecognised scope is either a typo that would
+         *     silently grant nothing, or a name the enforcement side has never heard of
+         *     and would therefore never check. Both fail quietly, which is the one failure
+         *     mode a permission system may not have. Adding a member here is a deliberate
+         *     change with an enforcement site attached (NG-5).
+         *
+         *     The wire form is `resource:verb`, which is what a person types and what the
+         *     listing shows.
+         * @enum {string}
+         */
+        TokenScope: "reports:write" | "tasks:read" | "tasks:write" | "mcp";
+        /**
          * @description Work's agreement to run somewhere despite a taint (MAIN-315).
          *
          *     Its own type rather than a re-use of the node-side taint: they are the two
@@ -9063,7 +9115,13 @@ export interface components {
             /** Format: date-time */
             updated_at: string;
         };
-        /** @description A personal access token as listed back — everything except the secret. */
+        /**
+         * @description A personal access token as listed back — everything except the secret.
+         *
+         *     Not `FromDbRow`: `scopes` is a space-separated column that becomes a typed
+         *     list here, so the repo maps a private row struct onto this rather than the
+         *     derive reading the column raw.
+         */
         UserToken: {
             /** Format: date-time */
             created_at: string;
@@ -9073,6 +9131,15 @@ export interface components {
             /** Format: date-time */
             last_used_at?: string | null;
             name: string;
+            /**
+             * @description Empty for an unscoped token — the credential that can do everything its
+             *     owner can, which is what every token was before MAIN-602.
+             */
+            scopes?: components["schemas"]["TokenScope"][];
+            /** @description Set only when the token is narrowed to one workspace. */
+            workspace_id?: string | null;
+            /** @description The narrowed workspace's slug, for a listing a person can read. */
+            workspace_slug?: string | null;
         };
         /** @description A passkey enrolled to unlock the vault. */
         VaultPasskey: {
@@ -15327,6 +15394,12 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["CreateUserTokenResponse"];
                 };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             403: {
                 headers: {

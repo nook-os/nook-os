@@ -315,6 +315,8 @@ async fn token_for(state: &AppState, tenant: TenantId, user: UserId) -> String {
             token_hash: nook_auth::hash_token(&token),
             name: "mcp tunnel test".into(),
             expires_at: None,
+            scopes: None,
+            workspace_id: None,
         })
         .await
         .expect("mint token");
