@@ -512,6 +512,12 @@ const TAIL_LINES: usize = 40;
 /// Linux only. macOS has no `PR_SET_PDEATHSIG` equivalent, so there the child
 /// is left to notice its stdin EOF, and the control plane's stall reaper is what
 /// stops the JOB from hanging in `running` regardless of the process.
+///
+/// It reaches only as far as the CHILD, which for a sandboxed job is the
+/// `docker exec` client rather than the agent (MAIN-611). Nothing is lost:
+/// removing the container ends every process inside it, and `sandbox::Sandbox`
+/// does that on drop — a stronger guarantee than this one, since it takes the
+/// job's compose stack with it too.
 fn die_with_parent(cmd: &mut Command) {
     #[cfg(target_os = "linux")]
     {
@@ -536,21 +542,37 @@ impl StreamingSession {
     /// path sets, so a skill cannot tell which adapter is running it — that
     /// equivalence is what lets AC-4's fallback stay a genuine fallback rather
     /// than a second, subtly different world.
+    ///
+    /// `sandbox` is the confinement (MAIN-611 AC-1). `Some` runs the runtime
+    /// INSIDE the job's container, which is what every loop job passes; `None`
+    /// spawns it directly and is a human's own conversation (`chat.rs`), which
+    /// this card deliberately does not confine (NG-2).
+    ///
+    /// The two are not the same launch in one respect worth knowing: a direct
+    /// spawn INHERITS this process's whole environment — the node's join token
+    /// and its own credentials included — while `docker exec` inherits nothing
+    /// and carries only what `extra_env` names. That asymmetry is AC-7.
     pub fn spawn(
         runtime: &str,
         args: &[String],
         cwd: &Path,
         extra_env: &[(&str, &str)],
+        sandbox: Option<&crate::sandbox::Sandbox>,
     ) -> Result<Self, String> {
-        let mut cmd = Command::new(runtime);
-        cmd.args(args)
-            .current_dir(cwd)
-            .stdin(Stdio::piped())
+        let mut cmd = match sandbox {
+            Some(sb) => sb.exec_command(runtime, args, cwd, extra_env),
+            None => {
+                let mut cmd = Command::new(runtime);
+                cmd.args(args).current_dir(cwd);
+                for (k, v) in extra_env {
+                    cmd.env(k, v);
+                }
+                cmd
+            }
+        };
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        for (k, v) in extra_env {
-            cmd.env(k, v);
-        }
         die_with_parent(&mut cmd);
         let mut child = cmd
             .spawn()
@@ -666,7 +688,7 @@ mod tests {
     #[test]
     fn a_streaming_child_dies_with_the_thread_that_spawned_it() {
         let mut session = std::thread::spawn(|| {
-            StreamingSession::spawn("sleep", &["60".to_string()], Path::new("/"), &[])
+            StreamingSession::spawn("sleep", &["60".to_string()], Path::new("/"), &[], None)
         })
         .join()
         .expect("the spawning thread")

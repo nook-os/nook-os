@@ -112,7 +112,10 @@ pub fn start(
     // goes on the transcript below so an operator can resume it by hand.
     let agent_session = uuid::Uuid::now_v7().to_string();
     let args = job_adapter::claude_chat_args(&agent_session);
-    let mut session = StreamingSession::spawn(runtime, &args, cwd, env)?;
+    // No sandbox, deliberately (MAIN-611 NG-2): this is a person's own
+    // conversation on their own machine, not a loop job driven by untrusted
+    // instructions, and confining a human's shell is not what that card is for.
+    let mut session = StreamingSession::spawn(runtime, &args, cwd, env, None)?;
     let stdout = match session.take_stdout() {
         Some(s) => s,
         None => {

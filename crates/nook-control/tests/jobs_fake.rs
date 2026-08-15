@@ -502,9 +502,12 @@ async fn an_unauthorized_node_is_not_an_executor_however_online_it_is() {
             mine,
             nook_control::repo::nodes::ReportedCapabilities {
                 capabilities: serde_json::json!({
-                    "loop_kinds": ["spec"],
-                    "runtime_auth": [{ "runtime": "claude", "state": "not_authorized" }]
-                }),
+                            "loop_kinds": ["spec"],
+                "sandbox": { "state": "ready", "image": "nook-job-sandbox:test" },
+                    "sandbox": { "state": "ready", "image": "nook-job-sandbox:test" },
+                            "sandbox": { "state": "ready", "image": "nook-job-sandbox:test" },
+                            "runtime_auth": [{ "runtime": "claude", "state": "not_authorized" }]
+                        }),
                 hostname: "h".into(),
                 platform: "linux".into(),
             },
@@ -537,6 +540,8 @@ async fn an_offline_node_is_never_picked() {
         mine,
         serde_json::json!({
             "loop_kinds": ["spec"],
+        "sandbox": { "state": "ready", "image": "nook-job-sandbox:test" },
+            "sandbox": { "state": "ready", "image": "nook-job-sandbox:test" },
             "runtime_auth": [{ "runtime": "claude", "state": "authorized" }]
         }),
     );
@@ -582,6 +587,7 @@ fn declaring(kinds: &[&str], operator: bool) -> serde_json::Value {
     serde_json::json!({
         "shared_operator": operator,
         "loop_kinds": kinds,
+        "sandbox": { "state": "ready", "image": "nook-job-sandbox:test" },
         "runtime_auth": [{ "runtime": "claude", "state": "authorized" }],
     })
 }
@@ -731,10 +737,13 @@ async fn a_reported_capacity_round_trips_and_absent_is_not_zero() {
     let capped = nodes.add(t, "capped", Some(me), false);
     nodes.set_capabilities(
         capped,
-        serde_json::json!({ "loop_kinds": ["spec"], "max_loop_jobs": 0 }),
+        serde_json::json!({ "loop_kinds": ["spec"], "max_loop_jobs": 0, "sandbox": { "state": "ready", "image": "nook-job-sandbox:test" } }),
     );
     let silent = nodes.add(t, "silent", Some(me), false);
-    nodes.set_capabilities(silent, serde_json::json!({ "loop_kinds": ["spec"] }));
+    nodes.set_capabilities(
+        silent,
+        serde_json::json!({ "loop_kinds": ["spec"], "sandbox": { "state": "ready", "image": "nook-job-sandbox:test" } }),
+    );
 
     assert_eq!(
         nodes.loop_profile(capped).await.unwrap(),
@@ -821,6 +830,7 @@ async fn online_node(
     let id = nodes.add(tenant, "n", owner, false);
     let mut caps = serde_json::json!({
         "loop_kinds": ["spec"],
+        "sandbox": { "state": "ready", "image": "nook-job-sandbox:test" },
         "runtime_auth": [{ "runtime": "claude", "state": "authorized" }]
     });
     if operator {

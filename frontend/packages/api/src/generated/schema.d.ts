@@ -4921,6 +4921,7 @@ export interface components {
             runtime_auth?: components["schemas"]["AuthProfile"][];
             /** @description Detected runtime executables: "claude", "hermes", "codex", "bash", ... */
             runtimes?: string[];
+            sandbox?: null | components["schemas"]["SandboxCapability"];
             /**
              * @description Whether this node is the deployment's shared operator node — a machine
              *     the stack ships (MAIN-125) rather than a person's own. Reported so later
@@ -7578,6 +7579,13 @@ export interface components {
              */
             listener: string;
         } | {
+            /** @description What that node said is missing. */
+            detail: string;
+            /** @enum {string} */
+            kind: "sandbox_unavailable";
+            /** @description The node that answered, so the fix has an address. */
+            node_name: string;
+        } | {
             /**
              * @description Renamed on the wire only: `kind` is the internal tag, and a variant
              *     field of that name would overwrite the discriminant a client reads.
@@ -7913,6 +7921,42 @@ export interface components {
             node_ids: components["schemas"]["NodeId"][];
             /** @description The runtime to authorize — `claude` today. */
             runtime: string;
+        };
+        /**
+         * @description Can this node run a loop-job agent inside a per-job container (MAIN-611)?
+         *
+         *     Internally tagged like [`QueuedReason`], and three states rather than a
+         *     bool because the third one is the interesting one: a CONTAINERISED node is
+         *     not merely "sandbox missing". It has no Docker to nest, cannot run a build
+         *     at all, and confining it is explicitly out of scope (MAIN-611 NG-5) — so it
+         *     keeps claiming the spec/review/decompose work it already does, while a HOST
+         *     node with no sandbox stops claiming anything.
+         *
+         *     Every variant carries the sentence an operator acts on, because the whole
+         *     reason this reaches the wire is that "why is nothing building on azul" must
+         *     be answerable without a shell on azul.
+         */
+        SandboxCapability: {
+            /**
+             * @description The image a job container is started from — the thing to rebuild or
+             *     re-pull when an operator wants a newer toolchain.
+             */
+            image: string;
+            /** @enum {string} */
+            state: "ready";
+        } | {
+            /** @description How the node concluded it is containerised. */
+            detail: string;
+            /** @enum {string} */
+            state: "exempt";
+        } | {
+            /**
+             * @description What is missing, in the operator's terms — no Docker daemon, image
+             *     not pulled, `iptables` absent from the image.
+             */
+            detail: string;
+            /** @enum {string} */
+            state: "unavailable";
         };
         /** @description The node the resource-aware scheduler chose for "Auto" placement. */
         ScheduledNode: {

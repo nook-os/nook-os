@@ -11258,6 +11258,17 @@
             },
             "description": "Detected runtime executables: \"claude\", \"hermes\", \"codex\", \"bash\", ..."
           },
+          "sandbox": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SandboxCapability",
+                "description": "Whether this node can confine a loop-job agent to a per-job container\n(MAIN-611). `None` from a node whose agent predates the field, which the\ndispatcher reads as \"cannot\", not as \"probably fine\" — a node that\ncannot confine an agent runs it with the OS user's whole world, which is\nthe failure the sandbox exists to remove."
+              }
+            ]
+          },
           "shared_operator": {
             "type": "boolean",
             "description": "Whether this node is the deployment's shared operator node — a machine\nthe stack ships (MAIN-125) rather than a person's own. Reported so later\nexecutor selection can tell it apart from personal nodes; surfaced in\n`nook get nodes` and the Nodes UI. Set by `NOOK_SHARED_OPERATOR` on that\ncontainer; false everywhere else."
@@ -16634,6 +16645,31 @@
           },
           {
             "type": "object",
+            "description": "Every eligible node is a HOST node that cannot confine a job agent to\nits own container (MAIN-611) — no Docker, no job image, no `iptables`.\n\nQueued rather than failed, exactly as [`Self::PortsUnavailable`] is: a\nnode-side shortage clears itself once an operator installs the missing\npiece, and failing the run would spend the card's strike budget on\nsomething the card did nothing to cause.",
+            "required": [
+              "node_name",
+              "detail",
+              "kind"
+            ],
+            "properties": {
+              "detail": {
+                "type": "string",
+                "description": "What that node said is missing."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "sandbox_unavailable"
+                ]
+              },
+              "node_name": {
+                "type": "string",
+                "description": "The node that answered, so the fix has an address."
+              }
+            }
+          },
+          {
+            "type": "object",
             "description": "The chosen node refused this kind at the claim (MAIN-142): a shared\noperator asked to build, or a node that does not declare the kind.",
             "required": [
               "job_kind",
@@ -17224,6 +17260,71 @@
             "description": "The runtime to authorize — `claude` today."
           }
         }
+      },
+      "SandboxCapability": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Docker answered, the job image is present, and a job agent will run\ninside it.",
+            "required": [
+              "image",
+              "state"
+            ],
+            "properties": {
+              "image": {
+                "type": "string",
+                "description": "The image a job container is started from — the thing to rebuild or\nre-pull when an operator wants a newer toolchain."
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "ready"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "This node is itself a container (NG-5). Nothing to nest and nothing to\nconfine here; it never runs builds.",
+            "required": [
+              "detail",
+              "state"
+            ],
+            "properties": {
+              "detail": {
+                "type": "string",
+                "description": "How the node concluded it is containerised."
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "exempt"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A host node that cannot set the sandbox up. It claims no loop work at\nall until this clears.",
+            "required": [
+              "detail",
+              "state"
+            ],
+            "properties": {
+              "detail": {
+                "type": "string",
+                "description": "What is missing, in the operator's terms — no Docker daemon, image\nnot pulled, `iptables` absent from the image."
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "unavailable"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Can this node run a loop-job agent inside a per-job container (MAIN-611)?\n\nInternally tagged like [`QueuedReason`], and three states rather than a\nbool because the third one is the interesting one: a CONTAINERISED node is\nnot merely \"sandbox missing\". It has no Docker to nest, cannot run a build\nat all, and confining it is explicitly out of scope (MAIN-611 NG-5) — so it\nkeeps claiming the spec/review/decompose work it already does, while a HOST\nnode with no sandbox stops claiming anything.\n\nEvery variant carries the sentence an operator acts on, because the whole\nreason this reaches the wire is that \"why is nothing building on azul\" must\nbe answerable without a shell on azul."
       },
       "ScheduledNode": {
         "type": "object",

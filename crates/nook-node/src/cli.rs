@@ -1224,6 +1224,11 @@ fn columns(resource: &str, first: &Value) -> Vec<&'static str> {
             // capacity and still takes no work, which every other column on
             // this line renders as an idle machine.
             "cordon",
+            // "why is nothing running on azul" has one more answer since
+            // MAIN-611: a host node that cannot confine a loop agent claims no
+            // loop work at all, and every other column on this line still reads
+            // as a healthy idle machine.
+            "sandbox",
             "capabilities.runtimes",
             "last_seen_at",
         ],
@@ -1298,6 +1303,13 @@ fn cell(row: &Value, key: &str) -> String {
     if key == "cordon" {
         return cordon_cell(row.get("cordon"));
     }
+    // Nor is `sandbox`: it is `capabilities.sandbox` read as the one thing an
+    // operator does about it (MAIN-611 AC-9). `-` is a node whose agent
+    // predates the field — which the dispatcher reads as "cannot", so it is
+    // not the same as an empty column elsewhere.
+    if key == "sandbox" {
+        return sandbox_cell(row.pointer("/capabilities/sandbox"));
+    }
     let mut node = row;
     for part in key.split('.') {
         match node.get(part) {
@@ -1306,6 +1318,27 @@ fn cell(row: &Value, key: &str) -> String {
         }
     }
     render_value(key, node)
+}
+
+/// A node's sandbox capability as one narrow cell (MAIN-611 AC-9).
+///
+/// The DETAIL is deliberately shortened here and not dropped: an operator
+/// scanning a fleet needs to see which machine is refusing work, and the full
+/// sentence — which names the image to build or the daemon to start — is one
+/// `--json` away.
+fn sandbox_cell(v: Option<&Value>) -> String {
+    let Some(c) = v.filter(|v| !v.is_null()) else {
+        return "-".into();
+    };
+    match c.get("state").and_then(Value::as_str) {
+        Some("ready") => match c.get("image").and_then(Value::as_str) {
+            Some(image) => format!("yes ({image})"),
+            None => "yes".into(),
+        },
+        Some("exempt") => "n/a (container)".into(),
+        Some("unavailable") => "NO".into(),
+        _ => "-".into(),
+    }
 }
 
 /// A node's cordon as one narrow cell (MAIN-505): what it is waiting for and

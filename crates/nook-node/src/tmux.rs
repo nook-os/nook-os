@@ -397,11 +397,19 @@ pub fn new_job_session(
     seed: Option<&str>,
     workspace_id: Option<&str>,
     tenant_id: Option<&str>,
+    // The job's container (MAIN-611 AC-1). `Some` runs the runtime inside it;
+    // the pane still lives on this machine, so a human reading the session sees
+    // exactly what it always showed. `None` is the direct launch, kept for a
+    // node whose profile says there is nothing to confine (NG-5).
+    sandbox: Option<&crate::sandbox::Sandbox>,
 ) -> Result<()> {
     if !std::path::Path::new(cwd).is_dir() {
         anyhow::bail!("checkout {cwd} does not exist on this node");
     }
-    if !runtime_available(runtime) {
+    // A sandboxed job runs the runtime from the IMAGE, so this node's own PATH
+    // says nothing about whether it exists — and asking would refuse every job
+    // on a node that deliberately has no agent runtime installed.
+    if sandbox.is_none() && !runtime_available(runtime) {
         anyhow::bail!("runtime '{runtime}' is not installed on this node");
     }
     // The human's opening brief (MAIN-231) rides the environment verbatim —
@@ -411,12 +419,19 @@ pub fn new_job_session(
     if let Some(seed) = seed.filter(|s| !s.trim().is_empty()) {
         env.push(("NOOK_JOB_SEED", seed));
     }
+    // Which credentials the runtime gets is decided ONCE, in `spawn`, whichever
+    // side of the container it lands on — the same rule the source guard below
+    // pins for `GIT_SSH_COMMAND`.
+    let launch = match sandbox {
+        Some(sb) => job_launch_command_in(sb, runtime, cwd, status_file),
+        None => job_launch_command(runtime, status_file),
+    };
     spawn(
         name,
         cwd,
         cols,
         rows,
-        &job_launch_command(runtime, status_file),
+        &launch,
         session_id,
         workspace_id,
         // A loop job runs in a workspace, so it has a tenant like any other
@@ -437,6 +452,49 @@ fn job_launch_command(runtime: &str, status_file: &str) -> String {
     let shell = login_shell();
     format!("{shell} -l -i -c '{runtime}; echo $? > {status_file}'")
 }
+
+/// The same launch, inside the job's container (MAIN-611 AC-1).
+///
+/// The outer shell stays on the HOST and still records the exit code, so AC-4's
+/// crash honesty is unchanged — a status file inside the container would go
+/// with the container. What moves is the runtime, and with it everything it can
+/// read: `docker exec` inherits nothing from this process, so the environment
+/// below is the whole of what reaches the agent (MAIN-611 AC-7).
+fn job_launch_command_in(
+    sandbox: &crate::sandbox::Sandbox,
+    runtime: &str,
+    cwd: &str,
+    status_file: &str,
+) -> String {
+    let inner = sandbox.exec_shell_line(runtime, std::path::Path::new(cwd), SESSION_ENV_FORWARDED);
+    let shell = login_shell();
+    format!("{shell} -l -c \"{inner}; echo \\$? > {status_file}\"")
+}
+
+/// What a sandboxed job carries in from its session's environment.
+///
+/// NAMES, because `spawn` below is the one place that decides the VALUES —
+/// including the `GIT_SSH_COMMAND`/`NOOK_WORKSPACE_ID` pair its guard test
+/// insists must be set together. Forwarding by name means the container gets
+/// whatever `spawn` set without a second copy of the decision, and a variable
+/// `spawn` never set is simply skipped by Docker.
+const SESSION_ENV_FORWARDED: &[&str] = &[
+    "NOOK_JOB_ID",
+    "NOOK_JOB_SEED",
+    "NOOK_SESSION_ID",
+    "NOOK_WORKSPACE_ID",
+    "NOOK_TENANT_ID",
+    "GIT_SSH_COMMAND",
+    "GH_TOKEN",
+    // The job's own identity. Inside the sandbox `HOME` is `/home/agent`, so
+    // the `~/.config/nook/contexts.toml` this path used to fall back to is
+    // simply absent — without these, `nook` and the `GIT_SSH_COMMAND` shim it
+    // backs are both unauthenticated. Latent while `RUNTIME` is `claude` (the
+    // streaming adapter passes them itself), which is exactly why it is worth
+    // fixing before the next runtime change finds it.
+    "NOOK_TOKEN",
+    "NOOK_SERVER",
+];
 
 /// Type a line into a session and press Enter — how a loop job drives its skill
 /// (e.g. `/nook-spec MAIN-42`) once the runtime is up. `-l` sends the text

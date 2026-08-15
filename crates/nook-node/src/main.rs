@@ -19,6 +19,7 @@ mod pinning;
 mod ports;
 mod resources;
 mod runtime_auth;
+mod sandbox;
 mod selfupdate;
 mod sessions;
 mod ssh;

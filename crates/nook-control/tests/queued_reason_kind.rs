@@ -89,6 +89,10 @@ fn every_variant() -> Vec<QueuedReason> {
             listener: "web".into(),
             env: "NOOK_WEB_PORT".into(),
         },
+        QueuedReason::SandboxUnavailable {
+            node_name: "azul".into(),
+            detail: "no Docker daemon on this node".into(),
+        },
     ]
 }
 

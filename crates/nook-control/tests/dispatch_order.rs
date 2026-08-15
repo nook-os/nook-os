@@ -112,6 +112,7 @@ async fn node(
                 person,
                 json!({
                     "loop_kinds": kinds,
+                    "sandbox": { "state": "ready", "image": "nook-job-sandbox:test" },
                     "max_loop_jobs": capacity,
                     "runtime_auth": [
                         { "id": "claude", "label": "Claude Code",

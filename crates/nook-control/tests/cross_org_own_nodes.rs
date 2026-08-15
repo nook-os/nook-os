@@ -455,6 +455,7 @@ async fn a_fellow_member_may_place_work_but_never_open_a_session() {
                 mine,
                 serde_json::json!({
                     "loop_kinds": ["spec"],
+                    "sandbox": { "state": "ready", "image": "nook-job-sandbox:test" },
                     "runtime_auth": [{ "runtime": "claude", "state": "authorized" }]
                 })
             ],

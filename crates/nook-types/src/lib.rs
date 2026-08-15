@@ -583,6 +583,68 @@ pub struct Capabilities {
     /// credential file. Empty when nothing to authorize is installed.
     #[serde(default)]
     pub runtime_auth: Vec<AuthProfile>,
+    /// Whether this node can confine a loop-job agent to a per-job container
+    /// (MAIN-611). `None` from a node whose agent predates the field, which the
+    /// dispatcher reads as "cannot", not as "probably fine" — a node that
+    /// cannot confine an agent runs it with the OS user's whole world, which is
+    /// the failure the sandbox exists to remove.
+    #[serde(default)]
+    pub sandbox: Option<SandboxCapability>,
+}
+
+/// Can this node run a loop-job agent inside a per-job container (MAIN-611)?
+///
+/// Internally tagged like [`QueuedReason`], and three states rather than a
+/// bool because the third one is the interesting one: a CONTAINERISED node is
+/// not merely "sandbox missing". It has no Docker to nest, cannot run a build
+/// at all, and confining it is explicitly out of scope (MAIN-611 NG-5) — so it
+/// keeps claiming the spec/review/decompose work it already does, while a HOST
+/// node with no sandbox stops claiming anything.
+///
+/// Every variant carries the sentence an operator acts on, because the whole
+/// reason this reaches the wire is that "why is nothing building on azul" must
+/// be answerable without a shell on azul.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum SandboxCapability {
+    /// Docker answered, the job image is present, and a job agent will run
+    /// inside it.
+    Ready {
+        /// The image a job container is started from — the thing to rebuild or
+        /// re-pull when an operator wants a newer toolchain.
+        image: String,
+    },
+    /// This node is itself a container (NG-5). Nothing to nest and nothing to
+    /// confine here; it never runs builds.
+    Exempt {
+        /// How the node concluded it is containerised.
+        detail: String,
+    },
+    /// A host node that cannot set the sandbox up. It claims no loop work at
+    /// all until this clears.
+    Unavailable {
+        /// What is missing, in the operator's terms — no Docker daemon, image
+        /// not pulled, `iptables` absent from the image.
+        detail: String,
+    },
+}
+
+impl SandboxCapability {
+    /// Would a loop-job agent on this node be confined, or is confinement
+    /// deliberately not this node's job? Both are placeable; `Unavailable` is
+    /// not.
+    pub fn may_run_loop_work(&self) -> bool {
+        !matches!(self, SandboxCapability::Unavailable { .. })
+    }
+
+    /// One cell for `nook get nodes` and the Nodes page.
+    pub fn summary(&self) -> String {
+        match self {
+            SandboxCapability::Ready { image } => format!("ready ({image})"),
+            SandboxCapability::Exempt { .. } => "exempt (containerised)".into(),
+            SandboxCapability::Unavailable { detail } => format!("no ({detail})"),
+        }
+    }
 }
 
 /// The authorization state of one runtime profile (MAIN-126). Four states, kept
@@ -4337,6 +4399,19 @@ pub enum QueuedReason {
         /// node's range, or free a lease on the Nodes page.
         listener: String,
         env: String,
+    },
+    /// Every eligible node is a HOST node that cannot confine a job agent to
+    /// its own container (MAIN-611) — no Docker, no job image, no `iptables`.
+    ///
+    /// Queued rather than failed, exactly as [`Self::PortsUnavailable`] is: a
+    /// node-side shortage clears itself once an operator installs the missing
+    /// piece, and failing the run would spend the card's strike budget on
+    /// something the card did nothing to cause.
+    SandboxUnavailable {
+        /// The node that answered, so the fix has an address.
+        node_name: String,
+        /// What that node said is missing.
+        detail: String,
     },
     /// The chosen node refused this kind at the claim (MAIN-142): a shared
     /// operator asked to build, or a node that does not declare the kind.

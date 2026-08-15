@@ -224,6 +224,110 @@ untouched and still separate: it exists to make the UI look populated, with a
 fake remote on a node that never reports. The dogfood workspace is the opposite
 — everything about it is real. Do not merge the two.
 
+## Every loop-job agent runs in its own container (MAIN-611)
+
+- **An agent's instructions are untrusted input.** A card body, a PR comment, a
+  dependency's README — anything the agent reads can carry an injection, and on
+  a host-installed node the blast radius used to be the owner's machine: every
+  file in `$HOME`, every sibling checkout, the node's own credentials, the
+  host's Docker, and the LAN. So a loop-job agent now runs inside a **per-job
+  container**: only its checkout mounted, a private `/tmp`, its own nested
+  Docker daemon, and an egress policy that drops the private address space.
+  **DNS survives it because the job gets a network of its own** — on the default
+  bridge the container inherits the host's nameservers, which are themselves
+  RFC1918, so the policy dropped every lookup; a user-defined network puts
+  Docker's embedded resolver on 127.0.0.11 and forwards from the host's
+  namespace, where the drop does not apply.
+- **The egress policy is enforced on the HOST, not in the job container.** An
+  in-container OUTPUT chain does not see a nested container's traffic (that is
+  FORWARDed, not locally generated) and the agent is in the nested daemon's
+  group, so it could flush that chain outright. The rules therefore live in a
+  `NOOK-SANDBOX` chain jumped from the host's `DOCKER-USER`, keyed on the job
+  network's subnet — which catches the job container and everything nested
+  inside it, in a namespace the job has no route into. The node writes them
+  through a throwaway `--net=host --cap-add=NET_ADMIN` container, because a
+  node is an ordinary user with Docker and without root. The in-container chain
+  stays as defence in depth.
+- **The whole security argument is a pure function.** `sandbox::run_args`,
+  `sandbox::egress_script` and `sandbox::isolation_args` build the flags and are
+  unit-tested against the rules; a source-inspecting guard (`sandbox::guards`,
+  the shape `tmux.rs:838` set) fails the build if a future edit launches a job
+  agent outside the wrap. **The host's Docker socket is never mounted** — a
+  container holding it can `docker run -v /:/host` and undo everything else.
+- **This is one install step on a machine that builds:**
+  `./scripts/build-job-sandbox.sh`, **then restart the node agent** — the
+  capability is probed at CONNECT, not on heartbeat, so a node that was
+  reporting `unavailable` keeps reporting it (and keeps queueing its jobs)
+  until it reconnects. **A host node with no image claims no loop
+  work** — it reports `sandbox: unavailable` and every job for it stays `queued`
+  under `QueuedReason::SandboxUnavailable`, never `failed`, so a node-side
+  shortage does not spend a card's strike budget. `nook get nodes` has a
+  `sandbox` column, which is what makes *"why is nothing building on azul"*
+  answerable without a shell on azul. **A node that reports nothing is refused
+  too** — an agent from before this shipped has not said it confines anything,
+  and reading silence as consent is how a fail-closed gate becomes fail-open on
+  exactly the machines that predate it. Upgrade the agent.
+- **A CONTAINERISED node is exempt, and that is not an oversight.** Neither
+  `node` nor `operator-node` mounts a Docker socket or sets `DOCKER_HOST`, so
+  neither can run a build at all; there is nothing to nest and nothing to
+  confine. They keep claiming spec/review/decompose work. Every build in this
+  fleet runs on a host-installed node, which is where the box is.
+- **What a kind gets is DATA, not a branch** (`sandbox::PROFILES`). Confinement
+  is universal by construction — `job_adapter::adapter_for` selects by runtime,
+  never by kind — so mounts and egress are identical for every kind. The nested
+  Docker daemon is the one thing that varies, and only `build` declares it: a
+  spec run cannot start containers and does not pay a daemon's cold start to
+  file a ticket. **A new loop kind adds a row**, and a test fails the build if
+  it does not.
+- **Docker-in-Docker WITHOUT `--privileged`** is the default:
+  `CAP_SYS_ADMIN` + `CAP_NET_ADMIN`, seccomp and AppArmor off, and the device
+  cgroup left alone — so the container's `/dev` holds the ordinary dozen entries
+  and no block device. Measured: `mknod` of a disk node succeeds and the
+  `mount` after it is refused; under `--privileged` the same container carries
+  the host's `sda`…`sdf`.
+- **A `build` agent can still reach host root, and that is a KNOWN,
+  UNCLOSED gap (MAIN-611's review).** It holds the nested daemon's group by
+  design, so it can `docker run --privileged` *in that daemon*; a nested
+  privileged container gets a fresh procfs and `CAP_SYS_ADMIN` in the initial
+  user namespace, so the host's non-namespaced sysctls are writable from it —
+  measured: it reads the host's own `kernel.core_pattern` and writes it. With
+  the checkout bind-mounted at its real host path, `core_pattern=|<that path>`
+  plus any crash is root execution on the host. The outer container's
+  read-only `/proc/sys` does not reach a nested container's mount.
+  - **It is not a regression** — before this the agent ran on the host as the
+    node's user with the host's Docker — but the box does NOT hold against an
+    agent that has Docker. Closing it needs an authorization plugin on the
+    nested daemon, `--userns-remap`, or a filtering socket proxy; `dockerd` has
+    no "refuse privileged" flag, and a partial filter would be worse than the
+    honest limitation. **Do not describe `build` confinement as a boundary
+    against a hostile agent until that card lands.** **Rootless DinD was the first choice and does not
+  work** — `rootlesskit` dies on `newuidmap … Operation not permitted` in any
+  container that is not privileged, and Docker's own docs say `dind-rootless`
+  still wants `--privileged`, which would be the weaker box with extra steps.
+  `NOOK_SANDBOX_ISOLATION=privileged` remains the escape hatch for a kernel
+  where the default will not start, and `nook get nodes` says which one a
+  machine got. Neither mode defends against a kernel escape; that is a non-goal.
+- **Three things a nested daemon needs, and each is scoped rather than opened
+  wide**: an anonymous per-job volume at `/var/lib/docker` (overlayfs will not
+  stack on overlayfs), `--cgroupns=private` plus a remount of the container's
+  OWN cgroup root, and a re-bind of `/proc/sys/net` alone. Never
+  `-v /sys/fs/cgroup:/sys/fs/cgroup:rw` and never `remount,rw /proc/sys` — the
+  first hands over the host's cgroup tree, the second lets a job set the host's
+  non-namespaced kernel sysctls.
+- **A repo declares its own caches**, `[sandbox] caches` in `.nook.toml`, beside
+  the port listeners and for the same reason: nothing is mounted because the
+  node happens to have it.
+- **The agent gets the credentials it needs and nothing else.** `docker exec`
+  inherits NOTHING from the node process — which is the improvement over
+  `Command::new`, that inherited everything — so the Claude session, the GitHub
+  token and the git SSH shim are mounted or passed explicitly, and the node's
+  own identity (`~/.config/nook/node.toml`, its join token) is simply absent. An
+  agent can still exfiltrate what it was given; narrowing that is its own card.
+- **Attack it, don't trust it.** `NOOK_SANDBOX_E2E=1 cargo test --bin nook
+  escapes` runs the escape suite against a REAL job container: reading `$HOME`,
+  a sibling checkout and the node identity; `docker run -v /:/host`; sockets and
+  pings to RFC1918. Opt-in because it needs Docker and the image.
+
 ## Loops are OFF by default (MAIN-239)
 
 - The control plane's job machinery — `job_dispatch`, `job_reaper`,
@@ -253,7 +357,13 @@ fake remote on a node that never reports. The dogfood workspace is the opposite
   - The range and the live leases are on the Nodes page: an owner can retune the range or release a stuck lease there, without a shell on the machine.
   - Unset range means the node leases nothing, deliberately — a guessed range would hand out ports something else is already listening on. A session on such a node simply gets no variables, which is fine: not every session runs a server.
   - **A BUILD RUN leases too, and its lease belongs to the CARD (MAIN-552).** A build boots the dev stack in its worktree and is not a session, so it used to take `docker-compose.yml`'s `${VAR:-default}` fallbacks and collide with everything else on the machine — human sessions included. It now leases the same declaration, by the same code path, and the ports arrive as the variables the workspace named.
-    - **Held by the card, not the run, because the STACK outlives the run** (MAIN-480). A repair pass on the same card gets the same numbers back — the containers are still bound to them. The lease is handed back when the stack actually comes down: `stack_reaper`, `prune-worktree`, or a run that concluded having never recorded a worktree (no tree, no stack, nothing bound).
+    - **Held by the card, not the run, because the STACK outlives the run** (MAIN-480). A repair pass on the same card gets the same numbers back — the containers are still bound to them.
+      - **On a HOST node this is no longer true, since MAIN-611.** The stack now
+        runs in the job's NESTED daemon, and tearing the job container down at
+        the end of a run takes the stack with it; the lease is still card-held
+        and `stack_reaper`'s `compose down` degrades to a no-op, so nothing
+        breaks, but a build's published ports are reachable only while its run
+        is live. Containerised nodes are unaffected (they run no builds). The lease is handed back when the stack actually comes down: `stack_reaper`, `prune-worktree`, or a run that concluded having never recorded a worktree (no tree, no stack, nothing bound).
     - **The lazy reclaim cannot reach it, and that is the point.** The allocator drops the rows of non-live SESSIONS; a build's row has no session, so a stack that outlived its run keeps its ports. Do not "fix" that sweep to cover builds — it is the bug this replaced.
     - **A required listener with no free port keeps the job `queued`** (`QueuedReason::PortsUnavailable`), never fails it — a shortage clears itself, and failing would spend the card's strike budget. Starvation escalation still reaches it, so it cannot wait forever.
     - So on this repo a build holds **eleven** ports, from the same node range sessions draw from. On a 100-port node that is nine builds and sessions combined. If it pinches, widen the range.
