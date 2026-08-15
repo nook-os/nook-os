@@ -382,6 +382,85 @@ async fn an_unplaceable_job_does_not_block_the_ones_behind_it() {
     bed.teardown().await;
 }
 
+/// MAIN-329: an `investigate` run is not in the dispatch order at all.
+///
+/// No node can advertise the kind, so the row would sit at the head of the
+/// order forever with a reason that never moves — and `DISPATCH_PASS_LIMIT`
+/// documents that such a head is never lifted by the window itself. One per
+/// accepted support email, all sorted into the unset-priority bucket ahead of
+/// every newer job, is how a tenant stops placing work entirely. They are
+/// therefore excluded from `queued_in_dispatch_order`, not merely refused by
+/// `select_executor`.
+///
+/// `DISPATCH_PASS_LIMIT` of them are raised here, each older than the runnable
+/// job, so the assertion fails on a build that only refuses them.
+#[tokio::test]
+async fn investigate_runs_are_not_in_the_dispatch_order() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("investigate").await;
+    let (user, person) = bed.user(tenant, "owner").await;
+    let b = board(&bed, tenant).await;
+    let _node = node(&bed, tenant, person, 1, &["spec"]).await;
+    let state = bed.app_state().await;
+
+    let mut seeded = Vec::new();
+    for i in 0..jobs::DISPATCH_PASS_LIMIT {
+        seeded.push(
+            queued_at(
+                &bed,
+                tenant,
+                user,
+                card(&bed, tenant, b, user, 0).await,
+                "investigate",
+                Utc::now() - Duration::hours(2) - Duration::seconds(i as i64),
+            )
+            .await,
+        );
+    }
+    let runnable = queued_at(
+        &bed,
+        tenant,
+        user,
+        card(&bed, tenant, b, user, 0).await,
+        "spec",
+        Utc::now() - Duration::minutes(1),
+    )
+    .await;
+
+    let order = state
+        .jobs
+        .queued_in_dispatch_order(tenant)
+        .await
+        .expect("order");
+    assert_eq!(
+        order,
+        vec![runnable],
+        "only the job a node could actually take is offered the executor"
+    );
+    assert_eq!(
+        placed_one(&state, tenant).await,
+        Some(runnable),
+        "and the window is not consumed by the seeded runs ahead of it"
+    );
+    for id in seeded {
+        assert_eq!(
+            state
+                .jobs
+                .get(tenant, id)
+                .await
+                .expect("read")
+                .expect("job")
+                .state,
+            "queued",
+            "the seeded run is untouched — skipped, not canceled"
+        );
+    }
+
+    bed.teardown().await;
+}
+
 /// The pass fills every free slot it can, in order — one occasion places as
 /// much as capacity allows rather than one job per delivery.
 #[tokio::test]

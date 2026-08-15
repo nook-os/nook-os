@@ -821,6 +821,33 @@ const QUEUED_CANDIDATE_COLS: &str = "SELECT id, tenant_id, target_task_id, queue
        FROM loop_jobs
       WHERE tenant_id = $1 AND state = 'queued'";
 
+/// Excludes the kinds NO node can advertise (MAIN-329) — `table` is the alias
+/// the surrounding query gives `loop_jobs`.
+///
+/// `investigate` is seeded by the inbound-email pipeline and is deliberately
+/// absent from `nook-node`'s `KNOWN_LOOP_KINDS`, so `eligible_loop_executors`
+/// can never return one: the row waits by design, on a card a person reads.
+/// Two sweeps must therefore leave it alone, and both are the same fact:
+///
+/// - **The dispatch order.** `DISPATCH_PASS_LIMIT` documents exactly this
+///   hazard — a head refused for a STABLE reason is never lifted by the window
+///   itself. These rows are permanently that head, and they accumulate one per
+///   accepted support email, so 32 of them would stop every newer unset-
+///   priority build or spec job being placed at all, with an executor standing
+///   free.
+/// - **The starvation escalation.** Its signal is a `queued_reason` that does
+///   not move, which "no eligible executor" is here by construction. Left in,
+///   each accepted support email would cancel its own run half an hour later
+///   and attach `blocked` to the card the pipeline had just filed.
+///
+/// `cancel_queued_on_finished_cards` deliberately still reaches these rows: a
+/// run queued against a card somebody closed is doomed whatever its kind. All
+/// of this goes away with the card that gives the kind an executor — at which
+/// point the wait becomes a real one and both sweeps should see it again.
+fn placeable_kind(table: &str) -> String {
+    format!("{table}.kind <> 'investigate'")
+}
+
 impl DbLoopJobRepository {
     pub fn new(db: DbPool) -> Self {
         Self { db }
@@ -1710,12 +1737,15 @@ impl LoopJobRepository for DbLoopJobRepository {
             .query_scalar_all(
                 // `LEFT JOIN`, because a review run targets a workspace and has
                 // no card to read a priority from.
-                "SELECT j.id FROM loop_jobs j
+                &format!(
+                    "SELECT j.id FROM loop_jobs j
                  LEFT JOIN tasks t ON t.id = j.target_task_id
-                 WHERE j.tenant_id = $1 AND j.state = 'queued'
+                 WHERE j.tenant_id = $1 AND j.state = 'queued' AND {placeable}
                  ORDER BY CASE WHEN COALESCE(t.priority, 0) = 0 THEN 5
                                ELSE t.priority END,
                           j.created_at, j.id",
+                    placeable = placeable_kind("j")
+                ),
                 params![tenant],
             )
             .await?)
@@ -1874,8 +1904,10 @@ impl LoopJobRepository for DbLoopJobRepository {
             .query_all(
                 &format!(
                     "{QUEUED_CANDIDATE_COLS}
+                       AND {placeable}
                        AND queued_reason IS NOT NULL AND updated_at < {}",
-                    cutoff("$2")
+                    cutoff("$2"),
+                    placeable = placeable_kind("loop_jobs")
                 ),
                 params![tenant, starve_secs],
             )
@@ -1887,8 +1919,9 @@ impl LoopJobRepository for DbLoopJobRepository {
             // guard, and keeps waiting — which is AC-6's negative holding even
             // in the gap between the two statements.
             let guard = format!(
-                "queued_reason IS NOT NULL AND updated_at < {}",
-                cutoff("$2")
+                "{placeable} AND queued_reason IS NOT NULL AND updated_at < {}",
+                cutoff("$2"),
+                placeable = placeable_kind("loop_jobs")
             );
             if self
                 .claim_ending(&guard, params![c.id, starve_secs])
@@ -2849,12 +2882,14 @@ impl LoopJobRepository for FakeLoopJobRepository {
     async fn queued_in_dispatch_order(&self, tenant: TenantId) -> ApiResult<Vec<JobId>> {
         // No tasks table here, so every job reads as unset priority — the age
         // half of the rule is what the fake preserves. Tests about priority
-        // drive the real repository.
+        // drive the real repository. The kind exclusion is NOT a simplification
+        // though: it is what keeps a caller driven by the fake from seeing a
+        // dispatch order the database would never return (see `placeable_kind`).
         let s = self.inner.lock().unwrap();
         let mut queued: Vec<&LoopJob> = s
             .jobs
             .iter()
-            .filter(|j| j.tenant_id == tenant && j.state == "queued")
+            .filter(|j| j.tenant_id == tenant && j.state == "queued" && j.kind != "investigate")
             .collect();
         queued.sort_by_key(|j| (j.created_at, j.id.0));
         Ok(queued.into_iter().map(|j| j.id).collect())

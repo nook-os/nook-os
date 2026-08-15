@@ -40,6 +40,26 @@ pub const REVIEW_KIND: &str = "review";
 /// arc's split 2, not this one.
 pub const BUILD_KIND: &str = "build";
 
+/// The READ-ONLY investigator (MAIN-329). In the kind CHECK since migration
+/// 0077, and deliberately absent from [`KINDS`]: it is not something a person
+/// asks for through the create endpoint, it is what the inbound-email pipeline
+/// seeds when a support report becomes a card.
+///
+/// A run of this kind reproduces and explains; it writes nothing and opens no
+/// PR. Today that holds by CONSTRUCTION rather than by discipline: the kind is
+/// deliberately absent from the node's `KNOWN_LOOP_KINDS`, so no machine can
+/// advertise it and placement can never hand one to another kind's skill. The
+/// row is a queued brief until the card that ships the investigator gives it an
+/// executor, and that card inherits the same contract.
+///
+/// **A wait nothing can end is not starvation, so this kind is exempt from the
+/// escalation that measures one** (`NEVER_STARVES` in `repo::jobs`). Without
+/// that, "no eligible executor" — a reason stable by construction — would trip
+/// `escalate_starved_queued` at `job_starve_secs`, cancel the run, and attach
+/// `blocked` to the support card the pipeline had just filed. The exemption
+/// goes away with the same card that gives the kind an executor.
+pub const INVESTIGATE_KIND: &str = "investigate";
+
 /// The runtime a loop job needs authorized on its executor (MAIN-160). Both
 /// kinds drive the `nook-spec` / `nook-epic` skills under Claude Code, so the
 /// executor must report the `claude` runtime `authorized` (MAIN-126). A single
@@ -242,6 +262,59 @@ pub async fn create(
 
     record_job_event(state, tenant, "job.created", &job, is_private(&target)).await;
     detail(state, job).await
+}
+
+/// Seed a read-only [`INVESTIGATE_KIND`] run against one card (MAIN-329 AC-6).
+///
+/// Its own entry point rather than a `kind` [`create`] would accept, for the
+/// reason [`enqueue_review`] is one: the caller is not a person with a session
+/// — it is the inbound-email pipeline, which has already decided the target and
+/// has no visibility check to make against a card it created a moment ago.
+/// Routing it through `create` would mean a public endpoint could ask for this
+/// kind, which nothing should.
+///
+/// `brief` opens the transcript as the human line it is, so every viewing
+/// surface shows what the run was asked to do before the agent says anything.
+pub async fn seed_investigate(
+    state: &AppState,
+    tenant: TenantId,
+    requested_by: UserId,
+    target: TaskId,
+    workspace: Option<WorkspaceId>,
+    brief: &str,
+) -> ApiResult<LoopJob> {
+    let job = state
+        .jobs
+        .create(crate::repo::jobs::NewLoopJob {
+            id: JobId::new(),
+            tenant,
+            kind: INVESTIGATE_KIND.to_string(),
+            target_task_id: Some(target),
+            workspace_id: workspace,
+            requested_by,
+            seed: Some(brief.to_string()),
+            predecessor_job_id: None,
+            review_forced: false,
+            review_pr_number: None,
+            review_head_sha: None,
+            build_fingerprint: None,
+        })
+        .await?;
+
+    append_transcript(state, job.id, "human", brief).await.ok();
+
+    // Enqueue AFTER the row exists, so a consumer racing us always finds it.
+    state
+        .queue
+        .enqueue(NewWork::new(
+            tenant.0,
+            WORK_TYPE,
+            serde_json::to_vec(&job.id).unwrap_or_default(),
+        ))
+        .await?;
+
+    record_job_event(state, tenant, "job.created", &job, false).await;
+    Ok(job)
 }
 
 /// Raise a `review` job against a workspace, unless one is already in flight

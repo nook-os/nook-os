@@ -528,6 +528,50 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/email/inbound": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/email/inbound` — one signed delivery from the mail provider's
+         *     inbound-parse webhook.
+         * @description **Takes no `AuthCtx`, which is how a route opts out of auth here** (the
+         *     precedent is `/hooks/github/{workspace_id}`, and before it
+         *     `/invites/preview`). A mail provider carries no session and no tenant; the
+         *     signature over the raw body is the authentication, and the recipient
+         *     address is what names the tenant.
+         *
+         *     | code | when |
+         *     |------|------|
+         *     | 202  | signed and understood — filed, or dropped by the trust gate |
+         *     | 400  | signed, but not a payload this source can normalize — including one whose sender the provider did not verify, or did not report on |
+         *     | 401  | no signature, one that does not verify, or one too old to accept |
+         *     | 404  | this deployment has no inbound secret — it receives no mail |
+         *     | 413  | body over the route's 25 MiB limit |
+         *
+         *     A 400 is deliberately distinguishable from a drop: it says the *delivery*
+         *     was malformed, which is the operator's problem and not a fact about who is
+         *     on an allow-list. Only the gate's two verdicts are hidden behind the 202.
+         *
+         *     **A drop is a 202, exactly like an accept.** The provider must not retry a
+         *     message we have decided not to act on, and a distinguishable refusal would
+         *     turn this endpoint into a way to ask "does this deployment serve that
+         *     address" and "is that person support staff" — from the outside, for free.
+         *     The disposition is in the body, where the operator reading their provider's
+         *     delivery log can see it and an enumerator cannot use it.
+         */
+        post: operations["receive_inbound_email"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/events": {
         parameters: {
             query?: never;
@@ -5900,6 +5944,20 @@ export interface components {
              */
             passphrase: string;
         };
+        /**
+         * @description What the inbound-email receiver tells the mail provider it did (MAIN-329).
+         *
+         *     A dropped delivery gets the same 202 an accepted one does — see
+         *     `routes::email` for why — so this body is the only place the two differ.
+         */
+        InboundEmailAck: {
+            /** @description Why it was dropped: `unrouted` | `sender-not-allowed`. */
+            reason?: string | null;
+            /** @description `filed` | `dropped`. */
+            status: string;
+            /** @description The card the message became, when it became one. */
+            task_key?: string | null;
+        };
         InitProjectRequest: {
             name: string;
         };
@@ -10465,6 +10523,53 @@ export interface operations {
             };
         };
     };
+    receive_inbound_email: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": unknown;
+            };
+        };
+        responses: {
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InboundEmailAck"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     list_events: {
         parameters: {
             query?: {
@@ -14174,6 +14279,12 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Setting"];
                 };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

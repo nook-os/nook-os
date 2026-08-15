@@ -107,16 +107,41 @@ async fn queued_job(
     created_secs_ago: i64,
     reason_secs_ago: i64,
 ) -> JobId {
+    queued_job_of_kind(
+        bed,
+        tenant,
+        user,
+        target,
+        "build",
+        reason,
+        created_secs_ago,
+        reason_secs_ago,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn queued_job_of_kind(
+    bed: &TestBed,
+    tenant: TenantId,
+    user: UserId,
+    target: TaskId,
+    kind: &str,
+    reason: Option<&str>,
+    created_secs_ago: i64,
+    reason_secs_ago: i64,
+) -> JobId {
     let id = JobId::new();
     bed.db()
         .exec(
             "INSERT INTO loop_jobs
                 (id, tenant_id, kind, target_task_id, requested_by, state, queued_reason,
                  created_at, updated_at)
-             VALUES ($1,$2,'build',$3,$4,'queued',$5,$6,$7)",
+             VALUES ($1,$2,$3,$4,$5,'queued',$6,$7,$8)",
             params![
                 id,
                 tenant,
+                kind.to_string(),
                 target,
                 user,
                 reason,
@@ -256,6 +281,60 @@ async fn a_queued_job_on_an_open_card_below_the_threshold_is_untouched() {
     assert_eq!(job_state(&bed, waiting).await, "queued");
     assert!(comments_of(&bed, open).await.is_empty());
     assert!(labels_of(&bed, open).await.is_empty(), "and unmarked");
+
+    bed.teardown().await;
+}
+
+/// MAIN-329: an `investigate` run waits by design, and a wait nothing can end
+/// is not starvation.
+///
+/// No node advertises the kind, so its `queued_reason` never moves — the exact
+/// signal the escalation reads. Without the exemption every accepted support
+/// email would cancel its own run half an hour later and attach `blocked` to
+/// the card the pipeline had just filed. Aged far past the threshold here, and
+/// beside a `build` run that IS starved, so the test cannot pass by the sweep
+/// simply doing nothing.
+#[tokio::test]
+async fn an_investigate_run_waits_instead_of_starving() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("ending").await;
+    let (user, _p) = bed.user(tenant, "owner").await;
+    let filed = card(&bed, tenant, user, "backlog").await;
+    let other = card(&bed, tenant, user, "started").await;
+    let reason = "no eligible executor";
+    let investigating = queued_job_of_kind(
+        &bed,
+        tenant,
+        user,
+        filed,
+        "investigate",
+        Some(reason),
+        18_000,
+        7_200,
+    )
+    .await;
+    let building = queued_job(&bed, tenant, user, other, Some(reason), 18_000, 7_200).await;
+    let state = bed.app_state().await;
+
+    let n = jobs::escalate_starved_queued(&state, tenant, 1_800)
+        .await
+        .expect("starve scan");
+    assert_eq!(n, 1, "the build starved and the investigate did not");
+    assert_eq!(job_state(&bed, building).await, "canceled");
+    assert_eq!(job_state(&bed, investigating).await, "queued");
+
+    // The point of the exemption: the support card the pipeline filed is not
+    // marked `blocked`, commented on, or otherwise touched.
+    assert!(
+        labels_of(&bed, filed).await.is_empty(),
+        "the filed card kept its labels"
+    );
+    assert!(
+        comments_of(&bed, filed).await.is_empty(),
+        "and was not commented on"
+    );
 
     bed.teardown().await;
 }

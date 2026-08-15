@@ -4,6 +4,7 @@ pub mod bulk;
 pub mod config;
 pub mod dispatcher;
 pub mod dist;
+pub mod email;
 pub mod events;
 pub mod feedback;
 pub mod gitops;
@@ -563,6 +564,19 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/hooks/github/{workspace_id}",
             post(hooks::github).layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
+        // Unauthenticated, for the same reason: a mail provider carries no
+        // session — the HMAC over the raw body is the authentication, and the
+        // recipient address is what names the tenant (MAIN-329).
+        //
+        // The limit is the shipped upload cap rather than axum's 2 MiB default:
+        // a support report with a screenshot or a log attached is the ordinary
+        // case, and one silently refused is a message nobody knows was sent.
+        .route(
+            "/email/inbound",
+            post(email::inbound).layer(DefaultBodyLimit::max(
+                crate::config::DEFAULT_USER_CONTENT_MAX_BYTES as usize,
+            )),
         )
         .route("/dispatcher/suggest", post(dispatcher::suggest))
         .route("/schedule/node", get(schedule::node))

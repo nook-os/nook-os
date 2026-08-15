@@ -206,6 +206,20 @@ pub struct Config {
     pub smtp_username: Option<String>,
     pub smtp_password: Option<String>,
 
+    // ── Inbound email ───────────────────────────────────────────────────
+    /// Shared secret the inbound-email webhook's HMAC is verified against
+    /// (MAIN-329). `None` — the shipped default — means the deployment receives
+    /// no mail: `POST /api/v1/email/inbound` answers 404 and nothing is parsed.
+    ///
+    /// Deployment-scoped rather than tenant-scoped, and that is what fixes the
+    /// ORDER of the trust gate. The route takes no principal and no path
+    /// parameter, so a per-tenant secret could only be found by parsing the
+    /// body first — verifying a signature with a key the unverified payload
+    /// chose. One relay, one secret, verified against the raw bytes before
+    /// anything reads them; which tenant the mail belongs to is decided
+    /// afterwards, from the recipient.
+    pub email_inbound_secret: Option<String>,
+
     // ── Postmark (HTTP mail provider) ───────────────────────────────────
     /// Server token for `mail_provider = postmark`, sent as the
     /// `X-Postmark-Server-Token` header. Missing → the provider fails to build
@@ -483,6 +497,8 @@ impl Config {
             smtp_username: env_opt("SMTP_USERNAME"),
             smtp_password: env_opt("SMTP_PASSWORD"),
 
+            email_inbound_secret: env_opt("EMAIL_INBOUND_SECRET"),
+
             postmark_token: env_opt("POSTMARK_TOKEN"),
             postmark_api_url: env_opt("POSTMARK_API_URL")
                 .unwrap_or_else(|| "https://api.postmarkapp.com/email".into()),
@@ -700,6 +716,7 @@ impl Config {
             smtp_from: "NookOS <no-reply@localhost>".into(),
             smtp_username: None,
             smtp_password: None,
+            email_inbound_secret: None,
             postmark_token: None,
             postmark_api_url: "https://api.postmarkapp.com/email".into(),
             mail_from: "NookOS <no-reply@localhost>".into(),
