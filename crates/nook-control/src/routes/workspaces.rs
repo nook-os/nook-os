@@ -1375,6 +1375,14 @@ pub async fn clone_to_node(
         )
     })?;
 
+    // Cloning writes a checkout onto that machine, and the rule below resolves
+    // the caller's PERSON — borrowed from the tenant owner by a node token
+    // (MAIN-577). The session routes reach the same rule through
+    // `AuthCtx::require_node_may_use`, which confines a node to its own machine
+    // before any person is resolved; this one calls it directly, so it says so
+    // directly.
+    auth.require_user()?;
+
     // Same person-based authorization as starting a session: own or shared node.
     crate::auth::require_person_may_use_node(
         &state,

@@ -36,7 +36,15 @@ use crate::state::AppState;
 /// they belong to, which is exactly why the notebook follows the person and
 /// looks identical whichever tenant they signed into (AC-3). This is the whole
 /// access model: scope every query by the value this returns and nothing else.
+///
+/// Which is why a node principal is refused HERE (MAIN-577). A node token
+/// carries the tenant owner's `user_id` on purpose, so that a machine's
+/// tenant-scoped queries and event attribution work; `require_user` is the wall
+/// that stops the borrowed identity becoming the owner. Nine handlers each
+/// forgot to put that wall up, and any tenth would too — so it stands at the
+/// one door they all come through rather than at each of them.
 async fn person_id_for(state: &AppState, auth: &AuthCtx) -> ApiResult<Uuid> {
+    auth.require_user()?;
     // One definition, shared with the node-ownership guard (MAIN-130).
     crate::auth::person_id_of(state, auth.user_id).await
 }
@@ -848,6 +856,51 @@ mod tests {
         assert!(
             code.contains("person_id"),
             "the notebook must scope every query by person_id"
+        );
+    }
+
+    /// The MAIN-577 guard: a node token borrows the tenant owner's `user_id`,
+    /// so anything that turns an `AuthCtx` into a person without asking what
+    /// kind of principal it is hands a machine the owner's notebook. Nine
+    /// handlers each independently forgot `require_user()`; a tenth would too.
+    ///
+    /// So the rule this asserts is structural, not per-route: the module
+    /// resolves a person in exactly ONE place, and that place checks. A new
+    /// handler either goes through `person_id_for` (and is guarded for free) or
+    /// resolves its own person — which is the second `person_id_of` this test
+    /// fails on.
+    #[test]
+    fn notebook_resolves_a_person_only_behind_a_principal_check() {
+        let src = include_str!("notebook.rs");
+        let code: String = src
+            .split("mod tests")
+            .next()
+            .expect("module body")
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(
+            code.matches("person_id_of").count(),
+            1,
+            "the notebook must resolve a person in exactly one place — \
+             `person_id_for`. A second `person_id_of` is a route that skipped \
+             the principal check (MAIN-577); call `person_id_for` instead."
+        );
+
+        let resolver = code
+            .split_once("async fn person_id_for")
+            .expect("`person_id_for` is the notebook's one person resolver")
+            .1
+            .split_once("\n}")
+            .expect("its body")
+            .0;
+        assert!(
+            resolver.contains("require_user"),
+            "`person_id_for` must call `require_user()` — it is the only thing \
+             stopping a node token, which carries the tenant owner's user id, \
+             from reading and writing the owner's private notebook (MAIN-577)."
         );
     }
 }
