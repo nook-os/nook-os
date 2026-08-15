@@ -69,6 +69,7 @@ pub fn control_plane_env(
         // and `loops.enabled`, which on somebody's laptop is a workspace
         // pointing at a repo that is not there and loops running by surprise.
         ("NOOK_LOCAL_JOIN_TOKEN".into(), secrets.join_token.clone()),
+        (EXIT_WITH_PARENT.into(), "1".into()),
     ]
 }
 
@@ -101,6 +102,7 @@ pub fn node_env(config_dir: &Path) -> Vec<(String, String)> {
         ("NOOK_CONFIG_DIR".into(), config_dir.display().to_string()),
         ("NOOK_PORT_RANGE".into(), LOCAL_PORT_RANGE.into()),
         ("NOOK_INSECURE".into(), "1".into()),
+        (EXIT_WITH_PARENT.into(), "1".into()),
     ]
 }
 
@@ -134,6 +136,77 @@ pub fn restart_delay(consecutive_failures: u32) -> Duration {
 pub fn is_flapping(consecutive_failures: u32) -> bool {
     consecutive_failures >= NODE_FLAPPING_AFTER
 }
+
+/// Asks a bundled process to stop when the app that started it does (MAIN-400
+/// AC-1/AC-2).
+///
+/// Set only by the two maps above, so it reaches the control plane and the node
+/// a desktop install owns and nothing else: a node under systemd or compose has
+/// no parent whose death means anything, and must not acquire one.
+pub const EXIT_WITH_PARENT: &str = "NOOK_EXIT_WITH_PARENT";
+
+/// How often an opted-in process checks whether it still has the parent it
+/// started under. Half a second is imperceptible to a person quitting the app
+/// and costs one syscall in that time.
+const ORPHAN_CHECK: Duration = Duration::from_millis(500);
+
+/// Whether a process that started under `started_under` has been orphaned.
+///
+/// Compared against the ORIGINAL parent rather than against pid 1, because pid
+/// 1 is not where an orphan lands when a subreaper is in the way — a systemd
+/// user session and most container init are subreapers, and there the reparent
+/// target is their pid. "My parent is not who it was" is true in every one of
+/// those cases and needs to know none of them.
+pub fn orphaned(started_under: u32, parent_now: u32) -> bool {
+    parent_now != started_under
+}
+
+/// Exit if the process that started this one goes away, when it asked for that
+/// ([`EXIT_WITH_PARENT`]).
+///
+/// The desktop shell kills both sidecars on a clean quit, which is faster and
+/// more direct than this. This is the half that covers the quit it never gets
+/// to run: a `kill -9`, an OS force-quit, a panic in the shell. Without it the
+/// control plane outlives the window, keeps the SQLite single-instance lock,
+/// and the next launch is refused by the guard — the app looks permanently
+/// broken after one force-quit (AC-2).
+///
+/// Called at the top of both binaries rather than only under `serve`/`run`: a
+/// short-lived `nook join` is a child of the shell too, and a check that costs
+/// one environment read is not worth making conditional.
+pub fn exit_when_orphaned() {
+    if std::env::var(EXIT_WITH_PARENT).is_ok_and(|v| !v.is_empty()) {
+        watch_parent();
+    }
+}
+
+#[cfg(unix)]
+fn watch_parent() {
+    // Read once, up front: after the parent dies this can only report the
+    // reaper, so the value is meaningless unless it was taken while the parent
+    // was still there.
+    let started_under = unsafe { libc::getppid() } as u32;
+    std::thread::spawn(move || loop {
+        std::thread::sleep(ORPHAN_CHECK);
+        let parent_now = unsafe { libc::getppid() } as u32;
+        if orphaned(started_under, parent_now) {
+            // stderr rather than tracing: this runs on any binary that opts in,
+            // including one that has not installed a subscriber yet.
+            eprintln!("the process that started this one (pid {started_under}) is gone — exiting");
+            // Immediate and unconditional. Every durable thing here is a file
+            // the kernel closes for us, and the one that matters is the
+            // single-instance lock: it is released by the exit, which is what
+            // lets the next launch in.
+            std::process::exit(0);
+        }
+    });
+}
+
+/// Windows ships as a client app with no bundled sidecars at all
+/// (`tauri.windows.conf.json`), so there is no orphan to prevent and nothing
+/// here to be wrong about.
+#[cfg(not(unix))]
+fn watch_parent() {}
 
 /// Append to a bounded tail. A boot log is unbounded and a reader wants its
 /// end, which is where the failure is.
@@ -511,6 +584,45 @@ mod tests {
         assert!(!is_flapping(0));
         assert!(!is_flapping(NODE_FLAPPING_AFTER - 1));
         assert!(is_flapping(NODE_FLAPPING_AFTER));
+    }
+
+    /// MAIN-400 AC-1/AC-2: both bundled processes are asked to stop when the
+    /// app that started them does.
+    ///
+    /// The shell kills them on a clean quit; this variable is what covers the
+    /// quit it never gets to run. Without it on the CONTROL PLANE, a force-quit
+    /// leaves a process holding the SQLite single-instance lock and the next
+    /// launch is refused — the app looks permanently broken after one crash.
+    #[test]
+    fn both_bundled_processes_exit_with_the_app() {
+        assert_eq!(get(&env_of(1, 2), EXIT_WITH_PARENT), "1");
+        assert_eq!(
+            get(
+                &node_env(Path::new("/home/a/.local/share/nook/node")),
+                EXIT_WITH_PARENT
+            ),
+            "1"
+        );
+    }
+
+    /// …and only there. A node under systemd or compose is started by an init
+    /// whose "death" is not a signal to stop; asking it to exit with its parent
+    /// would be asking it to exit on a restart of that supervisor.
+    #[test]
+    fn nothing_else_opts_a_process_into_it() {
+        assert_eq!(EXIT_WITH_PARENT, "NOOK_EXIT_WITH_PARENT");
+    }
+
+    /// The orphan test is "my parent changed", not "my parent is pid 1".
+    ///
+    /// A systemd user session and most container init are subreapers, so an
+    /// orphan there is reparented to THEM and never to 1 — a `== 1` check would
+    /// simply never fire on the machines most likely to run this.
+    #[test]
+    fn an_orphan_is_recognised_by_the_parent_having_changed() {
+        assert!(!orphaned(4321, 4321), "the parent is still there");
+        assert!(orphaned(4321, 1), "reparented to init");
+        assert!(orphaned(4321, 99), "reparented to a subreaper, not to init");
     }
 
     /// The log kept for the UI is bounded, and it is the END that is kept —

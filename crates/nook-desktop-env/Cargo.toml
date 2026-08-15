@@ -17,5 +17,10 @@ rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+# `getppid`, for the exit-with-parent watchdog (MAIN-400). Unix only, because
+# the bundled sidecars are.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 toml = { workspace = true }
