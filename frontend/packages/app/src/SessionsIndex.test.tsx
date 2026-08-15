@@ -31,7 +31,7 @@ const SESSIONS = [
 const get = vi.hoisted(() =>
   vi.fn(async (path: string) => {
     if (path === "/api/v1/auth/me") return { data: { user: { id: "u1" } } };
-    if (path === "/api/v1/workspaces") return { data: [] };
+    if (path === "/api/v1/workspaces") return { data: { rows: [], next_cursor: null } };
     if (path === "/api/v1/sessions") return { data: (globalThis as any).__sessions };
     if (path === "/api/v1/settings") return { data: (globalThis as any).__settings };
     return { data: [] };
@@ -127,7 +127,7 @@ describe("SessionsIndex", () => {
     });
     get.mockImplementation(async (path: string) => {
       if (path === "/api/v1/auth/me") return { data: { user: { id: "u1" } } };
-      if (path === "/api/v1/workspaces") return { data: [] };
+      if (path === "/api/v1/workspaces") return { data: { rows: [], next_cursor: null } };
       if (path === "/api/v1/sessions") {
         await pending;
         return { data: SESSIONS };

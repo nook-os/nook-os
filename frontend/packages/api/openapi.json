@@ -8020,59 +8020,8 @@
         "tags": [
           "crate::routes::workspaces"
         ],
+        "summary": "The tenant's repos, on the pagination contract — searched (name/slug/\nremote), sorted (name/created), cursor-walked. The envelope comes back with\nor without parameters (MAIN-606): a caller that has to know which of two\nURLs it wants before it can ask is a caller that has to narrow a union, and\nthe unbounded twin this replaced handed every picker a whole tenant to fill\na menu with.",
         "operationId": "list_workspaces",
-        "responses": {
-          "200": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/WorkspaceDetail"
-                  }
-                }
-              }
-            }
-          }
-        }
-      },
-      "post": {
-        "tags": [
-          "crate::routes::workspaces"
-        ],
-        "operationId": "create_workspace",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateWorkspaceRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Workspace"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/workspaces/page": {
-      "get": {
-        "tags": [
-          "crate::routes::workspaces"
-        ],
-        "summary": "The paged twin of the whole-list read — the table view's endpoint. The\nwhole list stays for the pickers (workspace switcher, dispatch target),\nwhich genuinely want everything.",
-        "operationId": "workspaces_page",
         "parameters": [
           {
             "name": "q",
@@ -8143,6 +8092,34 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Page_WorkspaceDetail"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::routes::workspaces"
+        ],
+        "operationId": "create_workspace",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateWorkspaceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Workspace"
                 }
               }
             }

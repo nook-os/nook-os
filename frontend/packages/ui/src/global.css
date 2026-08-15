@@ -4169,6 +4169,20 @@ textarea.env-area.blurred {
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
 }
 
+/* A workspace picker's popup (MAIN-606). The panel chrome of `.sel-menu`
+   WITHOUT its scroller: the row list inside owns the scrolling, so the search
+   box stays pinned above the rows while you page through them. */
+.ws-picker-menu {
+  position: fixed;
+  z-index: 500;
+  min-width: 240px;
+  padding: 6px;
+  background: var(--nook-bg-panel);
+  border: 1px solid var(--nook-border-bright);
+  border-radius: var(--nook-radius);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+}
+
 .sel-option {
   display: flex;
   align-items: center;

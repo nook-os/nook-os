@@ -9,7 +9,6 @@ import { BuildLoopPanel } from "../BuildLoopPanel";
 import { NotesPanel } from "./Notes";
 import { createSpecDraft } from "../newspec";
 import { useNewWork } from "../newwork";
-import { usePagedList } from "../paging";
 import { fetchCredentials } from "../GitCredentials";
 import { PORT_CAP_SENTENCE, PortSafetyNotice } from "../PortSafetyNotice";
 import { hasPortDeclaration } from "../portSafety";
@@ -24,6 +23,7 @@ import { askChoice, askConfirm, askForm, askText, notify } from "../dialogs";
 import { requireAppPassword, useAppPassword } from "../apppassword";
 import { adoptEnvFromDisk, saveEnv } from "../envvault";
 import { SessionOwner } from "../sessionOwner";
+import { useWorkspaces } from "../workspaces";
 
 /**
  * Which stored ssh key this repo clones and fetches with (MAIN-367 AC-1).
@@ -413,11 +413,7 @@ function NewSpecButton({ workspaceId, inRow = false }: { workspaceId: string; in
  *  the table in Admin read as hiding the product from itself. */
 export function WorkspacesPage() {
   const showNewWork = useNewWork((s) => s.show);
-  const list = usePagedList({
-    key: ["workspaces", "page"],
-    fetch: async (params) =>
-      (await api.GET("/api/v1/workspaces/page", { params: { query: params } })).data,
-  });
+  const list = useWorkspaces();
 
   const columns: DataColumn<WsDetail>[] = [
     {

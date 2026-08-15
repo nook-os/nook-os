@@ -9,6 +9,7 @@ import React from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@nookos/api";
 import type { SessionTab } from "./sessionTabsStore";
+import { useWorkspaceNames } from "./workspaces";
 import {
   EMPTY_WORKING_SET,
   WORKING_SET_KEY,
@@ -46,10 +47,6 @@ export function useWorkingSet(): WorkingSetTabs {
   const { data: settings } = useQuery({
     queryKey: ["settings"],
     queryFn: async () => (await api.GET("/api/v1/settings")).data ?? [],
-  });
-  const { data: workspaces } = useQuery({
-    queryKey: ["workspaces"],
-    queryFn: async () => (await api.GET("/api/v1/workspaces")).data ?? [],
   });
   const { data: nodes } = useQuery({
     queryKey: ["nodes"],
@@ -111,7 +108,10 @@ export function useWorkingSet(): WorkingSetTabs {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stranded]);
 
-  const names = Object.fromEntries((workspaces ?? []).map((w) => [w.id, w.name]));
+  // Names for the ids the sessions carry, read one row at a time (MAIN-606) —
+  // the collection is paged, so indexing "every workspace" is not on offer.
+  const workspaceNames = useWorkspaceNames((sessions ?? []).map((s) => s.workspace_id));
+  const names = Object.fromEntries(workspaceNames);
   const nodeNames = Object.fromEntries((nodes ?? []).map((n) => [n.id, n.name]));
   const tabs = deriveWorkingSetTabs(set, sessions ?? [], names, nodeNames);
 

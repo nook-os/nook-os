@@ -111,12 +111,11 @@ async fn resolve_workspace(client: &Client, want: Option<&str>) -> Result<String
                  --workspace <name|id>",
             );
     };
-    let rows = client.get("/api/v1/workspaces").await?;
     // Name, slug or id — the same three `nook start` and `nook set ports`
     // accept. A workspace addressed by slug everywhere else must not be
     // unfindable here.
     let ws = pick_one(
-        rows.as_array().cloned().unwrap_or_default(),
+        crate::cli::workspaces_all(client).await?,
         want,
         &["name", "slug", "id"],
         "workspaces",

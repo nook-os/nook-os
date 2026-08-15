@@ -33,8 +33,28 @@ const SESSIONS = [
   },
 ];
 
+// `api` has exactly one live checkout, so a terminal opens straight into it;
+// `web` has none, so the same action escalates to New Work. Both branches of
+// `terminalTarget` are reachable from the tree.
+const WORKSPACES = vi.hoisted(() => [
+  {
+    id: "w1",
+    name: "api",
+    locations: [
+      {
+        node_id: "n1",
+        node_name: "azul",
+        node_status: "online",
+        path: "/w/api",
+        dirty: false,
+      },
+    ],
+  },
+  { id: "w2", name: "web", locations: [] },
+]);
+
 const get = vi.hoisted(() =>
-  vi.fn(async (path: string) => {
+  vi.fn(async (path: string, opts?: { params?: { path?: { id?: string } } }) => {
     if (path === "/api/v1/auth/me")
       return {
         data: {
@@ -44,27 +64,9 @@ const get = vi.hoisted(() =>
         },
       };
     if (path === "/api/v1/workspaces")
-      return {
-        data: [
-          // `api` has exactly one live checkout, so a terminal opens straight
-          // into it; `web` has none, so the same action escalates to New Work.
-          // Both branches of `terminalTarget` are reachable from the tree.
-          {
-            id: "w1",
-            name: "api",
-            locations: [
-              {
-                node_id: "n1",
-                node_name: "azul",
-                node_status: "online",
-                path: "/w/api",
-                dirty: false,
-              },
-            ],
-          },
-          { id: "w2", name: "web", locations: [] },
-        ],
-      };
+      return { data: { rows: WORKSPACES, next_cursor: null } };
+    if (path === "/api/v1/workspaces/{id}")
+      return { data: WORKSPACES.find((w) => w.id === opts?.params?.path?.id) ?? null };
     if (path === "/api/v1/nodes") return { data: [{ id: "n1", name: "azul" }] };
     if (path === "/api/v1/sessions") return { data: (globalThis as any).__sessions };
     if (path === "/api/v1/settings") return { data: (globalThis as any).__settings };

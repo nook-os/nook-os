@@ -7,6 +7,7 @@ import { useLive } from "../live";
 import { QueuePanel } from "../QueuePanel";
 import { WorkspaceLocations } from "../WorkspaceLocations";
 import { SessionOwner } from "../sessionOwner";
+import { useWorkspaces } from "../workspaces";
 
 export function Dashboard() {
   const { data: nodes } = useQuery({
@@ -19,10 +20,7 @@ export function Dashboard() {
       (await api.GET("/api/v1/sessions", { params: { query: { active: true } } }))
         .data ?? [],
   });
-  const { data: workspaces } = useQuery({
-    queryKey: ["workspaces"],
-    queryFn: async () => (await api.GET("/api/v1/workspaces")).data ?? [],
-  });
+  const workspaces = useWorkspaces();
   const { data: me } = useQuery({
     queryKey: ["me"],
     queryFn: async () => (await api.GET("/api/v1/auth/me")).data ?? null,
@@ -109,26 +107,43 @@ export function Dashboard() {
           own page; it simply stopped being the first thing anyone sees. */}
       <QueuePanel />
 
-      <Panel title={`Workspaces (${(workspaces ?? []).length})`}>
-        {(workspaces ?? []).length === 0 ? (
+      {/* No count in the title any more: the collection is paged (MAIN-606),
+          so the only number this panel can know is how many rows it has
+          fetched — which is not how many the tenant has. */}
+      <Panel title="Workspaces">
+        {workspaces.rows.length === 0 ? (
           <Empty>No workspaces discovered yet.</Empty>
         ) : (
-          <table className="nook-table">
-            <tbody>
-              {(workspaces ?? []).map((w) => (
-                <tr key={w.id}>
-                  <td>
-                    <Link to={`/workspaces/${w.id}`} className="bright">
-                      {w.name}
-                    </Link>
-                  </td>
-                  <td>
-                    <WorkspaceLocations locations={w.locations} />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <>
+            <table className="nook-table">
+              <tbody>
+                {workspaces.rows.map((w) => (
+                  <tr key={w.id}>
+                    <td>
+                      <Link to={`/workspaces/${w.id}`} className="bright">
+                        {w.name}
+                      </Link>
+                    </td>
+                    <td>
+                      <WorkspaceLocations locations={w.locations} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {workspaces.hasMore && (
+              <div className="data-list-more">
+                <button
+                  type="button"
+                  className="data-list-more-btn"
+                  onClick={workspaces.loadMore}
+                  disabled={workspaces.loadingMore}
+                >
+                  {workspaces.loadingMore ? "Loading…" : "Load more"}
+                </button>
+              </div>
+            )}
+          </>
         )}
       </Panel>
 

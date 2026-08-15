@@ -38,6 +38,7 @@ import {
   useUploads,
 } from "./TaskAttachments";
 import { TaskPicker, isDone, type PickerTask } from "./TaskPicker";
+import { WorkspacePicker } from "./WorkspacePicker";
 import { toggleTaskCheckbox } from "./taskCheckbox";
 import { TaskInteractions } from "./Interactions";
 import { LoopPanel } from "./LoopPanel";
@@ -131,10 +132,6 @@ export function TaskDetail({
   const { data: allLabels } = useQuery({
     queryKey: ["labels"],
     queryFn: async () => (await api.GET("/api/v1/labels")).data ?? [],
-  });
-  const { data: workspaces } = useQuery({
-    queryKey: ["workspaces"],
-    queryFn: async () => (await api.GET("/api/v1/workspaces")).data ?? [],
   });
 
   const bust = () => {
@@ -835,17 +832,11 @@ export function TaskDetail({
                   can see this ticket at all — an unscoped task is one no
                   `/loop-build` will ever claim. */}
               <span className="faint small">Workspace</span>
-              <Select
+              <WorkspacePicker
                 ariaLabel="workspace"
-                value={task.workspace_id ?? NO_WORKSPACE}
-                onChange={setWorkspace}
-                options={[
-                  { value: NO_WORKSPACE, label: "— none —" },
-                  ...(workspaces ?? []).map((w) => ({
-                    value: w.id,
-                    label: w.name,
-                  })),
-                ]}
+                value={task.workspace_id ?? ""}
+                onChange={(id) => void setWorkspace(id || NO_WORKSPACE)}
+                noneLabel="— none —"
               />
 
               {/* Epic membership (MAIN-83 AC-4): only for a non-epic task, and

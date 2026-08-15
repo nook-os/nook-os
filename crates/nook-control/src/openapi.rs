@@ -41,7 +41,6 @@ use utoipa::OpenApi;
         crate::routes::auth::dev_login,
         crate::routes::auth::logout,
         crate::routes::workspaces::list,
-        crate::routes::workspaces::page,
         crate::routes::nodes::page,
         crate::routes::workspaces::get_one,
         crate::routes::workspaces::get_session_spec,

@@ -55,6 +55,8 @@ import {
 import { fetchTaskJobs, taskJobsKey } from "../loop";
 import { recall, remember } from "../lastPlace";
 import { priorityMeta, priorityRank, previewText, PRIORITIES } from "../taskmeta";
+import { WorkspacePicker } from "../WorkspacePicker";
+import { useWorkspace, useWorkspaceNames, useWorkspaces } from "../workspaces";
 
 /** Exported for its own test: what a card shows at a glance is the whole
  *  point of a board, and rendering the entire page to assert one badge is a
@@ -458,14 +460,12 @@ function BoardSearch({
  *  control, and a clear-all. Drives the same query an agent's pick step uses. */
 function Filters({
   labels,
-  workspaces,
   members,
   epics,
   value,
   onChange,
 }: {
   labels: { id: string; name: string; color: string }[];
-  workspaces: { id: string; name: string }[];
   /** Tenant members for the specific-person assignee filter (MAIN-111). */
   members: { id: string; name: string }[];
   /** Board epics, in pick order, for the epic filter (MAIN-111). */
@@ -514,7 +514,19 @@ function Filters({
         : [...value.visibility, v],
     });
 
-  const chips = activeChips(value, workspaces, members, epics);
+  // The chip only ever names the workspace the filter is SET to, so the one
+  // row is read by id (MAIN-606) rather than found in a list this strip can no
+  // longer hold. Same question for the control below: "more than one repo?" is
+  // two rows, not every row.
+  const selectedWorkspace = useWorkspace(value.workspace);
+  const firstTwo = useWorkspaces({ limit: 2 });
+  const manyWorkspaces = firstTwo.hasMore || firstTwo.rows.length > 1;
+  const chips = activeChips(
+    value,
+    selectedWorkspace ? [selectedWorkspace] : [],
+    members,
+    epics,
+  );
   const anyActive = isFilterActive(value);
   // Clear-all resets to empty but keeps the current TAB (AC-4); the open task
   // rides in a separate URL key that writeFilter never touches.
@@ -701,23 +713,15 @@ function Filters({
               </select>
             </label>
 
-            {workspaces.length > 1 && (
+            {manyWorkspaces && (
               <label className="filters-field">
                 <span className="faint small">workspace</span>
-                <select
-                  className="task-select"
+                <WorkspacePicker
                   value={value.workspace ?? ""}
-                  onChange={(e) =>
-                    onChange({ ...value, workspace: e.target.value === "" ? null : e.target.value })
-                  }
-                >
-                  <option value="">all</option>
-                  {workspaces.map((w) => (
-                    <option key={w.id} value={w.id}>
-                      {w.name}
-                    </option>
-                  ))}
-                </select>
+                  onChange={(id) => onChange({ ...value, workspace: id || null })}
+                  noneLabel="all"
+                  ariaLabel="workspace filter"
+                />
               </label>
             )}
           </div>
@@ -1237,16 +1241,10 @@ export function BoardPage() {
     queryKey: ["labels"],
     queryFn: async () => (await api.GET("/api/v1/labels")).data ?? [],
   });
-  // Workspaces, to turn each task's `workspace_id` into a name — one fetch for
-  // the whole board rather than one per card.
-  const { data: workspaces } = useQuery({
-    queryKey: ["workspaces"],
-    queryFn: async () => (await api.GET("/api/v1/workspaces")).data ?? [],
-  });
-  const wsName = React.useMemo(
-    () => new Map((workspaces ?? []).map((w) => [w.id, w.name])),
-    [workspaces],
-  );
+  // Each task's `workspace_id` turned into a name. One read per DISTINCT repo
+  // the visible cards name (MAIN-606) — a board spanning three repos asks for
+  // three rows, however many repos the tenant has.
+  const wsName = useWorkspaceNames((detail?.tasks ?? []).map((t) => t.workspace_id));
 
   // Blocked-ness is DERIVED from relations and column types, so the board
   // cannot work it out from the tasks it already holds — it would need every
@@ -1842,7 +1840,6 @@ export function BoardPage() {
           {filter.view !== "health" && (
             <Filters
               labels={labels ?? []}
-              workspaces={workspaces ?? []}
               members={filterMembers}
               epics={epicOptions(detail.tasks, "").map((e) => ({
                 id: e.id,

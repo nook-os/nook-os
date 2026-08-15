@@ -13,9 +13,11 @@ import React from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api, type TaskItem } from "@nookos/api";
-import { Empty, Panel, Select } from "@nookos/ui";
+import { Empty, Panel } from "@nookos/ui";
 
 import { priorityMeta } from "./taskmeta";
+import { WorkspacePicker } from "./WorkspacePicker";
+import { useWorkspaceNames } from "./workspaces";
 
 /// How many rows each section shows before it stops and offers the Board.
 ///
@@ -132,11 +134,6 @@ export function QueuePanel() {
   // stale is not a number anybody is reading that closely.
   const now = Date.now();
 
-  const { data: workspaces } = useQuery({
-    queryKey: ["workspaces"],
-    queryFn: async () => (await api.GET("/api/v1/workspaces")).data ?? [],
-  });
-
   const setFilter = (id: string) => {
     setWorkspace(id);
     try {
@@ -181,23 +178,25 @@ export function QueuePanel() {
     scoped({ label: ["human-review-required"], limit: FETCH }, workspace),
   );
 
-  const wsName = (id: string | null | undefined) =>
-    (workspaces ?? []).find((w) => w.id === id)?.name ?? "";
-
-  const options = [
-    { value: "", label: "All workspaces" },
-    ...(workspaces ?? []).map((w) => ({ value: w.id, label: w.name })),
-  ];
+  // A card names its workspace, so the badge reads THAT row (MAIN-606) rather
+  // than indexing a collection the panel can no longer hold whole.
+  const names = useWorkspaceNames([
+    workspace,
+    ...[onDeck, started, review, blocked, needsHuman].flatMap((q) =>
+      (q.data ?? []).map((t) => t.workspace_id),
+    ),
+  ]);
+  const wsName = (id: string | null | undefined) => (id && names.get(id)) || "";
 
   return (
     <Panel
       title="Queue"
       style={{ gridRow: "1 / span 2" }}
       actions={
-        <Select
+        <WorkspacePicker
           value={workspace}
-          options={options}
           onChange={setFilter}
+          noneLabel="All workspaces"
           ariaLabel="workspace filter"
         />
       }

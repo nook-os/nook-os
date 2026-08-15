@@ -323,6 +323,34 @@ impl Client {
     }
 }
 
+/// Every workspace the caller can see, walked off the paged collection.
+///
+/// `GET /api/v1/workspaces` answers `{rows, next_cursor}` and is bounded
+/// (MAIN-606), so a CLI that means "all of them" — a table, `--json`, a name
+/// lookup — has to follow the cursor. Taking the first page instead is how
+/// `nook start <repo>` would report a workspace that exists as missing.
+pub async fn workspaces_all(client: &Client) -> Result<Vec<Value>> {
+    let mut out = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let path = match &after {
+            None => "/api/v1/workspaces?limit=200".to_string(),
+            Some(c) => format!("/api/v1/workspaces?limit=200&after={c}"),
+        };
+        let page = client.get(&path).await?;
+        out.extend(
+            page.get("rows")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+        );
+        match page.get("next_cursor").and_then(Value::as_str) {
+            Some(c) => after = Some(c.to_string()),
+            None => return Ok(out),
+        }
+    }
+}
+
 /// One `multipart/form-data` part carrying a file, encoded exactly as the
 /// upload route's parser reads it.
 ///
@@ -629,11 +657,8 @@ pub async fn start(
     name: Option<&str>,
 ) -> Result<()> {
     let client = Client::from_config()?;
-    let workspaces = client.get("/api/v1/workspaces").await?;
-    let ws = workspaces
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
+    let ws = workspaces_all(&client)
+        .await?
         .into_iter()
         .find(|w| {
             ["name", "slug", "id"]
@@ -881,11 +906,14 @@ pub async fn get(
         return get_all_tenants(&client, resource, name, json).await;
     }
 
-    // Secrets live under a workspace; everything else is a flat collection.
-    let value = if resource == "secrets" {
-        secrets_across_workspaces(&client, name).await?
-    } else {
-        client.get(&format!("/api/v1/{resource}")).await?
+    // Secrets live under a workspace; workspaces themselves are paged
+    // (MAIN-606) and both the table and `--json` mean the whole set, so the
+    // cursor is walked here rather than the first page printed as if it were
+    // all of them. Everything else is still a flat collection.
+    let value = match resource {
+        "secrets" => secrets_across_workspaces(&client, name).await?,
+        "workspaces" => Value::Array(workspaces_all(&client).await?),
+        _ => client.get(&format!("/api/v1/{resource}")).await?,
     };
 
     if json {
@@ -919,9 +947,8 @@ pub async fn get(
 
 /// Secrets are per-workspace; list them all with their workspace for context.
 async fn secrets_across_workspaces(client: &Client, workspace: Option<&str>) -> Result<Value> {
-    let workspaces = client.get("/api/v1/workspaces").await?;
     let mut out = Vec::new();
-    for ws in workspaces.as_array().cloned().unwrap_or_default() {
+    for ws in workspaces_all(client).await? {
         let (Some(id), Some(name)) = (
             ws.get("id").and_then(Value::as_str),
             ws.get("name").and_then(Value::as_str),
@@ -1017,11 +1044,22 @@ async fn get_all_tenants(
         };
         let mut scoped = client.clone();
         scoped.set_tenant(Some(slug.to_string()));
+        // Workspaces are paged (MAIN-606), so `-A` walks each tenant's cursor
+        // for the same reason the single-tenant path does: `as_array()` on the
+        // envelope is None, and the fan-out would report every tenant empty.
+        let fetched = if resource == "workspaces" {
+            workspaces_all(&scoped).await
+        } else {
+            scoped
+                .get(&format!("/api/v1/{resource}"))
+                .await
+                .map(|v| v.as_array().cloned().unwrap_or_default())
+        };
         // One tenant failing must not lose the others: a membership can be
         // revoked between the list and the fetch, and a partial answer that
         // says so beats no answer at all.
-        let rows = match scoped.get(&format!("/api/v1/{resource}")).await {
-            Ok(v) => v.as_array().cloned().unwrap_or_default(),
+        let rows = match fetched {
+            Ok(rows) => rows,
             Err(e) => {
                 eprintln!("! {slug}: {e}");
                 continue;
@@ -1596,8 +1634,16 @@ pub async fn delete(kind: &str, names: &[String], tenant: Option<&str>) -> Resul
     if let Some(t) = tenant {
         client.set_tenant(Some(t.to_string()));
     }
-    let list = client.get(&format!("/api/v1/{resource}")).await?;
-    let rows = list.as_array().cloned().unwrap_or_default();
+    let rows = if resource == "workspaces" {
+        workspaces_all(&client).await?
+    } else {
+        client
+            .get(&format!("/api/v1/{resource}"))
+            .await?
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    };
 
     // RESOLVE THEM ALL BEFORE DELETING ANY. `kubectl delete pod a b c` on a
     // typo'd name deletes nothing; the alternative — delete two, then fail on
@@ -1944,9 +1990,8 @@ pub async fn rollout_restart(target: &str, yes: bool, tenant: Option<&str>) -> R
     if let Some(t) = tenant {
         client.set_tenant(Some(t.to_string()));
     }
-    let workspaces = client.get("/api/v1/workspaces").await?;
     let ws = pick_one(
-        workspaces.as_array().cloned().unwrap_or_default(),
+        workspaces_all(&client).await?,
         want,
         &["name", "slug", "id"],
         "workspaces",
@@ -2356,10 +2401,9 @@ async fn resolve_workspace(client: &Client, needle: &str) -> Result<String> {
     if uuid::Uuid::parse_str(needle).is_ok() {
         return Ok(needle.to_string());
     }
-    let list = client.get("/api/v1/workspaces").await?;
-    list.as_array()
+    workspaces_all(client)
+        .await?
         .into_iter()
-        .flatten()
         .find(|w| {
             w.get("name")
                 .and_then(|v| v.as_str())
