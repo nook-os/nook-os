@@ -47,6 +47,11 @@ need "required secretKeyRefs"      'key: (DATABASE_URL|SESSION_SECRET)' 2
 # made against a live tenant rather than baked into a deploy.
 need "liveness /livez"             'path: /livez' 2
 need "readiness /healthz"          'path: /healthz' 1
+# MAIN-598: uploads get a home of their own. Without both of these the control
+# plane writes into the image's read-only dist and every upload 500s.
+need "upload PVC"                  '^kind: PersistentVolumeClaim$' 1
+need "NOOK_USER_CONTENT_DIR set"   'NOOK_USER_CONTENT_DIR: "/var/lib/nook/user-content"' 1
+need "upload volume mounted"       'mountPath: /var/lib/nook/user-content' 1
 
 # No secret *material* may appear — only references.
 if grep -inE 'password: |nookdevsecret' <<<"$out" | grep -vE 'secretKeyRef|secretName|existingSecret' >/dev/null; then
@@ -103,6 +108,22 @@ if grep -q 'agent.tlsSecret' <<<"$agentguard"; then
   echo "  ok:   agent.enabled without a cert is refused"
 else
   echo "  FAIL: agent.enabled without a cert was not refused"
+  fail=1
+fi
+
+# ── Uploads without a PVC (MAIN-598) ─────────────────────────────────────────
+# The documented ephemeral case: no claim, but the directory is still mounted
+# and still named, so the control plane never falls back to the image.
+echo "==> helm template (userContent.persistence.enabled=false)"
+ephemeral="$(render "${min[@]}" --set userContent.persistence.enabled=false)"
+if grep -q '^kind: PersistentVolumeClaim$' <<<"$ephemeral"; then
+  echo "  FAIL: a PVC was rendered with persistence disabled"
+  fail=1
+elif grep -q 'emptyDir: {}' <<<"$ephemeral" &&
+     grep -q 'mountPath: /var/lib/nook/user-content' <<<"$ephemeral"; then
+  echo "  ok:   emptyDir mounted at the upload directory"
+else
+  echo "  FAIL: persistence=false did not mount an emptyDir at the upload directory"
   fail=1
 fi
 

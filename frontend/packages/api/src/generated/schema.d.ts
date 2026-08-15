@@ -15460,6 +15460,13 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description the file store is not usable (MAIN-598) */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     get_user_content: {

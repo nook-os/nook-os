@@ -236,8 +236,15 @@ config:
     scopes: "openid profile email"
     # -- OIDC_DEVICE_CLIENT_ID (the public client for native/device sign-in).
     deviceClientId: ""
-  # -- NOOK_ARTIFACT_STORE: "disk" or "s3".
+  # -- NOOK_ARTIFACT_STORE: "disk" or "s3". Exactly what this names is what is
+  #    used — an S3 that cannot be reached is reported broken at boot, never
+  #    quietly swapped for local disk (MAIN-598).
   artifactStore: disk
+  # -- NOOK_USER_CONTENT_DIR: where uploads are written inside the control-plane
+  #    pod when artifactStore is "disk". Mounted from userContent.persistence
+  #    below; the image's baked /usr/local/share/nook/dist is read-only and is
+  #    NOT this (MAIN-598).
+  userContentDir: /var/lib/nook/user-content
   s3:
     # -- NOOK_S3_BUCKET.
     bucket: ""
@@ -353,6 +360,28 @@ serviceAccount:
   name: ""
   # -- Annotations for the ServiceAccount (e.g. cloud IAM role bindings).
   annotations: {}
+
+# ── Uploads (MAIN-598) ───────────────────────────────────────────────────────
+# A disk-backed control plane writes what people upload to config.userContentDir,
+# which is mounted from here. With artifactStore="s3" the bytes go to the bucket
+# and this volume is unused — leave it as an emptyDir.
+userContent:
+  persistence:
+    # -- Back config.userContentDir with a PersistentVolumeClaim. false mounts an
+    #    emptyDir instead, which is correct ONLY where uploads are disposable:
+    #    the volume dies with the pod, so every attachment is lost on a restart
+    #    or a rollout.
+    enabled: true
+    # -- Use an existing PVC by name instead of letting the chart create one.
+    existingClaim: ""
+    # -- Size of the chart-created PVC.
+    size: 10Gi
+    # -- StorageClass for the chart-created PVC. "" uses the cluster default.
+    storageClass: ""
+    # -- Access modes. ReadWriteOnce is right for controlPlane.replicas=1; more
+    #    than one replica needs a ReadWriteMany class, or artifactStore="s3".
+    accessModes:
+      - ReadWriteOnce
 
 # ── Pod security & scheduling (hardened defaults, all overridable) ───────────
 # -- Pod-level securityContext. The images already run as uid 10001.

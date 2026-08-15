@@ -173,18 +173,31 @@ spec:
             failureThreshold: 30
           resources:
             {{- toYaml .Values.controlPlane.resources | nindent 12 }}
-          {{- if .Values.agent.enabled }}
           volumeMounts:
+            # Uploads (MAIN-598). Always mounted, because the control plane
+            # writes here whenever the store is disk-backed and the image's own
+            # filesystem is not somewhere it may write.
+            - name: user-content
+              mountPath: {{ .Values.config.userContentDir }}
+            {{- if .Values.agent.enabled }}
             - name: agent-tls
               mountPath: {{ include "nook-control.agentCertDir" . }}
               readOnly: true
-          {{- end }}
-      {{- if .Values.agent.enabled }}
+            {{- end }}
       volumes:
+        - name: user-content
+          {{- if .Values.userContent.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.userContent.persistence.existingClaim | default (include "nook-control.componentName" (dict "root" . "component" "user-content")) }}
+          {{- else }}
+          # Documented ephemeral case: uploads live only as long as this pod.
+          emptyDir: {}
+          {{- end }}
+        {{- if .Values.agent.enabled }}
         - name: agent-tls
           secret:
             secretName: {{ .Values.agent.tlsSecret }}
-      {{- end }}
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

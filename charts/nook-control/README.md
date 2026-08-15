@@ -294,6 +294,34 @@ ignored).
 
 The `ci/validate.sh` render matrix covers all three providers × KEDA on/off.
 
+## Uploads (`config.userContentDir`)
+
+What people upload — ticket and comment attachments — is written to
+`config.userContentDir`, backed by a PersistentVolumeClaim the chart creates and
+keeps (`helm.sh/resource-policy: keep`, so `helm uninstall` does not take a
+tenant's attachments with it). This is **not** the image's
+`/usr/local/share/nook/dist`, which holds the release binaries baked in at build
+time and is read-only to the uid 10001 the pod runs as.
+
+```bash
+# Ephemeral: uploads live only as long as the pod. Nothing else changes.
+--set userContent.persistence.enabled=false
+
+# Bring your own claim.
+--set userContent.persistence.existingClaim=my-nook-uploads
+```
+
+The default claim is `ReadWriteOnce`, which suits `controlPlane.replicas: 1`.
+More than one replica needs either a `ReadWriteMany` storage class or
+`config.artifactStore: s3` — with S3 the bytes go to the bucket and the volume
+is unused.
+
+**A store the control plane cannot write does not stop the pod.** It boots,
+serves everything else, and logs one `WARN` naming the backend, the path or
+bucket, and the underlying error; uploads answer `503 file storage is not
+configured` until it is fixed. `kubectl logs` is where the detail is — the
+response body deliberately carries none of it.
+
 ## Security
 
 Both pods run non-root with dropped capabilities and a `RuntimeDefault` seccomp

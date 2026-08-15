@@ -14,6 +14,13 @@ RUN cargo install cargo-watch --locked
 # in production: the alternative is baking a uid, and the host's is not knowable
 # at build time.
 RUN chmod -R a+rwX "$CARGO_HOME"
+
+# The upload directory's mount point (MAIN-598), for the same reason and by the
+# same mechanism: Docker seeds a named volume from the image directory it is
+# mounted over, so a mount point absent from the image arrives root-owned and
+# the non-root service cannot write it.
+RUN mkdir -p /var/lib/nook/user-content && chmod -R a+rwX /var/lib/nook
+
 WORKDIR /app
 
 # The dev NODE, on top of the same base: the loop toolchain a build run shells

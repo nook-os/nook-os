@@ -59,6 +59,9 @@ data:
   {{- end }}
   {{- end }}
   NOOK_ARTIFACT_STORE: {{ $c.artifactStore | quote }}
+  # Set explicitly, always: the built-in default is a per-USER data directory,
+  # and the pod's uid 10001 has no business writing its home for this (MAIN-598).
+  NOOK_USER_CONTENT_DIR: {{ $c.userContentDir | quote }}
   {{- with $c.s3.bucket }}
   NOOK_S3_BUCKET: {{ . | quote }}
   {{- end }}

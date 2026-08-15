@@ -62,7 +62,7 @@ pub struct AppState {
     /// What a tenant has taught its fleet (MAIN-258).
     pub skills: Arc<dyn crate::repo::admin::SkillRepository>,
     /// What people have uploaded (MAIN-532). Rows only — the bytes live in
-    /// `artifacts`, under a prefix of their own.
+    /// `user_content_store`, under a prefix of their own.
     pub user_content: Arc<dyn crate::repo::user_content::UserContentRepository>,
     /// Which uploads hang off which ticket or comment (MAIN-533). The join
     /// MAIN-532's store deliberately knows nothing about.
@@ -89,9 +89,17 @@ pub struct AppState {
     pub pending_deliveries: crate::services::runtime_auth_flow::SharedPendingDeliveries,
     pub dispatcher: Arc<dyn DispatcherBackend>,
     pub vault: Vault,
-    /// Where node binaries are read from and written to — a directory or an
-    /// object store, decided by config at boot.
+    /// Where node binaries are READ from — a directory or an object store,
+    /// decided by config at boot. On disk that directory is the image's baked
+    /// dist, which nothing writes at runtime (MAIN-598).
     pub artifacts: Arc<dyn crate::storage::ArtifactStore>,
+    /// Where an upload's bytes live. A separate store from `artifacts` on disk,
+    /// the same one on S3 — see `nook_infra::storage` for why.
+    pub user_content_store: Arc<dyn crate::storage::ArtifactStore>,
+    /// Why the boot probe could not use `user_content_store`, when it could not
+    /// (MAIN-598). `Some` is what turns an upload into a 503 instead of a 500;
+    /// the detail itself never leaves the boot log.
+    pub user_content_store_error: Option<String>,
     /// How outbound email leaves the control plane — a real SMTP relay, or the
     /// capture/log fallback when none is configured. Decided by config at boot.
     pub mailer: Arc<dyn crate::mailer::Mailer>,
@@ -135,8 +143,9 @@ impl AppState {
         let oidc = Arc::new(OidcState::new(&cfg, oidc));
         let cookie_key = crate::auth::cookie_key(&cfg.session_secret);
         let vault = Vault::from_env(&cfg.session_secret).expect("vault init failed");
-        let artifacts: Arc<dyn crate::storage::ArtifactStore> =
-            Arc::from(crate::storage::from_config(&cfg).await);
+        // Two stores and one verdict: the baked dist, the upload directory,
+        // and whether the second could actually be written at boot (MAIN-598).
+        let storage = crate::storage::from_config(&cfg).await;
         // The configured transport, wrapped in the send guards (enable /
         // category / quota) so every provider is gated identically (MAIN-52).
         let transport: Arc<dyn crate::mailer::Mailer> = Arc::from(crate::mailer::from_config(&cfg));
@@ -205,7 +214,9 @@ impl AppState {
             themes: Arc::new(crate::repo::admin::DbThemeRepository::new(db.clone())),
             kanban: Arc::new(KanbanRegistry::new(tasks.clone())),
             tasks,
-            artifacts,
+            artifacts: storage.artifacts,
+            user_content_store: storage.user_content,
+            user_content_store_error: storage.user_content_error,
             mailer,
             cache,
             queue,

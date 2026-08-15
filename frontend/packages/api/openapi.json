@@ -7757,6 +7757,9 @@
           },
           "413": {
             "description": "larger than the configured cap"
+          },
+          "503": {
+            "description": "the file store is not usable (MAIN-598)"
           }
         }
       }

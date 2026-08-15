@@ -53,6 +53,26 @@ use crate::storage::user_content_key;
 /// hand-off, not a shareable link.
 const PRESIGN_TTL: Duration = Duration::from_secs(300);
 
+/// What a caller is told when the store cannot take the bytes (MAIN-598).
+///
+/// Operational, not diagnostic. The path, the bucket, the credential and the
+/// OS error are all in the boot log, where an operator can act on them and a
+/// caller cannot read them — MAIN-273's rule, applied to a failure that is the
+/// server's rather than the request's.
+fn storage_unavailable() -> ApiError {
+    ApiError::ServiceUnavailable("file storage is not configured".into())
+}
+
+/// Refuse before reading a byte of the body when the boot probe already found
+/// the store unusable — buffering 25 MiB to fail at the last step wastes the
+/// caller's upload and this server's memory.
+fn unusable(state: &AppState) -> Result<(), ApiError> {
+    match &state.user_content_store_error {
+        Some(_) => Err(storage_unavailable()),
+        None => Ok(()),
+    }
+}
+
 /// Content types served inline. Everything else is an attachment, whatever the
 /// uploader called it (AC-5).
 ///
@@ -127,13 +147,15 @@ fn disposition(kind: &str, filename: &str) -> String {
     operation_id = "upload_user_content",
     responses(
         (status = 201, body = UserContent),
-        (status = 413, description = "larger than the configured cap")))]
+        (status = 413, description = "larger than the configured cap"),
+        (status = 503, description = "the file store is not usable (MAIN-598)")))]
 pub async fn upload(
     State(state): State<AppState>,
     auth: AuthCtx,
     mut multipart: Multipart,
 ) -> ApiResult<Response> {
     auth.require_user()?;
+    unusable(&state)?;
     let cap = state.cfg.user_content_max_bytes;
 
     let mut file: Option<(String, String, Vec<u8>)> = None;
@@ -192,10 +214,13 @@ pub async fn upload(
     let sha256 = format!("{:x}", Sha256::digest(&bytes));
     let size_bytes = bytes.len() as i64;
     state
-        .artifacts
+        .user_content_store
         .put(&key, bytes)
         .await
-        .map_err(ApiError::Internal)?;
+        .map_err(|e| {
+            tracing::error!(%key, error = %e, "the user-content store refused a write");
+            storage_unavailable()
+        })?;
 
     let row = match state
         .user_content
@@ -213,7 +238,7 @@ pub async fn upload(
     {
         Ok(row) => row,
         Err(e) => {
-            if let Err(cleanup) = state.artifacts.delete(&key).await {
+            if let Err(cleanup) = state.user_content_store.delete(&key).await {
                 tracing::warn!(%key, error = %cleanup, "orphaned upload: the row failed and the object could not be removed");
             }
             return Err(e);
@@ -244,7 +269,7 @@ pub async fn serve(
         // saying it has no URL of its own — so the switch being on simply
         // falls through to streaming (AC-4).
         if let Some(url) = state
-            .artifacts
+            .user_content_store
             .presign(&row.storage_key, PRESIGN_TTL)
             .await
             .map_err(ApiError::Internal)?
@@ -256,7 +281,7 @@ pub async fn serve(
     }
 
     let bytes = state
-        .artifacts
+        .user_content_store
         .get(&row.storage_key)
         .await
         .map_err(|e| {
@@ -296,7 +321,7 @@ pub async fn delete(
         return Err(ApiError::NotFound);
     }
     state
-        .artifacts
+        .user_content_store
         .delete(&row.storage_key)
         .await
         .map_err(ApiError::Internal)?;
