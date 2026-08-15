@@ -132,6 +132,7 @@ run_lint() {
     scripts/check-dialect-dispatch.sh scripts/check-dialect-dispatch.test.sh \
     scripts/check-nested-dialect.sh scripts/check-nested-dialect.test.sh \
     scripts/check-sqlite-ci.sh scripts/check-sqlite-ci.test.sh \
+    scripts/publish-image-report.sh scripts/publish-image-report.test.sh \
     scripts/squash-migrations.sh \
     scripts/dev-bootstrap.sh scripts/dev-up.sh scripts/compose-project.sh \
     scripts/dev-prewarm.sh scripts/dev-wait-healthy.sh \
@@ -190,6 +191,15 @@ run_lint() {
   say "sqlite leg guard"
   ./scripts/check-sqlite-ci.test.sh || die "sqlite leg guard self-test"
   pass "sqlite leg guard self-tested"
+
+  # MAIN-604: the image reporter's whole contract is that it cannot fail a
+  # build, and every way it might is a network condition nobody reproduces by
+  # hand. The self-test drives the real script against fakes for `gh` and
+  # `curl`, so the guarantee is checked here rather than discovered on a
+  # release.
+  say "image report publisher"
+  ./scripts/publish-image-report.test.sh || die "image report publisher self-test"
+  pass "image report publisher self-tested"
 
   # LAST on purpose (MAIN-345 AC-5). This is the only check here that needs to
   # pull a Docker image, and in an environment that cannot, it exited before
