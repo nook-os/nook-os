@@ -182,6 +182,8 @@ pub async fn declare(bed: &TestBed, f: &Fixture, reqs: &[(&str, &str, bool)]) {
             protocol: "tcp".into(),
             required: *required,
             runtimes: Vec::new(),
+            browsable: false,
+            path: "/".into(),
         })
         .collect();
     bed.app_state()

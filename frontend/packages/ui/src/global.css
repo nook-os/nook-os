@@ -2506,7 +2506,7 @@ table.nook-table tr.clickable { cursor: pointer; }
    fields they name instead of each row picking its own widths. */
 .ports-grid {
   display: grid;
-  grid-template-columns: minmax(90px, 1fr) minmax(110px, 1.2fr) 72px 62px 28px;
+  grid-template-columns: minmax(80px, 1fr) minmax(100px, 1.1fr) 62px 58px 66px minmax(70px, 0.8fr) 28px;
   gap: 6px;
   align-items: center;
 }

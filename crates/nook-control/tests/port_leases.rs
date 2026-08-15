@@ -108,6 +108,8 @@ async fn declare_for(
             protocol: "tcp".into(),
             required: *required,
             runtimes: runtimes.iter().map(|r| (*r).to_string()).collect(),
+            browsable: false,
+            path: "/".into(),
         })
         .collect();
     bed.app_state()

@@ -20,6 +20,8 @@
 //! It is a DECLARATION, never a detection: nothing here reads the repo's source
 //! looking for hardcoded ports (NG-5). What the file says is what nook believes.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use nook_types::PortRequirement;
 
 /// Every top-level section this build understands. Deliberately a struct with
@@ -42,6 +44,8 @@ pub enum SettingsError {
     DuplicateName(String),
     DuplicateEnv(String),
     BadEnv(String),
+    BrowsableProtocol(String),
+    BrowsableUnnamed,
 }
 
 impl std::fmt::Display for SettingsError {
@@ -63,6 +67,17 @@ impl std::fmt::Display for SettingsError {
                 ".nook.toml declares `{e}`, which is not a usable environment \
                  variable name (letters, digits and underscore, not starting \
                  with a digit)"
+            ),
+            Self::BrowsableProtocol(n) => write!(
+                f,
+                ".nook.toml marks `{n}` browsable, but it is not a tcp \
+                 listener — nothing can open a udp port in a browser"
+            ),
+            Self::BrowsableUnnamed => write!(
+                f,
+                ".nook.toml marks a listener browsable that has no name — a \
+                 browsable target is referred to by name, so an unnamed one \
+                 could never be asked for"
             ),
         }
     }
@@ -102,8 +117,8 @@ pub fn parse(source: &str) -> Result<Option<Vec<PortRequirement>>, SettingsError
 /// (`session_port_leases_one_per_name`); a duplicate `env` means one listener
 /// gets no port and nothing says so.
 fn validate(ports: &[PortRequirement]) -> Result<(), SettingsError> {
-    let mut names: std::collections::BTreeSet<&str> = Default::default();
-    let mut envs: std::collections::BTreeSet<&str> = Default::default();
+    let mut names: BTreeSet<&str> = Default::default();
+    let mut envs: BTreeSet<&str> = Default::default();
     for p in ports {
         if !p.env.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
             || p.env.is_empty()
@@ -117,8 +132,44 @@ fn validate(ports: &[PortRequirement]) -> Result<(), SettingsError> {
         if !envs.insert(p.env.as_str()) {
             return Err(SettingsError::DuplicateEnv(p.env.clone()));
         }
+        // A browsable listener has to be one somebody could actually open and
+        // ask for by name (MAIN-596 AC-8). Both of these would otherwise be
+        // silent: a udp target resolves to a URL nothing answers, and a
+        // nameless one cannot be named by the caller that wants it.
+        if p.browsable {
+            if p.name.trim().is_empty() {
+                return Err(SettingsError::BrowsableUnnamed);
+            }
+            if p.protocol != "tcp" {
+                return Err(SettingsError::BrowsableProtocol(p.name.clone()));
+            }
+        }
     }
     Ok(())
+}
+
+/// Which keys each `[[ports]]` table actually WROTE, by listener name.
+///
+/// The typed parse cannot answer this and that is the whole difficulty:
+/// `#[serde(default)]` renders "absent" and "written as the default"
+/// identically, while MAIN-596's precedence turns on exactly that difference —
+/// the file wins where it declares, and a field it says nothing about keeps
+/// what the UI set. Same trick, and same reason, as the raw parse `parse`
+/// already does to tell an empty `ports` array from a missing one.
+fn stated_keys(source: &str) -> BTreeMap<String, BTreeSet<String>> {
+    let Ok(raw) = toml::from_str::<toml::Value>(source) else {
+        return BTreeMap::new();
+    };
+    let Some(list) = raw.get("ports").and_then(|v| v.as_array()) else {
+        return BTreeMap::new();
+    };
+    list.iter()
+        .filter_map(|entry| {
+            let table = entry.as_table()?;
+            let name = table.get("name")?.as_str()?.to_string();
+            Some((name, table.keys().cloned().collect()))
+        })
+        .collect()
 }
 
 /// The file's name at a repo root. One constant, because the node is asked for
@@ -216,6 +267,7 @@ pub async fn apply(
             tracing::debug!(%workspace, checkout_path, "{FILE} declares no ports — leaving the stored requirement alone");
         }
         Ok(Some(ports)) => {
+            let ports = inherit_unstated(state, tenant, workspace, ports, source).await;
             let count = ports.len();
             let required = ports.iter().filter(|p| p.required).count();
             let stored = serde_json::to_value(&ports).unwrap_or(serde_json::Value::Null);
@@ -241,6 +293,58 @@ pub async fn apply(
             }
         }
     }
+}
+
+/// Fill in, from what is already stored, every field this file did not state
+/// (MAIN-596 AC-5).
+///
+/// **The file wins where it declares; the stored value fills in where it does
+/// not.** Before MAIN-596 the two halves of that sentence were the same thing,
+/// because a `[[ports]]` key replaced the declaration wholesale and there was
+/// nothing in it a repo could leave to the UI. `browsable` is the first field
+/// where they part: a repo that lists its ports and says nothing about which
+/// serve a UI has not thereby said "none of them do", and wiping an owner's
+/// answer on the next scan would make the UI's control unusable on any repo
+/// that commits the file at all.
+///
+/// Matched by NAME, which is already the identity a lease is keyed on. A
+/// listener the file adds inherits nothing, because there is nothing it could
+/// inherit from.
+async fn inherit_unstated(
+    state: &crate::state::AppState,
+    tenant: nook_types::TenantId,
+    workspace: nook_types::WorkspaceId,
+    mut ports: Vec<PortRequirement>,
+    source: &str,
+) -> Vec<PortRequirement> {
+    // The RAW stored column, never `requirements_of`: the fallback listener is
+    // the control plane's own invention, and inheriting from it would let a
+    // default masquerade as something an owner chose.
+    let stored: Vec<PortRequirement> = match state.workspaces.get(tenant, workspace).await {
+        Ok(Some(w)) => w
+            .port_requirements
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default(),
+        _ => return ports,
+    };
+    if stored.is_empty() {
+        return ports;
+    }
+    let stated = stated_keys(source);
+    for port in &mut ports {
+        let Some(prev) = stored.iter().find(|s| s.name == port.name) else {
+            continue;
+        };
+        let keys = stated.get(&port.name);
+        let says = |key: &str| keys.is_some_and(|k| k.contains(key));
+        if !says("browsable") {
+            port.browsable = prev.browsable;
+        }
+        if !says("path") {
+            port.path.clone_from(&prev.path);
+        }
+    }
+    ports
 }
 
 async fn report_invalid(
@@ -397,6 +501,91 @@ env  = "PORT"
             );
         }
         assert!(parse("[[ports]]\nname = \"web\"\nenv = \"PORT_2\"\n").is_ok());
+    }
+
+    #[test]
+    fn several_listeners_may_be_browsable_and_carry_their_own_path() {
+        // MAIN-596 AC-2/AC-3. N frontends is the ordinary case for a repo with
+        // an app and an admin panel, so this is a field per listener and the
+        // file's order is the answer's order.
+        let ports = parse(
+            r#"
+[[ports]]
+name = "web"
+env  = "WEB_PORT"
+browsable = true
+
+[[ports]]
+name = "api"
+env  = "API_PORT"
+
+[[ports]]
+name = "admin"
+env  = "ADMIN_PORT"
+browsable = true
+path = "/admin"
+"#,
+        )
+        .expect("parses")
+        .expect("declares ports");
+
+        let browsable: Vec<&str> = ports
+            .iter()
+            .filter(|p| p.browsable)
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(browsable, vec!["web", "admin"], "in file order");
+        assert_eq!(ports[0].path, "/", "the default when unstated");
+        assert_eq!(ports[2].path, "/admin");
+        assert!(!ports[1].browsable, "absent means not browsable");
+    }
+
+    #[test]
+    fn a_field_this_build_does_not_know_still_parses() {
+        // The same tolerance an unknown SECTION gets, one level down: a newer
+        // nook adding a key to `[[ports]]` must not brick an older control
+        // plane reading the same repo (AC-1).
+        let ports = parse("[[ports]]\nname = \"web\"\nenv = \"PORT\"\nrecord = true\n")
+            .expect("unknown keys are ignored")
+            .expect("ports still parsed");
+        assert_eq!(ports.len(), 1);
+        assert!(!ports[0].browsable);
+    }
+
+    #[test]
+    fn browsable_on_something_nobody_could_open_is_named() {
+        // AC-8. Both are silent otherwise: a udp target resolves to a URL that
+        // never answers, and a nameless one cannot be asked for at all.
+        let err = parse(
+            "[[ports]]\nname = \"debug\"\nenv = \"DEBUG_PORT\"\nprotocol = \"udp\"\nbrowsable = true\n",
+        )
+        .expect_err("udp is not browsable");
+        assert!(matches!(err, SettingsError::BrowsableProtocol(ref n) if n == "debug"));
+        assert!(err.to_string().contains("debug"), "{err}");
+
+        let err = parse("[[ports]]\nname = \"\"\nenv = \"PORT\"\nbrowsable = true\n")
+            .expect_err("a browsable listener needs a name");
+        assert!(matches!(err, SettingsError::BrowsableUnnamed));
+
+        // And neither rule fires on a listener that is not browsable — this
+        // labels what is declared, it does not narrow what may be declared.
+        assert!(
+            parse("[[ports]]\nname = \"debug\"\nenv = \"DEBUG_PORT\"\nprotocol = \"udp\"\n")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn stated_keys_reports_what_each_table_wrote_not_what_it_defaulted_to() {
+        // The distinction the whole precedence rule rests on: `browsable =
+        // false` is a statement and an absent `browsable` is not, and the typed
+        // parse renders them identically.
+        let keys = stated_keys(
+            "[[ports]]\nname=\"web\"\nenv=\"P\"\nbrowsable=false\n[[ports]]\nname=\"api\"\nenv=\"Q\"\n",
+        );
+        assert!(keys["web"].contains("browsable"));
+        assert!(!keys["api"].contains("browsable"));
+        assert!(!keys["web"].contains("path"));
     }
 
     #[test]

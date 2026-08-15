@@ -4472,6 +4472,26 @@ export interface components {
         };
         /** Format: uuid */
         BoardId: string;
+        /**
+         * @description One place a person can open, resolved from a workspace's declaration
+         *     (MAIN-596 AC-7).
+         *
+         *     Name, variable and path — and deliberately not the NUMBER. Resolving what a
+         *     workspace declares is a different question from what any one session leased,
+         *     and folding them together would make the answer session-scoped for callers
+         *     that have no session.
+         */
+        BrowsableTarget: {
+            /**
+             * @description The variable carrying the leased number, which is how a caller turns
+             *     this target into a URL for a given session.
+             */
+            env: string;
+            /** @description The listener's name in the declaration — `web`, `admin`. */
+            name: string;
+            /** @description The path the UI is served under, `/` unless declared otherwise. */
+            path: string;
+        };
         /** @description A node that delivers no build capacity, and why (MAIN-495). */
         BuildCapacityBlockedNode: {
             node_id: components["schemas"]["NodeId"];
@@ -7161,6 +7181,21 @@ export interface components {
          *     node without the control plane knowing anything about any of them.
          */
         PortRequirement: {
+            /**
+             * @description Whether this listener serves a UI a person (or a recorder) can open
+             *     (MAIN-596).
+             *
+             *     A repo can have several frontends — an app, an admin panel, a docs site
+             *     — so this is a field on each listener rather than one value on the
+             *     workspace, and MORE THAN ONE may carry it. The declaration is the
+             *     `[[ports]]` list, so "which frontends, in what order" is answered by the
+             *     order they are declared in.
+             *
+             *     DECLARED, never detected: nothing scans a repo looking for a dev server.
+             *     Absent means not browsable, which is what keeps every declaration
+             *     written before this field parses unchanged.
+             */
+            browsable?: boolean;
             /** @description The environment variable the session's runtime reads the number from. */
             env: string;
             /**
@@ -7169,6 +7204,12 @@ export interface components {
              *     renamed env var does not orphan the old lease.
              */
             name: string;
+            /**
+             * @description Where the browsable UI is served, so a caller does not have to guess a
+             *     prefix. `/` unless the repo says otherwise, and meaningless on a
+             *     listener that is not `browsable`.
+             */
+            path?: string;
             /**
              * @description `tcp` or `udp`. Carried because a declaration that cannot say which is
              *     not a description of what the app binds; nothing dispatches on it yet.

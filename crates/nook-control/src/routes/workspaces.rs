@@ -1257,6 +1257,16 @@ fn validate_requirements(reqs: &[PortRequirement]) -> ApiResult<()> {
                 r.protocol
             )));
         }
+        // The same two rules `.nook.toml` states, because this is the other
+        // door into the same declaration (MAIN-596 AC-4/AC-8): a udp target
+        // resolves to a URL nothing answers, and the name check above already
+        // covers a browsable listener nobody could ask for by name.
+        if r.browsable && r.protocol != "tcp" {
+            return Err(ApiError::BadRequest(format!(
+                "`{}` is marked browsable but is not a tcp listener",
+                r.name
+            )));
+        }
         // Names key the leases, so a duplicate is not a redundancy: the second
         // would overwrite the first's lease and the workspace would end up with
         // fewer ports than it declared.
