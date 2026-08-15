@@ -22,7 +22,10 @@ pub async fn list(State(state): State<AppState>, auth: AuthCtx) -> ApiResult<Jso
     operation_id = "put_setting",
     params(("key" = String, Path,)),
     request_body = UpdateSettingRequest,
-    responses((status = 200, body = Setting)))]
+    responses(
+        (status = 200, body = Setting),
+        // `email.inbound` claims an address no other tenant may hold (MAIN-329).
+        (status = 409)))]
 pub async fn put(
     State(state): State<AppState>,
     auth: AuthCtx,
@@ -55,6 +58,13 @@ pub async fn put(
         )
         .await?;
     }
+
+    // Key-specific validation, for the keys whose VALUE carries an invariant the
+    // settings table cannot express. `email.inbound` routes real mail by
+    // address, so a second tenant claiming one already in use would take
+    // delivery of somebody else's support mail (MAIN-329).
+    crate::services::email_inbound::validate_setting(&state, auth.tenant_id, &key, &req.value)
+        .await?;
 
     let user_id = (scope == "user").then_some(auth.user_id);
     let setting = state

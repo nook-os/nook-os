@@ -40,10 +40,93 @@ use crate::state::AppState;
 /// would be one more thing to get wrong on the side that cannot be tested from
 /// here.
 pub fn sign(secret: &str, body: &str, unix_ts: i64) -> String {
+    format!(
+        "t={unix_ts},v1={}",
+        hex(&mac_of(secret, unix_ts, body.as_bytes()))
+    )
+}
+
+/// How far a signed timestamp may be from now before the delivery is refused.
+///
+/// The timestamp is only worth signing if something checks it: without a
+/// window, a captured request replays forever. Five minutes each way is
+/// Stripe's default tolerance and covers ordinary clock skew between a relay
+/// and this server.
+pub const SIGNATURE_TOLERANCE_SECS: i64 = 300;
+
+/// Does `header` — a value [`sign`] produced — sign these bytes with `secret`,
+/// recently enough?
+///
+/// The inverse of [`sign`], sharing its one definition of the signed material
+/// (MAIN-329): a receiver that reconstructed the framing itself would be a
+/// second copy of the scheme, on the path where getting it wrong means
+/// accepting a forgery.
+///
+/// Two properties this deliberately keeps:
+///
+/// - **The RAW bytes, never a re-serialized parse.** Round-tripping JSON
+///   changes key order and spacing, so a signature over the result verifies
+///   nothing about what was sent.
+/// - **Constant time**, via `Mac::verify_slice`. A byte-by-byte `==` on a
+///   signature leaks, through timing, how many leading bytes a guess got right,
+///   which turns forging one into a few thousand requests. The hex decode ahead
+///   of it runs on attacker-supplied text and reveals nothing about the secret.
+pub fn verify(secret: &str, body: &[u8], header: &str, now_unix: i64) -> bool {
+    let Some((ts, hex_sig)) = parse_signature(header) else {
+        return false;
+    };
+    // `saturating_sub`, not `-`: `t` is attacker-supplied and `t=-9223372036854775808`
+    // is plain ASCII a header carries fine. Subtracting it overflows `i64`,
+    // which release builds wrap (returning false, by luck) and every debug and
+    // test build PANICS on — a 500 through the panic net where a 401 was the
+    // answer. Saturating gives the same verdict on both profiles.
+    if now_unix.saturating_sub(ts).saturating_abs() > SIGNATURE_TOLERANCE_SECS {
+        return false;
+    }
+    let Some(expected) = decode_hex(hex_sig) else {
+        return false;
+    };
     let mut mac =
         Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("hmac accepts any key length");
-    mac.update(format!("{unix_ts}.{body}").as_bytes());
-    format!("t={unix_ts},v1={}", hex(&mac.finalize().into_bytes()))
+    mac.update(signed_material(ts, body).as_slice());
+    mac.verify_slice(&expected).is_ok()
+}
+
+fn mac_of(secret: &str, unix_ts: i64, body: &[u8]) -> Vec<u8> {
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("hmac accepts any key length");
+    mac.update(signed_material(unix_ts, body).as_slice());
+    mac.finalize().into_bytes().to_vec()
+}
+
+fn signed_material(unix_ts: i64, body: &[u8]) -> Vec<u8> {
+    let mut out = format!("{unix_ts}.").into_bytes();
+    out.extend_from_slice(body);
+    out
+}
+
+/// `t=<unix>,v1=<hex>` → the two parts, in either order and ignoring any
+/// further comma-separated pairs a future scheme version adds.
+fn parse_signature(header: &str) -> Option<(i64, &str)> {
+    let (mut ts, mut sig) = (None, None);
+    for part in header.split(',') {
+        match part.trim().split_once('=') {
+            Some(("t", v)) => ts = v.parse::<i64>().ok(),
+            Some(("v1", v)) => sig = Some(v),
+            _ => {}
+        }
+    }
+    Some((ts?, sig?))
+}
+
+fn decode_hex(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -828,6 +911,39 @@ mod tests {
             payload: Value::Null,
             read_at: None,
             created_at: chrono::Utc::now(),
+        }
+    }
+
+    /// `sign` and `verify` are one scheme, and the timestamp inside the signed
+    /// material is what a receiver checks (MAIN-329). The body is deliberately
+    /// bytes a re-serialization would reorder.
+    #[test]
+    fn a_signature_verifies_only_against_its_own_body_secret_and_moment() {
+        let body = br#"{"b":2,"a":1}"#;
+        let now = 1_700_000_000;
+        let sig = sign("s3cret", std::str::from_utf8(body).unwrap(), now);
+
+        assert!(verify("s3cret", body, &sig, now));
+        assert!(verify("s3cret", body, &sig, now + SIGNATURE_TOLERANCE_SECS));
+
+        assert!(!verify("other", body, &sig, now), "another secret");
+        assert!(
+            !verify("s3cret", br#"{"a":1,"b":2}"#, &sig, now),
+            "re-ordered"
+        );
+        assert!(
+            !verify("s3cret", body, &sig, now + SIGNATURE_TOLERANCE_SECS + 1),
+            "a replay past the window"
+        );
+        assert!(!verify("s3cret", body, "v1=deadbeef", now), "no timestamp");
+        assert!(!verify("s3cret", body, "t=1,v1=zz", now), "not hex");
+        assert!(!verify("s3cret", body, "", now), "nothing at all");
+
+        // An `i64` boundary the caller chose. `now - ts` on either of these
+        // overflows, which panics in this very build unless the subtraction
+        // saturates — so the assertion is that it ANSWERS at all.
+        for extreme in [i64::MIN, i64::MAX] {
+            assert!(!verify("s3cret", body, &format!("t={extreme},v1=00"), now));
         }
     }
 

@@ -1061,6 +1061,48 @@
         }
       }
     },
+    "/api/v1/email/inbound": {
+      "post": {
+        "tags": [
+          "crate::routes::email"
+        ],
+        "summary": "`POST /api/v1/email/inbound` — one signed delivery from the mail provider's\ninbound-parse webhook.",
+        "description": "**Takes no `AuthCtx`, which is how a route opts out of auth here** (the\nprecedent is `/hooks/github/{workspace_id}`, and before it\n`/invites/preview`). A mail provider carries no session and no tenant; the\nsignature over the raw body is the authentication, and the recipient\naddress is what names the tenant.\n\n| code | when |\n|------|------|\n| 202  | signed and understood — filed, or dropped by the trust gate |\n| 400  | signed, but not a payload this source can normalize — including one whose sender the provider did not verify, or did not report on |\n| 401  | no signature, one that does not verify, or one too old to accept |\n| 404  | this deployment has no inbound secret — it receives no mail |\n| 413  | body over the route's 25 MiB limit |\n\nA 400 is deliberately distinguishable from a drop: it says the *delivery*\nwas malformed, which is the operator's problem and not a fact about who is\non an allow-list. Only the gate's two verdicts are hidden behind the 202.\n\n**A drop is a 202, exactly like an accept.** The provider must not retry a\nmessage we have decided not to act on, and a distinguishable refusal would\nturn this endpoint into a way to ask \"does this deployment serve that\naddress\" and \"is that person support staff\" — from the outside, for free.\nThe disposition is in the body, where the operator reading their provider's\ndelivery log can see it and an enumerator cannot use it.",
+        "operationId": "receive_inbound_email",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InboundEmailAck"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          },
+          "401": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          },
+          "413": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/events": {
       "get": {
         "tags": [
@@ -5795,6 +5837,9 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": ""
           }
         }
       }
@@ -13438,6 +13483,33 @@
           "passphrase": {
             "type": "string",
             "description": "The app password. Same rule as saving: nothing enters the vault\nunsealed."
+          }
+        }
+      },
+      "InboundEmailAck": {
+        "type": "object",
+        "description": "What the inbound-email receiver tells the mail provider it did (MAIN-329).\n\nA dropped delivery gets the same 202 an accepted one does — see\n`routes::email` for why — so this body is the only place the two differ.",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it was dropped: `unrouted` | `sender-not-allowed`."
+          },
+          "status": {
+            "type": "string",
+            "description": "`filed` | `dropped`."
+          },
+          "task_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The card the message became, when it became one."
           }
         }
       },

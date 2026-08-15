@@ -1265,6 +1265,20 @@ pub struct ForgeDeliveryAck {
     pub duplicate: bool,
 }
 
+/// What the inbound-email receiver tells the mail provider it did (MAIN-329).
+///
+/// A dropped delivery gets the same 202 an accepted one does — see
+/// `routes::email` for why — so this body is the only place the two differ.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct InboundEmailAck {
+    /// `filed` | `dropped`.
+    pub status: String,
+    /// The card the message became, when it became one.
+    pub task_key: Option<String>,
+    /// Why it was dropped: `unrouted` | `sender-not-allowed`.
+    pub reason: Option<String>,
+}
+
 /// A workspace's review-loop declaration (MAIN-445), as the API reports it.
 ///
 /// `max_replicas: null` is UNSET — the build's default ceiling of one applies.
