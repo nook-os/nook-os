@@ -38,6 +38,13 @@ through untouched. The freeze is on leaves, never on groups.
 - **Verb second**, and an ordinary one: `list`, `get`, `create`, `move`, `ask`.
 - **No new abbreviations.** `interactions`, not `ix`. The existing short ones
   (`exec`, `whoami`) are grandfathered; do not add siblings for them.
+  - **`attachments rm` is a ruled exception** (MAIN-594, AC-7). Written down
+    rather than absorbed, for the same reason the `notebook` one is: the next
+    verb that wants a short name has to earn it in a ruling somebody can point
+    at, not by citing this one. It is `rm` because that is the word for
+    deleting a file on every machine this runs on, and the verb removes a
+    FILE — `nook attachments rm <id>` reads as what it does. The general rule
+    is unchanged: spell the verb out unless a ticket rules otherwise.
 - Prefer an existing group over a new one. A new noun is justified when the
   thing it names is a real resource, not when it is a convenient prefix.
 

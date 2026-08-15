@@ -8,13 +8,25 @@
 //! by itself and nothing is inlined into the ticket body — a run never pays for
 //! a file it did not ask for (NG-2, NG-3).
 //!
-//! Read-only, both verbs. Attaching stays a person's act (NG-1).
+//! **`add` is one command over two endpoints** (MAIN-594). Putting a file on a
+//! card is an upload and then a join — `POST /user-content`, then `POST
+//! /tasks/{key}/attachments` with the id it hands back — and asking a person to
+//! type both, copying a uuid between them, is why there was no CLI for this at
+//! all. A pure client: neither endpoint changes (NG-1).
+//!
+//! **Reading is machine work; writing is a person's.** `list` and `get` answer
+//! a node token, because an agent reading its brief is the case they exist for.
+//! The three write routes all call `require_user`, so `add` and `rm` refuse a
+//! machine credential here, by name, rather than letting it become a 403 from
+//! somewhere the reader cannot see.
 
 use anyhow::{bail, Context, Result};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::cli::Client;
 use crate::style;
+
+const UPLOAD: &str = "/api/v1/user-content";
 
 /// The whole thread's files: the ticket's own and every comment's.
 pub async fn list(task: &str, json: bool) -> Result<()> {
@@ -170,6 +182,171 @@ fn safe_filename(raw: &str, id: &str) -> String {
     base.to_string()
 }
 
+/// Put a file on a card: upload the bytes, then record the join (AC-2).
+///
+/// Two requests, one command. The upload answers with a content id that means
+/// nothing on its own — bytes in a store with no owner — and the second request
+/// is what makes it an attachment on this ticket. Anyone doing this by hand was
+/// copying that uuid between two `curl`s.
+pub async fn add(task: &str, file: &str, replace: bool, json_out: bool) -> Result<()> {
+    let client = as_a_person("attach a file")?;
+    let path = std::path::Path::new(file);
+    let filename = upload_name(path)?;
+    let content_type = content_type_for(&filename);
+    let bytes = std::fs::read(path).with_context(|| format!("reading {file}"))?;
+
+    if replace {
+        // BEFORE the upload, deliberately: the rule is "one file of this name
+        // on this card", and detaching after would mean a window in which two
+        // exist and a failure that leaves the wrong one behind (AC-3).
+        let on_card = fetch(&client, task).await?;
+        for id in same_name_on_task(&on_card, &filename) {
+            client
+                .delete(&format!("/api/v1/attachments/{id}"))
+                .await
+                .with_context(|| format!("replacing the {filename} already on {task}"))?;
+        }
+    }
+
+    let content = client
+        .post_file(UPLOAD, &filename, &content_type, bytes)
+        .await?;
+    let content_id = content["id"]
+        .as_str()
+        .context("the upload answered without a content id")?;
+    let row = client
+        .post(
+            &format!("/api/v1/tasks/{task}/attachments"),
+            json!({ "user_content_id": content_id }),
+        )
+        .await?;
+
+    if json_out {
+        println!("{}", serde_json::to_string_pretty(&row)?);
+        return Ok(());
+    }
+    println!(
+        "{} {}  {}  {}",
+        style::ok_c("✓"),
+        row["id"].as_str().unwrap_or("—"),
+        filename,
+        style::dim(&content_type)
+    );
+    Ok(())
+}
+
+/// Take one attachment off, bytes and all.
+///
+/// The record is read before it is deleted so the refusal for an id that is not
+/// this tenant's is one sentence rather than a 404 body, and so what was
+/// removed can be named afterwards — `DELETE` answers 204 and cannot say.
+pub async fn rm(id: &str, json_out: bool) -> Result<()> {
+    let client = as_a_person("remove an attachment")?;
+    let Some(row) = client.get_opt(&format!("/api/v1/attachments/{id}")).await? else {
+        bail!("no attachment {id} in this tenant");
+    };
+    // Deleting the join deletes the content row with it — the foreign key
+    // cascades — so this is one call, not two.
+    client.delete(&format!("/api/v1/attachments/{id}")).await?;
+
+    if json_out {
+        println!("{}", serde_json::to_string_pretty(&row)?);
+        return Ok(());
+    }
+    println!(
+        "{} removed {}",
+        style::ok_c("✓"),
+        row["filename"].as_str().unwrap_or(id)
+    );
+    Ok(())
+}
+
+/// Which of the thread's attachments `--replace` takes off (AC-3).
+///
+/// Scoped to the TICKET: `fetch` answers for the whole thread, and a file of
+/// the same name on somebody's comment is their file, not a previous version of
+/// this one (NG-2).
+fn same_name_on_task(rows: &[Value], filename: &str) -> Vec<String> {
+    rows.iter()
+        .filter(|r| r["parent_kind"].as_str() == Some("task"))
+        .filter(|r| r["filename"].as_str() == Some(filename))
+        .filter_map(|r| r["id"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// The name the file is uploaded under — its own, never the path to it.
+///
+/// A path is how the caller found the file; the name is what the card shows and
+/// what `--replace` matches on, so `./shots/run.webm` and `/tmp/run.webm` are
+/// the same file arriving twice.
+fn upload_name(path: &std::path::Path) -> Result<String> {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .map(str::to_string)
+        .filter(|n| !n.is_empty())
+        .with_context(|| format!("{} does not name a file", path.display()))
+}
+
+/// A client that is a PERSON, or the refusal that says why (AC-6).
+///
+/// The three write routes call `require_user`, so a node token gets a 403 from
+/// the server with no clue as to which credential was wrong. Saying it here
+/// names the thing that is missing and how to get it, before a byte is read off
+/// disk.
+fn as_a_person(doing: &str) -> Result<Client> {
+    let client = Client::from_config()?;
+    person_only(client.is_user(), doing)?;
+    Ok(client)
+}
+
+/// The refusal itself, decided before anything is read or sent — which is what
+/// lets it be exercised without a control plane, as `plan_write` already is.
+fn person_only(is_user: bool, doing: &str) -> Result<()> {
+    if !is_user {
+        bail!(
+            "this is a machine credential, and only a person can {doing} — run `nook login` \
+             to act as yourself.\n  Reading them (`list`, `get`) works either way."
+        );
+    }
+    Ok(())
+}
+
+/// What the file's extension says it is (AC-4).
+///
+/// The stored type is what a future player or preview keys on, so
+/// `application/octet-stream` on every upload would make a video unplayable
+/// having uploaded it perfectly. The table is deliberately short — the formats
+/// something actually renders — and anything not on it stays octet-stream,
+/// which the serving route treats as a download.
+///
+/// `.svg` is left off on purpose: it is scriptable, and the serving route
+/// echoes an `image/*` subtype back inline. Naming it here would be choosing to
+/// run it in this origin.
+fn content_type_for(filename: &str) -> String {
+    let ext = std::path::Path::new(filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "webm" => "video/webm",
+        "mp4" | "m4v" => "video/mp4",
+        "mov" => "video/quicktime",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "pdf" => "application/pdf",
+        "json" => "application/json",
+        "zip" => "application/zip",
+        "csv" => "text/csv",
+        "md" => "text/markdown",
+        "txt" | "log" => "text/plain",
+        _ => "application/octet-stream",
+    }
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,5 +458,62 @@ mod tests {
     fn without_the_comments_a_file_still_says_it_is_on_one() {
         let lines = render(&[row("task_comment", "c-1")], &[]);
         assert!(lines[1].contains("on a comment"), "{}", lines[1]);
+    }
+
+    /// AC-4: the stored type is what a player keys on, so the extension has to
+    /// reach it. The two the epic turns on are `.webm` and `.png`.
+    #[test]
+    fn the_extension_decides_the_content_type() {
+        assert_eq!(content_type_for("run.webm"), "video/webm");
+        assert_eq!(content_type_for("shot.png"), "image/png");
+        assert_eq!(content_type_for("SHOT.PNG"), "image/png");
+        assert_eq!(
+            content_type_for("archive.tar.gz"),
+            "application/octet-stream"
+        );
+        assert_eq!(content_type_for("README"), "application/octet-stream");
+        // Scriptable in this origin if the serving route echoed it back inline.
+        assert_eq!(content_type_for("logo.svg"), "application/octet-stream");
+    }
+
+    #[test]
+    fn a_path_uploads_under_its_own_name() {
+        let name = |p: &str| upload_name(std::path::Path::new(p)).unwrap();
+        assert_eq!(name("./shots/run.webm"), "run.webm");
+        assert_eq!(name("/tmp/run.webm"), "run.webm");
+        assert_eq!(name("run.webm"), "run.webm");
+        assert!(upload_name(std::path::Path::new("/")).is_err());
+    }
+
+    /// AC-3: `--replace` is "one file of this name ON THIS CARD" — never a file
+    /// of that name somebody put on a comment (NG-2).
+    #[test]
+    fn replace_matches_the_cards_own_files_by_name() {
+        let att = |id: &str, kind: &str, name: &str| json!({"id": id, "parent_kind": kind, "parent_id": "p", "filename": name});
+        let rows = vec![
+            att("a-1", "task", "run.webm"),
+            att("a-2", "task", "notes.md"),
+            att("a-3", "task_comment", "run.webm"),
+            att("a-4", "task", "run.webm"),
+        ];
+        assert_eq!(same_name_on_task(&rows, "run.webm"), vec!["a-1", "a-4"]);
+        // Nothing matching is not an error — `--replace` then simply adds.
+        assert!(same_name_on_task(&rows, "first.webm").is_empty());
+    }
+
+    /// AC-6: a node token is turned away by name, before a byte is read off
+    /// disk — not left to become a 403 from a route the reader cannot see.
+    #[test]
+    fn a_machine_credential_is_refused_by_name() {
+        let refusal = person_only(false, "attach a file")
+            .expect_err("a node token cannot attach")
+            .to_string();
+        assert!(refusal.contains("machine credential"), "{refusal}");
+        assert!(refusal.contains("nook login"), "{refusal}");
+        assert!(
+            refusal.contains("list") && refusal.contains("get"),
+            "it says what a machine CAN still do: {refusal}"
+        );
+        assert!(person_only(true, "attach a file").is_ok());
     }
 }

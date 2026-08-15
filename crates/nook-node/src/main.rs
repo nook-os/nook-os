@@ -233,12 +233,15 @@ enum Command {
     /// human decision without losing it to a dropped connection (MAIN-159).
     #[command(subcommand)]
     Interactions(InteractionsCommand),
-    /// Files hung on a ticket or on one of its comments (MAIN-534).
+    /// Files hung on a ticket or on one of its comments (MAIN-534, MAIN-594).
     ///
-    ///     nook attachments list MAIN-42     what the card carries
-    ///     nook attachments get <id>         pull the one you want
+    ///     nook attachments list MAIN-42          what the card carries
+    ///     nook attachments get <id>              pull the one you want
+    ///     nook attachments add MAIN-42 shot.png  put one on the card
+    ///     nook attachments rm <id>               take it off again
     ///
-    /// Read-only: an agent reads a card's attachments, a person adds them.
+    /// Reading answers a node token, because an agent reading its brief is what
+    /// it is for; writing needs a person, and says so.
     /// A new noun group, per docs/cli-style.md — the top level stays frozen.
     #[command(subcommand)]
     Attachments(AttachmentsCommand),
@@ -803,6 +806,15 @@ async fn main() -> Result<()> {
         }
         Command::Attachments(AttachmentsCommand::Get { id, out, force }) => {
             attachments::get(&id, out.as_deref(), force).await
+        }
+        Command::Attachments(AttachmentsCommand::Add {
+            task,
+            file,
+            replace,
+            json,
+        }) => attachments::add(&task, &file, replace, json).await,
+        Command::Attachments(AttachmentsCommand::Rm { id, json }) => {
+            attachments::rm(&id, json).await
         }
         Command::Notebook(NotebookCommand::List { folder, json }) => {
             notebook::list(folder.as_deref(), json).await
@@ -1477,6 +1489,29 @@ enum AttachmentsCommand {
         /// Overwrite what is already there.
         #[arg(long)]
         force: bool,
+    },
+    /// Put a local file on a card: upload it and attach it, in one command.
+    ///
+    /// The content type is taken from the extension, so a `.webm` is stored as
+    /// a video rather than as bytes nothing will play.
+    Add {
+        /// The card, by key (MAIN-42) or id.
+        task: String,
+        /// The file to put on it.
+        file: String,
+        /// Take off anything on the card already carrying this filename first —
+        /// "one of these per card", rather than a pile of versions.
+        #[arg(long)]
+        replace: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Take one attachment off a card. Removes the stored file with it.
+    Rm {
+        /// The attachment id, as `list` prints it.
+        id: String,
+        #[arg(long)]
+        json: bool,
     },
 }
 
