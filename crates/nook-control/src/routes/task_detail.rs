@@ -20,6 +20,7 @@ use nook_types::*;
 
 use crate::auth::{AuthCtx, Principal};
 use crate::error::{ApiError, ApiResult};
+use crate::services::identity::display_name;
 use crate::services::jobs;
 use crate::services::tasks;
 use crate::state::AppState;
@@ -255,19 +256,6 @@ async fn owned_comment(state: &AppState, auth: &AuthCtx, id: uuid::Uuid) -> ApiR
         ));
     }
     Ok(task)
-}
-
-async fn display_name(state: &AppState, user: UserId) -> String {
-    // A user's display name is identity data, so it comes from that aggregate's
-    // repository rather than a second copy of the query here (MAIN-246/249).
-    state
-        .identity
-        .get_user(user)
-        .await
-        .ok()
-        .flatten()
-        .map(|u| u.display_name)
-        .unwrap_or_else(|| "unknown".into())
 }
 
 // ── relations ───────────────────────────────────────────────────────────────

@@ -37,6 +37,7 @@ import {
   pastedFiles,
   useUploads,
 } from "./TaskAttachments";
+import { TaskReports } from "./TaskReports";
 import { TaskPicker, isDone, type PickerTask } from "./TaskPicker";
 import { WorkspacePicker } from "./WorkspacePicker";
 import { toggleTaskCheckbox } from "./taskCheckbox";
@@ -156,6 +157,24 @@ export function TaskDetail({
   const { data: me } = useQuery({
     queryKey: ["me"],
     queryFn: async () => (await api.GET("/api/v1/auth/me")).data ?? null,
+  });
+
+  // ── Reports (MAIN-603) ──────────────────────────────────────────────────
+  //
+  // Its own request rather than a field on the task detail: reports are written
+  // by automation between reads, and a card whose producer has nothing to say
+  // must not pay for an empty array on every board hover. The server orders
+  // them most recently updated first (AC-5), so this renders what it is given.
+  //
+  // Keyed UNDER `["task", id]` — the loop jobs' convention — so the websocket's
+  // `task_changed` invalidates it by prefix. A producer writes between reads by
+  // definition, so a report the card cannot repaint for is the common case, not
+  // the corner.
+  const { data: reports } = useQuery({
+    queryKey: ["task", taskId, "reports"],
+    queryFn: async () =>
+      (await api.GET("/api/v1/tasks/{id}/reports", { params: { path: { id: taskId } } }))
+        .data ?? [],
   });
   const bustAttachments = () =>
     qc.invalidateQueries({ queryKey: ["task-attachments", taskId] });
@@ -954,6 +973,12 @@ export function TaskDetail({
               </div>
             )}
           </div>
+
+          {/* Below the development sections deliberately (AC-5): what a machine
+              has to say about this card is context for the work, and the work's
+              own state — branch, session, PR — is what a person came here to
+              read first. */}
+          <TaskReports reports={reports ?? []} />
         </aside>
       </div>
     </Shell>

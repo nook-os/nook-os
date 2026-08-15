@@ -22,6 +22,7 @@ pub mod notebook;
 pub mod notifications;
 pub mod read_model;
 pub mod sessions;
+pub mod task_reports;
 pub mod tasks;
 pub mod user_content;
 pub mod workspaces;

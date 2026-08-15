@@ -2874,6 +2874,45 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tasks/{id}/reports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_task_reports"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tasks/{id}/reports/{key}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Create or **replace** the report at this key (AC-1).
+         * @description `PUT` and not `POST` because that is exactly what this is: the key is the
+         *     address, the body is what is there now, and running the same automation
+         *     twice leaves one report rather than two. Every refusal is settled before the
+         *     first write, so a rejected report leaves the card untouched.
+         */
+        put: operations["put_task_report"];
+        post?: never;
+        delete: operations["delete_task_report"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tasks/{id}/revisions": {
         parameters: {
             query?: never;
@@ -7354,6 +7393,16 @@ export interface components {
             passphrase: string;
         };
         /**
+         * @description `PUT /tasks/{id}/reports/{key}` — create or replace the report at that key.
+         *
+         *     No `key` field: the key is the address, and a body that could disagree with
+         *     the path is a body somebody eventually writes wrong.
+         */
+        PutTaskReportRequest: {
+            body_md: string;
+            title: string;
+        };
+        /**
          * @description Which dispatch gate is holding a job `queued` (MAIN-494).
          *
          *     The sentence in `loop_jobs.queued_reason` stays the rendering; this is what
@@ -8479,6 +8528,51 @@ export interface components {
             kind: string;
             tenant_id: components["schemas"]["TenantId"];
             to_task: components["schemas"]["TaskId"];
+        };
+        /**
+         * @description One piece of automation-written metadata on a card (MAIN-603).
+         *
+         *     The record Nook stores and the record Nook does not understand. `body_md` is
+         *     Markdown a producer wrote and nothing in this tree parses it — no extraction,
+         *     no link detection, no per-type handling (NG-1). If something here ever needs
+         *     to be *understood*, that is a signal the abstraction is wrong, not a reason
+         *     to add a `kind` column.
+         *
+         *     `key` is the producer's own name for the report and is what makes a re-run
+         *     replace rather than append. It is unique per task, so `PUT` twice with one
+         *     key leaves one report (AC-1).
+         */
+        TaskReport: {
+            author_id?: null | components["schemas"]["UserId"];
+            author_name: string;
+            /**
+             * @description `user` | `agent` | `system`, in `TaskComment`'s spelling — so "an agent
+             *     said this" means one thing across the whole card.
+             */
+            author_type: string;
+            /**
+             * @description Markdown, stored verbatim and rendered by the shared renderer the rest of
+             *     the card uses — which sanitises it, because this is untrusted input from
+             *     automation (AC-6).
+             */
+            body_md: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            id: string;
+            /**
+             * @description Lowercase letters, digits and `-`. The path segment the producer writes
+             *     to, echoed back so a client never has to reconstruct it.
+             */
+            key: string;
+            task_id: components["schemas"]["TaskId"];
+            title: string;
+            /**
+             * Format: date-time
+             * @description When this key was last written. What the sidebar shows, so a stale report
+             *     is visibly stale (AC-10), and what the listing orders by.
+             */
+            updated_at: string;
         };
         TeachRequest: {
             content: string;
@@ -14787,6 +14881,109 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["TaskItem"];
                 };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_task_reports: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskReport"][];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    put_task_report: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PutTaskReportRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskReport"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_task_report: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             404: {
                 headers: {

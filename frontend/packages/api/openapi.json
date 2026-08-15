@@ -6811,6 +6811,136 @@
         }
       }
     },
+    "/api/v1/tasks/{id}/reports": {
+      "get": {
+        "tags": [
+          "crate::routes::task_reports"
+        ],
+        "operationId": "list_task_reports",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TaskReport"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/tasks/{id}/reports/{key}": {
+      "put": {
+        "tags": [
+          "crate::routes::task_reports"
+        ],
+        "summary": "Create or **replace** the report at this key (AC-1).",
+        "description": "`PUT` and not `POST` because that is exactly what this is: the key is the\naddress, the body is what is there now, and running the same automation\ntwice leaves one report rather than two. Every refusal is settled before the\nfirst write, so a rejected report leaves the card untouched.",
+        "operationId": "put_task_report",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutTaskReportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "crate::routes::task_reports"
+        ],
+        "operationId": "delete_task_report",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/tasks/{id}/revisions": {
       "get": {
         "tags": [
@@ -16163,6 +16293,22 @@
           }
         }
       },
+      "PutTaskReportRequest": {
+        "type": "object",
+        "description": "`PUT /tasks/{id}/reports/{key}` — create or replace the report at that key.\n\nNo `key` field: the key is the address, and a body that could disagree with\nthe path is a body somebody eventually writes wrong.",
+        "required": [
+          "title",
+          "body_md"
+        ],
+        "properties": {
+          "body_md": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
       "QueuedReason": {
         "oneOf": [
           {
@@ -18261,6 +18407,67 @@
           },
           "to_task": {
             "$ref": "#/components/schemas/TaskId"
+          }
+        }
+      },
+      "TaskReport": {
+        "type": "object",
+        "description": "One piece of automation-written metadata on a card (MAIN-603).\n\nThe record Nook stores and the record Nook does not understand. `body_md` is\nMarkdown a producer wrote and nothing in this tree parses it — no extraction,\nno link detection, no per-type handling (NG-1). If something here ever needs\nto be *understood*, that is a signal the abstraction is wrong, not a reason\nto add a `kind` column.\n\n`key` is the producer's own name for the report and is what makes a re-run\nreplace rather than append. It is unique per task, so `PUT` twice with one\nkey leaves one report (AC-1).",
+        "required": [
+          "id",
+          "task_id",
+          "key",
+          "title",
+          "body_md",
+          "author_type",
+          "author_name",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "author_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/UserId"
+              }
+            ]
+          },
+          "author_name": {
+            "type": "string"
+          },
+          "author_type": {
+            "type": "string",
+            "description": "`user` | `agent` | `system`, in `TaskComment`'s spelling — so \"an agent\nsaid this\" means one thing across the whole card."
+          },
+          "body_md": {
+            "type": "string",
+            "description": "Markdown, stored verbatim and rendered by the shared renderer the rest of\nthe card uses — which sanitises it, because this is untrusted input from\nautomation (AC-6)."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "key": {
+            "type": "string",
+            "description": "Lowercase letters, digits and `-`. The path segment the producer writes\nto, echoed back so a client never has to reconstruct it."
+          },
+          "task_id": {
+            "$ref": "#/components/schemas/TaskId"
+          },
+          "title": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When this key was last written. What the sidebar shows, so a stale report\nis visibly stale (AC-10), and what the listing orders by."
           }
         }
       },

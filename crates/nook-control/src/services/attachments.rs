@@ -127,32 +127,12 @@ pub async fn list_thread_readable(
 /// The task behind an identifier, refused as 404 when this viewer may not see
 /// it (MAIN-76). Every attachment route resolves its parent through here, so
 /// none of them can become a side channel onto a ticket nobody may open.
-pub async fn readable_task(
-    state: &AppState,
-    tenant: TenantId,
-    viewer: UserId,
-    ident: &str,
-) -> ApiResult<TaskId> {
-    let id = crate::services::tasks::resolve_id(state.tasks.as_ref(), tenant, ident).await?;
-    readable_task_id(state, tenant, viewer, id).await
-}
-
-async fn readable_task_id(
-    state: &AppState,
-    tenant: TenantId,
-    viewer: UserId,
-    id: TaskId,
-) -> ApiResult<TaskId> {
-    let row = state
-        .tasks
-        .get_row(tenant, id)
-        .await?
-        .ok_or(ApiError::NotFound)?;
-    if !crate::services::tasks::visible_to(&row, viewer) {
-        return Err(ApiError::NotFound);
-    }
-    Ok(id)
-}
+///
+/// The rule itself moved to `services::tasks` when reports needed it too
+/// (MAIN-603) — these names stay because the attachment routes read better
+/// with them, and because one definition of "may this viewer see this card" is
+/// the whole point.
+pub use crate::services::tasks::{readable_task, readable_task_id};
 
 /// Which ticket a parent belongs to. `None` when the parent has already gone —
 /// which a removal treats as success and a read treats as a 404.

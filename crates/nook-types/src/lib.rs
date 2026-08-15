@@ -2882,6 +2882,50 @@ pub struct AttachContentRequest {
     pub user_content_id: Uuid,
 }
 
+/// One piece of automation-written metadata on a card (MAIN-603).
+///
+/// The record Nook stores and the record Nook does not understand. `body_md` is
+/// Markdown a producer wrote and nothing in this tree parses it — no extraction,
+/// no link detection, no per-type handling (NG-1). If something here ever needs
+/// to be *understood*, that is a signal the abstraction is wrong, not a reason
+/// to add a `kind` column.
+///
+/// `key` is the producer's own name for the report and is what makes a re-run
+/// replace rather than append. It is unique per task, so `PUT` twice with one
+/// key leaves one report (AC-1).
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
+pub struct TaskReport {
+    pub id: Uuid,
+    pub task_id: TaskId,
+    /// Lowercase letters, digits and `-`. The path segment the producer writes
+    /// to, echoed back so a client never has to reconstruct it.
+    pub key: String,
+    pub title: String,
+    /// Markdown, stored verbatim and rendered by the shared renderer the rest of
+    /// the card uses — which sanitises it, because this is untrusted input from
+    /// automation (AC-6).
+    pub body_md: String,
+    /// `user` | `agent` | `system`, in `TaskComment`'s spelling — so "an agent
+    /// said this" means one thing across the whole card.
+    pub author_type: String,
+    pub author_id: Option<UserId>,
+    pub author_name: String,
+    pub created_at: DateTime<Utc>,
+    /// When this key was last written. What the sidebar shows, so a stale report
+    /// is visibly stale (AC-10), and what the listing orders by.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// `PUT /tasks/{id}/reports/{key}` — create or replace the report at that key.
+///
+/// No `key` field: the key is the address, and a body that could disagree with
+/// the path is a body somebody eventually writes wrong.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct PutTaskReportRequest {
+    pub title: String,
+    pub body_md: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct NotificationPage {
     pub notifications: Vec<Notification>,

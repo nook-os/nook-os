@@ -25,6 +25,25 @@ use crate::error::{ApiError, ApiResult};
 use crate::repo::identity::{IdentityRepository, MembershipRow};
 use crate::state::AppState;
 
+/// A user's name as an authored record spells it — a comment's author, a
+/// report's (MAIN-603). Identity data, so it comes from that aggregate's
+/// repository rather than a second copy of the query beside each caller
+/// (MAIN-246/249).
+///
+/// Missing resolves to `"unknown"` rather than failing: a node token has no
+/// user row behind it, and a record of the work is worth more than a refusal
+/// over the name on it.
+pub async fn display_name(state: &AppState, user: UserId) -> String {
+    state
+        .identity
+        .get_user(user)
+        .await
+        .ok()
+        .flatten()
+        .map(|u| u.display_name)
+        .unwrap_or_else(|| "unknown".into())
+}
+
 /// Every tenant this person belongs to, resolved from `tenant_members`.
 ///
 /// A person is one `users` row PER tenant, and the rows are tied together by
