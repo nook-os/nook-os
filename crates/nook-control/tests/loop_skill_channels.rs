@@ -315,7 +315,7 @@ fn build_skill_is_directed_and_judgment_only() {
         );
     }
     assert!(
-        skill("nook-build").contains("version: 2.5.0"),
+        skill("nook-build").contains("version: 2.6.0"),
         "nook-build's version must be bumped with every change to its text"
     );
 }

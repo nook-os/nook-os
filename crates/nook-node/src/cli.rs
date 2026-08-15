@@ -2890,7 +2890,7 @@ pub async fn task(key: &str, json: bool, revisions: bool) -> Result<()> {
     // board is noise every reader then has to skip.
     if let Some(rows) = attachments.filter(|r| !r.is_empty()) {
         println!();
-        for line in crate::attachments::render(&rows, &comments) {
+        for line in crate::attachments::render(key, &rows, &comments) {
             println!("{line}");
         }
     }
@@ -4891,7 +4891,7 @@ pub async fn issues_set_parent(key: &str, parent: &str) -> Result<()> {
     Ok(())
 }
 
-/// The wire format `nook attachments add` sends, and the sentence it prints
+/// The wire format `nook issues attach` sends, and the sentence it prints
 /// when the server refuses (MAIN-594).
 #[cfg(test)]
 mod upload_wire {

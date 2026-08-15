@@ -38,15 +38,24 @@ through untouched. The freeze is on leaves, never on groups.
 - **Verb second**, and an ordinary one: `list`, `get`, `create`, `move`, `ask`.
 - **No new abbreviations.** `interactions`, not `ix`. The existing short ones
   (`exec`, `whoami`) are grandfathered; do not add siblings for them.
-  - **`attachments rm` is a ruled exception** (MAIN-594, AC-7). Written down
-    rather than absorbed, for the same reason the `notebook` one is: the next
-    verb that wants a short name has to earn it in a ruling somebody can point
-    at, not by citing this one. It is `rm` because that is the word for
-    deleting a file on every machine this runs on, and the verb removes a
-    FILE — `nook attachments rm <id>` reads as what it does. The general rule
-    is unchanged: spell the verb out unless a ticket rules otherwise.
+  - **The `attachments rm` exception is RETIRED** (MAIN-610, owner ruling
+    2026-08-15). MAIN-594 AC-7 granted it, and folding the group into `issues`
+    spelled the verb out — `nook issues detach` — so the thing it was granted
+    for no longer exists. Retiring it rather than leaving it on the page is the
+    point: an exception is earned by a ruling somebody can point at, and this
+    one has stopped applying. The general rule stands unweakened: spell the
+    verb out unless a ticket rules otherwise.
 - Prefer an existing group over a new one. A new noun is justified when the
   thing it names is a real resource, not when it is a convenient prefix.
+  - **`attachments` folding into `issues` is the worked example** (MAIN-610).
+    An attachment is never free-standing — it hangs on a card or on one of that
+    card's comments — so a group of its own was a prefix, not a resource, and
+    its four verbs are `nook issues attach|attachments|download|detach` now.
+    Note what it did NOT cost: the freeze is on flat leaves, never on groups,
+    so moving a group's verbs under another group adds no thirty-first verb.
+    A retired group stays as a **hidden alias for one release**, printing the
+    replacement, because a fleet is running the old spelling in skill text
+    nobody has re-taught yet.
 
 ### Naming the thing a verb acts on
 
@@ -56,6 +65,10 @@ exemplar: a note or folder is given as a slash-delimited path
 (`"Nook/Ideas/2026-08-13"`) or as a uuid, and the path is matched against the
 address the group's own `list` prints — so what a person copies out of the
 output works verbatim, and a script that kept an id keeps working too.
+
+`nook issues download MAIN-42/shot.png` (MAIN-610) follows it: the card and the
+filename ARE the address, and `nook issues attachments` prints exactly that
+string beside the uuid, so either can be pasted into the next command.
 
 Two conventions the notebook group did not invent but that every new group
 should follow, because a skill written against one CLI verb should not have to
