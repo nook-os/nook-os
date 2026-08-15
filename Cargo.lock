@@ -2642,6 +2642,7 @@ dependencies = [
  "ipnet",
  "nook-auth",
  "nook-db",
+ "nook-desktop-env",
  "nook-dispatcher",
  "nook-errors",
  "nook-infra",
@@ -2701,6 +2702,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "nook-desktop-env"
+version = "0.6.11"
+dependencies = [
+ "rand 0.9.5",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -9,6 +9,11 @@
 use std::fs;
 use std::path::PathBuf;
 
+// What the bundled control plane is launched with lives in the cargo
+// workspace, not here: this shell is outside it, so a boot environment written
+// here could only ever be asserted against itself — which is how MAIN-396
+// shipped one that could not boot at all (MAIN-434).
+use nook_desktop_env::{control_plane_env, load_or_create_secrets};
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
@@ -471,32 +476,6 @@ fn free_port() -> Result<u16, String> {
         .map_err(|e| format!("could not read the chosen port: {e}"))
 }
 
-/// The environment the bundled control plane boots with.
-///
-/// Pure so it can be asserted without launching anything — the values here are
-/// exactly the ones MAIN-376 showed go wrong silently. `PUBLIC_BASE_URL` and
-/// `WEB_ORIGIN` must carry the CHOSEN port: left at a default they point every
-/// task-key link, invite and agent-authored URL at a port nothing is serving.
-fn control_plane_env(db_path: &std::path::Path, port: u16) -> Vec<(String, String)> {
-    let base = format!("http://127.0.0.1:{port}");
-    vec![
-        // `sqlite://` selects the engine by URL, the same way boot does
-        // (MAIN-195). A virgin file is the ordinary case: migrate + seed +
-        // /healthz from nothing is what `tests/sqlite_boot.rs` already proves.
-        (
-            "DATABASE_URL".into(),
-            format!("sqlite://{}", db_path.display()),
-        ),
-        // Never `production`: that arm makes a ledger it cannot account for
-        // fatal, which is right for a server and wrong for a desktop app whose
-        // database is a file the user can corrupt.
-        ("APP_ENV".into(), "desktop".into()),
-        ("NOOK_CONTROL_PORT".into(), port.to_string()),
-        ("PUBLIC_BASE_URL".into(), base.clone()),
-        ("WEB_ORIGIN".into(), base),
-    ]
-}
-
 /// Where the local database lives, under the OS-conventional app-data directory
 /// Tauri resolves (AC-5): `~/.local/share/<id>` on Linux,
 /// `~/Library/Application Support/<id>` on macOS, `%APPDATA%\<id>` on Windows.
@@ -599,14 +578,25 @@ fn start_local_stack(app: tauri::AppHandle) {
             Ok(p) => p,
             Err(e) => return set(fail(e)),
         };
-        let port = match free_port() {
-            Ok(p) => p,
+        let secrets = match db
+            .parent()
+            .ok_or_else(|| "the database path has no directory".to_string())
+            .and_then(load_or_create_secrets)
+        {
+            Ok(s) => s,
             Err(e) => return set(fail(e)),
+        };
+        // Both doors get their own free port. Binding them is all-or-nothing in
+        // the control plane (MAIN-285), so a fixed agent port that a dev stack
+        // already holds takes the whole boot down with it.
+        let (port, agent_port) = match (free_port(), free_port()) {
+            (Ok(p), Ok(a)) => (p, a),
+            (Err(e), _) | (_, Err(e)) => return set(fail(e)),
         };
         let base = format!("http://127.0.0.1:{port}");
 
         let cmd = match app.shell().sidecar("nook-control") {
-            Ok(c) => c.envs(control_plane_env(&db, port)),
+            Ok(c) => c.envs(control_plane_env(&db, port, agent_port, &secrets)),
             Err(e) => return set(fail(format!("the bundled control plane is missing: {e}"))),
         };
         let (mut rx, _child) = match cmd.spawn() {
@@ -1328,49 +1318,6 @@ mod boot_tests {
 
         // And it is actually bindable — the point of asking the OS.
         std::net::TcpListener::bind(("127.0.0.1", p)).expect("the chosen port binds");
-    }
-
-    /// AC-4: the URLs carry the CHOSEN port.
-    ///
-    /// MAIN-376's lesson, and the reason this is asserted rather than assumed:
-    /// a stale literal here does not fail — it sends every task-key link,
-    /// invite and agent-authored URL to a port nothing is serving.
-    #[test]
-    fn the_public_urls_carry_the_chosen_port() {
-        let env = control_plane_env(std::path::Path::new("/tmp/x/nook.db"), 41007);
-        let get = |k: &str| {
-            env.iter()
-                .find(|(n, _)| n == k)
-                .map(|(_, v)| v.clone())
-                .unwrap_or_else(|| panic!("{k} is not set"))
-        };
-        assert_eq!(get("PUBLIC_BASE_URL"), "http://127.0.0.1:41007");
-        assert_eq!(get("WEB_ORIGIN"), "http://127.0.0.1:41007");
-        assert_eq!(get("NOOK_CONTROL_PORT"), "41007");
-        for (_, v) in &env {
-            assert!(!v.contains("8080"), "no 8080 literal may survive: {v}");
-        }
-    }
-
-    /// AC-1: a SQLite URL at the app-data path, and an APP_ENV that is not
-    /// production — a desktop database is a file the user can corrupt, and the
-    /// production arm makes an unaccountable ledger fatal.
-    #[test]
-    fn the_database_is_sqlite_at_the_given_path_and_env_is_not_production() {
-        let env = control_plane_env(std::path::Path::new("/home/a/.local/share/nook/nook.db"), 1);
-        let url = env
-            .iter()
-            .find(|(n, _)| n == "DATABASE_URL")
-            .map(|(_, v)| v.clone())
-            .unwrap();
-        assert_eq!(url, "sqlite:///home/a/.local/share/nook/nook.db");
-        assert!(
-            url.starts_with("sqlite://"),
-            "engine is selected by URL scheme"
-        );
-
-        let app_env = env.iter().find(|(n, _)| n == "APP_ENV").unwrap().1.clone();
-        assert_ne!(app_env, "production");
     }
 
     /// The state the webview reads starts as not-ready with no error, so the UI
