@@ -40,7 +40,6 @@ describe("resolveTitle — the AC-2 map", () => {
     ["/operator", "Admin · nook@os"],
     ["/settings", "Settings · nook@os"],
     ["/team", "Team · nook@os"],
-    ["/feedback", "Feedback · nook@os"],
     ["/help", "Docs · nook@os"],
     ["/verify-email", "Verify email · nook@os"],
     ["/accept", "Accept invite · nook@os"],

@@ -900,38 +900,36 @@ export function WorkspaceDetail() {
       render: () => (id ? <WorkspaceRuns workspaceId={id} workspaceName={ws.name} /> : null),
     },
     {
-      // Beside Sessions and Ports on purpose (AC-1): all three answer "what
-      // runs in this repo, and where" — this is the one that runs without
-      // anybody asking.
-      id: "build-loop",
-      title: "Build loop",
+      // The build loop and the session policy are ONE question — what this repo
+      // runs without anybody asking — and they were two tabs, so answering it
+      // meant knowing both existed (MAIN-600 AC-1). Two sections, two submits
+      // against their own endpoints (NG-3); one place to look.
+      id: "automation",
+      title: "Automation",
       group: "Work",
       keywords: [
         "build", "loop", "switch", "auto", "automatic", "pin", "node",
         "concurrency", "agent-ready", "queued", "backoff", "escalated",
+        "policy", "session", "reconcile", "replicas", "desired", "declarative",
+        "ports", "cap",
       ],
-      render: () => (id ? <BuildLoopPanel workspaceId={id} /> : null),
-    },
-    {
-      id: "policy",
-      title: "Session policy",
-      group: "Work",
-      keywords: ["reconcile", "replicas", "desired", "declarative", "ports", "cap"],
       // One flex column, not two grid tracks: the section shell gives every
       // child an equal-height row, and the cap banner (which usually renders
       // NOTHING) must not cost the policy half the screen when it appears.
       // The banner stays ABOVE the policy on purpose (MAIN-361 AC-6): the
       // policy's replica count is the number the cap is overriding.
-      render: () => (
-        <div style={{ display: "flex", flexDirection: "column", gap: 10, minHeight: 0 }}>
-          {id && <PortSafetyNotice workspaceId={id} workspaceName={ws.name} />}
-          {/* The grid wrapper hands the policy panel the column's remaining
-              height, so this section fills the shell like every other one. */}
-          <div style={{ flex: 1, minHeight: 0, display: "grid" }}>
-            {id && <SessionPolicy workspaceId={id} />}
+      render: () =>
+        id ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, minHeight: 0 }}>
+            <BuildLoopPanel workspaceId={id} />
+            <PortSafetyNotice workspaceId={id} workspaceName={ws.name} />
+            {/* The grid wrapper hands the policy panel the column's remaining
+                height, so this section fills the shell like every other one. */}
+            <div style={{ flex: 1, minHeight: 0, display: "grid" }}>
+              <SessionPolicy workspaceId={id} />
+            </div>
           </div>
-        </div>
-      ),
+        ) : null,
     },
     {
       // Beside the session policy on purpose: both are declarations about what

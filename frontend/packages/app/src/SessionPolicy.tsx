@@ -9,12 +9,13 @@
 // UNSAVED draft would do, through that same planner. So the panel says what is
 // declared, what happened, and what would happen — and the last of those is
 // labelled as a projection everywhere it appears.
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, X } from "lucide-react";
 import { api, type Schemas } from "@nookos/api";
-import { Empty, Panel, Pill } from "@nookos/ui";
+import { Panel, Pill } from "@nookos/ui";
 import { notify } from "./dialogs";
+import { useFleetRuntimes } from "./fleetRuntimes";
 
 type Replicas =
   | { kind: "count"; count: number }
@@ -368,11 +369,11 @@ const PREVIEW_DEBOUNCE_MS = 300;
 
 export function SessionPolicy({ workspaceId }: { workspaceId: string }) {
   const queryClient = useQueryClient();
-  const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<Spec>(EMPTY);
   const [selector, setSelector] = useState<Pair[]>([]);
   const [tolerations, setTolerations] = useState<Pair[]>([]);
   const [busy, setBusy] = useState(false);
+  const runtimes = useFleetRuntimes();
 
   const { data: spec } = useQuery({
     queryKey: ["session-spec", workspaceId],
@@ -402,21 +403,24 @@ export function SessionPolicy({ workspaceId }: { workspaceId: string }) {
   const wanted = JSON.stringify(draftSpec(draft, selector, tolerations));
   const [asked, setAsked] = useState(wanted);
 
-  // Seed the editor from what is stored, each time it opens.
-  useEffect(() => {
-    if (!editing) return;
+  // Seed the form from what is stored — on arrival, and again on demand from
+  // `revert`. There is no open/closed any more (MAIN-600 AC-2): an existing
+  // spec pre-fills the fields, no spec leaves them at EMPTY, and both are
+  // editable on sight.
+  const reseed = useCallback(() => {
     const s = (spec as Spec | null) ?? EMPTY;
     const sel = pairsOf(s.node_selector ?? {});
     const tol = (s.tolerations ?? []).map((t) => ({ k: t.key, v: t.effect }));
     setDraft(s);
     setSelector(sel);
     setTolerations(tol);
-    // The opening preview asks about the SEEDED draft in the same commit the
-    // editor is seeded in. Left to the debounce, the query would fire once for
-    // the placeholder the closed panel was holding, and show that answer for
-    // the length of the window.
+    // The first preview asks about the SEEDED draft in the same commit the form
+    // is seeded in. Left to the debounce, the query would fire once for the
+    // placeholder this was holding, and show that answer for the length of the
+    // window.
     setAsked(JSON.stringify(draftSpec(s, sel, tol)));
-  }, [editing, spec]);
+  }, [spec]);
+  useEffect(reseed, [reseed]);
   useEffect(() => {
     const t = setTimeout(() => setAsked(wanted), PREVIEW_DEBOUNCE_MS);
     return () => clearTimeout(t);
@@ -424,9 +428,6 @@ export function SessionPolicy({ workspaceId }: { workspaceId: string }) {
 
   const preview = useQuery({
     queryKey: ["reconcile-preview", workspaceId, asked],
-    // Only while the editor is open: this is a question about a draft, and
-    // there is no draft when nothing is being edited.
-    enabled: editing,
     // A projection is worth exactly one attempt — retrying holds the panel in
     // "recalculating" for seconds on a control plane that is plainly down,
     // when the honest answer (AC-3) is that it is unavailable.
@@ -447,7 +448,7 @@ export function SessionPolicy({ workspaceId }: { workspaceId: string }) {
   });
   // Answering for a spec the editor has moved past — the debounce window, and
   // the request after it.
-  const previewStale = editing && (wanted !== asked || preview.isFetching);
+  const previewStale = wanted !== asked || preview.isFetching;
 
   const save = async (next: Spec | null) => {
     setBusy(true);
@@ -462,7 +463,6 @@ export function SessionPolicy({ workspaceId }: { workspaceId: string }) {
       await notify("The control plane refused that policy", JSON.stringify(error));
       return;
     }
-    setEditing(false);
     queryClient.invalidateQueries({ queryKey: ["session-spec", workspaceId] });
     queryClient.invalidateQueries({ queryKey: ["reconcile-status", workspaceId] });
   };
@@ -515,137 +515,127 @@ export function SessionPolicy({ workspaceId }: { workspaceId: string }) {
       actions={
         <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
           {status && <StatusLine status={status} />}
-          {!editing && (
-            <button className="btn small" onClick={() => setEditing(true)}>
-              {spec ? "edit" : "declare"}
-            </button>
-          )}
         </span>
       }
     >
-      {!editing ? (
-        spec ? (
-          <>
-            <div className="policy-summary small mono">
-              <div>
-                runtime <b>{(spec as Spec).runtime}</b> ·{" "}
-                {(spec as Spec).replicas.kind === "count"
-                  ? `${((spec as Spec).replicas as { count: number }).count} replicas`
-                  : (spec as Spec).replicas.kind === "all"
-                    ? "one per matching node"
-                    : "exactly one"}
-              </div>
-              <div className="faint">
-                {Object.keys((spec as Spec).node_selector ?? {}).length === 0
-                  ? "any node"
-                  : Object.entries((spec as Spec).node_selector)
-                      .map(([k, v]) => `${k}=${v}`)
-                      .join(", ")}
-                {((spec as Spec).tolerations ?? []).length > 0 &&
-                  ` · tolerates ${(spec as Spec).tolerations
-                    .map((t) => `${t.key}:${t.effect}`)
-                    .join(", ")}`}
-              </div>
-            </div>
-            {status && <ShortfallDetail status={status} />}
-          </>
-        ) : (
-          <Empty>
-            This workspace runs no declared sessions. Declare a policy and the
-            control plane keeps them running for you.
-          </Empty>
-        )
-      ) : (
-        <div className="policy-editor">
-          {/* Three questions, three regions (AC-4). The replica mode and the
-              count it governs are ONE decision, and the flat column said so
-              nowhere: the count appeared and disappeared four rows down from
-              the select that decides whether it exists. */}
-          <fieldset className="policy-region" data-testid="policy-region-what">
-            <legend className="policy-region-title small">what runs</legend>
+      {!spec && (
+        <div className="faint small" data-testid="policy-undeclared">
+          This workspace runs no declared sessions yet. Fill this in and the
+          control plane keeps them running for you.
+        </div>
+      )}
+      {spec && status && <ShortfallDetail status={status} />}
+      <div className="policy-editor">
+        {/* Three questions, three regions (AC-4). The replica mode and the
+            count it governs are ONE decision, and the flat column said so
+            nowhere: the count appeared and disappeared four rows down from
+            the select that decides whether it exists. */}
+        <fieldset className="policy-region" data-testid="policy-region-what">
+          <legend className="policy-region-title small">what runs</legend>
+          <label className="small">
+            runtime
+            {/* The fleet's own list, never free text (AC-3): a typo used to be
+                a policy that matches no node, and the panel could only say so
+                after the planner had been asked about it. */}
+            <select
+              className="input small"
+              aria-label="runtime"
+              value={draft.runtime}
+              onChange={(e) => setDraft({ ...draft, runtime: e.target.value })}
+            >
+              {/* A stored runtime the fleet no longer reports still shows,
+                  and shows as itself: dropping it would silently rewrite the
+                  declaration to whatever happened to be first. */}
+              {!runtimes.includes(draft.runtime) && (
+                <option value={draft.runtime}>
+                  {draft.runtime} (no node reports this)
+                </option>
+              )}
+              {runtimes.map((r) => (
+                <option key={r} value={r}>
+                  {r}
+                </option>
+              ))}
+            </select>
+          </label>
+        </fieldset>
+
+        <fieldset className="policy-region" data-testid="policy-region-how-many">
+          <legend className="policy-region-title small">how many</legend>
+          <label className="small">
+            replicas
+            <select
+              className="input small"
+              aria-label="replicas"
+              value={draft.replicas.kind}
+              onChange={(e) => {
+                const kind = e.target.value as Replicas["kind"];
+                setDraft({
+                  ...draft,
+                  replicas:
+                    kind === "count" ? { kind: "count", count: 1 } : { kind },
+                });
+              }}
+            >
+              <option value="single">exactly one</option>
+              <option value="count">a fixed number</option>
+              <option value="all">one per matching node</option>
+            </select>
+          </label>
+          {draft.replicas.kind === "count" && (
             <label className="small">
-              runtime
+              how many
               <input
                 className="input small"
-                value={draft.runtime}
-                onChange={(e) => setDraft({ ...draft, runtime: e.target.value })}
-                placeholder="claude"
-              />
-            </label>
-          </fieldset>
-
-          <fieldset className="policy-region" data-testid="policy-region-how-many">
-            <legend className="policy-region-title small">how many</legend>
-            <label className="small">
-              replicas
-              <select
-                className="input small"
-                value={draft.replicas.kind}
-                onChange={(e) => {
-                  const kind = e.target.value as Replicas["kind"];
+                type="number"
+                min={0}
+                value={draft.replicas.count}
+                onChange={(e) =>
                   setDraft({
                     ...draft,
-                    replicas:
-                      kind === "count" ? { kind: "count", count: 1 } : { kind },
-                  });
-                }}
-              >
-                <option value="single">exactly one</option>
-                <option value="count">a fixed number</option>
-                <option value="all">one per matching node</option>
-              </select>
+                    replicas: {
+                      kind: "count",
+                      // 0 is legal and means "managed, wanting none" — a real
+                      // declaration, distinct from having no policy at all.
+                      count: Math.max(0, Number(e.target.value) || 0),
+                    },
+                  })
+                }
+              />
             </label>
-            {draft.replicas.kind === "count" && (
-              <label className="small">
-                how many
-                <input
-                  className="input small"
-                  type="number"
-                  min={0}
-                  value={draft.replicas.count}
-                  onChange={(e) =>
-                    setDraft({
-                      ...draft,
-                      replicas: {
-                        kind: "count",
-                        // 0 is legal and means "managed, wanting none" — a real
-                        // declaration, distinct from having no policy at all.
-                        count: Math.max(0, Number(e.target.value) || 0),
-                      },
-                    })
-                  }
-                />
-              </label>
-            )}
-          </fieldset>
+          )}
+        </fieldset>
 
-          <fieldset className="policy-region" data-testid="policy-region-where">
-            <legend className="policy-region-title small">where</legend>
-            <div className="small">
-              node selector <span className="faint">(empty matches every node)</span>
-              {pairEditor(selector, setSelector, "os", "linux")}
-            </div>
+        <fieldset className="policy-region" data-testid="policy-region-where">
+          <legend className="policy-region-title small">where</legend>
+          <div className="small">
+            node selector <span className="faint">(empty matches every node)</span>
+            {pairEditor(selector, setSelector, "os", "linux")}
+          </div>
 
-            <div className="small">
-              tolerations <span className="faint">(taints this work accepts)</span>
-              {pairEditor(tolerations, setTolerations, "key", "NoSchedule")}
-            </div>
-          </fieldset>
+          <div className="small">
+            tolerations <span className="faint">(taints this work accepts)</span>
+            {pairEditor(tolerations, setTolerations, "key", "NoSchedule")}
+          </div>
+        </fieldset>
 
-          <PolicyPreview
-            preview={preview.data}
-            isError={preview.isError}
-            stale={previewStale}
-          />
+        <PolicyPreview
+          preview={preview.data}
+          isError={preview.isError}
+          stale={previewStale}
+        />
 
-          <div className="policy-actions">
-            <button className="btn primary small" disabled={busy} onClick={submit}>
-              save policy
-            </button>
-            <button className="btn small" disabled={busy} onClick={() => setEditing(false)}>
-              cancel
-            </button>
-            {spec && (
+        <div className="policy-actions">
+          <button className="btn primary small" disabled={busy} onClick={submit}>
+            save policy
+          </button>
+          {spec && (
+            <>
+              {/* What "cancel" meant once there is no editor to leave: put
+                  the fields back to what is stored. */}
+              <button className="btn small" disabled={busy} onClick={reseed}>
+                revert
+              </button>
               <button
                 className="btn danger small"
                 disabled={busy}
@@ -654,10 +644,10 @@ export function SessionPolicy({ workspaceId }: { workspaceId: string }) {
               >
                 clear
               </button>
-            )}
-          </div>
+            </>
+          )}
         </div>
-      )}
+      </div>
     </Panel>
   );
 }

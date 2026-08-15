@@ -17,12 +17,40 @@ import { onJobFinish, useJobs } from "./jobs";
 import { WorkspaceLocations } from "./WorkspaceLocations";
 import { adoptEnvFromDisk, saveEnv } from "./envvault";
 import { requireAppPassword } from "./apppassword";
+import { fleetRuntimes } from "./fleetRuntimes";
 
 const AUTO = "";
 type Tab = "new" | "existing";
 
 const looksLikeGitUrl = (q: string) =>
   /^(https?:\/\/|git@|ssh:\/\/|git:\/\/)/.test(q.trim()) || /\.git$/.test(q.trim());
+
+/**
+ * Why Chat is not offered, in a line that is always on screen (MAIN-600 AC-4).
+ *
+ * It used to be a `title` on a DISABLED button — which most browsers never show
+ * — so the guard read as a dead control. The reason is only half of it: a
+ * person who cannot pick Chat wants to know what they COULD pick, and only the
+ * node knows, so the machine's own list is named.
+ *
+ * Null when Chat is available: there is nothing to explain, and a line saying
+ * so would be noise above a button that is plainly enabled.
+ */
+export function chatGuardText(o: {
+  runtime: string;
+  chatRuntimes: string[];
+  nodeName: string | null;
+}): string | null {
+  if (o.runtime && o.chatRuntimes.includes(o.runtime)) return null;
+  // No node yet — the empty list is "nothing has been asked", not "this machine
+  // offers nothing", and saying the second would be a claim about a machine
+  // nobody has chosen.
+  if (!o.nodeName) {
+    return "Chat needs a runtime a machine can drive as a chat, and no machine is picked yet — pick one to see what it offers.";
+  }
+  const offers = o.chatRuntimes.length ? o.chatRuntimes.join(", ") : "nothing";
+  return `Chat needs a runtime this machine can drive as a chat. ${o.nodeName} offers: ${offers}.`;
+}
 
 /** "git@github.com:acme/services.git" → "acme/services" */
 function repoLabel(url: string): string {
@@ -152,15 +180,7 @@ function NewWorkModal() {
   // the reconciler places it. The runtime choices are therefore the UNION of
   // what the whole fleet can launch, not one node's — a workspace asking for
   // `claude` will only land where claude exists (the reconciler's eligibility).
-  const fleetRuntimes = useMemo(() => {
-    const set = new Set<string>();
-    for (const n of nodes ?? [])
-      for (const r of ((n.capabilities as Record<string, unknown>)?.runtimes as
-        | string[]
-        | undefined) ?? [])
-        set.add(r);
-    return set.size ? [...set] : ["bash"];
-  }, [nodes]);
+  const fleet = useMemo(() => fleetRuntimes(nodes), [nodes]);
   // Which runtimes the chosen machine says it can drive as a CHAT (MAIN-502).
   // Reported by the node, never decided here: the node owns how it runs an
   // agent, and a picker that offered Chat for a runtime the node would refuse
@@ -171,6 +191,13 @@ function NewWorkModal() {
     ((effectiveNode?.capabilities as Record<string, unknown>)
       ?.chat_runtimes as string[]) ?? [];
   const chatAvailable = chatRuntimes.includes(runtime);
+  // NG-4: the guard's behaviour is `chatAvailable` and is unchanged — this is
+  // only its explanation, and it covers the no-node case the tooltip never did.
+  const chatGuard = chatGuardText({
+    runtime,
+    chatRuntimes,
+    nodeName: effectiveNode?.name ?? null,
+  });
   // A runtime change must not leave Chat selected for a runtime that cannot be
   // one: the server refuses that combination (AC-2), so silently keeping it
   // would turn a runtime click into a failed create.
@@ -190,7 +217,7 @@ function NewWorkModal() {
   // fields show as soon as the tab opens, so the model is visible before you
   // type; the submit needs a real repo URL (canGo gates on it).
   const declarative = tab === "new" && !taskId;
-  const pickerRuntimes = declarative ? fleetRuntimes : runtimes;
+  const pickerRuntimes = declarative ? fleet : runtimes;
 
   // Starting work here means starting an agent on it: if the node has claude,
   // that's what the session opens with. (A plain shell is one click away in
@@ -663,27 +690,25 @@ function NewWorkModal() {
                 >
                   Terminal
                 </button>
-                {/* Disabled with the reason shown, never hidden (AC-2): a
+                {/* Disabled with the reason BELOW it, never hidden (AC-2): a
                     missing option reads as "this product has no chat", which
                     sends people looking for a setting that does not exist. */}
                 <button
                   className={`mode-tab${iface === "chat" ? " active" : ""}`}
                   disabled={!chatAvailable}
-                  title={
-                    chatAvailable
-                      ? "run the agent as a conversation"
-                      : `${runtime || "this runtime"} cannot run as a chat`
-                  }
+                  title={chatAvailable ? "run the agent as a conversation" : undefined}
                   onClick={() => chatAvailable && setIface("chat")}
                 >
                   Chat
                 </button>
               </div>
-              {!chatAvailable && (
-                <div className="faint small" style={{ marginTop: 4 }}>
-                  Chat needs a runtime that streams its work —{" "}
-                  <span className="mono">{runtime || "this runtime"}</span> does
-                  not, so it runs as a terminal.
+              {chatGuard && (
+                <div
+                  className="faint small"
+                  data-testid="chat-guard-reason"
+                  style={{ marginTop: 4 }}
+                >
+                  {chatGuard}
                 </div>
               )}
             </div>

@@ -59,7 +59,7 @@ vi.mock("@nookos/api", () => ({
   },
 }));
 
-import { NewWorkHost } from "./NewWorkModal";
+import { chatGuardText, NewWorkHost } from "./NewWorkModal";
 import { useNewWork } from "./newwork";
 
 /** Opened on an EXISTING workspace — the path that actually creates a session
@@ -119,7 +119,19 @@ describe("the Interface picker", () => {
 
     // Still THERE — that is the AC. Disabled, with the reason on screen.
     await waitFor(() => expect((chatButton() as HTMLButtonElement).disabled).toBe(true));
-    expect(screen.getByText(/Chat needs a runtime that streams its work/)).toBeTruthy();
+    // On screen, and naming what WOULD work (MAIN-600 AC-4) — the reason used
+    // to be a `title` on a disabled button, which is the one place a browser
+    // will not show it.
+    const reason = await screen.findByTestId("chat-guard-reason");
+    expect(reason.textContent).toContain("box offers: claude");
+    expect(chatButton().getAttribute("title")).toBeNull();
+  });
+
+  it("says nothing extra once Chat is available", async () => {
+    openModal();
+    await chooseRuntime("claude");
+    await waitFor(() => expect((chatButton() as HTMLButtonElement).disabled).toBe(false));
+    expect(screen.queryByTestId("chat-guard-reason")).toBeNull();
   });
 
   it("sends the chosen interface when a session is created", async () => {
@@ -161,5 +173,37 @@ describe("the Interface picker", () => {
     openModal();
     await chooseRuntime("claude");
     await waitFor(() => expect((chatButton() as HTMLButtonElement).disabled).toBe(true));
+  });
+});
+
+// The two disabled cases the picker has, decided in one pure function so both
+// are checkable without a machine, a node or a modal (MAIN-600 AC-4).
+describe("chatGuardText", () => {
+  it("names the machine and what it offers", () => {
+    expect(
+      chatGuardText({ runtime: "bash", chatRuntimes: ["claude"], nodeName: "operator" }),
+    ).toBe(
+      "Chat needs a runtime this machine can drive as a chat. operator offers: claude.",
+    );
+  });
+
+  it("says a node reporting none offers nothing, rather than staying silent", () => {
+    expect(
+      chatGuardText({ runtime: "claude", chatRuntimes: [], nodeName: "operator" }),
+    ).toContain("operator offers: nothing.");
+  });
+
+  // The case the tooltip never covered at all: nothing is picked, so the empty
+  // list is "not asked yet" and must not be reported as a machine's answer.
+  it("asks for a machine before claiming one offers nothing", () => {
+    const text = chatGuardText({ runtime: "claude", chatRuntimes: [], nodeName: null });
+    expect(text).toContain("no machine is picked yet");
+    expect(text).not.toContain("offers:");
+  });
+
+  it("explains nothing when Chat is available", () => {
+    expect(
+      chatGuardText({ runtime: "claude", chatRuntimes: ["claude"], nodeName: "operator" }),
+    ).toBeNull();
   });
 });
