@@ -16,6 +16,7 @@ const OK = { ok: true, status: 200, statusText: "OK" } as unknown as Response;
 const state = vi.hoisted(() => ({
   pr_url: null as string | null,
   column_id: "c-open",
+  labels: [] as { id: string; name: string; color: string }[],
 }));
 
 const get = vi.hoisted(() =>
@@ -32,7 +33,7 @@ const get = vi.hoisted(() =>
             column_id: state.column_id,
             priority: 0,
             visibility: "team",
-            labels: [],
+            labels: state.labels,
             pr_url: state.pr_url,
             created_at: "2026-08-14T00:00:00Z",
             updated_at: "2026-08-14T00:00:00Z",
@@ -109,6 +110,7 @@ import { TaskDetail, canRequestChanges, commentRequestBody } from "./TaskDetail"
 beforeEach(() => {
   state.pr_url = null;
   state.column_id = "c-open";
+  state.labels = [];
   get.mockClear();
   post.mockClear();
   post.mockResolvedValue({ data: undefined });
@@ -180,6 +182,23 @@ describe("the card's request-changes action", () => {
     show();
     await screen.findByRole("button", { name: /^comment$/i });
     expect(rejectButton()).toBeNull();
+  });
+
+  // MAIN-608 AC-3: the two conditional buttons are independent, so a card with
+  // an open PR that is ALSO stopped shows both — the case a row holding one of
+  // them at a time would render wrong.
+  it("shares the row with 'comment and unblock' when the card is also escalated", async () => {
+    state.pr_url = "https://github.com/acme/api/pull/7";
+    state.labels = [{ id: "l-1", name: "needs-human-review", color: "#f00" }];
+    show();
+    const submit = await screen.findByRole("button", { name: /^comment$/i });
+    const row = submit.parentElement as HTMLElement;
+    expect([...row.querySelectorAll("button")].map((b) => b.textContent?.trim())).toEqual([
+      "Attach",
+      "comment and unblock",
+      "request changes",
+      "comment",
+    ]);
   });
 
   it("is not offered once the card is done — its PR is merged or closed", async () => {
