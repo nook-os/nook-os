@@ -37,7 +37,6 @@ import { ControlPlaneTabs } from "./ControlPlaneTabs";
 import { askText, DialogHost, notify } from "./dialogs";
 import { JobsHud } from "./JobsHud";
 import { useNewWork } from "./newwork";
-import { FeedbackModalHost, useFeedbackModal } from "./FeedbackModal";
 
 // Left rail: the permanent global nav. The top bar never repeats it — top is
 // for CONTEXT (the selected workspace's views).
@@ -296,7 +295,6 @@ export function Shell({ me }: { me: MeResponse }) {
   );
 
   const showNewWork = useNewWork((s) => s.show);
-  const showFeedback = useFeedbackModal((s) => s.show);
 
   const openTerminal = () => {
     const latest = activeSessions[0];
@@ -316,7 +314,6 @@ export function Shell({ me }: { me: MeResponse }) {
   return (
     <div className="nook-app">
       <NewWorkHost />
-      <FeedbackModalHost />
       <DialogHost />
       <JobsHud />
       {/* Desktop-only control-plane tab strip, above the top bar. Renders null
@@ -359,16 +356,6 @@ export function Shell({ me }: { me: MeResponse }) {
         <div className="nook-topbar-right">
           <PendingInteractions />
           <NotificationBell />
-          {/* Feedback lives here, spelled out, not just as one more unlabelled
-              icon in the rail — you can't tell us what's wrong with a thing
-              you can't find. */}
-          <NavLink
-            to="/feedback"
-            className={({ isActive }) => `nook-tab${isActive ? " active" : ""}`}
-            title="tell us what should be better"
-          >
-            <MessageSquare size={14} /> Feedback
-          </NavLink>
           <NavLink
             to="/help"
             className={({ isActive }) => `nook-tab${isActive ? " active" : ""}`}
@@ -409,19 +396,6 @@ export function Shell({ me }: { me: MeResponse }) {
           </NavLink>
         ))}
         <div className="spacer" />
-        {/* Feedback sits where you reach for it once something annoys you —
-            next to Settings, not buried in the nav list. It opens a modal
-            rather than navigating, because the thought is usually one
-            sentence and losing your place to write it down is the friction
-            that stops people bothering. */}
-        <button
-          type="button"
-          data-tip="Feedback"
-          className="nook-rail-btn"
-          onClick={() => showFeedback()}
-        >
-          <MessageSquare size={19} />
-        </button>
         <NavLink
           to="/settings"
           data-tip="Settings"

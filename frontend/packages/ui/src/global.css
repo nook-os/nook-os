@@ -4390,6 +4390,60 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   box-shadow: var(--nook-glow);
 }
 
+/* A queued ask, as a row you open (MAIN-600 AC-8). The answer controls moved to
+   the modal, so the row is a prompt and how long it has waited. */
+.ixn-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  width: 100%;
+  padding: 8px 10px;
+  text-align: left;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--nook-border);
+  border-left: 2px solid var(--nook-accent);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.ixn-row:hover { background: var(--nook-bg-raised); }
+.ixn-row .ixn-prompt { margin-bottom: 0; }
+
+/* What the ask carries, in one line: the wait, the card, the run. */
+.ixn-context {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  color: var(--nook-fg-dim);
+}
+.ixn-context-h { text-transform: uppercase; letter-spacing: 0.04em; }
+
+.ixn-tail {
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  background: var(--nook-bg);
+  border: 1px solid var(--nook-border);
+  border-radius: var(--nook-radius);
+  max-height: 200px;
+  overflow-y: auto;
+}
+.ixn-tail-line {
+  color: var(--nook-fg-dim);
+  overflow-wrap: anywhere;
+  margin-top: 2px;
+}
+
+/* Inside the modal the item is the whole body, not a row in a list. */
+.modal-body .ixn-item {
+  padding: 0;
+  border-bottom: none;
+  border-left: none;
+}
+
 /* ── Loop panel (MAIN-128) ──────────────────────────────────────────────── */
 
 .loop-panel-h { display: flex; align-items: center; justify-content: space-between; gap: 8px; }

@@ -39,7 +39,6 @@ const APP_ROUTES = new Set([
   "activity",
   "nodes",
   "settings",
-  "feedback",
   "help",
 ]);
 

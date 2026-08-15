@@ -1,5 +1,6 @@
 // The session policy editor, and the projection it now shows before you commit
-// to anything (MAIN-500).
+// to anything (MAIN-500). MAIN-600 took the declare/edit gate off it: the form
+// is what the panel IS, so every case below starts with the fields on screen.
 //
 // The assertions that matter are about WHICH spec was asked about and about
 // what the answer is allowed to claim. A preview that quietly answers for the
@@ -37,6 +38,8 @@ function preview(over: Record<string, unknown> = {}) {
 }
 
 const state = vi.hoisted(() => ({
+  // What the fleet reports it can run — the runtime select's whole content.
+  nodes: [] as unknown[],
   spec: null as unknown,
   status: null as unknown,
   preview: null as unknown,
@@ -52,6 +55,7 @@ vi.mock("@nookos/api", () => ({
     GET: vi.fn(async (path: string) => {
       if (path.includes("reconcile-status")) return { data: state.status };
       if (path.includes("session-spec")) return { data: state.spec };
+      if (path === "/api/v1/nodes") return { data: state.nodes };
       return { data: null };
     }),
     POST: vi.fn(async (path: string, opts?: { body?: Record<string, unknown> }) => {
@@ -77,11 +81,27 @@ function mount() {
   );
 }
 
-/** Open the editor, seeded from the saved spec. */
-async function openEditor(user: ReturnType<typeof userEvent.setup>) {
-  const button = await screen.findByRole("button", { name: /edit|declare/ });
-  await user.click(button);
+/** The runtime dropdown, which replaced a free-text input (AC-3). */
+const runtimeSelect = () => screen.getByLabelText("runtime") as HTMLSelectElement;
+
+/**
+ * The form, seeded from the saved spec — present without a click (AC-2).
+ *
+ * It paints before either query it is seeded from lands, so this waits for both
+ * of them: `clear` exists only once a stored spec has arrived, and the select's
+ * options only once the node list has. Reading a field before that is reading
+ * the placeholder.
+ */
+async function form() {
   await screen.findByTestId("policy-region-what");
+  if (state.spec) await screen.findByRole("button", { name: "clear" });
+  const fleet = (state.nodes as { capabilities?: { runtimes?: string[] } }[]).flatMap(
+    (n) => n.capabilities?.runtimes ?? [],
+  );
+  await waitFor(() => {
+    const values = Array.from(runtimeSelect().options).map((o) => o.value);
+    for (const r of fleet) expect(values).toContain(r);
+  });
 }
 
 /** The spec the last preview asked about. */
@@ -93,6 +113,7 @@ const lastAsked = () =>
 beforeEach(() => {
   cleanup();
   previews.length = 0;
+  state.nodes = [{ id: "n-1", capabilities: { runtimes: ["bash", "claude", "codex"] } }];
   state.spec = { ...SPEC };
   state.status = {
     enabled: true,
@@ -114,9 +135,9 @@ describe("the preview asks about the draft", () => {
   it("sends the UNSAVED values, and saves nothing to get them (AC-1)", async () => {
     const user = userEvent.setup();
     mount();
-    await openEditor(user);
+    await form();
 
-    await user.selectOptions(screen.getByRole("combobox"), "count");
+    await user.selectOptions(screen.getByLabelText("replicas"), "count");
     const count = screen.getByRole("spinbutton");
     await user.clear(count);
     await user.type(count, "3");
@@ -132,12 +153,10 @@ describe("the preview asks about the draft", () => {
   it("re-asks as the draft changes (AC-2)", async () => {
     const user = userEvent.setup();
     mount();
-    await openEditor(user);
+    await form();
     await waitFor(() => expect(previews.length).toBeGreaterThan(0));
 
-    const runtime = screen.getByDisplayValue("claude");
-    await user.clear(runtime);
-    await user.type(runtime, "codex");
+    await user.selectOptions(runtimeSelect(), "codex");
 
     await waitFor(() => expect(lastAsked()?.runtime).toBe("codex"));
   });
@@ -145,7 +164,7 @@ describe("the preview asks about the draft", () => {
   it("drops half-typed selector rows, exactly as save would (AC-1)", async () => {
     const user = userEvent.setup();
     mount();
-    await openEditor(user);
+    await form();
 
     const where = screen.getByTestId("policy-region-where");
     await user.click(within(where).getAllByRole("button", { name: /add/ })[0]);
@@ -160,13 +179,12 @@ describe("the preview asks about the draft", () => {
   it("marks an answer that is behind the draft as stale (AC-2)", async () => {
     const user = userEvent.setup();
     mount();
-    await openEditor(user);
+    await form();
     await waitFor(() =>
       expect(screen.getByTestId("policy-preview").getAttribute("data-stale")).toBe("false"),
     );
 
-    const runtime = screen.getByDisplayValue("claude");
-    await user.type(runtime, "x");
+    await user.selectOptions(runtimeSelect(), "codex");
     expect(screen.getByTestId("policy-preview").getAttribute("data-stale")).toBe("true");
     expect(screen.getByTestId("policy-preview-stale")).toBeTruthy();
 
@@ -187,7 +205,7 @@ describe("the preview asks about the draft", () => {
     });
     const user = userEvent.setup();
     mount();
-    await openEditor(user);
+    await form();
 
     const panel = await screen.findByTestId("policy-preview");
     expect(panel.textContent).toContain("if you save this");
@@ -207,7 +225,7 @@ describe("a preview is an aid, not a gate", () => {
     state.previewFails = true;
     const user = userEvent.setup();
     mount();
-    await openEditor(user);
+    await form();
 
     await screen.findByTestId("policy-preview-unavailable");
     expect(screen.queryByTestId("policy-preview")).toBeNull();
@@ -282,7 +300,7 @@ describe("blocked nodes get a row each", () => {
     });
     const user = userEvent.setup();
     mount();
-    await openEditor(user);
+    await form();
 
     const rows = await screen.findAllByTestId("policy-blocked-row");
     expect(rows).toHaveLength(3);
@@ -345,16 +363,14 @@ describe("the editor still edits", () => {
   it("keeps every control, grouped rather than removed (AC-4, AC-6)", async () => {
     const user = userEvent.setup();
     mount();
-    await openEditor(user);
+    await form();
 
     for (const region of ["what", "how-many", "where"]) {
       expect(screen.getByTestId(`policy-region-${region}`)).toBeTruthy();
     }
 
-    const runtime = screen.getByDisplayValue("claude");
-    await user.clear(runtime);
-    await user.type(runtime, "codex");
-    await user.selectOptions(screen.getByRole("combobox"), "count");
+    await user.selectOptions(runtimeSelect(), "codex");
+    await user.selectOptions(screen.getByLabelText("replicas"), "count");
     const count = screen.getByRole("spinbutton");
     await user.clear(count);
     await user.type(count, "2");
@@ -385,7 +401,7 @@ describe("the editor still edits", () => {
     state.spec = { ...SPEC, node_selector: { os: "linux" } };
     const user = userEvent.setup();
     mount();
-    await openEditor(user);
+    await form();
 
     const where = screen.getByTestId("policy-region-where");
     await user.click(within(where).getAllByRole("button", { name: "remove" })[0]);
@@ -397,17 +413,76 @@ describe("the editor still edits", () => {
   it("clears the policy from the editor (AC-6)", async () => {
     const user = userEvent.setup();
     mount();
-    await openEditor(user);
+    await form();
     await user.click(screen.getByRole("button", { name: "clear" }));
     await waitFor(() => expect(put).toHaveBeenCalledTimes(1));
     expect(put.mock.calls[0][1].body).toEqual({ spec: null });
   });
 
-  it("asks nothing while the editor is closed", async () => {
+});
+
+describe("the form is the panel (MAIN-600 AC-2)", () => {
+  it("shows the fields pre-filled from an existing spec, with nothing to click first", async () => {
     mount();
-    await screen.findByRole("button", { name: "edit" });
-    await new Promise((r) => setTimeout(r, 400));
-    expect(previews).toHaveLength(0);
+    await form();
+    // The gate is GONE, not merely defaulted open: a panel that still offers
+    // "edit" is one somebody has to notice before they can change anything.
+    expect(screen.queryByRole("button", { name: /^(edit|declare)$/ })).toBeNull();
+    await waitFor(() => expect(runtimeSelect().value).toBe("claude"));
+    expect(screen.getByRole("button", { name: "save policy" })).toBeTruthy();
+  });
+
+  it("shows the same empty form when nothing is declared", async () => {
+    state.spec = null;
+    mount();
+    await form();
+    expect(screen.getByTestId("policy-undeclared")).toBeTruthy();
+    // Empty means the defaults, editable — not a wall with a button on it.
+    expect(screen.getByRole("button", { name: "save policy" })).toBeTruthy();
+    // Nothing to revert to and nothing to clear when nothing is stored.
+    expect(screen.queryByRole("button", { name: "clear" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "revert" })).toBeNull();
+  });
+
+  it("puts the fields back to what is stored on revert", async () => {
+    const user = userEvent.setup();
+    mount();
+    await form();
+    await user.selectOptions(runtimeSelect(), "codex");
+    expect(runtimeSelect().value).toBe("codex");
+    await user.click(screen.getByRole("button", { name: "revert" }));
+    expect(runtimeSelect().value).toBe("claude");
+    expect(put).not.toHaveBeenCalled();
+  });
+});
+
+describe("the runtime comes from the fleet (MAIN-600 AC-3)", () => {
+  it("offers what the nodes report, as options rather than free text", async () => {
+    mount();
+    await form();
+    await waitFor(() =>
+      expect(
+        Array.from(runtimeSelect().options).map((o) => o.value),
+      ).toEqual(["bash", "claude", "codex"]),
+    );
+  });
+
+  it("falls back to bash when no node reports a runtime", async () => {
+    state.nodes = [];
+    state.spec = { ...SPEC, runtime: "bash" };
+    mount();
+    await form();
+    await waitFor(() =>
+      expect(Array.from(runtimeSelect().options).map((o) => o.value)).toEqual(["bash"]),
+    );
+  });
+
+  it("keeps a stored runtime the fleet no longer reports, rather than rewriting it", async () => {
+    state.spec = { ...SPEC, runtime: "hermes" };
+    mount();
+    await form();
+    await waitFor(() => expect(runtimeSelect().value).toBe("hermes"));
+    expect(Array.from(runtimeSelect().options).map((o) => o.value)).toContain("hermes");
   });
 });
 

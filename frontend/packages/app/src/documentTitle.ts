@@ -48,7 +48,6 @@ const SECTIONS: ReadonlyArray<readonly [string, string]> = [
   ["/operator", "Admin"],
   ["/settings", "Settings"],
   ["/team", "Team"],
-  ["/feedback", "Feedback"],
   ["/help", "Docs"],
   ["/verify-email", "Verify email"],
   ["/accept", "Accept invite"],

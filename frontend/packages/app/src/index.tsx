@@ -18,7 +18,6 @@ import { BoardPage } from "./pages/Board";
 import { ChatPage } from "./pages/Chat";
 import { Dashboard } from "./pages/Dashboard";
 import { DocsPage } from "./pages/Docs";
-import { FeedbackPage } from "./pages/Feedback";
 import { Login } from "./pages/Login";
 import { Connect } from "./pages/Connect";
 import { awaitLocalStack, checkForUpdate, initDesktop, installUpdate, isDesktop, LOCAL_CONTROL_PLANE, setControlPlaneAccount, type AvailableUpdate } from "./desktop";
@@ -254,7 +253,6 @@ function AuthGate() {
         <Route path="settings" element={<SettingsPage />} />
         <Route path="team" element={<TeamPage />} />
         <Route path="verify-email" element={<VerifyEmailPage />} />
-        <Route path="feedback" element={<FeedbackPage />} />
         <Route path="help" element={<DocsPage />} />
         <Route path="*" element={<Empty>Nothing here.</Empty>} />
       </Route>
