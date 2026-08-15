@@ -1,11 +1,12 @@
 # CI and deploys
 
-One surface: GitHub Actions. Two workflows, both in `.github/workflows/`.
+One surface: GitHub Actions. Three workflows, all in `.github/workflows/`.
 
 | Workflow      | Trigger           | Produces                                        |
 | ------------- | ----------------- | ----------------------------------------------- |
 | `ci.yml`      | every push and PR | nothing — it only says yes or no                |
 | `release.yml` | a `v*` tag        | `nook` binaries, and images on ghcr.io          |
+| `rc.yml`      | dispatched by ref | `rc-<sha>` images on ghcr.io, and nothing else  |
 
 Nothing deploys on a branch push, and nothing builds a release without a tag,
 so `main` never produces something that looks shipped but isn't.
@@ -44,6 +45,57 @@ whole Rust compile — turning a five-minute build into forty.
 Ubuntu 22.04 rather than `latest`: a binary carries the glibc it was built
 against, and 24.04's is newer than Debian 12, the distro most people
 self-hosting this are running.
+
+## What a build tells the board
+
+`rc.yml` writes an **Images** report on the card the built commit's pull request
+closes — a table of image, tag and digest, one row per image it built. It is
+keyed `images`, and a report key is an address: building the same pull request
+again replaces that table rather than adding a second one, so a card carries the
+current answer and not a log.
+
+The report is Nook reporting on itself through the ordinary producer surface
+(`PUT /api/v1/tasks/{key}/reports/images`), with nothing special about it — the
+same door any other CI system writes through.
+
+To turn it on, a repository needs two settings and neither is optional:
+
+| Setting              | Kind     | Value                                       |
+| -------------------- | -------- | ------------------------------------------- |
+| `NOOK_URL`           | variable | the control plane's base URL                |
+| `NOOK_REPORTS_TOKEN` | secret   | a `reports:write` token for this workspace  |
+
+Mint the token against your own session, narrowed to both the scope and the
+workspace:
+
+```
+curl -X POST "$NOOK_URL/api/v1/tokens" \
+  -H "Authorization: Bearer <your own token>" \
+  -H 'content-type: application/json' \
+  -d '{"name":"github actions — image reports",
+       "scopes":["reports:write"],
+       "workspace":"nook-os"}'
+```
+
+The value comes back once. That grant writes and retracts reports on cards in
+that one workspace and reaches nothing else — not the board, not the notebook,
+not another workspace's cards. A personal token would also work and is the wrong
+thing to hand a CI job: the point of MAIN-602's scopes is that a credential
+sitting in a runner can do the one job it is there for.
+
+With either setting missing — a fork, or a repository nobody has configured —
+the step says so and passes. That is the rule for every way this can fail:
+
+- the built commit belongs to no pull request, or its body has no `Closes KEY`
+  line, or the key names no card the token can reach;
+- the control plane is unreachable, or the token has been revoked.
+
+Each of them is a `::notice::` or `::warning::` in the log and a green job.
+Publishing a report is a remark **about** a build, and a remark that cannot be
+delivered is not a reason to throw away images that built correctly.
+`scripts/publish-image-report.test.sh` runs the real publisher against fakes for
+`gh` and `curl` and holds it to that in every one of those cases; it runs in
+`./test.sh lint` and in CI.
 
 ## Deploying
 

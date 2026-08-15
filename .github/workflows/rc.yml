@@ -212,6 +212,7 @@ jobs:
         env:
           REPO: ${{ env.REGISTRY }}/${{ github.repository_owner }}/nook-${{ matrix.image }}
           TAG: ${{ needs.plan.outputs.tag }}
+          IMAGE: ${{ matrix.image }}
         run: |
           # ONE tag, and never `latest`: an RC is a specific commit somebody is
           # testing, not a thing anything else should float onto.
@@ -222,7 +223,76 @@ jobs:
           # shellcheck disable=SC2046
           docker buildx imagetools create -t "$REPO:$TAG" \
             $(printf "${REPO}@sha256:%s " $(ls))
-          docker buildx imagetools inspect "$REPO:$TAG"
+          # Redirected and then printed, rather than piped through `tee`: the
+          # default shell has no `pipefail`, so a pipe would make a failed
+          # inspect the tee's success and this step would stop noticing that the
+          # manifest it just created cannot be read back.
+          docker buildx imagetools inspect "$REPO:$TAG" > /tmp/inspect.txt
+          cat /tmp/inspect.txt
+          # The manifest LIST's digest — what a `docker pull` of this tag
+          # resolves to, and the one identifier that outlives the tag. Recorded
+          # here, where it is already on screen, so `report` below needs neither
+          # a registry login nor a second inspect (MAIN-604).
+          mkdir -p /tmp/manifest
+          printf '%s\t%s\t%s\n' "$REPO" "$TAG" \
+            "$(awk '/^Digest:/ { print $2; exit }' /tmp/inspect.txt)" \
+            > "/tmp/manifest/${IMAGE}.tsv"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: manifest-${{ matrix.image }}
+          path: /tmp/manifest/*
+          retention-days: 1
+
+  # ----------------------------------------------------------------- report
+  #
+  # Say on the board what this build produced (MAIN-604). The images are already
+  # published by the time this runs; this is only the sentence about them —
+  # written to the card the built commit's pull request closes, keyed `images`,
+  # so building that pull request again replaces the table instead of adding a
+  # second one.
+  #
+  # ONE job rather than a step in `merge`: the report is a single table covering
+  # every image, and per-image it would be six producers writing one key.
+  #
+  # `alias` is deliberately not in `needs`. An aliased image is an earlier
+  # release's manifest under a new tag, and this build did not produce it — the
+  # table says what was BUILT.
+  #
+  # Nothing here can redden the run. The publisher treats every reason it cannot
+  # deliver — no pull request, no `Closes` line, an unreachable control plane, a
+  # revoked token — as a line in the log, because a remark about a build is not
+  # a reason to throw the images away. `scripts/publish-image-report.test.sh`
+  # holds that to it.
+  report:
+    name: report to the board
+    needs: [plan, merge]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # Which pull request the built commit belongs to. Read-only, and the only
+      # thing this job asks GitHub for.
+      pull-requests: read
+    steps:
+      # The workflow's own ref, NOT the commit being built: this job and the
+      # script it runs are one pair, and an RC of an older commit predates both.
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: manifest-*
+          path: /tmp/manifest
+          merge-multiple: true
+      - name: Publish the image report
+        env:
+          # Both unset is the ordinary state of a fork, and of this repository
+          # before the credential is minted: the publisher says so and stops.
+          # The token is scoped `reports:write` and narrowed to this workspace —
+          # see docs/ci-deploy.md.
+          NOOK_URL: ${{ vars.NOOK_URL }}
+          NOOK_TOKEN: ${{ secrets.NOOK_REPORTS_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.plan.outputs.sha }}
+        run: cat /tmp/manifest/*.tsv | sort | ./scripts/publish-image-report.sh "$SHA"
 
   # ------------------------------------------------------------------ alias
   #

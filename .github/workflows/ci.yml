@@ -181,6 +181,10 @@ jobs:
           # the exclusion list it is the only place it is caught at all.
           ./scripts/check-nested-dialect.sh
           ./scripts/check-nested-dialect.test.sh
+          # MAIN-604. Not a source guard but the same shape — a shell script
+          # whose self-test needs nothing but bash, and whose subject (the RC
+          # workflow's image report) is otherwise exercised only by a release.
+          ./scripts/publish-image-report.test.sh
           # `check-dialect-dispatch.sh` is deliberately absent, and so is its
           # self-test. Both are RED on main today — an unlisted offender in
           # repo/read_model.rs plus three stale entries — and the self-test's
