@@ -102,6 +102,24 @@ pub async fn bootstrap(
     // appoint one.
     crate::seed::bootstrap_operator(&state.db).await;
 
+    // …and the machines that enrolled before they existed become theirs
+    // (MAIN-398). A desktop install's bundled node joins on first launch, which
+    // is necessarily before anyone has claimed the instance, so it lands with
+    // `owner_person_id` NULL — and an owner-less node is refused to EVERYONE by
+    // `require_person_may_use_node`, which means no session on this computer
+    // would ever start. Same rule as the tenant itself: adopted by the first
+    // identity to sign in.
+    //
+    // Resolved ONCE and reused below: asking twice would make a lookup the
+    // adoption deliberately tolerates (it warns and carries on) into a second
+    // `?` that fails the instance claim outright.
+    let person_id = crate::auth::person_id_of(&state, user.id).await?;
+    match state.nodes.adopt_ownerless(tenant.id, person_id).await {
+        Ok(n) if n > 0 => tracing::info!(nodes = n, "adopted machines with no owner"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "could not adopt machines with no owner"),
+    }
+
     Ok((
         jar.add(session_cookie(&state, session_id)),
         Json(MeResponse {
@@ -111,7 +129,7 @@ pub async fn bootstrap(
                 tenant.id,
             )
             .await?,
-            person_id: crate::auth::person_id_of(&state, user.id).await?,
+            person_id,
             user,
             tenant,
             capability: Default::default(),

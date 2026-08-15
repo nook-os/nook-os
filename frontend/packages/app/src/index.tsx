@@ -20,7 +20,7 @@ import { Dashboard } from "./pages/Dashboard";
 import { DocsPage } from "./pages/Docs";
 import { Login } from "./pages/Login";
 import { Connect } from "./pages/Connect";
-import { awaitLocalStack, checkForUpdate, initDesktop, installUpdate, isDesktop, LOCAL_CONTROL_PLANE, setControlPlaneAccount, type AvailableUpdate } from "./desktop";
+import { awaitLocalStack, checkForUpdate, initDesktop, installUpdate, isDesktop, LOCAL_CONTROL_PLANE, localNodeProblem, localStack, setControlPlaneAccount, type AvailableUpdate } from "./desktop";
 import { installLinkHandler, registerNavigator } from "./links";
 import { NodeDetail, NodesPage } from "./pages/Nodes";
 import { Notebook } from "./pages/Notebook";
@@ -50,6 +50,45 @@ export function LocalStackFailed({ log }: { log: string }) {
       >
         {log}
       </pre>
+    </div>
+  );
+}
+
+/** The bundled node has stopped coming back, so say so (MAIN-398 AC-2).
+ *
+ *  A strip rather than a takeover: the control plane is serving and the board
+ *  is worth reading, but nothing the person opens will actually run. The one
+ *  thing this must not do is nothing — a node that is gone while the UI looks
+ *  healthy is the failure the card names.
+ *
+ *  Polled rather than pushed because the shell holds this state in memory and
+ *  the webview has no channel to it; five seconds is invisible next to the
+ *  half-minute of restarts it takes to get here. */
+export function LocalNodeBar() {
+  const [problem, setProblem] = useState<string | null>(null);
+  useEffect(() => {
+    if (!isDesktop()) return;
+    let cancelled = false;
+    const check = async () => {
+      const s = await localStack();
+      if (!cancelled) setProblem(localNodeProblem(s));
+    };
+    void check();
+    const t = setInterval(() => void check(), 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, []);
+
+  if (!problem) return null;
+  return (
+    <div className="update-bar node-bar" role="alert">
+      <div>
+        <strong>The local node is not running.</strong> Sessions on this
+        computer cannot start until it comes back.
+        <pre data-testid="local-node-log">{problem}</pre>
+      </div>
     </div>
   );
 }
@@ -216,6 +255,7 @@ function AuthGate() {
 
   return (
     <>
+      <LocalNodeBar />
       {update && (
         <div className="update-bar" role="status">
           NookOS {update.version} is available — you are on {update.current}.

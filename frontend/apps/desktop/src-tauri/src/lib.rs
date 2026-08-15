@@ -13,7 +13,10 @@ use std::path::PathBuf;
 // workspace, not here: this shell is outside it, so a boot environment written
 // here could only ever be asserted against itself — which is how MAIN-396
 // shipped one that could not boot at all (MAIN-434).
-use nook_desktop_env::{control_plane_env, load_or_create_secrets};
+use nook_desktop_env::{
+    control_plane_env, is_flapping, join_spec_toml, load_or_create_secrets, node_env, push_tail,
+    restart_delay, NODE_SETTLED,
+};
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
@@ -476,6 +479,29 @@ fn free_port() -> Result<u16, String> {
         .map_err(|e| format!("could not read the chosen port: {e}"))
 }
 
+/// Where the bundled node keeps its identity — `<app-data>/node`, never the
+/// person's own `~/.config/nook` (AC-1).
+///
+/// That path belongs to their `nook` CLI. A desktop install writing `node.toml`
+/// there would overwrite the identity of a machine they joined to a real fleet,
+/// and `nook join` overwrites without asking.
+///
+/// The node's WORKSPACE root is a different question and a different answer
+/// (AC-3): it is left at the node's own tenant-scoped default,
+/// `~/.nook/workspace/<tenant-slug>`, by passing no `--workspace-root` at all.
+/// Checkouts are the one thing here a person opens in an editor, so they belong
+/// somewhere they can reach; and using the same layout as every other node
+/// means nothing about a desktop install's checkouts is special.
+fn node_config_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("no app-data directory: {e}"))?
+        .join("node");
+    fs::create_dir_all(&dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+    Ok(dir)
+}
+
 /// Where the local database lives, under the OS-conventional app-data directory
 /// Tauri resolves (AC-5): `~/.local/share/<id>` on Linux,
 /// `~/Library/Application Support/<id>` on macOS, `%APPDATA%\<id>` on Windows.
@@ -499,7 +525,7 @@ async fn healthy(base: &str) -> bool {
 }
 
 /// How the local stack came up, or did not — what the UI renders instead of a
-/// blank window (AC-3).
+/// blank window (MAIN-396 AC-3).
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct LocalStack {
     /// `http://127.0.0.1:<port>` once healthy.
@@ -509,6 +535,15 @@ pub struct LocalStack {
     /// could not start explains itself rather than showing nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Present once the bundled node has failed to stay up repeatedly, carrying
+    /// its own log tail (MAIN-398 AC-2). Absent during an ordinary restart —
+    /// one blip is not news.
+    ///
+    /// Reported separately from `error` because the two fail separately: a
+    /// control plane can serve a board perfectly while the node behind every
+    /// session is gone, and that is the state this card exists to stop hiding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_error: Option<String>,
 }
 
 #[tauri::command]
@@ -572,6 +607,7 @@ fn start_local_stack(app: tauri::AppHandle) {
             base_url: String::new(),
             ready: false,
             error: Some(msg),
+            ..Default::default()
         };
 
         let db = match local_db_path(&app) {
@@ -617,14 +653,7 @@ fn start_local_stack(app: tauri::AppHandle) {
                     }
                     _ => continue,
                 };
-                let mut l = sink.lock().unwrap();
-                l.push_str(&line);
-                // Keep the tail only: a boot log is unbounded and the UI wants
-                // the end of it, which is where the failure is.
-                if l.len() > 16_384 {
-                    let cut = l.len() - 8_192;
-                    *l = l.split_off(cut);
-                }
+                push_tail(&mut sink.lock().unwrap(), &line);
             }
         });
 
@@ -632,11 +661,16 @@ fn start_local_stack(app: tauri::AppHandle) {
         // the actual contract, and a log format is not.
         for _ in 0..120 {
             if healthy(&base).await {
-                return set(LocalStack {
-                    base_url: base,
+                set(LocalStack {
+                    base_url: base.clone(),
                     ready: true,
                     error: None,
+                    ..Default::default()
                 });
+                // Only now: `nook join` talks to the API, so starting the node
+                // before /healthz answers is a join that fails for a reason
+                // that has nothing to do with the node.
+                return supervise_local_node(app, base, secrets.join_token);
             }
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
@@ -644,6 +678,151 @@ fn start_local_stack(app: tauri::AppHandle) {
         set(fail(format!(
             "the control plane did not answer {base}/healthz within 60s\n\n{tail}"
         )));
+    });
+}
+
+/// What one `nook run` did before it stopped.
+struct NodeRun {
+    ran_for: std::time::Duration,
+    tail: String,
+}
+
+/// Enrol this machine's bundled node, once ever (AC-1).
+///
+/// Guarded by `node.toml` rather than a flag of our own: that file IS the record
+/// of having joined, and re-joining an existing node rotates its token on the
+/// server, which would strand the config already on disk.
+async fn join_local_node(
+    app: &tauri::AppHandle,
+    base: &str,
+    token: &str,
+    dir: &std::path::Path,
+) -> Result<(), String> {
+    use tauri_plugin_shell::process::CommandEvent;
+    use tauri_plugin_shell::ShellExt;
+
+    if dir.join("node.toml").exists() {
+        return Ok(());
+    }
+    let spec = dir.join("join.toml");
+    fs::write(&spec, join_spec_toml(base, token))
+        .map_err(|e| format!("could not write {}: {e}", spec.display()))?;
+    nook_desktop_env::restrict_to_owner(&spec);
+
+    let run = async {
+        let (mut rx, _child) = app
+            .shell()
+            .sidecar("nook")
+            .map_err(|e| format!("the bundled node is missing: {e}"))?
+            .envs(node_env(dir))
+            .args(["join", "--config", &spec.display().to_string()])
+            .spawn()
+            .map_err(|e| format!("could not start the node: {e}"))?;
+
+        let mut tail = String::new();
+        let mut code = None;
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                CommandEvent::Stdout(b) | CommandEvent::Stderr(b) => {
+                    push_tail(&mut tail, &String::from_utf8_lossy(&b));
+                }
+                CommandEvent::Terminated(p) => code = p.code,
+                _ => {}
+            }
+        }
+        match code {
+            Some(0) => Ok(()),
+            _ => Err(format!("the node could not join {base}\n\n{tail}")),
+        }
+    }
+    .await;
+
+    // The spec carries a credential; it does not outlive the command that
+    // needed it, on either path.
+    let _ = fs::remove_file(&spec);
+    run
+}
+
+/// Run the node once, returning when it stops.
+async fn run_node_once(app: &tauri::AppHandle, dir: &std::path::Path) -> Result<NodeRun, String> {
+    use tauri_plugin_shell::process::CommandEvent;
+    use tauri_plugin_shell::ShellExt;
+
+    let (mut rx, _child) = app
+        .shell()
+        .sidecar("nook")
+        .map_err(|e| format!("the bundled node is missing: {e}"))?
+        .envs(node_env(dir))
+        .args(["run"])
+        .spawn()
+        .map_err(|e| format!("could not start the node: {e}"))?;
+
+    let started = std::time::Instant::now();
+    let mut tail = String::new();
+    while let Some(ev) = rx.recv().await {
+        if let CommandEvent::Stdout(b) | CommandEvent::Stderr(b) = ev {
+            push_tail(&mut tail, &String::from_utf8_lossy(&b));
+        }
+    }
+    Ok(NodeRun {
+        ran_for: started.elapsed(),
+        tail,
+    })
+}
+
+/// Join once, then keep the node running for as long as the app is up (AC-2).
+///
+/// A restart is not by itself worth reporting — a node exits for ordinary
+/// reasons and comes straight back. What is reported is a node that will not
+/// STAY up, because that is the state where the board looks fine and no session
+/// will ever start.
+fn supervise_local_node(app: tauri::AppHandle, base: String, token: String) {
+    tauri::async_runtime::spawn(async move {
+        let node = |error: Option<String>| {
+            if let Some(st) = app.try_state::<LocalStackState>() {
+                st.0.lock().unwrap().node_error = error;
+            }
+        };
+
+        let dir = match node_config_dir(&app) {
+            Ok(d) => d,
+            Err(e) => return node(Some(e)),
+        };
+        if let Err(e) = join_local_node(&app, &base, &token, &dir).await {
+            return node(Some(e));
+        }
+
+        let mut consecutive = 0u32;
+        let mut problem: Option<String> = None;
+        loop {
+            // The standing complaint is NOT cleared here: starting the process
+            // is not evidence it will stay up, and once this node is known to
+            // be flapping, dropping the warning on every retry would blink it
+            // out of the UI while nothing has improved. Only a run that
+            // actually settles clears it, below.
+            node(problem.clone());
+            let run = match run_node_once(&app, &dir).await {
+                Ok(r) => r,
+                // Spawning failed rather than the node exiting: the binary is
+                // missing or unrunnable, and retrying that on a timer would
+                // only hide it.
+                Err(e) => return node(Some(e)),
+            };
+            consecutive = if run.ran_for >= NODE_SETTLED {
+                0
+            } else {
+                consecutive + 1
+            };
+            problem = is_flapping(consecutive).then(|| {
+                format!(
+                    "the local node has stopped {consecutive} times without staying up — \
+                     sessions will not start\n\n{}",
+                    run.tail
+                )
+            });
+            node(problem.clone());
+            tokio::time::sleep(restart_delay(consecutive)).await;
+        }
     });
 }
 

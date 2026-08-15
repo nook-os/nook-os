@@ -220,6 +220,20 @@ pub trait NodeRepository: Send + Sync {
         shared: bool,
     ) -> ApiResult<Option<Node>>;
 
+    /// Give this tenant's OWNER-LESS nodes to a person, returning how many
+    /// moved (MAIN-398).
+    ///
+    /// A node enrolled before anybody had an account has no owner and can never
+    /// gain one — and `require_person_may_use_node` refuses an owner-less node
+    /// to everyone, so no session ever starts on it. That is not a corner case
+    /// on a local install: the bundled node joins on first launch, which is by
+    /// definition before the person has claimed the instance.
+    ///
+    /// Only NULL owners are touched, so a machine somebody already owns is
+    /// never reassigned. It is the same rule the seeded tenant already follows
+    /// — adopted by the first identity that signs in.
+    async fn adopt_ownerless(&self, tenant: TenantId, person: Uuid) -> ApiResult<u64>;
+
     /// The owner declines (or restores) operator-authorize on this machine
     /// (MAIN-276 AC-6). Tenant-scoped like `set_shared`, because the caller is
     /// always the owner acting in their own tenant — the operator can never
@@ -843,6 +857,20 @@ impl NodeRepository for DbNodeRepository {
                     type_mapping(self.db.engine()).now()
                 ),
                 params![id, tenant, shared],
+            )
+            .await?)
+    }
+
+    async fn adopt_ownerless(&self, tenant: TenantId, person: Uuid) -> ApiResult<u64> {
+        Ok(self
+            .db
+            .exec(
+                &format!(
+                    "UPDATE nodes SET owner_person_id = $2, updated_at = {}
+                     WHERE tenant_id = $1 AND owner_person_id IS NULL",
+                    type_mapping(self.db.engine()).now()
+                ),
+                params![tenant, person],
             )
             .await?)
     }
@@ -2194,6 +2222,19 @@ impl NodeRepository for FakeNodeRepository {
                 n.node.updated_at = chrono::Utc::now();
                 n.node.clone()
             }))
+    }
+
+    async fn adopt_ownerless(&self, tenant: TenantId, person: Uuid) -> ApiResult<u64> {
+        let mut s = self.inner.lock().unwrap();
+        let mut moved = 0;
+        for n in s.nodes.iter_mut() {
+            if n.node.tenant_id == tenant && n.node.owner_person_id.is_none() {
+                n.node.owner_person_id = Some(person);
+                n.node.updated_at = chrono::Utc::now();
+                moved += 1;
+            }
+        }
+        Ok(moved)
     }
 
     async fn set_cross_tenant(&self, id: NodeId, cross_tenant: bool) -> ApiResult<Option<Node>> {

@@ -382,17 +382,25 @@ pub async fn run(db: &DbPool, cfg: &Config) -> Result<()> {
         }
     };
 
-    // Well-known join token so the compose node can auto-join on boot.
-    if let Some(token) = &cfg.dev_join_token {
+    // Well-known join token so the compose node can auto-join on boot — or, on
+    // a desktop install, so the bundled node can (MAIN-398). Either variable
+    // seeds the row; only `dev_join_token` gates the dogfood block far below,
+    // which is scaffolding for the compose stack and wrong on a laptop.
+    if let Some((token, name)) = cfg
+        .dev_join_token
+        .as_ref()
+        .map(|t| (t, "dev auto-join"))
+        .or_else(|| cfg.local_join_token.as_ref().map(|t| (t, "this computer")))
+    {
         db.exec(
             &format!(
                 "INSERT INTO join_tokens (id, tenant_id, token_hash, name, expires_at)
-             VALUES ($1, $2, $3, 'dev auto-join', {expiry})
+             VALUES ($1, $2, $3, $4, {expiry})
              ON CONFLICT (token_hash) DO NOTHING",
                 // Engine-selected (MAIN-196): SQLite has no `now() + interval`.
                 expiry = nook_db::dialect::time_math(db.engine()).now_plus("10 years")
             ),
-            params![JoinTokenId::new(), tenant.id, hash_token(token)],
+            params![JoinTokenId::new(), tenant.id, hash_token(token), name],
         )
         .await?;
     }

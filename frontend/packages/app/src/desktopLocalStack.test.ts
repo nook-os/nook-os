@@ -2,7 +2,7 @@
 // blank window, so the polling that fetches it must terminate on BOTH outcomes
 // — ready and failed — and must not spin once the shell has answered.
 import { describe, expect, it, vi, afterEach } from "vitest";
-import { awaitLocalStack } from "./desktop";
+import { awaitLocalStack, localNodeProblem } from "./desktop";
 
 function shell(responses: unknown[]) {
   const invoke = vi.fn();
@@ -56,5 +56,29 @@ describe("awaiting the bundled control plane", () => {
 
   it("is null off the desktop, which is not an error", async () => {
     expect(await awaitLocalStack(0, nosleep)).toBeNull();
+  });
+});
+
+// MAIN-398 AC-2: a node that is gone must not leave the UI looking healthy —
+// but an ordinary restart is not news, and a bar that flickered on every blip
+// would train people to ignore the one that matters.
+describe("the bundled node's health", () => {
+  it("says nothing while the node is running, or during a restart", () => {
+    expect(localNodeProblem({ base_url: "x", ready: true })).toBeNull();
+  });
+
+  it("surfaces the node's own log once it will not stay up", () => {
+    expect(
+      localNodeProblem({
+        base_url: "x",
+        ready: true,
+        node_error: "stopped 3 times without staying up\n\ntmux: not found",
+      }),
+    ).toMatch(/tmux: not found/);
+  });
+
+  it("says nothing on a shell that predates the field, or off the desktop", () => {
+    expect(localNodeProblem({ base_url: "", ready: false })).toBeNull();
+    expect(localNodeProblem(null)).toBeNull();
   });
 });
