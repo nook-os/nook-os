@@ -31,6 +31,7 @@ FROM dev-rust AS dev-node
 # same claude version) as operator-node.Dockerfile. Override to bump.
 ARG NODE_MAJOR=22
 ARG CLAUDE_VERSION=2.1.220
+ARG PLAYWRIGHT_VERSION=1.62.1
 
 # Node.js is `claude`'s runtime, not a project toolchain: it is here because the
 # npm-published CLI needs it, which is the same reason the operator node carries
@@ -54,6 +55,28 @@ RUN mkdir -p -m 755 /etc/apt/keyrings \
     && apt-get update && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 
+# Playwright and Chromium — ONLY Chromium (MAIN-595). This stage gets it and
+# `node.Dockerfile` does not, because THIS is the image build runs execute on:
+# the `node` service declares `NOOK_LOOP_KINDS=build`, and the control plane
+# refuses build work on the shared operator outright
+# (`jobs::kind_wall_refusal`), so a browser only reaches a build run here.
+#
+# Fixed browsers path, world-readable, for the same reason as the operator
+# image: root installs them at build time and the host's uid launches them.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ENV NOOK_PLAYWRIGHT_VERSION=${PLAYWRIGHT_VERSION}
+RUN npm install -g "playwright@${PLAYWRIGHT_VERSION}" \
+    && playwright install --with-deps chromium \
+    && npm cache clean --force \
+    && chmod -R a+rX /ms-playwright \
+    && rm -rf /var/lib/apt/lists/*
+
+# Launched during the build, so an image whose Chromium cannot start fails here
+# rather than at the first build run that wanted a page. Re-runnable against a
+# live container: `docker compose exec node nook-browser-check`.
+COPY deploy/docker/browser-check.js /usr/local/bin/nook-browser-check
+RUN chmod +x /usr/local/bin/nook-browser-check && nook-browser-check
+
 # What the entrypoint and the node write as the host user (MAIN-537 AC-1): the
 # `nook` symlink it re-makes on every start, its HOME, and the mount points of
 # the two named volumes. A volume Docker initializes from a directory that is
@@ -66,6 +89,6 @@ RUN mkdir -p /root/.config/nook /workspace \
 # does — a renamed package or a failed installer must never ship as a node that
 # looks healthy and cannot run a pass. `nook` is deliberately absent here: it is
 # built from the bind-mounted source and linked onto PATH by the entrypoint.
-RUN set -eux; for bin in git tmux ssh gh claude node; do \
+RUN set -eux; for bin in git tmux ssh gh claude node playwright nook-browser-check; do \
       command -v "$bin" >/dev/null || { echo "FATAL: '$bin' not on PATH"; exit 1; }; \
     done
