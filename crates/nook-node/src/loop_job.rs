@@ -2913,14 +2913,20 @@ mod tests {
 
         // `excluded_by` neutralises core.excludesFile, so this global rule is
         // invisible to it even while git is told to read the file.
-        let prev = std::env::var("GIT_CONFIG_GLOBAL").ok();
-        // SAFETY: single-threaded test process; restored below.
-        unsafe { std::env::set_var("GIT_CONFIG_GLOBAL", tmp.join("gitconfig")) };
+        //
+        // The config file is written BEFORE the env points at it, so the var
+        // never names a path that does not yet exist — a concurrent git that
+        // read it mid-setup used to see a missing file. The real protection is
+        // that every FIXTURE git now ignores this variable (`hermetic_git`);
+        // this only narrows the source. `set_var` across threads is a data race
+        // regardless, which is why the readers, not the writer, are the fix.
         std::fs::write(
             tmp.join("gitconfig"),
             format!("[core]\n\texcludesFile = {}\n", global.display()),
         )
         .unwrap();
+        let prev = std::env::var("GIT_CONFIG_GLOBAL").ok();
+        unsafe { std::env::set_var("GIT_CONFIG_GLOBAL", tmp.join("gitconfig")) };
 
         let entries = vec![".env".to_string(), "build.log".to_string()];
         let skip = excluded_by(&["*.log".to_string()], &entries).expect("excludes");
@@ -4164,7 +4170,7 @@ mod tests {
         let remote = tmp.join("remote");
         std::fs::create_dir_all(&remote).unwrap();
         let git = |args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = hermetic_git()
                 .args(args)
                 .current_dir(&remote)
                 .output()
@@ -4220,12 +4226,28 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// `git` for the FIXTURES, pinned to read NO ambient config.
+    ///
+    /// `cargo test` runs these in parallel, and a sibling test
+    /// (`a_global_gitignore_cannot_carve_entries_out_of_the_seed`) repoints
+    /// `GIT_CONFIG_GLOBAL` process-wide for the duration of its own run. A
+    /// fixture `git add` that happened to execute in that window read a config
+    /// path meant for another test — often mid-create or mid-delete — and died
+    /// with `fatal: unknown error occurred while reading the configuration
+    /// files`. It looked engine-specific only because it surfaced on the SQLite
+    /// leg; it is pure test-process races (MAIN-6xx). Clearing both scopes here
+    /// makes every fixture git independent of whatever a concurrent test set.
+    fn hermetic_git() -> std::process::Command {
+        let mut cmd = std::process::Command::new("git");
+        cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_TERMINAL_PROMPT", "0");
+        cmd
+    }
+
     fn git_in(dir: &Path, args: &[&str]) -> String {
-        let out = std::process::Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .unwrap();
+        let out = hermetic_git().args(args).current_dir(dir).output().unwrap();
         assert!(
             out.status.success(),
             "git {args:?}: {}",
