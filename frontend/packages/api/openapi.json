@@ -2078,6 +2078,92 @@
         }
       }
     },
+    "/api/v1/jobs/{id}/email/investigation": {
+      "post": {
+        "tags": [
+          "crate::routes::jobs"
+        ],
+        "summary": "`POST /api/v1/jobs/{id}/email/investigation` — the investigate run reports\nwhat it found (MAIN-331 AC-2), onto the chain it was seeded from.",
+        "description": "`record_build_outcome`'s twin for the read-only kind: one call as the run's\nlast act, so the agent performs no board mechanics of its own. The draft\nreply is sealed here and never comes back out through the read model.",
+        "operationId": "job_investigation",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InvestigationReport"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmailLink"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/email/message": {
+      "get": {
+        "tags": [
+          "crate::routes::jobs"
+        ],
+        "summary": "`GET /api/v1/jobs/{id}/email/message` — the investigate run reads the\nmessage it was seeded from, decrypted (MAIN-331 AC-4).",
+        "description": "The only route in this deployment that returns the plaintext of somebody's\nsupport mail, which is why it is job-scoped and kind-checked rather than\nhung off the link: the caller must BE the run seeded for that message.",
+        "operationId": "job_email_message",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecryptedMessage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/jobs/{id}/messages": {
       "post": {
         "tags": [
@@ -11286,7 +11372,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Which loop stages this node will execute (MAIN-142): any of `spec`,\n`decompose`, `review`, `epic-run`, `build`. Set by `NOOK_LOOP_KINDS`.\n\n**Empty means the node accepts NO loop jobs** — the safe default, so a\nmachine that never opted in cannot be handed agent work by an upgrade.\nIt is the node's own declaration and the control plane treats it as\nexactly that: a filter it applies, never a permission it trusts. The\nshared-operator build wall does not consult this list at all."
+            "description": "Which loop stages this node will execute (MAIN-142): any of `spec`,\n`decompose`, `review`, `epic-run`, `build`, `investigate`. Set by\n`NOOK_LOOP_KINDS`.\n\n**Empty means the node accepts NO loop jobs** — the safe default, so a\nmachine that never opted in cannot be handed agent work by an upgrade.\nIt is the node's own declaration and the control plane treats it as\nexactly that: a filter it applies, never a permission it trusts. The\nshared-operator build wall does not consult this list at all."
           },
           "max_loop_jobs": {
             "type": [
@@ -12804,6 +12890,19 @@
           }
         }
       },
+      "DecryptedMessage": {
+        "type": "object",
+        "description": "The decrypted original message, handed to the investigate run that asked for\nit (MAIN-331 AC-4).\n\nA type of its own rather than a bare string so the one route that returns\nplaintext customer content is greppable, and so nothing accidentally grows\na second field beside it. **Named for what it holds, which is PLAINTEXT** —\na `Sealed…` here would be the one place in this codebase where that word\nmeans its opposite, and would defeat the audit the paragraph above exists\nto enable.",
+        "required": [
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string",
+            "description": "Exactly the bytes the source received, unsealed: an RFC 5322 message\nfrom a mailbox transport, a provider's parsed payload from a webhook.\nWhole either way, which is the point — the card carries a truncated\nexcerpt and this does not."
+          }
+        }
+      },
       "DeleteWorkspaceRequest": {
         "type": "object",
         "description": "Deleting a workspace. Records always go; the checkouts on disk only go\nwhen explicitly asked for (and if they stay, discovery re-adds them).",
@@ -13047,12 +13146,24 @@
           "id",
           "task_id",
           "storage_key",
+          "has_draft_reply",
           "created_at"
         ],
         "properties": {
           "created_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "findings": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What the investigate run found (MAIN-331) — its own analysis, `None`\nuntil the run reports. Text, unlike the draft below: this is what the\nproduct shows a support staffer, not what the reporter wrote."
+          },
+          "has_draft_reply": {
+            "type": "boolean",
+            "description": "Whether a draft reply has been written, never the draft itself. It\nquotes customer content and is stored sealed (HC-4), so it is read\nthrough its own route and one link at a time — an inbox listing must\nstay a listing nothing has to decrypt."
           },
           "id": {
             "type": "string",
@@ -13950,6 +14061,24 @@
       "InteractionId": {
         "type": "string",
         "format": "uuid"
+      },
+      "InvestigationReport": {
+        "type": "object",
+        "description": "What a read-only investigate run produced (MAIN-331), reported by the run\nitself as its last act — `BuildOutcomeRequest`'s twin for the kind that\nwrites no code.\n\nBoth fields are required and non-empty: the whole point of the run is that a\nsupport staffer gets a \"why\" AND something to send back, and a report\ncarrying one of the two silently leaves the other half of the job undone.",
+        "required": [
+          "findings",
+          "draft_reply"
+        ],
+        "properties": {
+          "draft_reply": {
+            "type": "string",
+            "description": "The \"here's what we found\" reply, addressed to the reporter. Sealed\nbefore it is stored; nothing sends it (C4 owns delivery)."
+          },
+          "findings": {
+            "type": "string",
+            "description": "The analysis: what was reproduced, and where the fault is."
+          }
+        }
       },
       "Invite": {
         "type": "object",

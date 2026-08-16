@@ -543,7 +543,8 @@ pub struct Capabilities {
     #[serde(default)]
     pub shared_operator: bool,
     /// Which loop stages this node will execute (MAIN-142): any of `spec`,
-    /// `decompose`, `review`, `epic-run`, `build`. Set by `NOOK_LOOP_KINDS`.
+    /// `decompose`, `review`, `epic-run`, `build`, `investigate`. Set by
+    /// `NOOK_LOOP_KINDS`.
     ///
     /// **Empty means the node accepts NO loop jobs** — the safe default, so a
     /// machine that never opted in cannot be handed agent work by an upgrade.
@@ -1374,6 +1375,15 @@ pub struct EmailLink {
     pub in_reply_to: Option<String>,
     /// Where the sealed raw message lives in the user-content store.
     pub storage_key: String,
+    /// What the investigate run found (MAIN-331) — its own analysis, `None`
+    /// until the run reports. Text, unlike the draft below: this is what the
+    /// product shows a support staffer, not what the reporter wrote.
+    pub findings: Option<String>,
+    /// Whether a draft reply has been written, never the draft itself. It
+    /// quotes customer content and is stored sealed (HC-4), so it is read
+    /// through its own route and one link at a time — an inbox listing must
+    /// stay a listing nothing has to decrypt.
+    pub has_draft_reply: bool,
     pub created_at: DateTime<Utc>,
 }
 
@@ -1422,6 +1432,40 @@ pub struct UpdateEmailPollerRequest {
     /// Defaults to true. `false` keeps the configuration and stops the polling.
     #[serde(default)]
     pub enabled: Option<bool>,
+}
+
+/// What a read-only investigate run produced (MAIN-331), reported by the run
+/// itself as its last act — `BuildOutcomeRequest`'s twin for the kind that
+/// writes no code.
+///
+/// Both fields are required and non-empty: the whole point of the run is that a
+/// support staffer gets a "why" AND something to send back, and a report
+/// carrying one of the two silently leaves the other half of the job undone.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct InvestigationReport {
+    /// The analysis: what was reproduced, and where the fault is.
+    pub findings: String,
+    /// The "here's what we found" reply, addressed to the reporter. Sealed
+    /// before it is stored; nothing sends it (C4 owns delivery).
+    pub draft_reply: String,
+}
+
+/// The decrypted original message, handed to the investigate run that asked for
+/// it (MAIN-331 AC-4).
+///
+/// A type of its own rather than a bare string so the one route that returns
+/// plaintext customer content is greppable, and so nothing accidentally grows
+/// a second field beside it. **Named for what it holds, which is PLAINTEXT** —
+/// a `Sealed…` here would be the one place in this codebase where that word
+/// means its opposite, and would defeat the audit the paragraph above exists
+/// to enable.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DecryptedMessage {
+    /// Exactly the bytes the source received, unsealed: an RFC 5322 message
+    /// from a mailbox transport, a provider's parsed payload from a webhook.
+    /// Whole either way, which is the point — the card carries a truncated
+    /// excerpt and this does not.
+    pub message: String,
 }
 
 /// A workspace's review-loop declaration (MAIN-445), as the API reports it.

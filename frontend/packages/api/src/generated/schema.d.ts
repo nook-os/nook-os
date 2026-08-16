@@ -1012,6 +1012,52 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/jobs/{id}/email/investigation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/jobs/{id}/email/investigation` — the investigate run reports
+         *     what it found (MAIN-331 AC-2), onto the chain it was seeded from.
+         * @description `record_build_outcome`'s twin for the read-only kind: one call as the run's
+         *     last act, so the agent performs no board mechanics of its own. The draft
+         *     reply is sealed here and never comes back out through the read model.
+         */
+        post: operations["job_investigation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/jobs/{id}/email/message": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/jobs/{id}/email/message` — the investigate run reads the
+         *     message it was seeded from, decrypted (MAIN-331 AC-4).
+         * @description The only route in this deployment that returns the plaintext of somebody's
+         *     support mail, which is why it is job-scoped and kind-checked rather than
+         *     hung off the link: the caller must BE the run seeded for that message.
+         */
+        get: operations["job_email_message"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/jobs/{id}/messages": {
         parameters: {
             query?: never;
@@ -4899,7 +4945,8 @@ export interface components {
             hostname: string;
             /**
              * @description Which loop stages this node will execute (MAIN-142): any of `spec`,
-             *     `decompose`, `review`, `epic-run`, `build`. Set by `NOOK_LOOP_KINDS`.
+             *     `decompose`, `review`, `epic-run`, `build`, `investigate`. Set by
+             *     `NOOK_LOOP_KINDS`.
              *
              *     **Empty means the node accepts NO loop jobs** — the safe default, so a
              *     machine that never opted in cannot be handed agent work by an upgrade.
@@ -5649,6 +5696,26 @@ export interface components {
             name: string;
         };
         /**
+         * @description The decrypted original message, handed to the investigate run that asked for
+         *     it (MAIN-331 AC-4).
+         *
+         *     A type of its own rather than a bare string so the one route that returns
+         *     plaintext customer content is greppable, and so nothing accidentally grows
+         *     a second field beside it. **Named for what it holds, which is PLAINTEXT** —
+         *     a `Sealed…` here would be the one place in this codebase where that word
+         *     means its opposite, and would defeat the audit the paragraph above exists
+         *     to enable.
+         */
+        DecryptedMessage: {
+            /**
+             * @description Exactly the bytes the source received, unsealed: an RFC 5322 message
+             *     from a mailbox transport, a provider's parsed payload from a webhook.
+             *     Whole either way, which is the point — the card carries a truncated
+             *     excerpt and this does not.
+             */
+            message: string;
+        };
+        /**
          * @description Deleting a workspace. Records always go; the checkouts on disk only go
          *     when explicitly asked for (and if they stay, discovery re-adds them).
          */
@@ -5788,6 +5855,19 @@ export interface components {
         EmailLink: {
             /** Format: date-time */
             created_at: string;
+            /**
+             * @description What the investigate run found (MAIN-331) — its own analysis, `None`
+             *     until the run reports. Text, unlike the draft below: this is what the
+             *     product shows a support staffer, not what the reporter wrote.
+             */
+            findings?: string | null;
+            /**
+             * @description Whether a draft reply has been written, never the draft itself. It
+             *     quotes customer content and is stored sealed (HC-4), so it is read
+             *     through its own route and one link at a time — an inbox listing must
+             *     stay a listing nothing has to decrypt.
+             */
+            has_draft_reply: boolean;
             /** Format: uuid */
             id: string;
             /** @description What the message itself was a reply to, verbatim. */
@@ -6128,6 +6208,24 @@ export interface components {
         };
         /** Format: uuid */
         InteractionId: string;
+        /**
+         * @description What a read-only investigate run produced (MAIN-331), reported by the run
+         *     itself as its last act — `BuildOutcomeRequest`'s twin for the kind that
+         *     writes no code.
+         *
+         *     Both fields are required and non-empty: the whole point of the run is that a
+         *     support staffer gets a "why" AND something to send back, and a report
+         *     carrying one of the two silently leaves the other half of the job undone.
+         */
+        InvestigationReport: {
+            /**
+             * @description The "here's what we found" reply, addressed to the reporter. Sealed
+             *     before it is stored; nothing sends it (C4 owns delivery).
+             */
+            draft_reply: string;
+            /** @description The analysis: what was reproduced, and where the fault is. */
+            findings: string;
+        };
         /**
          * @description A pending/accepted/revoked invitation into a tenant. `accept_url` is set only
          *     on the create response (the link to hand out); the token is never listed.
@@ -11548,6 +11646,76 @@ export interface operations {
                 content?: never;
             };
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    job_investigation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InvestigationReport"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EmailLink"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    job_email_message: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DecryptedMessage"];
+                };
+            };
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };

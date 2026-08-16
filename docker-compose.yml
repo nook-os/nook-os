@@ -402,7 +402,7 @@ services:
       # The loop stages this node runs (MAIN-142). No `build`: shared substrate
       # never runs the build loop, and the control plane enforces that wall
       # regardless of what is listed here.
-      NOOK_LOOP_KINDS: spec,decompose,review,epic-run
+      NOOK_LOOP_KINDS: spec,decompose,review,epic-run,investigate
       NOOK_MAX_LOOP_JOBS: "2"
       # The FLEET's GitHub token (MAIN-407) — never a literal here, only the
       # variable, so a real credential lives in .env and nothing committed can

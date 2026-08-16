@@ -80,10 +80,11 @@ pub struct Profile {
     /// Provision the nested Docker daemon (AC-4).
     ///
     /// `build` needs it: `./test.sh`, `dev-up.sh` and the card's own compose
-    /// stack are the work. Nothing else does — a spec agent files a ticket and
-    /// a review agent reads a PR — and giving them one would cost every such
-    /// run a daemon cold start, plus the `seccomp`/`apparmor` relaxation
-    /// nesting requires. So they get a STRICTER box, not merely a cheaper one.
+    /// stack are the work. Nothing else does — a spec agent files a ticket, a
+    /// review agent reads a PR, an investigate agent reads code and a sealed
+    /// email — and giving them one would cost every such run a daemon cold
+    /// start, plus the `seccomp`/`apparmor` relaxation nesting requires. So
+    /// they get a STRICTER box, not merely a cheaper one.
     pub nested_docker: bool,
 }
 
@@ -108,6 +109,22 @@ pub const PROFILES: &[Profile] = &[
     },
     Profile {
         kind: "epic-run",
+        nested_docker: false,
+    },
+    // The one kind whose brief is written by a STRANGER (MAIN-331). Every other
+    // kind's input originates inside the tenant — a card a member wrote, a PR
+    // somebody opened — while an investigate run is driven by a support email
+    // that arrived unauthenticated from outside. So of the five, this is the
+    // last one to hand a nesting relaxation to: the run already gets no forge
+    // credential and a throwaway worktree, and a privileged daemon would be the
+    // one powerful thing left in a box built to be read-only.
+    //
+    // The cost is real and named rather than hidden: `nook-investigate/SKILL.md`
+    // §2 tells the agent to reproduce the fault, and on a repo whose
+    // reproduction is `./run.sh` it cannot. That section says so now instead of
+    // promising a box it does not get.
+    Profile {
+        kind: "investigate",
         nested_docker: false,
     },
 ];
@@ -2036,7 +2053,16 @@ mod tests {
     #[test]
     fn only_build_is_given_a_nested_daemon() {
         assert!(profile_for("build").nested_docker);
-        for kind in ["review", "spec", "decompose", "epic-run", "something-new"] {
+        for kind in [
+            "review",
+            "spec",
+            "decompose",
+            "epic-run",
+            // Read-only AND externally driven (MAIN-331) — the kind with the
+            // strongest claim to the strict box, not the weakest.
+            "investigate",
+            "something-new",
+        ] {
             let p = profile_for(kind);
             assert!(!p.nested_docker, "{kind} was handed a Docker daemon");
             let args = isolation_args(p, Isolation::Privileged);

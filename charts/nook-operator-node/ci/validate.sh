@@ -154,7 +154,7 @@ else
 fi
 
 # ── the loop-kind wall's shipped configuration (MAIN-142) ──────────────────
-need "loop kinds env"              '^              value: "spec,decompose,review,epic-run"$' 1
+need "loop kinds env"              '^              value: "spec,decompose,review,epic-run,investigate"$' 1
 need "capacity env"                '^            - name: NOOK_MAX_LOOP_JOBS$' 1
 
 # `build` must not ship in the operator's declared kinds. The control plane

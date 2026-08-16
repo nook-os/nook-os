@@ -114,12 +114,17 @@ networkPolicy:
 # refuses build work on any shared operator whatever the node declares — so the
 # list is a statement of intent, not the wall.
 #
+# `investigate` (MAIN-331) belongs here for the same reason `review` does: it is
+# read-only, holds no forge credential and opens no PR, so a tenant's support
+# mail is looked into on shared substrate rather than on somebody's laptop.
+#
 # An empty list means the node accepts NO loop jobs.
 loopKinds:
   - spec
   - decompose
   - review
   - epic-run
+  - investigate
 
 # How many loop jobs this node holds at once. `0` stops it claiming entirely,
 # which is the way to quiesce an operator without deleting it.
