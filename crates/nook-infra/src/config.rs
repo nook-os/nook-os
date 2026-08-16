@@ -431,10 +431,32 @@ fn env_opt(key: &str) -> Option<String> {
 /// the deployments that must keep the bytes set `NOOK_USER_CONTENT_DIR`
 /// explicitly (docker-compose and the Helm chart both do).
 fn default_user_content_dir() -> String {
-    let base = env_opt("XDG_DATA_HOME")
+    user_content_dir_from(
+        env_opt("XDG_DATA_HOME"),
+        env_opt("HOME"),
+        std::env::temp_dir(),
+    )
+}
+
+/// The path-derivation alone, taking its inputs by value so the test can pin the
+/// LOGIC without touching the process environment.
+///
+/// It used to read the env directly, so the test drove it through the ambient
+/// `HOME`. In a container run as a bare uid with `HOME=/` (root-owned, mode
+/// 755) the default was `/.local/share/nook/user-content` — a real, correct
+/// answer for that odd env, but not writable, so the test failed there and only
+/// there. That is not a Postgres/SQLite difference; it surfaced on whichever leg
+/// happened to run under that HOME (MAIN-6xx). Made pure so the test supplies a
+/// normal HOME and never depends on the one it inherits.
+fn user_content_dir_from(
+    xdg_data_home: Option<String>,
+    home: Option<String>,
+    temp_dir: std::path::PathBuf,
+) -> String {
+    let base = xdg_data_home
         .map(std::path::PathBuf::from)
-        .or_else(|| env_opt("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share")))
-        .unwrap_or_else(std::env::temp_dir);
+        .or_else(|| home.map(|h| std::path::PathBuf::from(h).join(".local/share")))
+        .unwrap_or(temp_dir);
     base.join("nook/user-content")
         .to_string_lossy()
         .into_owned()
@@ -890,7 +912,7 @@ mod retired_env_tests {
 
 #[cfg(test)]
 mod user_content_dir_tests {
-    use super::default_user_content_dir;
+    use super::user_content_dir_from;
 
     /// MAIN-598 AC-2: the shipped default is writable by whoever is running,
     /// with nothing pre-created and nothing configured — which is the property
@@ -900,8 +922,24 @@ mod user_content_dir_tests {
     /// standalone install takes an upload out of the box.
     #[test]
     fn the_default_is_a_per_user_directory_this_process_can_write() {
-        let dir = std::path::PathBuf::from(default_user_content_dir());
+        // A normal, writable HOME supplied by the test — never the ambient one,
+        // which in a container may be `/` (root-owned) and is not what this
+        // property is about. Pinning the input keeps the test independent of the
+        // environment it runs in, which is why it moved off the real env.
+        let home = std::env::temp_dir().join(format!("nook-uc-{}", uuid::Uuid::now_v7().simple()));
+        std::fs::create_dir_all(&home).expect("a home to derive under");
+
+        let dir = std::path::PathBuf::from(user_content_dir_from(
+            None,
+            Some(home.to_string_lossy().into_owned()),
+            std::env::temp_dir(),
+        ));
         assert!(dir.ends_with("nook/user-content"), "{}", dir.display());
+        assert!(
+            dir.starts_with(&home),
+            "under the per-user home: {}",
+            dir.display()
+        );
         assert!(
             !dir.starts_with("/usr") && !dir.starts_with("/opt"),
             "never a path inside the image: {}",
@@ -912,6 +950,18 @@ mod user_content_dir_tests {
         let probe = dir.join(".write-probe");
         std::fs::write(&probe, b"writable").expect("and write in it");
         std::fs::remove_file(&probe).expect("and clean up after itself");
+
+        // With neither var set, the last resort is the temp dir — also writable,
+        // which is the whole point of the fallback (a bare-uid container).
+        let fallback =
+            std::path::PathBuf::from(user_content_dir_from(None, None, std::env::temp_dir()));
+        assert!(
+            fallback.starts_with(std::env::temp_dir()),
+            "{}",
+            fallback.display()
+        );
+
+        let _ = std::fs::remove_dir_all(&home);
     }
 }
 
