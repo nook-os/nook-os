@@ -353,7 +353,8 @@ async fn mutating_gitops_routes_require_person_may_use_node() {
                     ctx(user, tenant),
                     Path(node),
                     Json(InitProjectRequest {
-                        name: "proj".into()
+                        name: "proj".into(),
+                        description: None,
                     }),
                 )
                 .await

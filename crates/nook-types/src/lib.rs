@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+pub mod scaffold;
+
 /// Strongly-typed UUID newtypes. `value_type = String, format = Uuid` keeps the
 /// generated OpenAPI/TS surface a plain string.
 macro_rules! id_type {
@@ -4334,6 +4336,11 @@ pub struct DeleteWorkspaceResponse {
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct InitProjectRequest {
     pub name: String,
+    /// Free text describing the project. Optional, and absent is not blank:
+    /// with nothing here the scaffold carries no description section at all
+    /// rather than an empty heading (MAIN-619 AC-7).
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, ToSchema)]

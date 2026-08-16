@@ -1176,15 +1176,26 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                     });
                 });
             }
-            ControlToNode::InitProject { request_id, name } => {
+            ControlToNode::InitProject {
+                request_id,
+                name,
+                description,
+            } => {
                 let tx = ctl_tx.clone();
                 // No tenant on the wire for this one yet, so it uses the node's
                 // own — correct for the ordinary case, and still better than
                 // `workspace_roots[0]`.
                 let root = new_checkout_root(cfg, None);
-                let roots = cfg.workspace_roots.clone();
+                // Registered BEFORE the init, exactly as the clone arm above
+                // does it and for the same reason (MAIN-363): the project lands
+                // under the TENANT root, which on a node enrolled before that
+                // card is not a scan root — so the rescan below walked
+                // `~/.nook/workspace` and never saw it. Discovery then never
+                // surfaced the workspace, and the flow that waits for it to
+                // open a session waited forever (MAIN-619 AC-9).
+                let roots = ensure_scan_root(cfg, &root);
                 tokio::task::spawn_blocking(move || {
-                    let outcome = crate::gitops::init_project(&root, &name);
+                    let outcome = crate::gitops::init_project(&root, &name, description.as_deref());
                     let ok = outcome.ok;
                     let _ = tx.blocking_send(NodeToControl::OpResult {
                         request_id,
@@ -1853,6 +1864,39 @@ mod tests {
             "~/.nook/workspace/nook.hein.network",
             "no slug anywhere: the host is the last resort, not a bare root"
         );
+    }
+
+    /// Every arm that WRITES a checkout must register where it writes as a scan
+    /// root, or discovery walks a tree the file is not in (MAIN-363). Clone got
+    /// this; `InitProject` did not, and the cost was invisible — the repo was
+    /// created correctly and then never surfaced, so the flow waiting on
+    /// discovery to open a session waited forever (MAIN-619 AC-9).
+    ///
+    /// Read off the source because the invariant is about the CALL, and both
+    /// alternatives are worse: `ensure_scan_root` persists the config, so
+    /// exercising it needs a config file, and the two arms are inside one
+    /// several-hundred-line `match` in a connection loop that needs a live
+    /// control plane to reach.
+    #[test]
+    fn every_arm_that_creates_a_checkout_registers_it_as_a_scan_root() {
+        let src = include_str!("conn.rs");
+        for arm in ["let root = new_checkout_root(cfg,"] {
+            let mut from = 0;
+            let mut seen = 0;
+            while let Some(at) = src[from..].find(arm) {
+                let start = from + at;
+                let after = &src[start..(start + 700).min(src.len())];
+                assert!(
+                    after.contains("ensure_scan_root(cfg, &root)"),
+                    "a checkout destination is computed without being registered \
+                     as a scan root — discovery will not see what lands there:\n{}",
+                    &after[..after.len().min(300)]
+                );
+                seen += 1;
+                from = start + arm.len();
+            }
+            assert!(seen >= 2, "expected the clone and init arms, found {seen}");
+        }
     }
 
     /// An older control plane sends nothing, and the node keeps its previous

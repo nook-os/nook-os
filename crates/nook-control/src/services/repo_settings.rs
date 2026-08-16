@@ -373,6 +373,27 @@ async fn report_invalid(
 mod tests {
     use super::*;
 
+    /// The scaffold a from-scratch project is created with has to be a file
+    /// THIS parser accepts (MAIN-619 AC-4). The writer is nook-node, which the
+    /// control plane cannot import, so the template is a shared constant and
+    /// this is the half that proves the two agree.
+    #[test]
+    fn the_from_scratch_scaffold_is_a_file_we_accept() {
+        let ports = parse(nook_types::scaffold::NOOK_TOML)
+            .expect("the scaffold parses")
+            .expect("the scaffold declares ports");
+
+        assert_eq!(ports.len(), 1);
+        assert_eq!(ports[0].name, "web");
+        assert_eq!(ports[0].env, "NOOK_PORT");
+        assert_eq!(ports[0].protocol, "tcp");
+        assert!(!ports[0].required);
+        assert!(ports[0].browsable);
+        // `parse` runs it, but naming it is what keeps this test honest if the
+        // two ever come apart.
+        validate(&ports).expect("the scaffold validates");
+    }
+
     #[test]
     fn a_three_port_file_parses_with_the_struct_defaults() {
         let ports = parse(

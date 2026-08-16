@@ -52,7 +52,7 @@ never_called! {
     fn append_note(McpCaller, String, String) -> anyhow::Result<Note>;
     fn create_task(McpCaller, String, Option<String>, Option<String>) -> anyhow::Result<TaskItem>;
     fn clone_repo(McpCaller, String, Option<String>) -> anyhow::Result<String>;
-    fn create_project(McpCaller, String, Option<String>) -> anyhow::Result<String>;
+    fn create_project(McpCaller, String, Option<String>, Option<String>) -> anyhow::Result<String>;
     fn add_worktree(McpCaller, String, String, Option<String>) -> anyhow::Result<String>;
     fn dispatch_task(McpCaller, String) -> anyhow::Result<TaskItem>;
     fn start_work(McpCaller, String, Option<String>, Option<String>) -> anyhow::Result<Session>;

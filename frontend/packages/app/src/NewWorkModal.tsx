@@ -1,5 +1,6 @@
 // The one place to start work — two tabs matched to how you actually think:
-//   • New       → type a git URL (clones) or a new name (creates a project).
+//   • New       → type a git URL (deploys a clone) or a plain name (creates an
+//                 empty project, scaffolded with .nook.toml + CLAUDE.md).
 //   • Existing  → PICK a workspace from a filterable list (no typing exact
 //                 names, so no typos).
 // Then optionally tick "new worktree branch", pick node (Auto by default) and
@@ -88,8 +89,16 @@ function NewWorkModal() {
   // exactly as it did for anyone who does not touch this.
   const [iface, setIface] = useState<"terminal" | "chat">("terminal");
   const [envText, setEnvText] = useState("");
+  // What the project is, in the creator's words. From-scratch only, optional,
+  // and it reaches the scaffolded CLAUDE.md and README.md — never the workspace
+  // row's own description column (MAIN-619 NG-6).
+  const [description, setDescription] = useState("");
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
+  // Set the moment the project exists and discovery finds it. Everything after
+  // that point — the .env seal, the session start — can still fail, and when it
+  // does the repo is real and must not be stranded behind a modal (AC-12).
+  const [createdWorkspace, setCreatedWorkspace] = useState<string | null>(null);
 
   const useWorktree = worktree || !!taskId;
 
@@ -212,7 +221,18 @@ function NewWorkModal() {
   // fields show as soon as the tab opens, so the model is visible before you
   // type; the submit needs a real repo URL (canGo gates on it).
   const declarative = tab === "new" && !taskId;
-  const pickerRuntimes = declarative ? fleet : runtimes;
+  // A plain name is a project to CREATE, not a repo to deploy (MAIN-619). It
+  // shares this form but not its model: the node is picked HERE and the session
+  // opens on it now, where a deploy declares intent and lets the reconciler
+  // place it. So everything the declarative path hides because "you don't pick
+  // a machine" comes back, and everything it shows because "the fleet decides"
+  // goes away.
+  const fromScratch = declarative && newIntent === "project";
+  const deploying = declarative && !fromScratch;
+  // The fleet union is right for a deploy, which may land anywhere. From
+  // scratch runs on ONE named machine, so offering a runtime that machine
+  // cannot launch would only produce a session that fails on arrival.
+  const pickerRuntimes = deploying ? fleet : runtimes;
 
   // Starting work here means starting an agent on it: if the node has claude,
   // that's what the session opens with. (A plain shell is one click away in
@@ -270,11 +290,19 @@ function NewWorkModal() {
   const initAndResolve = async (node: string): Promise<string> => {
     const { data, error } = await api.POST("/api/v1/nodes/{id}/projects", {
       params: { path: { id: node } },
-      body: { name: q },
+      body: { name: q, description: description.trim() || null },
     });
+    // The node's own message, verbatim — "already exists", "invalid project
+    // name". It knows why; restating it here would only be a worse sentence
+    // (AC-11), and the modal stays open with the input intact.
     if (error || !data?.ok) throw new Error(data?.message ?? "init failed");
     setStatus(data.message);
-    return pollWorkspace(q);
+    const ws = await pollWorkspace(q);
+    // Reachable from the Workspaces list from this moment on, whatever the
+    // session start does next (AC-12).
+    setCreatedWorkspace(ws);
+    queryClient.invalidateQueries();
+    return ws;
   };
 
   const waitForLocation = async (ws: string, path: string) => {
@@ -359,8 +387,11 @@ function NewWorkModal() {
     setBusy(true);
     setStatus(null);
     try {
-      // Declarative "New Workspace" short-circuits the whole imperative flow.
-      if (declarative) {
+      // Deploying a repo short-circuits the whole imperative flow. Creating a
+      // project from scratch does not: it makes the repo on a machine and opens
+      // a session in the primary checkout (AC-9), which is the imperative path
+      // below.
+      if (deploying) {
         await createDeclarative();
         return;
       }
@@ -474,14 +505,15 @@ function NewWorkModal() {
     }
   };
 
-  const canGo = declarative
+  const haveAMachineNow = nodeId !== AUTO || !!autoPick?.node_id || online.length > 0;
+  const canGo = deploying
     ? // Declarative deploy needs a real repo URL and nothing else — no online
       // node up front, the reconciler waits for one.
       looksLikeGitUrl(query)
     : (tab === "new" ? newIntent !== null : !!selectedWorkspace) &&
-      // Every imperative path (task-start, ad-hoc on an existing workspace)
-      // still needs a machine to act on now.
-      (nodeId !== AUTO || !!autoPick?.node_id || online.length > 0);
+      // Every imperative path (from-scratch, task-start, ad-hoc on an existing
+      // workspace) still needs a machine to act on now.
+      haveAMachineNow;
 
   return (
     <div className="modal-backdrop" onMouseDown={hide}>
@@ -502,16 +534,22 @@ function NewWorkModal() {
           {tab === "new" ? (
             <>
               <div className="field">
+                {/* One field, two intents, and the chip is what says which one
+                    you are in — a plain name used to read "enter a git URL",
+                    which described a name as a malformed URL rather than as the
+                    other thing this form makes (MAIN-619 AC-1). */}
                 <label>
-                  Repository URL
+                  Repository URL or new project name
                   {newIntent === "clone" && <span className="intent-chip info">→ deploy</span>}
-                  {query.trim() && newIntent !== "clone" && (
-                    <span className="intent-chip">enter a git URL</span>
+                  {fromScratch && (
+                    <span className="intent-chip" data-testid="new-work-intent">
+                      new project
+                    </span>
                   )}
                 </label>
                 <input
                   className="input mono"
-                  placeholder="https://github.com/org/repo · git@github.com:org/repo.git"
+                  placeholder="https://github.com/org/repo · git@github.com:org/repo.git · greeting-lab"
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
                   autoFocus
@@ -522,10 +560,49 @@ function NewWorkModal() {
                   sentence is shared with the workspace banner so the two cannot
                   drift into describing the same rule differently. */}
               {query.trim() !== "" && (
-                <div className="faint small" style={{ marginTop: -4, marginBottom: 6 }}>
-                  {PORT_CAP_SENTENCE} Add a{" "}
-                  <span className="mono">.nook.toml</span> to the repo (or declare
-                  its ports on the workspace afterwards) and the limit lifts.
+                <div
+                  className="faint small"
+                  data-testid="new-work-port-note"
+                  style={{ marginTop: -4, marginBottom: 6 }}
+                >
+                  {fromScratch ? (
+                    <>
+                      {/* Nothing to warn about: the cap exists because a repo
+                          has not said what it binds, and this one is created
+                          having said it (AC-10). */}
+                      A <span className="mono">.nook.toml</span> is created for you,
+                      declaring one listener on{" "}
+                      <span className="mono">$NOOK_PORT</span> — so this repo is not
+                      capped to one session per node, and a{" "}
+                      <span className="mono">CLAUDE.md</span> comes with it.
+                    </>
+                  ) : (
+                    <>
+                      {PORT_CAP_SENTENCE} Add a{" "}
+                      <span className="mono">.nook.toml</span> to the repo (or declare
+                      its ports on the workspace afterwards) and the limit lifts.
+                    </>
+                  )}
+                </div>
+              )}
+              {fromScratch && (
+                <div className="field">
+                  <label>
+                    What this project is{" "}
+                    <span className="faint">
+                      (optional — becomes a section of{" "}
+                      <span className="mono">CLAUDE.md</span> and the body of{" "}
+                      <span className="mono">README.md</span>)
+                    </span>
+                  </label>
+                  <textarea
+                    className="input"
+                    rows={2}
+                    spellCheck={false}
+                    placeholder="A scratch repo for trying greeting commands."
+                    value={description}
+                    onChange={(e) => setDescription(e.target.value)}
+                  />
                 </div>
               )}
               {newIntent === "clone" && (
@@ -576,6 +653,9 @@ function NewWorkModal() {
             </div>
           )}
 
+          {/* NG-4: a from-scratch project gets no worktree — the session opens
+              in the primary checkout — so the checkbox stays hidden for it as
+              it is for a deploy. */}
           {!taskId && !declarative && (
             <label className="check-row">
               <input
@@ -602,10 +682,11 @@ function NewWorkModal() {
             </div>
           )}
 
-          {/* Declarative mode picks the node(s) for you — you declare intent,
-              the reconciler places it. The imperative paths (task-start, ad-hoc
-              on an existing workspace) still pick a machine. */}
-          {!declarative && (
+          {/* Deploying picks the node(s) for you — you declare intent, the
+              reconciler places it. Every path that acts NOW picks a machine:
+              task-start, ad-hoc on an existing workspace, and creating a project
+              from scratch, which writes a checkout on one named box (AC-2). */}
+          {!deploying && (
             <div className="field">
               <label>
                 Where (node)
@@ -621,7 +702,12 @@ function NewWorkModal() {
                   computer to add one.
                 </div>
               ) : (
-                <select className="input" value={nodeId} onChange={(e) => setNodeId(e.target.value)}>
+                <select
+                  className="input"
+                  data-testid="new-work-node"
+                  value={nodeId}
+                  onChange={(e) => setNodeId(e.target.value)}
+                >
                   <option value={AUTO}>Auto (best available)</option>
                   {eligibleNodes.map((n) => {
                     // A shared node belongs to a teammate — label it so nobody
@@ -686,7 +772,7 @@ function NewWorkModal() {
             </div>
           )}
 
-          {declarative && (
+          {deploying && (
             <>
               <div className="field">
                 <label>
@@ -772,15 +858,29 @@ function NewWorkModal() {
           <button className="btn primary" onClick={go} disabled={!canGo || busy}>
             {busy
               ? "working…"
-              : declarative
-                ? "Create & deploy"
-                : taskId
-                  ? "start work"
+              : fromScratch
+                ? "Create"
+                : deploying
+                  ? "Create & deploy"
                   : "start work"}
           </button>
           <button className="btn" onClick={hide} disabled={busy}>cancel</button>
           {status && <span className="muted small">{status}</span>}
-          {declarative && !status && (
+          {/* The repo exists but something after it did not (AC-12). Say where
+              it went, rather than leaving a project nobody can find behind a
+              modal that only offers "cancel". */}
+          {status && createdWorkspace && (
+            <button
+              className="btn small"
+              onClick={() => {
+                navigate(`/workspaces/${createdWorkspace}`);
+                hide();
+              }}
+            >
+              open the workspace
+            </button>
+          )}
+          {deploying && !status && (
             <span className="muted small">
               the fleet clones it and starts sessions — no machine to pick
             </span>

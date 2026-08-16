@@ -2,6 +2,7 @@
 //! under `spawn_blocking`. Results feed the generic `OpResult` protocol
 //! message.
 
+use nook_types::scaffold;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -653,8 +654,13 @@ pub fn remove_worktree(worktree_path: &str) -> OpOutcome {
     }
 }
 
-/// Create a brand-new empty git project (`git init` + README + first commit).
-pub fn init_project(workspace_root: &str, name: &str) -> OpOutcome {
+/// Create a brand-new git project: `git init`, the scaffold, one commit.
+///
+/// Node-side rather than in each caller (MAIN-619 AC-8), so the modal, MCP's
+/// `create_project` and task start-work all produce an identical repo. The four
+/// files are written BEFORE `git add .`, which is what makes the scaffold the
+/// initial commit instead of a second commit on top of an empty one (AC-3).
+pub fn init_project(workspace_root: &str, name: &str, description: Option<&str>) -> OpOutcome {
     let root = crate::config::expand_path(workspace_root);
     if name.contains('/') || name.starts_with('.') || name.trim().is_empty() {
         return fail("invalid project name");
@@ -666,8 +672,19 @@ pub fn init_project(workspace_root: &str, name: &str) -> OpOutcome {
     if std::fs::create_dir_all(&dest).is_err() {
         return fail(format!("cannot create {}", dest.display()));
     }
-    if std::fs::write(dest.join("README.md"), format!("# {name}\n")).is_err() {
-        return fail("cannot write README");
+    let files: [(&str, String); 4] = [
+        ("README.md", scaffold::readme_md(name, description)),
+        (".nook.toml", scaffold::NOOK_TOML.to_string()),
+        ("CLAUDE.md", scaffold::claude_md(name, description)),
+        (".gitignore", scaffold::GITIGNORE.to_string()),
+    ];
+    for (file, body) in &files {
+        if std::fs::write(dest.join(file), body).is_err() {
+            // A half-written directory would make the retry fail with "already
+            // exists" instead of the real reason (AC-11).
+            let _ = std::fs::remove_dir_all(&dest);
+            return fail(format!("cannot write {file}"));
+        }
     }
     let steps: [&[&str]; 4] = [
         &["init", "-b", "main"],
@@ -687,6 +704,7 @@ pub fn init_project(workspace_root: &str, name: &str) -> OpOutcome {
         if let Err(e) = run_git(args, Some(&dest), None) {
             // symbolic-ref may already be correct; only fail on the essentials.
             if args[0] == "init" || args[0] == "commit" {
+                let _ = std::fs::remove_dir_all(&dest);
                 return fail(format!("git {} failed: {e}", args[0]));
             }
         }
@@ -732,8 +750,8 @@ pub fn read_workspace_file(checkout_path: &str, name: &str) -> Result<Vec<u8>, S
 #[cfg(test)]
 mod tests {
     use super::{
-        add_worktree, commit_paths, hardened_git, remove_build_worktree, repo_path_from_url,
-        run_git, staging_path_ok, GIT_HARDENING,
+        add_worktree, commit_paths, hardened_git, init_project, remove_build_worktree,
+        repo_path_from_url, run_git, scaffold, staging_path_ok, GIT_HARDENING,
     };
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -1259,5 +1277,126 @@ touch {}
             "unmerged work is not ours to delete"
         );
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// Is there a usable git here? The scaffold assertions below that do not
+    /// need one still run; the commit-shape ones return early.
+    fn has_git() -> bool {
+        Command::new("git")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    fn git_out(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?} failed");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// MAIN-619 AC-3: all four scaffold files are in the INITIAL commit, not a
+    /// scaffold commit stacked on an empty one. Written before `git add .` is
+    /// what buys that, so the shape is what this asserts — one commit, four
+    /// files in it.
+    #[test]
+    fn a_new_project_is_one_commit_holding_the_whole_scaffold() {
+        if !has_git() {
+            return;
+        }
+        let tmp = Scratch::new();
+        let out = init_project(tmp.0.to_str().unwrap(), "greeting-lab", None);
+        assert!(out.ok, "{}", out.message);
+        let dest = tmp.0.join("greeting-lab");
+
+        assert_eq!(git_out(&dest, &["log", "--oneline"]).lines().count(), 1);
+        let files = git_out(&dest, &["show", "--pretty=", "--name-only", "HEAD"]);
+        let mut listed: Vec<&str> = files.lines().collect();
+        listed.sort_unstable();
+        assert_eq!(
+            listed,
+            [".gitignore", ".nook.toml", "CLAUDE.md", "README.md"]
+        );
+        // Committed, not merely on disk and ignored: `.gitignore` names nothing
+        // that would swallow them, but only the commit proves it.
+        assert_eq!(git_out(&dest, &["status", "--porcelain"]), "");
+    }
+
+    /// AC-4/AC-5/AC-6: the bytes on disk are the shared templates, so nothing
+    /// can drift between what we write and what the control plane parses.
+    #[test]
+    fn the_scaffold_on_disk_is_the_template() {
+        if !has_git() {
+            return;
+        }
+        let tmp = Scratch::new();
+        assert!(init_project(tmp.0.to_str().unwrap(), "greeting-lab", None).ok);
+        let dest = tmp.0.join("greeting-lab");
+        let read = |f: &str| std::fs::read_to_string(dest.join(f)).unwrap();
+
+        assert_eq!(read(".nook.toml"), scaffold::NOOK_TOML);
+        assert_eq!(read(".gitignore"), scaffold::GITIGNORE);
+        assert_eq!(read("CLAUDE.md"), scaffold::claude_md("greeting-lab", None));
+        assert_eq!(read("README.md"), "# greeting-lab\n");
+    }
+
+    /// AC-7: the typed description reaches both files, and only when given.
+    #[test]
+    fn a_description_reaches_claude_md_and_the_readme() {
+        if !has_git() {
+            return;
+        }
+        let tmp = Scratch::new();
+        let about = "A place to try greetings.";
+        assert!(init_project(tmp.0.to_str().unwrap(), "greeting-lab", Some(about)).ok);
+        let dest = tmp.0.join("greeting-lab");
+
+        let claude = std::fs::read_to_string(dest.join("CLAUDE.md")).unwrap();
+        assert!(claude.contains("## What this project is\n\nA place to try greetings.\n"));
+        assert_eq!(
+            std::fs::read_to_string(dest.join("README.md")).unwrap(),
+            "# greeting-lab\n\nA place to try greetings.\n"
+        );
+    }
+
+    /// AC-11: the name guards still hold, and a refusal creates nothing — the
+    /// modal reports the node's own message and the operator retries the same
+    /// name, which a half-written directory would then reject for the wrong
+    /// reason.
+    #[test]
+    fn an_invalid_or_taken_name_is_refused_and_leaves_nothing_behind() {
+        let tmp = Scratch::new();
+        let root = tmp.0.to_str().unwrap().to_string();
+        for bad in ["", "   ", "a/b", ".hidden"] {
+            let out = init_project(&root, bad, None);
+            assert!(!out.ok, "{bad:?} should be refused");
+            assert_eq!(out.message, "invalid project name");
+        }
+        assert_eq!(std::fs::read_dir(&tmp.0).unwrap().count(), 0);
+
+        if !has_git() {
+            return;
+        }
+        assert!(init_project(&root, "taken", None).ok);
+        let again = init_project(&root, "taken", None);
+        assert!(!again.ok);
+        assert!(
+            again.message.contains("already exists"),
+            "{}",
+            again.message
+        );
+        // The first project is untouched — a refused second create must not
+        // have rewritten or half-written over it.
+        assert_eq!(std::fs::read_dir(&tmp.0).unwrap().count(), 1);
+        assert_eq!(
+            git_out(&tmp.0.join("taken"), &["log", "--oneline"])
+                .lines()
+                .count(),
+            1
+        );
     }
 }
