@@ -8257,6 +8257,16 @@ export interface components {
         SessionPermissionDecisionRequest: {
             /** @description `true` runs the tool, `false` refuses it and tells the agent so. */
             allow: boolean;
+            /**
+             * @description "Allow always (this tool, this session)" (MAIN-620 AC-3): the node
+             *     answers the same tool itself for the rest of the session instead of
+             *     asking again. Meaningful only with `allow` — a remembered denial would
+             *     disable a tool until restart on one tap, which no button offers.
+             *
+             *     Defaulted, so the one-shot "Allow" a client already sends keeps working
+             *     unchanged.
+             */
+            remember?: boolean;
         };
         /**
          * @description A workspace's declared desired session state (MAIN-315) — the Deployment

@@ -3839,6 +3839,15 @@ pub struct CreateSessionMessageRequest {
 pub struct SessionPermissionDecisionRequest {
     /// `true` runs the tool, `false` refuses it and tells the agent so.
     pub allow: bool,
+    /// "Allow always (this tool, this session)" (MAIN-620 AC-3): the node
+    /// answers the same tool itself for the rest of the session instead of
+    /// asking again. Meaningful only with `allow` — a remembered denial would
+    /// disable a tool until restart on one tap, which no button offers.
+    ///
+    /// Defaulted, so the one-shot "Allow" a client already sends keeps working
+    /// unchanged.
+    #[serde(default)]
+    pub remember: bool,
 }
 
 /// Open an ad-hoc terminal on a machine — a shell with no workspace, running in

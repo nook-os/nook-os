@@ -113,8 +113,18 @@ pub enum Permissions {
 /// person's own checkout, on their behalf, with them right there — the two
 /// conditions that made skipping defensible for a job are both absent, and the
 /// approval is the feature rather than an obstacle to it.
-pub fn claude_chat_args(session_id: &str) -> Vec<String> {
-    stream_args(session_id, false, Permissions::Ask)
+///
+/// `settings` is `crate::human_permissions`' managed document (MAIN-620): the
+/// narrowed allow-list that keeps a person from tapping "allow" through the
+/// agent's routine tooling. `None` — no runtime it applies to, or a write that
+/// failed — leaves the posture exactly as it was, asking about everything.
+pub fn claude_chat_args(session_id: &str, settings: Option<&Path>) -> Vec<String> {
+    let mut args = stream_args(session_id, false, Permissions::Ask);
+    if let Some(path) = settings {
+        args.push("--settings".into());
+        args.push(path.display().to_string());
+    }
+    args
 }
 
 /// The same run, but continuing the agent session a previous run left behind
@@ -861,24 +871,30 @@ mod tests {
     }
 
     /// MAIN-502 AC-3: a chat launch is the SAME launch, differing only in who
-    /// answers a permission. Written as a diff between the two argvs rather
-    /// than as a second expected list, so a flag added to the streaming
-    /// contract cannot land in one and be forgotten in the other — which is
-    /// exactly what a forked argv would let happen.
+    /// answers a permission — and, since MAIN-620, in the managed allow-list
+    /// that decides which permissions are worth asking about. Written as a diff
+    /// between the two argvs rather than as a second expected list, so a flag
+    /// added to the streaming contract cannot land in one and be forgotten in
+    /// the other — which is exactly what a forked argv would let happen.
     #[test]
     fn the_chat_argv_is_the_run_argv_with_only_the_permission_posture_changed() {
         let run = claude_stream_args("sess-1");
-        let chat = claude_chat_args("sess-1");
+        let chat = claude_chat_args("sess-1", Some(Path::new("/tmp/perm.json")));
         let common = |a: &[String]| -> Vec<String> {
-            a.iter()
-                .filter(|s| {
-                    !matches!(
-                        s.as_str(),
-                        "--dangerously-skip-permissions" | "--permission-prompt-tool" | "stdio"
-                    )
-                })
-                .cloned()
-                .collect()
+            let mut out = Vec::new();
+            let mut it = a.iter();
+            while let Some(s) = it.next() {
+                match s.as_str() {
+                    "--dangerously-skip-permissions" | "stdio" => {}
+                    // Flag AND its value, or the path would survive the filter
+                    // and the diff would compare a list against a longer one.
+                    "--permission-prompt-tool" | "--settings" => {
+                        it.next();
+                    }
+                    _ => out.push(s.clone()),
+                }
+            }
+            out
         };
         assert_eq!(
             common(&run),
@@ -887,12 +903,30 @@ mod tests {
         );
     }
 
+    /// MAIN-620 AC-1: a human session carries the managed allow-list, and a
+    /// loop job never does — its posture is `Skip`, and a second, narrower
+    /// statement of permissions on top of a blanket one is only confusing.
+    #[test]
+    fn only_a_human_session_carries_the_managed_allow_list() {
+        let chat = claude_chat_args("sess-1", Some(Path::new("/tmp/perm.json")));
+        assert!(
+            chat.join(" ").contains("--settings /tmp/perm.json"),
+            "{chat:?}"
+        );
+        // No document — an unwritable config dir — leaves the launch exactly as
+        // MAIN-502 shipped it: asking about everything, never failing to start.
+        let bare = claude_chat_args("sess-1", None);
+        assert!(!bare.contains(&"--settings".to_string()), "{bare:?}");
+        assert!(!claude_stream_args("sess-1").contains(&"--settings".to_string()));
+        assert!(!claude_resume_args("sess-1").contains(&"--settings".to_string()));
+    }
+
     /// MAIN-502 AC-6, the negative that carries the weight: a chat session must
     /// NOT skip permissions. A person is sitting in front of it, and the whole
     /// feature is that they get asked.
     #[test]
     fn a_chat_asks_permission_and_a_run_skips_it() {
-        let chat = claude_chat_args("sess-1");
+        let chat = claude_chat_args("sess-1", None);
         let joined = chat.join(" ");
         assert!(
             !chat.contains(&"--dangerously-skip-permissions".to_string()),

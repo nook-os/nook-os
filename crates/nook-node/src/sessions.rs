@@ -78,11 +78,13 @@ pub enum Cmd {
         session_id: SessionId,
         text: String,
     },
-    /// A human's verdict on a permission that agent is blocked on.
+    /// A human's verdict on a permission that agent is blocked on, and
+    /// whether it stands for the rest of the session (MAIN-620 AC-3).
     ChatPermission {
         session_id: SessionId,
         request_id: String,
         allow: bool,
+        remember: bool,
     },
     StartAuth {
         session_id: SessionId,
@@ -245,7 +247,8 @@ impl Manager {
                 session_id,
                 request_id,
                 allow,
-            } => self.chat_permission(session_id, &request_id, allow),
+                remember,
+            } => self.chat_permission(session_id, &request_id, allow, remember),
             Cmd::StartAuth {
                 session_id,
                 runtime,
@@ -483,14 +486,20 @@ impl Manager {
     }
 
     /// Answer a permission the agent is blocked on.
-    fn chat_permission(&mut self, session_id: SessionId, request_id: &str, allow: bool) {
+    fn chat_permission(
+        &mut self,
+        session_id: SessionId,
+        request_id: &str,
+        allow: bool,
+        remember: bool,
+    ) {
         let Some(handle) = self.chats.get(&session_id) else {
             return self.chat_note(
                 session_id,
                 "this session's agent is not running on this machine any more — restart it",
             );
         };
-        if let Err(e) = handle.decide(request_id, allow) {
+        if let Err(e) = handle.decide(request_id, allow, remember) {
             self.chat_note(session_id, format!("could not answer the agent: {e}"));
         }
     }

@@ -3,10 +3,13 @@
 //
 // What is pinned here is what the card's "How to verify" actually asks a person
 // to do: the history renders as a conversation, typing sends, a permission
-// request appears IN the log with allow and deny beside the composer, and
+// request appears IN the log with its choices beside the composer, and
 // answering posts the verdict. Plus the two negatives — a request that has
 // already been answered offers no buttons, and the composer is held shut while
 // the agent is blocked.
+//
+// MAIN-620 adds the third choice: "allow always", which posts `remember` so the
+// node stops asking about that tool for the rest of the session.
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
@@ -111,16 +114,19 @@ describe("a permission request", () => {
       permission_request_id: "req-1",
     });
 
-  // AC-6: it is a MESSAGE with allow and deny — in the log, not a strip bolted
-  // to the side of it.
-  it("appears in the log, with allow and deny", async () => {
+  // AC-6: it is a MESSAGE with its choices — in the log, not a strip bolted
+  // to the side of it. MAIN-620 AC-3 makes those choices three.
+  it("appears in the log, with allow once, allow all <tool> and deny", async () => {
     state.messages = [blocked()];
     renderChat();
     expect(
       await screen.findByText(/Permission needed — Bash: rm -rf build\//),
     ).toBeTruthy();
     const choices = await screen.findByTestId("permission-choices");
-    expect(choices.textContent).toContain("Allow");
+    expect(choices.textContent).toContain("Allow once");
+    // The tool is NAMED, because the tap grants the tool and not the command
+    // the request happens to be about.
+    expect(choices.textContent).toContain("Allow all Bash");
     expect(choices.textContent).toContain("Deny");
   });
 
@@ -133,7 +139,44 @@ describe("a permission request", () => {
         "/api/v1/sessions/{id}/permissions/{request_id}",
         expect.objectContaining({
           params: { path: { id: SESSION, request_id: "req-1" } },
-          body: { allow: false },
+          body: { allow: false, remember: false },
+        }),
+      ),
+    );
+  });
+
+  // MAIN-620 AC-3. The suppression itself is the node's — it holds the set and
+  // answers the tool without announcing it — so what this surface owes is the
+  // distinction: "once" and "always" must not post the same thing, or the node
+  // has nothing to tell them apart by and the button is decorative.
+  it("asks for the tool to be remembered when told always", async () => {
+    state.messages = [blocked()];
+    renderChat();
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Allow all Bash" }),
+    );
+    await waitFor(() =>
+      expect(post).toHaveBeenCalledWith(
+        "/api/v1/sessions/{id}/permissions/{request_id}",
+        expect.objectContaining({
+          params: { path: { id: SESSION, request_id: "req-1" } },
+          body: { allow: true, remember: true },
+        }),
+      ),
+    );
+  });
+
+  it("asks for nothing to be remembered when told once", async () => {
+    state.messages = [blocked()];
+    renderChat();
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Allow once" }),
+    );
+    await waitFor(() =>
+      expect(post).toHaveBeenCalledWith(
+        "/api/v1/sessions/{id}/permissions/{request_id}",
+        expect.objectContaining({
+          body: { allow: true, remember: false },
         }),
       ),
     );

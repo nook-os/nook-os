@@ -17830,6 +17830,10 @@
           "allow": {
             "type": "boolean",
             "description": "`true` runs the tool, `false` refuses it and tells the agent so."
+          },
+          "remember": {
+            "type": "boolean",
+            "description": "\"Allow always (this tool, this session)\" (MAIN-620 AC-3): the node\nanswers the same tool itself for the rest of the session instead of\nasking again. Meaningful only with `allow` — a remembered denial would\ndisable a tool until restart on one tap, which no button offers.\n\nDefaulted, so the one-shot \"Allow\" a client already sends keeps working\nunchanged."
           }
         }
       },

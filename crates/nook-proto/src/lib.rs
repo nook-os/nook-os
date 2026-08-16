@@ -569,6 +569,15 @@ pub enum ControlToNode {
         /// makes answering from two devices harmless.
         request_id: String,
         allow: bool,
+        /// "Allow always (this tool, this session)" (MAIN-620 AC-3). The node
+        /// answers that tool itself from here on and stops announcing it.
+        ///
+        /// `#[serde(default)]` so a control plane that has this and a node that
+        /// does not still speak: the older node ignores the field and behaves
+        /// exactly as it did, which is one more prompt rather than a broken
+        /// session.
+        #[serde(default)]
+        remember: bool,
     },
     /// Install a runtime credential this node did not obtain (MAIN-283).
     ///

@@ -246,14 +246,20 @@ pub fn login_shell() -> String {
 /// that don't see the user's own tools aren't terminals, so sessions start
 /// the way a desktop terminal emulator starts them: as a login shell.
 /// `-i` matters too, since most PATH setup lives in ~/.bashrc.
-pub fn login_command(runtime: &str) -> String {
+///
+/// `settings` is the managed permission document (MAIN-620 AC-4). The TUI gets
+/// the SAME one the structured chat does, because "answer this on your phone"
+/// is worse inside a tmux pane than in a chat: the two surfaces asking about
+/// different things is precisely the gap the card is about.
+pub fn login_command(runtime: &str, settings: Option<&std::path::Path>) -> String {
     let shell = login_shell();
     let is_shell = matches!(
         runtime,
         "bash" | "zsh" | "sh" | "fish" | "pwsh" | "dash" | "ksh"
     );
     if is_shell {
-        // Login shells source the profile themselves.
+        // Login shells source the profile themselves. A shell has no agent and
+        // therefore no permission gate to narrow, so `settings` is not its.
         match runtime {
             "pwsh" => runtime.to_string(),
             _ => format!("{runtime} -l"),
@@ -262,8 +268,36 @@ pub fn login_command(runtime: &str) -> String {
         // Runtimes (claude/hermes/codex) inherit the sourced environment.
         // exec keeps the pane bound to the runtime, so quitting it ends the
         // window rather than dropping to a stray shell.
-        format!("{shell} -l -i -c 'exec {runtime}'")
+        let flag = match settings {
+            // The path is `$HOME`-derived, so a space or an apostrophe in it is
+            // an ordinary machine rather than an attack — and it has to survive
+            // BOTH parses below, which is why it is quoted here and the whole
+            // command is quoted again by `sh_word`.
+            Some(p) => format!(" --settings {}", sh_word(&p.display().to_string())),
+            None => String::new(),
+        };
+        format!(
+            "{shell} -l -i -c {}",
+            sh_word(&format!("exec {runtime}{flag}"))
+        )
     }
+}
+
+/// One shell word, quoted so a shell hands it back exactly as given.
+///
+/// The launch string is parsed TWICE and that is what makes this necessary
+/// (MAIN-620's review): tmux runs `spawn`'s command through `/bin/sh -c`, which
+/// tokenizes it into the login shell's argv, and the login shell then parses
+/// its own `-c` word as a command line. Quoting the path inside an already
+/// single-quoted `-c` word does not nest — it CLOSES that word — so a path with
+/// a space arrived split in two and a path with an apostrophe died on
+/// *"unterminated quoted string"*, taking the session with it.
+///
+/// `'\''` is the only escape a single-quoted word has: end the quote, an
+/// escaped literal quote, start a new one. Applying it once per level is what
+/// composes.
+fn sh_word(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 /// Can the login shell actually find this runtime?
@@ -341,12 +375,16 @@ pub fn new_session(
         extra.push(("NOOK_PORTS_UNSATISFIED", skipped.as_str()));
     }
     extra.extend_from_slice(extra_env);
+    // A person's terminal session, so it gets the same narrowed gate a chat
+    // does (MAIN-620 AC-4). Loop jobs go through `new_job_session`, which does
+    // not come through here — their posture is untouched (AC-5/NG-1).
+    let settings = crate::human_permissions::settings_for(command, std::path::Path::new(cwd));
     spawn(
         name,
         cwd,
         cols,
         rows,
-        &login_command(command),
+        &login_command(command, settings.as_deref()),
         session_id,
         workspace_id,
         tenant_id,
@@ -849,6 +887,134 @@ mod tests {
         assert!(
             !stock.contains(WHEEL_MARKER),
             "must NOT match tmux's default, or an unconfigured server looks configured"
+        );
+    }
+}
+
+#[cfg(test)]
+mod human_permission_tests {
+    //! MAIN-620 AC-4: the TUI and the structured chat get the SAME posture.
+    //!
+    //! A person on a phone can answer a prompt in a chat; they cannot
+    //! comfortably answer one inside a tmux pane. So the two surfaces must not
+    //! be able to disagree about what is worth asking — and the way that is
+    //! guaranteed is that both load `human_permissions`' one document.
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn a_tui_runtime_launches_with_the_managed_document() {
+        let cmd = login_command("claude", Some(Path::new("/var/lib/nook/perm.json")));
+        assert!(cmd.contains("--settings"), "{cmd}");
+        // Nothing else about the launch moves: still an exec'd login shell, or
+        // quitting the runtime stops ending the window. That the PATH arrives
+        // intact is the both-levels test's job — asserting it as a raw
+        // substring here is what let the broken quoting through review.
+        assert!(cmd.contains(" -l -i -c 'exec claude"), "{cmd}");
+    }
+
+    /// No document — an unwritable config dir, or a node that has not upgraded
+    /// its `$HOME` — must leave the launch byte-identical to the pre-MAIN-620
+    /// one, because that is the posture it falls back to.
+    #[test]
+    fn a_document_that_could_not_be_written_leaves_the_launch_alone() {
+        assert_eq!(
+            login_command("claude", None),
+            format!("{} -l -i -c 'exec claude'", login_shell())
+        );
+    }
+
+    /// A shell session has no agent and therefore no gate to narrow. Passing it
+    /// a settings flag would hand `bash` an argument it would take as a script.
+    #[test]
+    fn a_shell_never_carries_it() {
+        let cmd = login_command("bash", Some(Path::new("/var/lib/nook/perm.json")));
+        assert_eq!(cmd, "bash -l");
+    }
+
+    /// The launch survives BOTH parses, for a path a real `$HOME` can produce.
+    ///
+    /// This replaces an assertion that certified the broken form: it checked a
+    /// literal substring and that the string ended in a quote, and both were
+    /// true of a command `sh` refuses to parse at all. So the property is
+    /// checked the only way that means anything — by handing the string to a
+    /// real shell at each level and reading back what it produced.
+    #[test]
+    fn the_launch_survives_both_levels_of_shell_parsing() {
+        for path in [
+            "/home/ryan/.config/nook/session-permissions/ab12.json",
+            // A space: used to arrive as two arguments, so `--settings` named a
+            // path that does not exist.
+            "/home/john doe/.config/nook/perm.json",
+            // An apostrophe: used to be an unterminated quoted string, so the
+            // pane died and the TUI session never started.
+            "/home/o'brien/.config/nook/perm.json",
+        ] {
+            let launch = login_command("claude", Some(Path::new(path)));
+
+            // Level 1 — tmux runs the whole launch through `/bin/sh -c`, which
+            // tokenizes it into the login shell's argv. What comes back must be
+            // the `-c` word, whole.
+            let quoted = launch.split_once(" -c ").expect("a -c word").1;
+            let c_word = sh(&format!("printf %s {quoted}"));
+            assert_eq!(
+                c_word,
+                format!("exec claude --settings {}", sh_word(path)),
+                "level 1 lost the -c word for {path}"
+            );
+
+            // Level 2 — and the login shell parses THAT as a command line. The
+            // runtime is swapped for a `printf` so the argv is readable without
+            // claude installed; the arguments are byte-identical either way.
+            let args = c_word
+                .strip_prefix("exec claude")
+                .expect("the runtime leads the command");
+            let argv = sh(&format!(r"printf '%s\n'{args}"));
+            assert_eq!(
+                argv.lines().collect::<Vec<_>>(),
+                vec!["--settings", path],
+                "level 2 lost the path for {path}"
+            );
+        }
+    }
+
+    /// Run a script through a real `/bin/sh` and return its stdout. The point
+    /// of the test above is that no hand-rolled tokenizer of ours is judging
+    /// this — the shell that will run it is.
+    fn sh(script: &str) -> String {
+        let out = Command::new("/bin/sh")
+            .args(["-c", script])
+            .output()
+            .expect("a shell");
+        assert!(
+            out.status.success(),
+            "the shell refused to parse it: {script}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    /// Both human surfaces resolve the document through the SAME function, so
+    /// neither can grow a list of its own (AC-4). A source guard because the
+    /// alternative is launching two real agents to compare what they ask about.
+    #[test]
+    fn both_human_surfaces_read_one_policy() {
+        for (file, what) in [("tmux.rs", "the TUI"), ("chat.rs", "the chat")] {
+            let src = std::fs::read_to_string(format!("{}/src/{file}", env!("CARGO_MANIFEST_DIR")))
+                .expect("readable");
+            let code = src.split("\n#[cfg(test)]").next().unwrap_or_default();
+            assert!(
+                code.contains("human_permissions::settings_for("),
+                "{what} must take its permission policy from human_permissions"
+            );
+        }
+        // …and a loop job must not. Its posture is `Permissions::Skip`, and
+        // MAIN-620 NG-1 says that does not move.
+        let job = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/loop_job.rs"))
+            .expect("readable");
+        assert!(
+            !job.contains("human_permissions"),
+            "a headless loop job keeps --dangerously-skip-permissions (NG-1)"
         );
     }
 }
