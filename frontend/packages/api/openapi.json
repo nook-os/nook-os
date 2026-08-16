@@ -1187,6 +1187,91 @@
         }
       }
     },
+    "/api/v1/email/poller": {
+      "get": {
+        "tags": [
+          "crate::routes::email"
+        ],
+        "summary": "`GET /api/v1/email/poller` — the tenant's IMAP poller, or a 404.",
+        "description": "Never the password, and never the sealed bytes either: see\n[`nook_types::EmailPoller`] for why the response type has no field they\ncould travel in.",
+        "operationId": "get_email_poller",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmailPoller"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "crate::routes::email"
+        ],
+        "summary": "`PUT /api/v1/email/poller` — configure the mailbox this tenant polls.",
+        "description": "The password is sealed with the deployment's vault key HERE, before it\nreaches the repository, and the repository takes only sealed bytes — so\nthere is no path that stores a plaintext one by forgetting to (AC-4).\n\nGated on `tenant.manage` like every other tenant-wide setting: a poller\nfiles cards on the tenant's board and spends its investigate runs, and the\ncredential it holds is the tenant's, not the writer's.",
+        "operationId": "put_email_poller",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateEmailPollerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmailPoller"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "428": {
+            "description": ""
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "crate::routes::email"
+        ],
+        "summary": "`DELETE /api/v1/email/poller` — stop polling and forget the credential.",
+        "operationId": "delete_email_poller",
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/events": {
       "get": {
         "tags": [
@@ -13026,6 +13111,58 @@
           }
         }
       },
+      "EmailPoller": {
+        "type": "object",
+        "description": "The IMAP mailbox a tenant polls for support mail (MAIN-333), as the API\nreports it.\n\nThere is deliberately no password field. AC-4 puts the credential in the\nvault, and a response type that could carry it is how a sealed secret ends\nup in a browser's network tab, a log, or a support screenshot — `has_password`\nanswers the only question a caller actually has.",
+        "required": [
+          "host",
+          "port",
+          "username",
+          "has_password",
+          "mailbox",
+          "poll_interval_secs",
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "has_password": {
+            "type": "boolean"
+          },
+          "host": {
+            "type": "string"
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_polled_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the last poll ran, and what it said if it failed. Both are how an\noperator sees a mailbox that has stopped working without a shell on the\nbox."
+          },
+          "mailbox": {
+            "type": "string"
+          },
+          "poll_interval_secs": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "username": {
+            "type": "string"
+          }
+        }
+      },
       "EmailVerificationStatus": {
         "type": "object",
         "description": "Whether the signed-in user's email is verified, and whether a local\nverification round-trip applies to them (MAIN-30).",
@@ -19792,6 +19929,56 @@
         ],
         "properties": {
           "body_md": {
+            "type": "string"
+          }
+        }
+      },
+      "UpdateEmailPollerRequest": {
+        "type": "object",
+        "description": "Configure the poller. A full replacement, not a patch: the password is\nrequired on every write because there is no read path to carry the old one\nforward, and a partial update that silently kept a credential would make\n\"change the account\" a two-call operation nobody would guess at.",
+        "required": [
+          "host",
+          "username",
+          "password"
+        ],
+        "properties": {
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Defaults to true. `false` keeps the configuration and stops the polling."
+          },
+          "host": {
+            "type": "string"
+          },
+          "mailbox": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Defaults to `INBOX`."
+          },
+          "password": {
+            "type": "string",
+            "description": "Sealed with the deployment's vault key before it is stored, and never\nreturned by anything."
+          },
+          "poll_interval_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "port": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Implicit TLS. Defaults to 993."
+          },
+          "username": {
             "type": "string"
           }
         }

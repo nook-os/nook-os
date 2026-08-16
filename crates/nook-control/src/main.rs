@@ -231,6 +231,15 @@ async fn serve(db: nook_db::DbPool, cfg: Config) -> Result<()> {
     // lookup a tick and nothing else.
     nook_control::services::build_loop::start(state.clone());
 
+    // Poll the mailboxes tenants configured, feeding the same inbound-email
+    // pipeline the provider webhook does (MAIN-333). Not gated on
+    // `loops.enabled`: receiving support mail is not loop work, and a tenant
+    // that turned loops off still wants its reports filed. With no poller
+    // configured this is one small scan every fifteen seconds and nothing else —
+    // `email_pollers` holds at most one row per tenant, so it carries no index
+    // beyond its primary key.
+    nook_control::services::email_imap::start(state.clone());
+
     // Converge sessions to what workspaces declare (MAIN-316). Every replica
     // runs it; a partial unique index on live managed sessions per
     // (workspace, node) is what makes one starter win rather than a lease.

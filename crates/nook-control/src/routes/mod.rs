@@ -584,6 +584,15 @@ pub fn build_router(state: AppState) -> Router {
                 crate::config::DEFAULT_USER_CONTENT_MAX_BYTES as usize,
             )),
         )
+        // Authenticated and tenant-scoped, unlike the delivery route above:
+        // this is configuration a tenant admin writes, and it carries the
+        // credential the poller logs in with (MAIN-333).
+        .route(
+            "/email/poller",
+            get(email::get_poller)
+                .put(email::put_poller)
+                .delete(email::delete_poller),
+        )
         .route("/dispatcher/suggest", post(dispatcher::suggest))
         .route("/schedule/node", get(schedule::node))
         .route("/events", get(events::list))

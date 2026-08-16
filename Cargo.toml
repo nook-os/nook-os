@@ -104,6 +104,11 @@ hmac = "0.12"
 aes-gcm = "0.10"
 rand = "0.9"
 dotenvy = "0.15"
+# RFC 5322 / MIME parsing for the IMAP source (MAIN-333). A polled mailbox
+# hands over whole messages, where the inbound-parse webhook handed over a JSON
+# envelope somebody else had already decoded — so this is the one thing the
+# second source needs that the first did not.
+mail-parser = "0.11"
 toml = "0.8"
 walkdir = "2"
 # Test-only so far: the installer asserts its generated Traefik rule against a

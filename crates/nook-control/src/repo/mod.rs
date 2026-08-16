@@ -14,6 +14,7 @@
 pub mod admin;
 pub mod attachments;
 pub mod email_links;
+pub mod email_pollers;
 pub mod forge_deliveries;
 pub mod identity;
 pub mod invites;
