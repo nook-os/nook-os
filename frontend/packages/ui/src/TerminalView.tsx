@@ -8,6 +8,7 @@ import { ClipboardAddon } from "@xterm/addon-clipboard";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { terminalTheme, useTheme } from "./theme";
+import { attachTouchScroll } from "./terminalTouchScroll";
 
 // Bundled JuliaMono is primary for the terminal: it's the one monospace face
 // that covers every glyph a TUI throws at it — box-drawing, blocks, shapes,
@@ -302,6 +303,17 @@ export function TerminalView({
     };
     host.addEventListener("auxclick", onAuxClick);
 
+    // Touch scrolling (MAIN-621). tmux holds every line of history and the
+    // wheel is what reaches it, so a finger drag is translated into the very
+    // same wheel events rather than into a scroll this side of the socket —
+    // under `scrollback: 0` there is nothing local to scroll. The listeners go
+    // on the host (touches anywhere in the terminal bubble to it) while the
+    // wheel is dispatched at xterm's element, where xterm's own listener lives.
+    const detachTouchScroll = attachTouchScroll(host, {
+      wheelTarget: () => term.element ?? null,
+      rowHeight: () => (term.rows > 0 ? host.clientHeight / term.rows : 0),
+    });
+
     const transport = attach({
       onOutput: (bytes) => term.write(bytes),
       onStatus: (status) => {
@@ -390,6 +402,7 @@ export function TerminalView({
       vv?.removeEventListener("resize", onViewport);
       host.removeEventListener("paste", onPaste, true);
       host.removeEventListener("auxclick", onAuxClick);
+      detachTouchScroll();
       dataSub.dispose();
       transport.close();
       term.dispose();
