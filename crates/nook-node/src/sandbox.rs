@@ -34,6 +34,15 @@ pub const DEFAULT_IMAGE: &str = "nook-job-sandbox:latest";
 /// other way.
 pub const HOST_GATEWAY: &str = "HOST_GATEWAY";
 
+/// The NAME a container reaches the host by, aliased to the gateway with
+/// `--add-host`.
+///
+/// It is not `localhost`, and it cannot be: Docker writes `127.0.0.1 localhost`
+/// into every container's `/etc/hosts` before any `--add-host` of ours, the
+/// resolver takes the first match, and the alias is silently shadowed. Aliasing
+/// a name with no built-in entry is the only form that survives.
+pub const HOST_ALIAS: &str = "host.docker.internal";
+
 /// The address space a job container may not reach (AC-5): RFC1918 plus
 /// link-local. No SSH to a NAS, no scanning the LAN, no cloud metadata service.
 ///
@@ -221,6 +230,10 @@ pub struct SandboxSpec {
     /// loopback, whose NAME has to resolve to the gateway inside or the agent's
     /// `nook` cannot reach the board it was issued a token for.
     pub add_hosts: Vec<String>,
+    /// The control-plane URL **as spelled inside the container**
+    /// ([`server_for_container`]). Empty means "say nothing", which is what the
+    /// escape suite uses — it attacks the box, it does not talk to a board.
+    pub server: String,
     /// The uid/gid the AGENT runs as inside. The container itself is root (the
     /// nested daemon and the firewall need that); the agent is not, so what it
     /// writes into the bind-mounted checkout is owned by the node's user and
@@ -379,6 +392,18 @@ pub fn run_args(spec: &SandboxSpec) -> Vec<String> {
     a
 }
 
+/// Rewrite `<name>:host-gateway` entries onto a concrete address.
+///
+/// Pure so the substitution is assertable without Docker; see the caller in
+/// [`Sandbox::start`] for why the network's own gateway is the right address.
+pub fn pin_host_alias(add_hosts: &mut [String], gateway: &str) {
+    for entry in add_hosts {
+        if let Some(name) = entry.strip_suffix(":host-gateway") {
+            *entry = format!("{name}:{gateway}");
+        }
+    }
+}
+
 fn bind(host: &Path, container: &Path) -> String {
     format!("{}:{}", host.display(), container.display())
 }
@@ -416,7 +441,12 @@ pub const HOST_CHAIN: &str = "NOOK-SANDBOX";
 /// `docker network create` in `Sandbox::start` takes the daemon's default,
 /// which is v4-only unless an operator has turned on IPv6 — which is why this
 /// is a note rather than an `ip6tables` twin nothing would exercise.
-pub fn host_rules(subnet: &str, allow: &[String], gateway: Option<&str>) -> Vec<Vec<String>> {
+pub fn host_rules(
+    subnet: &str,
+    allow: &[String],
+    port: &str,
+    gateway: Option<&str>,
+) -> Vec<Vec<String>> {
     let mut out = Vec::new();
     for addr in allow {
         // A control plane on the host's loopback is reached through the
@@ -427,11 +457,44 @@ pub fn host_rules(subnet: &str, allow: &[String], gateway: Option<&str>) -> Vec<
             (HOST_GATEWAY, None) => continue,
             (a, _) => a.to_string(),
         };
+        // The exception is scoped to the control plane's ADDRESS AND PORT, not
+        // its address alone. On a single-box or dev install the control plane
+        // shares the docker gateway with every other published service — the
+        // database, the object store, the web app — and an address-only RETURN
+        // let a job reach all of them: measured, `curl gw:4446` connected
+        // straight to the dev Postgres. Only the one port the token is for is
+        // opened.
+        //
+        // Two forms per exception, because a published control plane is DNAT'ed
+        // before the filter table runs — by then `-d` is its container address
+        // inside `172.16/12`, dropped by the very next rules, so without the
+        // conntrack form the agent cannot reach the board that issued its
+        // token. `--ctorigdstport` matches the ORIGINAL (pre-DNAT) port; the
+        // `-d`/`--dport` form covers a control plane that is not DNAT'ed at all,
+        // the ordinary remote case.
+        out.push(vec![
+            "-s".into(),
+            subnet.into(),
+            "-p".into(),
+            "tcp".into(),
+            "-m".into(),
+            "conntrack".into(),
+            "--ctorigdst".into(),
+            target.clone(),
+            "--ctorigdstport".into(),
+            port.into(),
+            "-j".into(),
+            "RETURN".into(),
+        ]);
         out.push(vec![
             "-s".into(),
             subnet.into(),
             "-d".into(),
             target,
+            "-p".into(),
+            "tcp".into(),
+            "--dport".into(),
+            port.into(),
             "-j".into(),
             "RETURN".into(),
         ]);
@@ -470,7 +533,7 @@ pub fn host_rules(subnet: &str, allow: &[String], gateway: Option<&str>) -> Vec<
 /// two ways (see [`host_rules`], which is where the policy actually holds). It
 /// stays because it costs nothing, it fails a packet earlier, and it is the
 /// only policy a profile with no nested daemon can be evaded through at all.
-pub fn egress_script(allow: &[String]) -> String {
+pub fn egress_script(allow: &[String], port: &str) -> String {
     let mut s = String::from("set -e\n");
     s.push_str("EXT=$(ip route show default | awk '{print $5; exit}')\n");
     s.push_str("GW=$(ip route show default | awk '{print $3; exit}')\n");
@@ -487,8 +550,11 @@ pub fn egress_script(allow: &[String]) -> String {
         } else {
             addr.clone()
         };
+        // Port-scoped for the same reason the host chain is: the gateway hosts
+        // every published dev-stack service, and an address-only ACCEPT would
+        // reopen the ones the drops below are meant to close.
         s.push_str(&format!(
-            "iptables -A OUTPUT -o \"$EXT\" -d {target} -j ACCEPT\n"
+            "iptables -A OUTPUT -o \"$EXT\" -d {target} -p tcp --dport {port} -j ACCEPT\n"
         ));
     }
     for range in PRIVATE_RANGES {
@@ -514,6 +580,15 @@ pub struct Sandbox {
     /// The addresses this job's host rules let through, kept so teardown can
     /// delete each rule by the exact spec it was added with.
     allow: Vec<String>,
+    /// The one control-plane port those addresses are opened on. The exception
+    /// is address+port, never address alone — the gateway hosts every other
+    /// published service too (MAIN-611 review: an address-only rule reached the
+    /// dev Postgres).
+    allow_port: String,
+    /// The control-plane URL the agent inside must use. Held here so ONE place
+    /// decides it: both drivers launch through this type, and a second copy of
+    /// the loopback rewrite is a second chance to get it wrong.
+    server: String,
     uid: u32,
     gid: u32,
 }
@@ -543,6 +618,10 @@ impl Sandbox {
             subnet: subnet.clone(),
             image: spec.image.clone(),
             allow: spec.allow.clone(),
+            allow_port: host_and_port(&spec.server)
+                .map(|(_, p)| p)
+                .unwrap_or_else(|| "8080".into()),
+            server: spec.server.clone(),
             uid: spec.agent_uid,
             gid: spec.agent_gid,
         };
@@ -550,7 +629,18 @@ impl Sandbox {
             sb.stop();
             return Err(format!("could not apply the sandbox egress policy: {e}"));
         }
-        let args = run_args(spec);
+        // `--add-host <name>:host-gateway` names DOCKER's idea of the host, and
+        // on Docker Desktop that is a proxy address in 192.168/16 — a range the
+        // policy above drops, so the alias resolved to an address the agent was
+        // then forbidden to reach and every `nook` call inside failed. This
+        // network's gateway serves the same published ports and IS what
+        // `HOST_GATEWAY` resolves to in `host_rules`, so pinning the alias to it
+        // makes the name and the policy one decision instead of two.
+        let mut spec = spec.clone();
+        if let Some(gw) = sb.gateway() {
+            pin_host_alias(&mut spec.add_hosts, &gw);
+        }
+        let args = run_args(&spec);
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
         if let Err(e) = docker(&argv) {
             sb.stop();
@@ -564,7 +654,7 @@ impl Sandbox {
         // before the daemon is waited for, so there is no window in which
         // anything inside has a route out that the host policy has not already
         // closed anyway.
-        let script = egress_script(&spec.allow);
+        let script = egress_script(&spec.allow, &sb.allow_port);
         if let Err(e) = docker(&["exec", &name, "sh", "-c", &script]) {
             sb.stop();
             return Err(format!("could not apply the sandbox egress policy: {e}"));
@@ -612,7 +702,12 @@ impl Sandbox {
             .map_err(|e| format!("could not hook {HOST_CHAIN} into DOCKER-USER: {e}"))?;
         }
         let gateway = self.gateway();
-        for rule in host_rules(&self.subnet, &self.allow, gateway.as_deref()) {
+        for rule in host_rules(
+            &self.subnet,
+            &self.allow,
+            &self.allow_port,
+            gateway.as_deref(),
+        ) {
             let mut args = vec!["-A".to_string(), HOST_CHAIN.to_string()];
             args.extend(rule);
             self.host_iptables(&args)
@@ -631,7 +726,12 @@ impl Sandbox {
     /// Best effort otherwise: a rule already gone is the state we wanted.
     fn remove_host_policy(&self) {
         let gateway = self.gateway();
-        for rule in host_rules(&self.subnet, &self.allow, gateway.as_deref()) {
+        for rule in host_rules(
+            &self.subnet,
+            &self.allow,
+            &self.allow_port,
+            gateway.as_deref(),
+        ) {
             let mut args = vec!["-D".to_string(), HOST_CHAIN.to_string()];
             args.extend(rule);
             let _ = self.host_iptables(&args);
@@ -755,7 +855,7 @@ impl Sandbox {
 
     /// What every launch inside gets, sandbox or not.
     fn base_env(&self) -> Vec<(&str, &str)> {
-        vec![
+        let mut env = vec![
             ("HOME", AGENT_HOME),
             // The node's own session, mounted (AC-7). Same variable the
             // containerised nodes already set, so there is one convention.
@@ -763,7 +863,16 @@ impl Sandbox {
             ("LANG", "C.UTF-8"),
             ("LC_ALL", "C.UTF-8"),
             ("NOOK_SANDBOX", "1"),
-        ]
+        ];
+        // Written by VALUE rather than forwarded by name, because the name is
+        // the one thing the launching shell cannot be trusted to hold: the
+        // node reads its server from `node.toml`, so `docker exec -e
+        // NOOK_SERVER` would carry nothing at all — and where the variable IS
+        // set it holds the host's spelling, which does not resolve in here.
+        if !self.server.is_empty() {
+            env.push(("NOOK_SERVER", &self.server));
+        }
+        env
     }
 
     /// Remove the container, and with it every process the job started.
@@ -959,6 +1068,48 @@ pub fn host_and_port(server: &str) -> Option<(String, String)> {
     (!host.is_empty()).then(|| (host.to_string(), port.to_string()))
 }
 
+/// The control-plane URL as the AGENT must spell it.
+///
+/// A loopback URL is the HOST's loopback; inside the container the same string
+/// means the container's own, where nothing listens — so every `nook` call in a
+/// sandboxed agent died with `Connection refused` and the run ended at its
+/// preflight. Rewriting the host onto [`HOST_ALIAS`] is what makes the token
+/// the agent was issued usable against the board that issued it.
+///
+/// Any other host is returned unchanged: a real control plane resolves the same
+/// inside the container as out.
+pub fn server_for_container(server: &str) -> String {
+    let Some((host, _)) = host_and_port(server) else {
+        return server.to_string();
+    };
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    if !loopback {
+        return server.to_string();
+    }
+    // Replaced in the AUTHORITY only. A path or a query may legitimately repeat
+    // the host name, and rewriting those would silently edit an unrelated value.
+    let (scheme, rest) = match server.split_once("://") {
+        Some((s, r)) => (format!("{s}://"), r),
+        None => (String::new(), server),
+    };
+    let (authority, tail) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, ""),
+    };
+    let port = authority
+        .rsplit_once(':')
+        .and_then(|(_, p)| (!p.is_empty() && p.chars().all(|c| c.is_ascii_digit())).then_some(p));
+    match port {
+        Some(p) => format!("{scheme}{HOST_ALIAS}:{p}{tail}"),
+        None => format!("{scheme}{HOST_ALIAS}{tail}"),
+    }
+}
+
 /// The addresses the egress policy lets through: the control plane, resolved
 /// now, on this node.
 ///
@@ -1063,6 +1214,7 @@ mod escapes {
                 ports: Vec::new(),
                 allow: Vec::new(),
                 add_hosts: Vec::new(),
+                server: String::new(),
                 agent_uid: 1000,
                 agent_gid: 1000,
             };
@@ -1533,6 +1685,7 @@ mod tests {
             ports: vec![4201, 4202],
             allow: vec!["203.0.113.7".into()],
             add_hosts: Vec::new(),
+            server: String::new(),
             agent_uid: 1000,
             agent_gid: 1000,
         }
@@ -1724,18 +1877,29 @@ mod tests {
     /// traffic is caught by the same rule as the job container's own.
     #[test]
     fn the_host_policy_drops_every_private_range_for_the_job_subnet() {
-        let rules = host_rules("172.30.0.0/16", &["203.0.113.7".into()], None);
+        let rules = host_rules("172.30.0.0/16", &["203.0.113.7".into()], "4442", None);
         let flat: Vec<String> = rules.iter().map(|r| r.join(" ")).collect();
-        assert_eq!(flat[0], "-s 172.30.0.0/16 -d 203.0.113.7 -j RETURN");
+        // Two allow forms per address, both scoped to the control-plane PORT:
+        // the ORIGINAL destination (a control plane published on this machine is
+        // DNAT'ed before the filter table sees it) and the current one. Address
+        // alone would open every other service on the gateway.
+        assert_eq!(
+            flat[0],
+            "-s 172.30.0.0/16 -p tcp -m conntrack --ctorigdst 203.0.113.7 --ctorigdstport 4442 -j RETURN"
+        );
+        assert_eq!(
+            flat[1],
+            "-s 172.30.0.0/16 -d 203.0.113.7 -p tcp --dport 4442 -j RETURN"
+        );
         for (i, range) in PRIVATE_RANGES.iter().enumerate() {
             assert_eq!(
-                flat[i + 1],
+                flat[i + 2],
                 format!(
                     "-s 172.30.0.0/16 -d {range} -j REJECT --reject-with icmp-admin-prohibited"
                 )
             );
         }
-        assert_eq!(flat.len(), PRIVATE_RANGES.len() + 1);
+        assert_eq!(flat.len(), PRIVATE_RANGES.len() + 2);
         // Every rule names the job's own subnet: a rule without one would
         // police the whole machine, and a rule with somebody else's would
         // police the wrong job.
@@ -1749,7 +1913,7 @@ mod tests {
     /// a rule that never runs.
     #[test]
     fn the_host_policy_lets_the_control_plane_through_before_it_drops() {
-        let rules = host_rules("10.9.0.0/16", &["192.168.1.20".into()], None);
+        let rules = host_rules("10.9.0.0/16", &["192.168.1.20".into()], "8080", None);
         let flat: Vec<String> = rules.iter().map(|r| r.join(" ")).collect();
         let allow = flat
             .iter()
@@ -1774,9 +1938,21 @@ mod tests {
     /// the rule is DROPPED rather than guessed at.
     #[test]
     fn the_host_gateway_exception_needs_a_resolved_gateway() {
-        let with = host_rules("10.9.0.0/16", &[HOST_GATEWAY.into()], Some("10.9.0.1"));
-        assert_eq!(with[0].join(" "), "-s 10.9.0.0/16 -d 10.9.0.1 -j RETURN");
-        let without = host_rules("10.9.0.0/16", &[HOST_GATEWAY.into()], None);
+        let with = host_rules(
+            "10.9.0.0/16",
+            &[HOST_GATEWAY.into()],
+            "4442",
+            Some("10.9.0.1"),
+        );
+        assert_eq!(
+            with[0].join(" "),
+            "-s 10.9.0.0/16 -p tcp -m conntrack --ctorigdst 10.9.0.1 --ctorigdstport 4442 -j RETURN"
+        );
+        assert_eq!(
+            with[1].join(" "),
+            "-s 10.9.0.0/16 -d 10.9.0.1 -p tcp --dport 4442 -j RETURN"
+        );
+        let without = host_rules("10.9.0.0/16", &[HOST_GATEWAY.into()], "4442", None);
         assert!(
             !without
                 .iter()
@@ -1792,8 +1968,8 @@ mod tests {
     fn every_rule_added_is_reproducible_for_deletion() {
         let allow = vec!["203.0.113.7".into(), "198.51.100.4".into()];
         assert_eq!(
-            host_rules("172.30.0.0/16", &allow, Some("172.30.0.1")),
-            host_rules("172.30.0.0/16", &allow, Some("172.30.0.1")),
+            host_rules("172.30.0.0/16", &allow, "4442", Some("172.30.0.1")),
+            host_rules("172.30.0.0/16", &allow, "4442", Some("172.30.0.1")),
             "the delete pass rebuilds the add pass's rules exactly"
         );
     }
@@ -1803,7 +1979,7 @@ mod tests {
     /// by address, then the four ranges.
     #[test]
     fn egress_drops_every_private_range_and_allows_the_control_plane_by_address() {
-        let s = egress_script(&["203.0.113.7".into()]);
+        let s = egress_script(&["203.0.113.7".into()], "4442");
         for range in PRIVATE_RANGES {
             assert!(
                 s.contains(&format!("-d {range} -j REJECT")),
@@ -1811,8 +1987,8 @@ mod tests {
             );
         }
         let allow = s
-            .find("-d 203.0.113.7 -j ACCEPT")
-            .expect("the control plane");
+            .find("-d 203.0.113.7 -p tcp --dport 4442 -j ACCEPT")
+            .expect("the control plane, port-scoped");
         let first_drop = s.find("-j REJECT").expect("a drop");
         assert!(
             allow < first_drop,
@@ -1832,8 +2008,8 @@ mod tests {
     /// The policy allows an ADDRESS, never a range, and never "it is private".
     #[test]
     fn a_private_control_plane_is_allowed_as_one_host_not_as_a_range() {
-        let s = egress_script(&["192.168.1.20".into()]);
-        assert!(s.contains("-d 192.168.1.20 -j ACCEPT"));
+        let s = egress_script(&["192.168.1.20".into()], "8080");
+        assert!(s.contains("-d 192.168.1.20 -p tcp --dport 8080 -j ACCEPT"));
         assert!(
             s.contains("-d 192.168.0.0/16 -j REJECT"),
             "the range around the exception stays dropped:\n{s}"
@@ -1921,6 +2097,62 @@ mod tests {
         assert_eq!(host_and_port(""), None);
     }
 
+    /// A loopback control plane is rewritten onto the alias; anything else is
+    /// left exactly as the operator wrote it.
+    ///
+    /// The bug this pins: `localhost` reached the agent verbatim, resolved to
+    /// the CONTAINER's loopback, and every `nook` call inside a sandboxed run
+    /// died with `Connection refused` — the run then "completed" having filed
+    /// nothing. `--add-host localhost:host-gateway` cannot fix it, because
+    /// Docker's own `127.0.0.1 localhost` is written first and wins.
+    #[test]
+    fn a_loopback_control_plane_is_spelled_differently_inside() {
+        assert_eq!(
+            server_for_container("http://localhost:4442"),
+            format!("http://{HOST_ALIAS}:4442")
+        );
+        assert_eq!(
+            server_for_container("http://127.0.0.1:8080/api"),
+            format!("http://{HOST_ALIAS}:8080/api")
+        );
+        assert_eq!(
+            server_for_container("http://localhost"),
+            format!("http://{HOST_ALIAS}")
+        );
+        // Not loopback: unchanged, including the port and the path.
+        assert_eq!(
+            server_for_container("https://nook.example.com"),
+            "https://nook.example.com"
+        );
+        assert_eq!(
+            server_for_container("https://nook.example.com:8443/x"),
+            "https://nook.example.com:8443/x"
+        );
+        // A host that merely CONTAINS the word is not loopback.
+        assert_eq!(
+            server_for_container("https://localhost.example.com"),
+            "https://localhost.example.com"
+        );
+        assert_eq!(server_for_container(""), "");
+    }
+
+    /// The host alias resolves to THIS network's gateway, not to Docker's own
+    /// host proxy.
+    ///
+    /// The bug this pins: on Docker Desktop `host-gateway` is a 192.168/16
+    /// address, which `host_rules` drops — so the agent resolved the control
+    /// plane to an address the very same policy forbade it to reach.
+    #[test]
+    fn the_host_alias_is_pinned_to_the_address_the_policy_allows() {
+        let mut hosts = vec![
+            format!("{HOST_ALIAS}:host-gateway"),
+            "already.pinned:203.0.113.9".to_string(),
+        ];
+        pin_host_alias(&mut hosts, "172.26.0.1");
+        assert_eq!(hosts[0], format!("{HOST_ALIAS}:172.26.0.1"));
+        assert_eq!(hosts[1], "already.pinned:203.0.113.9");
+    }
+
     #[test]
     fn a_container_name_survives_an_awkward_job_id() {
         assert_eq!(container_name("abc/def:1"), "nook-job-abc_def_1");
@@ -1937,6 +2169,8 @@ mod tests {
             subnet: "172.30.0.0/16".into(),
             image: "nook-job-sandbox:test".into(),
             allow: Vec::new(),
+            allow_port: "4442".into(),
+            server: "http://host.docker.internal:4442".into(),
             uid: 1000,
             gid: 1000,
         };
@@ -1957,6 +2191,8 @@ mod tests {
             subnet: "172.30.0.0/16".into(),
             image: "nook-job-sandbox:test".into(),
             allow: Vec::new(),
+            allow_port: "4442".into(),
+            server: "http://host.docker.internal:4442".into(),
             uid: 1000,
             gid: 1000,
         };

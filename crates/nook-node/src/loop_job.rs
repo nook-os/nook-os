@@ -1921,10 +1921,13 @@ fn start_sandbox(
     // A control plane on the host's loopback (the dev stack) is reachable only
     // through the container's gateway, and its NAME has to resolve there too or
     // the agent's `nook` cannot reach the board it holds a token for.
+    //
+    // The alias is `HOST_ALIAS`, never the URL's own host: aliasing `localhost`
+    // is written into `/etc/hosts` BEHIND Docker's own `127.0.0.1 localhost`,
+    // the resolver takes the first match, and the entry does nothing. So the
+    // URL handed to the agent is rewritten onto the alias to match.
     if allow.iter().any(|a| a == sandbox::HOST_GATEWAY) {
-        if let Some((host, _)) = sandbox::host_and_port(&server) {
-            add_hosts.push(format!("{host}:host-gateway"));
-        }
+        add_hosts.push(format!("{}:host-gateway", sandbox::HOST_ALIAS));
     }
     let spec = sandbox::SandboxSpec {
         job_id: job_id.to_string(),
@@ -1945,6 +1948,7 @@ fn start_sandbox(
             .collect(),
         allow,
         add_hosts,
+        server: sandbox::server_for_container(&server),
         // The container is root — the nested daemon and the firewall need it —
         // and the AGENT is not. What it writes into the bind-mounted checkout is
         // owned by the node's user, so the prune that follows can delete it
@@ -2138,9 +2142,18 @@ fn drive_streaming(
     // `nook login` on this machine — on a shared operator node, one human in one
     // tenant, which is how a job for another tenant's workspace listed the wrong
     // boards and drafted against the wrong one.
+    //
+    // The URL is spelled as the agent must use it where it RUNS. A sandboxed
+    // agent is in a container, and this node's own spelling of a loopback
+    // control plane means the CONTAINER's loopback there — nothing listens on
+    // it, so `nook` preflight fails and the run ends having done nothing.
+    let server_env = match sandbox {
+        Some(_) => crate::sandbox::server_for_container(identity.server),
+        None => identity.server.to_string(),
+    };
     if let Some(t) = identity.token.filter(|t| !t.trim().is_empty()) {
         env.push(("NOOK_TOKEN", t));
-        env.push(("NOOK_SERVER", identity.server));
+        env.push(("NOOK_SERVER", &server_env));
     }
     // The ports this run leased (MAIN-552), each under the variable the
     // WORKSPACE named — so `dev-up.sh` in the worktree binds them instead of

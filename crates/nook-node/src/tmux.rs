@@ -493,7 +493,11 @@ const SESSION_ENV_FORWARDED: &[&str] = &[
     // streaming adapter passes them itself), which is exactly why it is worth
     // fixing before the next runtime change finds it.
     "NOOK_TOKEN",
-    "NOOK_SERVER",
+    // `NOOK_SERVER` is deliberately NOT here: the node reads its server from
+    // `node.toml`, so forwarding the name carries nothing, and where the
+    // variable is set it holds the host's spelling of a loopback control plane,
+    // which resolves to the container's own loopback inside. `Sandbox` writes
+    // the container's spelling by value instead.
 ];
 
 /// Type a line into a session and press Enter — how a loop job drives its skill
