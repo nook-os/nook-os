@@ -722,10 +722,16 @@ pub enum ControlToNode {
         tmux_session: String,
         action: WindowAction,
     },
-    /// Create a brand-new empty git project under the node's workspace root.
+    /// Create a brand-new git project under the node's workspace root, with
+    /// the scaffold `gitops::init_project` writes.
     InitProject {
         request_id: uuid::Uuid,
         name: String,
+        /// What the project is, in the creator's words. Rides in optionally
+        /// (MAIN-619 AC-8) so a control plane that does not send it — or a
+        /// caller that had nothing to say — still gets everything else.
+        #[serde(default)]
+        description: Option<String>,
     },
     /// Read a session's terminal screen (plus history tail) as plain text —
     /// the observe half of programmatic session control. Replied via

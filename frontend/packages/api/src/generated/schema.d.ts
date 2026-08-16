@@ -6093,6 +6093,12 @@ export interface components {
             task_key?: string | null;
         };
         InitProjectRequest: {
+            /**
+             * @description Free text describing the project. Optional, and absent is not blank:
+             *     with nothing here the scaffold carries no description section at all
+             *     rather than an empty heading (MAIN-619 AC-7).
+             */
+            description?: string | null;
             name: string;
         };
         /**

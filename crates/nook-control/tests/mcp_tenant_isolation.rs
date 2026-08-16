@@ -358,7 +358,7 @@ async fn every_tenant_scoped_tool_refuses_another_tenants_names() {
         (
             "create_project",
             Box::pin(async {
-                mcp.create_project(c(), "p".into(), Some(a.node_name.clone()))
+                mcp.create_project(c(), "p".into(), None, Some(a.node_name.clone()))
                     .await
                     .map(drop)
             }),

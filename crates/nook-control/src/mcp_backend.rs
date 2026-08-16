@@ -413,13 +413,18 @@ impl NookBackend for McpBackend {
         &self,
         caller: McpCaller,
         name: String,
+        description: Option<String>,
         node: Option<String>,
     ) -> anyhow::Result<String> {
         let tenant = caller.tenant_id;
         let node_id = self.resolve_node(tenant, node).await?;
         self.run_op(
             node_id,
-            |request_id| ControlToNode::InitProject { request_id, name },
+            |request_id| ControlToNode::InitProject {
+                request_id,
+                name,
+                description,
+            },
             30,
         )
         .await

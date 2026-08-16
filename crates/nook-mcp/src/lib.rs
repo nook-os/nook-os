@@ -117,11 +117,12 @@ pub trait NookBackend: Send + Sync + 'static {
         url: String,
         node: Option<String>,
     ) -> anyhow::Result<String>;
-    /// Create a new empty git project on a node.
+    /// Create a new git project on a node, scaffolded by the node.
     async fn create_project(
         &self,
         caller: McpCaller,
         name: String,
+        description: Option<String>,
         node: Option<String>,
     ) -> anyhow::Result<String>;
     /// Add a worktree (branch) of a workspace on a node.
@@ -455,6 +456,9 @@ pub struct CloneRepoParams {
 #[derive(Deserialize, JsonSchema)]
 pub struct CreateProjectParams {
     pub name: String,
+    /// What the project is, in one or two sentences. Optional — omitting it
+    /// scaffolds the same repo without the description sections.
+    pub description: Option<String>,
     pub node: Option<String>,
 }
 
@@ -998,7 +1002,10 @@ impl NookMcp {
         Ok(CallToolResult::success(vec![ContentBlock::text(msg)]))
     }
 
-    #[tool(description = "Create a new empty git project on a node")]
+    #[tool(
+        description = "Create a new git project on a node, scaffolded with README.md, \
+                       .nook.toml, CLAUDE.md and .gitignore in one initial commit"
+    )]
     async fn create_project(
         &self,
         Extension(parts): Extension<Parts>,
@@ -1007,7 +1014,7 @@ impl NookMcp {
         let caller = require_caller(&parts)?;
         let msg = self
             .backend
-            .create_project(caller, p.name, p.node)
+            .create_project(caller, p.name, p.description, p.node)
             .await
             .map_err(backend_err)?;
         Ok(CallToolResult::success(vec![ContentBlock::text(msg)]))

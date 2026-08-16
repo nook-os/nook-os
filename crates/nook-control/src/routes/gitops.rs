@@ -609,6 +609,7 @@ pub async fn init_project(
         .request_op(node_id, |request_id| ControlToNode::InitProject {
             request_id,
             name: req.name.clone(),
+            description: req.description.clone(),
         })
         .ok_or_else(|| ApiError::BadRequest("node is offline".into()))?;
     let payload = tokio::time::timeout(std::time::Duration::from_secs(30), rx)

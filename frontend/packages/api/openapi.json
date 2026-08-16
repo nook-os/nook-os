@@ -13822,6 +13822,13 @@
           "name"
         ],
         "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Free text describing the project. Optional, and absent is not blank:\nwith nothing here the scaffold carries no description section at all\nrather than an empty heading (MAIN-619 AC-7)."
+          },
           "name": {
             "type": "string"
           }
