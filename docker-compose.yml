@@ -458,12 +458,16 @@ services:
     # and pnpm's store and cache to a mounted HOME, because this container is no
     # longer root (see the header). Without the mounted HOME the store would be
     # re-fetched into a throwaway layer on every boot.
+    # `&&` ends each line rather than starting the next: a folded scalar keeps
+    # the newlines of more-indented lines, and `sh` reads a leading `&&` as a
+    # syntax error (MAIN-537 shipped it that way and no fresh `web` container
+    # could start). A trailing `&&` is a line continuation either way.
     command: >
-      sh -c "mkdir -p $$HOME/bin
-             && corepack enable --install-directory $$HOME/bin
-             && export PATH=$$HOME/bin:$$PATH
-             && pnpm install
-             && pnpm --filter @nookos/web dev"
+      sh -c "mkdir -p $$HOME/bin &&
+             corepack enable --install-directory $$HOME/bin &&
+             export PATH=$$HOME/bin:$$PATH &&
+             pnpm install &&
+             pnpm --filter @nookos/web dev"
     environment:
       HOME: /home/web
       NOOK_API_PROXY: http://control-plane:8080
