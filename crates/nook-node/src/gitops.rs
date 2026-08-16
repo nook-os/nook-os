@@ -48,6 +48,55 @@ pub(crate) fn run_git_remote(
     run_git(args, cwd, held.as_ref().map(|k| k.path.as_path()))
 }
 
+/// The `-c` options every git the node runs on the HOST carries, so a directive
+/// planted in a repository a sandboxed agent can write cannot make the node run
+/// code as itself (MAIN-611).
+///
+/// The checkout and its mirror are mounted read-write inside the sandbox by
+/// design (AC-2), and git config and hooks ARE code: an agent that writes
+/// `hooks/post-checkout`, `core.fsmonitor`, or `core.sshCommand` into the mirror
+/// would have the node execute it — unconfined, as the node's user — on its next
+/// `worktree add`, `fetch`, prune, or discovery `status`. That is a full escape
+/// from the box through a path the box legitimately hands over.
+///
+/// Set on the NODE's own invocations only, so a planted directive is neutralised
+/// without touching what the agent may do with git INSIDE the sandbox (where it
+/// runs as the confined user and hooks firing are its own business). Global `-c`
+/// options, so they must precede the subcommand.
+///
+/// `core.sshCommand` is overridden to `ssh` rather than emptied: see the note on
+/// that entry — an empty value breaks git instead of hardening it.
+///
+/// This closes the hook / fsmonitor / sshCommand vectors named on the card. A
+/// smudge/clean filter (`.gitattributes` + `filter.<name>.smudge`) is a further
+/// checkout-time vector that a per-name `-c` cannot blanket-disable, because the
+/// filter's NAME is the attacker's choice; it is MAIN-613.
+const GIT_HARDENING: &[&str] = &[
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.fsmonitor=",
+    // `ssh`, NOT the empty string. An empty value is not "unset" — git takes it
+    // as the command and execs it, so every ssh remote dies with
+    // `error: cannot run : No such file or directory` on any path that does not
+    // also set `GIT_SSH_COMMAND`. That path is reachable: a node configured
+    // against an existing `~/.ssh` key whose file later moved gets `None` from
+    // `ssh::git_ssh_command`, and before this hardening it fell back to plain
+    // ssh and worked. Naming `ssh` neutralises a planted value just as well —
+    // the node's `-c` beats repository config either way — and keeps the
+    // fallback working. Measured both ways on git 2.34.1.
+    "-c",
+    "core.sshCommand=ssh",
+];
+
+/// `git`, hardened against a repository-local directive (see [`GIT_HARDENING`]).
+/// Every git the node runs starts here.
+pub(crate) fn hardened_git() -> Command {
+    let mut cmd = Command::new("git");
+    cmd.args(GIT_HARDENING);
+    cmd
+}
+
 /// Run a git command. Prefer [`run_git_remote`] for anything touching a remote —
 /// it owns the key handling, so there is no key argument here to forget.
 pub(crate) fn run_git(
@@ -55,7 +104,7 @@ pub(crate) fn run_git(
     cwd: Option<&Path>,
     ssh_key: Option<&Path>,
 ) -> Result<String, String> {
-    let mut cmd = Command::new("git");
+    let mut cmd = hardened_git();
     cmd.args(args);
     if let Some(cwd) = cwd {
         cmd.current_dir(cwd);
@@ -683,8 +732,8 @@ pub fn read_workspace_file(checkout_path: &str, name: &str) -> Result<Vec<u8>, S
 #[cfg(test)]
 mod tests {
     use super::{
-        add_worktree, commit_paths, remove_build_worktree, repo_path_from_url, run_git,
-        staging_path_ok,
+        add_worktree, commit_paths, hardened_git, remove_build_worktree, repo_path_from_url,
+        run_git, staging_path_ok, GIT_HARDENING,
     };
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -733,6 +782,121 @@ mod tests {
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "-qm", "c"]);
         repo
+    }
+
+    /// Every git the node runs disables the executable config a sandboxed agent
+    /// could plant in a mounted repo (MAIN-611): hooks, fsmonitor, sshCommand.
+    /// Proven end to end — a `post-checkout` hook in the source repo does NOT
+    /// run when the node checks the tree out, though git would run it otherwise.
+    #[test]
+    fn the_node_ignores_a_planted_hook_when_it_checks_out() {
+        let flat = GIT_HARDENING.join(" ");
+        assert!(flat.contains("core.hooksPath=/dev/null"), "{flat}");
+        assert!(flat.contains("core.fsmonitor="), "{flat}");
+        // The VALUE, not just the key. `core.sshCommand=` (empty) reads as
+        // hardening and is breakage: git execs the empty string and every ssh
+        // remote fails on any path that does not set `GIT_SSH_COMMAND`.
+        assert!(
+            GIT_HARDENING.contains(&"core.sshCommand=ssh"),
+            "core.sshCommand must name a real command, not be emptied: {flat}"
+        );
+        assert!(
+            !GIT_HARDENING.contains(&"core.sshCommand="),
+            "an empty core.sshCommand makes git exec the empty string: {flat}"
+        );
+
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .map(|o| !o.status.success())
+            .unwrap_or(true)
+        {
+            return; // no usable git here; the flag assertions above still hold
+        }
+        let tmp = std::env::temp_dir().join(format!("nook-hook-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let src = tmp.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let g = |args: &[&str], cwd: &Path| {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(cwd)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success(),
+                "git {args:?}"
+            );
+        };
+        g(&["init", "-b", "main"], &src);
+        g(&["config", "user.email", "t@t"], &src);
+        g(&["config", "user.name", "t"], &src);
+        std::fs::write(src.join("README"), "x").unwrap();
+        g(&["add", "."], &src);
+        g(&["commit", "-m", "c"], &src);
+        // The planted hook: a post-checkout that drops a marker. Git fires
+        // post-checkout on `worktree add`'s checkout — unless hooks are off.
+        let hooks = src.join(".git/hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let marker = tmp.join("PWNED");
+        let hook = hooks.join("post-checkout");
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh
+touch {}
+",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let wt = tmp.join("wt");
+        // The node's own worktree add, through the hardened runner.
+        let out = super::hardened_git()
+            .args([
+                "-C",
+                src.to_str().unwrap(),
+                "worktree",
+                "add",
+                wt.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "worktree add: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !marker.exists(),
+            "the planted post-checkout hook RAN — the node is not hardened"
+        );
+        // And a control: the SAME add with a plain git DOES fire it, so the
+        // test is discriminating rather than vacuous.
+        let wt2 = tmp.join("wt2");
+        let _ = std::process::Command::new("git")
+            .args([
+                "-C",
+                src.to_str().unwrap(),
+                "worktree",
+                "add",
+                wt2.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        let control_fired = marker.exists();
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(
+            control_fired,
+            "control: a plain git did not fire the hook either — test is not discriminating"
+        );
+        let _ = hardened_git; // silence unused in the git-absent path
     }
 
     #[test]

@@ -299,8 +299,8 @@ fake remote on a node that never reports. The dogfood workspace is the opposite
     agent that has Docker. Closing it needs an authorization plugin on the
     nested daemon, `--userns-remap`, or a filtering socket proxy; `dockerd` has
     no "refuse privileged" flag, and a partial filter would be worse than the
-    honest limitation. **Do not describe `build` confinement as a boundary
-    against a hostile agent until that card lands.** **Rootless DinD was the first choice and does not
+    honest limitation. **MAIN-612; do not describe `build` confinement as a
+    boundary against a hostile agent until it lands.** **Rootless DinD was the first choice and does not
   work** — `rootlesskit` dies on `newuidmap … Operation not permitted` in any
   container that is not privileged, and Docker's own docs say `dind-rootless`
   still wants `--privileged`, which would be the weaker box with extra steps.

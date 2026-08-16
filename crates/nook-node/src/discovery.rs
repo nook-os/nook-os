@@ -4,10 +4,12 @@
 
 use nook_proto::DiscoveredWorkspace;
 use std::path::Path;
-use std::process::Command;
 
 fn git(dir: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git")
+    // Hardened like every git the node runs on the host: discovery reads repos a
+    // sandboxed agent can write, and `status`/`rev-parse` would fire a planted
+    // `core.fsmonitor` as the node user (MAIN-611). See `gitops::hardened_git`.
+    let out = crate::gitops::hardened_git()
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -74,7 +76,7 @@ const MAX_DIFF_BYTES: usize = 200_000;
 /// missing, permissions, ownership — answers `true` and lets the panel show
 /// whatever it can, which is the behaviour that existed before.
 fn is_git_repo(dir: &Path) -> bool {
-    let Ok(out) = Command::new("git")
+    let Ok(out) = crate::gitops::hardened_git()
         .arg("-C")
         .arg(dir)
         .args(["rev-parse", "--git-dir"])
@@ -225,6 +227,7 @@ pub fn scan(roots: &[String]) -> Vec<DiscoveredWorkspace> {
 #[cfg(test)]
 mod git_status_tests {
     use super::*;
+    use std::process::Command;
 
     /// A directory that is not a repository must say so, rather than looking
     /// like a clean one — they are otherwise byte-identical.
