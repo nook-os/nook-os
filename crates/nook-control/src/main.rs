@@ -269,6 +269,13 @@ async fn serve(db: nook_db::DbPool, cfg: Config) -> Result<()> {
     // for the case that actually happens — the browser port is the contended
     // one, since it is the port everything else in a deployment also talks to.
     let (listener, agent_listener) = bind_doors(&bind, &agent_bind).await?;
+
+    // The inbound SMTP receiver, when this deployment runs one (MAIN-334).
+    // Bound here, with the other doors, and for the same reason: a boot that is
+    // going to fail on a misconfigured mail port must fail before any node or
+    // browser is served. `None` — the shipped default — opens no socket at all.
+    let smtp_state = state.clone();
+    let smtp = nook_control::services::email_smtp::bind(&smtp_state.cfg).await?;
     let agent_router = routes::build_agent_router(state);
     match (
         agent_tls_cert.as_deref().filter(|s| !s.is_empty()),
@@ -317,6 +324,14 @@ async fn serve(db: nook_db::DbPool, cfg: Config) -> Result<()> {
         // Half-configured is a mistake worth failing on rather than quietly
         // serving plaintext to a fleet the operator believes is encrypted.
         _ => anyhow::bail!("NOOK_AGENT_TLS_CERT and NOOK_AGENT_TLS_KEY must be set together"),
+    }
+
+    if let Some(smtp) = smtp {
+        tokio::spawn(nook_control::services::email_smtp::serve(
+            smtp,
+            smtp_state,
+            wait_for_shutdown(shutdown_rx.clone()),
+        ));
     }
 
     tracing::info!(%bind, "control plane listening");

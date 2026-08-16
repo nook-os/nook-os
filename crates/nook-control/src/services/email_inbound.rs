@@ -1,28 +1,35 @@
 //! Inbound email: the normalized shape, the source trait, and the one pipeline
 //! everything downstream of a source runs (MAIN-329).
 //!
-//! ## Why a trait for something with one implementation
+//! ## Why a trait
 //!
 //! The transports differ in every way that is boring — a webhook is pushed JSON,
 //! IMAP is a polled mailbox, SMTP is a socket — and in nothing that matters
 //! after normalization. [`EmailSource`] is the seam that keeps that true:
-//! everything below [`receive`] is written once, against [`InboundEmail`], so
-//! the IMAP and SMTP sources this epic adds later are a `normalize` each and no
-//! change here.
+//! everything below [`receive_authenticated`] is written once, against
+//! [`InboundEmail`], so a source is a `normalize` and nothing else.
+//! [`ProviderWebhookSource`] and [`SmtpSource`] (MAIN-334) are both exactly
+//! that; the IMAP source this epic adds later will be too.
 //!
 //! ## The trust gate is the whole security story (HC-2)
 //!
 //! Two independent facts must both hold before a message is acted on:
 //!
-//! 1. The **signature** over the raw bytes verifies against the deployment's
-//!    inbound secret, and its timestamp is inside the replay window. This is
-//!    the only authentication the route has — it takes no session, no token and
-//!    no node principal. The window BOUNDS replay rather than preventing it: a
-//!    captured delivery re-sent inside it files a second card, because nothing
-//!    here dedupes on `message_id` yet.
-//! 2. The **provider-verified sender** — the SMTP envelope's, not the `From:`
-//!    header, which anyone can write — is on the routed tenant's support-staff
-//!    allow-list.
+//! 1. The **transport authenticated its peer**, before anything parsed a byte.
+//!    For the webhook that is the signature over the raw bytes, verified
+//!    against the deployment's inbound secret with its timestamp inside the
+//!    replay window — the route takes no session, no token and no node
+//!    principal. For the SMTP receiver it is ESMTP `AUTH` against the
+//!    deployment's relay credential, which is the same statement about the same
+//!    thing: the relay in front is who we think it is. The window BOUNDS replay
+//!    rather than preventing it: a captured delivery re-sent inside it files a
+//!    second card, because nothing here dedupes on `message_id` yet.
+//! 2. The **verified sender** — the SMTP envelope's, not the `From:` header,
+//!    which anyone can write — is on the routed tenant's support-staff
+//!    allow-list, AND something that can actually check it said it was genuine:
+//!    the provider's `spf` verdict on the webhook, the front MTA's
+//!    `Authentication-Results: … spf=pass` on the SMTP receiver. Neither source
+//!    runs SPF itself, and neither accepts a delivery that carries no verdict.
 //!
 //! Anything else is logged and dropped: no ticket, no job, no stored object.
 //! Dropping is deliberately indistinguishable from accepting at the wire level
@@ -51,6 +58,7 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
+use mailparse::MailHeaderMap as _;
 use nook_types::*;
 use serde::Deserialize;
 
@@ -319,6 +327,267 @@ impl EmailSource for ProviderWebhookSource {
     }
 }
 
+/// A message delivered straight to the receiver's own SMTP port (MAIN-334).
+///
+/// Built per transaction rather than being a unit struct, because for SMTP the
+/// envelope is a property of the **session** and not of the bytes: `MAIL FROM`
+/// and `RCPT TO` are what the relay asserted over the wire, while the `From:`
+/// and `To:` headers inside `raw` are free text the sender wrote. The webhook
+/// source reads the same two facts out of its JSON envelope, and for the same
+/// reason.
+pub struct SmtpSource {
+    /// The transaction's `MAIL FROM`, as the relay gave it.
+    pub envelope_from: String,
+    /// The transaction's `RCPT TO` list — what routes the message.
+    pub envelope_to: Vec<String>,
+    /// Which MTA's `Authentication-Results` verdict counts, when the operator
+    /// has named one. `None` trusts the topmost header on position alone —
+    /// see [`require_verified_sender`] for exactly what that gives up.
+    pub authserv_id: Option<String>,
+}
+
+/// The header a front MTA stamps its authentication verdicts into (RFC 8601).
+const AUTH_RESULTS_HEADER: &str = "Authentication-Results";
+
+/// How deep a nested multipart may go before the message is refused. Real mail
+/// reaches three or four — mixed, related, alternative, text — and a forwarded
+/// chain a couple more. Deliberately BELOW the depth `mailparse` stops
+/// descending at on its own (ten), so this is the limit that actually applies
+/// and a message past it is refused rather than silently flattened.
+const MAX_MIME_DEPTH: usize = 8;
+
+/// How many attachments one message may contribute. Each becomes a separate
+/// sealed object, so an unbounded count is an unbounded number of writes.
+const MAX_ATTACHMENTS: usize = 64;
+
+#[async_trait]
+impl EmailSource for SmtpSource {
+    fn id(&self) -> &'static str {
+        "smtp"
+    }
+
+    async fn normalize(&self, raw: &[u8]) -> ApiResult<InboundEmail> {
+        let from = bare_address(&self.envelope_from);
+        if from.is_empty() {
+            return Err(ApiError::BadRequest(
+                "the transaction carries no envelope sender".into(),
+            ));
+        }
+
+        let parsed = mailparse::parse_mail(raw)
+            .map_err(|e| ApiError::BadRequest(format!("that is not a MIME message: {e}")))?;
+
+        require_verified_sender(&parsed, self.authserv_id.as_deref())?;
+
+        let mut parts = MessageParts::default();
+        collect_parts(&parsed, 0, &mut parts)?;
+
+        let header = |name: &str| {
+            parsed
+                .headers
+                .get_first_value(name)
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+
+        Ok(InboundEmail {
+            from,
+            to: self
+                .envelope_to
+                .iter()
+                .map(|a| bare_address(a))
+                .filter(|a| !a.is_empty())
+                .collect(),
+            subject: header("Subject").unwrap_or_default(),
+            body_text: parts.text,
+            body_html: parts.html,
+            attachments: parts.attachments,
+            message_id: header("Message-Id"),
+            in_reply_to: header("In-Reply-To"),
+            // When WE took delivery, never the `Date:` header. That header is
+            // written by the sender, and it reaches the card and the log; a
+            // receipt time nobody outside this process chose is the only one
+            // worth recording.
+            received_at: Utc::now(),
+            raw: raw.to_vec(),
+        })
+    }
+}
+
+/// Refuse a message the relay in front did not authenticate the sender of.
+///
+/// This is the SMTP spelling of the webhook source's `spf` requirement, and it
+/// fails closed for the identical reason: the envelope sender is trivially
+/// forgeable, the allow-list is applied to it, and so a delivery carrying no
+/// verdict is one where the gate would be comparing against a string the sender
+/// typed. The receiver does not run SPF itself — it has no resolver and does not
+/// want one; the MTA that already did is the one that reports it.
+///
+/// **The TOPMOST header is the only one read.** A trace header is *prepended* by
+/// each hop, so the first `Authentication-Results` on the message is the one the
+/// relay that just handed it over wrote. Every other one is something an earlier
+/// hop — or the sender, who is free to put whatever they like in their own
+/// message — supplied, and reading those would let a forged header satisfy the
+/// check.
+///
+/// **Position alone is a weaker guarantee than the webhook's, which is what
+/// `authserv_id` is for.** There, the `spf` verdict arrives inside a body the
+/// HMAC covers, so a sender cannot reach it at all; here the sender writes every
+/// byte of the message and only header ORDER separates the relay's verdict from
+/// one they wrote themselves. If the front MTA stamps nothing, the attacker's own
+/// header IS the topmost. Naming the MTA (`EMAIL_SMTP_AUTHSERV_ID`) makes the
+/// check fail closed instead of depending on that MTA being configured right,
+/// and an operator who has not named one gets the position rule and the
+/// self-announcing failure it implies — legitimate mail 550s until the relay is
+/// fixed.
+fn require_verified_sender(
+    parsed: &mailparse::ParsedMail,
+    authserv_id: Option<&str>,
+) -> ApiResult<()> {
+    let stamped = parsed.headers.get_all_values(AUTH_RESULTS_HEADER);
+    let Some(value) = stamped.first() else {
+        return Err(ApiError::BadRequest(
+            concat!(
+                "the message carries no ",
+                "Authentication-Results header — nothing verified the envelope sender, so the ",
+                "allow-list cannot be applied to it",
+            )
+            .into(),
+        ));
+    };
+    if let Some(expected) = authserv_id {
+        if !reported_by(value, expected) {
+            return Err(ApiError::BadRequest(format!(
+                "the sender check was not reported by {expected}, so it is not this \
+                 deployment's relay speaking"
+            )));
+        }
+    }
+    if !spf_passed(value) {
+        return Err(ApiError::BadRequest(format!(
+            "the relay's sender check did not pass ({value})"
+        )));
+    }
+    Ok(())
+}
+
+/// Did `expected` write this `Authentication-Results` value?
+///
+/// RFC 8601 opens the value with the `authserv-id` — the reporting MTA's name —
+/// optionally followed by a version number, then the first `;`. That name is
+/// still only a claim inside the message; what it buys is that a forged header
+/// must now also know and copy the operator's chosen identifier, and a relay
+/// that stamps under its real name cannot be impersonated by a header the
+/// sender wrote before it.
+fn reported_by(value: &str, expected: &str) -> bool {
+    value
+        .split(';')
+        .next()
+        .and_then(|head| head.split_whitespace().next())
+        .is_some_and(|id| id.eq_ignore_ascii_case(expected.trim()))
+}
+
+/// Does one `Authentication-Results` value report `spf=pass`?
+///
+/// `spf` and not `dkim` or `dmarc`, because it is the envelope sender the gate
+/// compares and SPF is the method that authenticates exactly that. DKIM signs
+/// the message and DMARC aligns the `From:` header; neither says who the
+/// transaction was from.
+///
+/// The value is `authserv-id ; method=result reason… ; method=result…`, so the
+/// first `;`-separated chunk is the identifier of the MTA reporting and is
+/// skipped. Each remaining clause's FIRST token is its `method=result`.
+fn spf_passed(value: &str) -> bool {
+    value.split(';').skip(1).any(|clause| {
+        clause.split_whitespace().next().is_some_and(|token| {
+            let mut kv = token.splitn(2, '=');
+            kv.next().is_some_and(|m| m.eq_ignore_ascii_case("spf"))
+                && kv.next().is_some_and(|r| r.eq_ignore_ascii_case("pass"))
+        })
+    })
+}
+
+/// What one walk of a MIME tree found.
+#[derive(Default)]
+struct MessageParts {
+    text: Option<String>,
+    html: Option<String>,
+    attachments: Vec<InboundAttachment>,
+}
+
+/// Flatten a MIME tree into a body and a list of attachments.
+///
+/// The FIRST `text/plain` and the first `text/html` win; a later one is left in
+/// the sealed original rather than pushed onto the card as a pseudo-attachment,
+/// because a card quoting the second alternative of a forwarded thread is worse
+/// than a card quoting the first. Everything that is not text, and everything
+/// carrying a filename, is an attachment.
+fn collect_parts(
+    part: &mailparse::ParsedMail,
+    depth: usize,
+    out: &mut MessageParts,
+) -> ApiResult<()> {
+    if depth > MAX_MIME_DEPTH {
+        return Err(ApiError::BadRequest(
+            "the message nests multipart bodies deeper than this receiver accepts".into(),
+        ));
+    }
+    if !part.subparts.is_empty() {
+        for sub in &part.subparts {
+            collect_parts(sub, depth + 1, out)?;
+        }
+        return Ok(());
+    }
+
+    let mime = part.ctype.mimetype.to_ascii_lowercase();
+    let disposition = part.get_content_disposition();
+    let filename = disposition
+        .params
+        .get("filename")
+        .map(|f| f.trim().to_string())
+        .filter(|f| !f.is_empty());
+    let attached = filename.is_some()
+        || matches!(
+            disposition.disposition,
+            mailparse::DispositionType::Attachment
+        )
+        || !mime.starts_with("text/");
+
+    if attached {
+        if out.attachments.len() >= MAX_ATTACHMENTS {
+            return Err(ApiError::BadRequest(
+                "the message carries more attachments than this receiver accepts".into(),
+            ));
+        }
+        let i = out.attachments.len();
+        out.attachments.push(InboundAttachment {
+            filename: filename.unwrap_or_else(|| format!("attachment-{i}")),
+            content_type: if mime.is_empty() {
+                "application/octet-stream".into()
+            } else {
+                mime
+            },
+            bytes: part.get_body_raw().map_err(|e| {
+                ApiError::BadRequest(format!("attachment {i} does not decode: {e}"))
+            })?,
+        });
+        return Ok(());
+    }
+
+    let body = part
+        .get_body()
+        .map_err(|e| ApiError::BadRequest(format!("a text part does not decode: {e}")))?;
+    let slot = if mime == "text/html" {
+        &mut out.html
+    } else {
+        &mut out.text
+    };
+    if slot.is_none() {
+        *slot = Some(body);
+    }
+    Ok(())
+}
+
 /// What a tenant has said about the mail it receives.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct InboundConfig {
@@ -401,6 +670,25 @@ pub async fn receive(
         return Err(ApiError::Unauthorized);
     }
 
+    receive_authenticated(state, source, raw).await
+}
+
+/// The gate and the pipeline, for a transport that has ALREADY authenticated
+/// its peer by its own means (MAIN-334).
+///
+/// [`receive`] is this with the webhook's HMAC in front. The split exists
+/// because the two transports authenticate differently and share everything
+/// after: a webhook delivery is a signed HTTP body, an SMTP delivery is a
+/// session that got past `AUTH` on a listener only a relay can reach. Neither
+/// authentication says anything about the *sender* — that is the allow-list's
+/// job, below, and it is the same code for both.
+///
+/// Nothing that opens a socket may call this without authenticating first.
+pub async fn receive_authenticated(
+    state: &AppState,
+    source: &dyn EmailSource,
+    raw: &[u8],
+) -> ApiResult<Disposition> {
     let email = source.normalize(raw).await?;
 
     let (tenant, cfg) = match route(state, &email.to).await? {
@@ -1070,6 +1358,233 @@ mod tests {
         let h = parse_headers("Message-Id: <a@b>\nReferences: <one>\n <two>\nSubject: hi");
         assert_eq!(h.get("message-id").unwrap(), "<a@b>");
         assert_eq!(h.get("references").unwrap(), "<one> <two>");
+    }
+
+    /// One RFC 5322 message as a relay hands it over, `\r\n` line endings and
+    /// all.
+    fn wire(headers: &str, body: &str) -> Vec<u8> {
+        format!("{headers}\n\n{body}")
+            .replace('\n', "\r\n")
+            .into_bytes()
+    }
+
+    fn smtp() -> SmtpSource {
+        SmtpSource {
+            envelope_from: "<reporter@example.com>".into(),
+            envelope_to: vec!["support@acme.example".into()],
+            authserv_id: None,
+        }
+    }
+
+    const STAMPED: &str = "Authentication-Results: mx.acme.example; spf=pass \
+                           smtp.mailfrom=reporter@example.com; dkim=pass";
+
+    /// AC-1: a whole MIME message becomes the same normalized shape the webhook
+    /// source produces — nested alternative, transfer encodings, encoded-word
+    /// subject and an attachment included.
+    #[tokio::test]
+    async fn an_smtp_delivery_normalizes_a_mime_message() {
+        let raw = wire(
+            &format!(
+                "{STAMPED}\n\
+                 From: A Reporter <someone-else@evil.example>\n\
+                 To: support@acme.example\n\
+                 Subject: =?utf-8?q?login_500s_=E2=80=94_urgent?=\n\
+                 Message-Id: <m1@example.com>\n\
+                 In-Reply-To: <m0@example.com>\n\
+                 MIME-Version: 1.0\n\
+                 Content-Type: multipart/mixed; boundary=OUTER"
+            ),
+            "--OUTER\n\
+             Content-Type: multipart/alternative; boundary=INNER\n\
+             \n\
+             --INNER\n\
+             Content-Type: text/plain; charset=utf-8\n\
+             Content-Transfer-Encoding: quoted-printable\n\
+             \n\
+             the login page 500s when I submit=20the form\n\
+             --INNER\n\
+             Content-Type: text/html\n\
+             \n\
+             <p>the login page 500s</p>\n\
+             --INNER--\n\
+             --OUTER\n\
+             Content-Type: text/plain; name=\"trace.log\"\n\
+             Content-Disposition: attachment; filename=\"trace.log\"\n\
+             Content-Transfer-Encoding: base64\n\
+             \n\
+             aGk=\n\
+             --OUTER--\n",
+        );
+
+        let email = smtp().normalize(&raw).await.expect("parses");
+        // The ENVELOPE sender, never the `From:` header — which this message
+        // deliberately disagrees with.
+        assert_eq!(email.from, "reporter@example.com");
+        assert_eq!(email.to, vec!["support@acme.example"]);
+        assert_eq!(email.subject, "login 500s — urgent");
+        assert_eq!(
+            email.body_text.as_deref(),
+            Some("the login page 500s when I submit the form")
+        );
+        assert_eq!(
+            email.body_html.as_deref(),
+            Some("<p>the login page 500s</p>")
+        );
+        assert_eq!(email.message_id.as_deref(), Some("<m1@example.com>"));
+        assert_eq!(email.in_reply_to.as_deref(), Some("<m0@example.com>"));
+        assert_eq!(email.attachments.len(), 1);
+        assert_eq!(email.attachments[0].filename, "trace.log");
+        assert_eq!(email.attachments[0].bytes, b"hi");
+        assert_eq!(email.raw, raw, "the raw bytes are kept exactly");
+    }
+
+    /// The SMTP twin of the webhook's fail-closed `spf` rule: over SMTP the
+    /// envelope sender is whatever the peer typed, so with no verdict from
+    /// something that could check it, the allow-list has nothing to apply to.
+    #[tokio::test]
+    async fn an_smtp_delivery_needs_the_relay_to_have_checked_the_sender() {
+        let no_verdict = wire("Subject: hi", "it broke");
+        assert!(smtp().normalize(&no_verdict).await.is_err());
+
+        let failed = wire(
+            "Authentication-Results: mx.acme.example; spf=softfail\nSubject: hi",
+            "it broke",
+        );
+        assert!(smtp().normalize(&failed).await.is_err());
+
+        let passed = wire(&format!("{STAMPED}\nSubject: hi"), "it broke");
+        assert!(smtp().normalize(&passed).await.is_ok());
+    }
+
+    /// A trace header is PREPENDED by each hop, so the first one is the relay's
+    /// and every later one is the sender's own. Reading any but the first would
+    /// let a sender stamp their own pass.
+    #[tokio::test]
+    async fn only_the_relays_own_verdict_is_read() {
+        let forged = wire(
+            "Authentication-Results: mx.acme.example; spf=fail\n\
+             Authentication-Results: mx.acme.example; spf=pass\n\
+             Subject: hi",
+            "it broke",
+        );
+        assert!(
+            smtp().normalize(&forged).await.is_err(),
+            "a sender-supplied pass under the relay's fail was accepted"
+        );
+    }
+
+    /// `MAIL FROM:<>` — a bounce — has no sender the allow-list can name.
+    #[tokio::test]
+    async fn an_smtp_delivery_with_a_null_sender_is_refused() {
+        let source = SmtpSource {
+            envelope_from: String::new(),
+            envelope_to: vec!["support@acme.example".into()],
+            authserv_id: None,
+        };
+        let raw = wire(&format!("{STAMPED}\nSubject: hi"), "it broke");
+        assert!(source.normalize(&raw).await.is_err());
+    }
+
+    /// The nesting depth and the attachment count are both a sender's choice,
+    /// so both are bounded.
+    #[tokio::test]
+    async fn a_pathologically_nested_message_is_refused() {
+        let mut part = String::from("Content-Type: text/plain\n\nthe end\n");
+        for depth in (0..MAX_MIME_DEPTH + 2).rev() {
+            part = format!(
+                "Content-Type: multipart/mixed; boundary=B{depth}\n\n--B{depth}\n{part}--B{depth}--\n"
+            );
+        }
+        let raw = format!("{STAMPED}\nSubject: deep\n{part}")
+            .replace('\n', "\r\n")
+            .into_bytes();
+        assert!(smtp().normalize(&raw).await.is_err());
+    }
+
+    /// Every attachment becomes its own sealed object, so the count a sender
+    /// chooses is a number of writes they chose.
+    #[tokio::test]
+    async fn a_message_with_more_attachments_than_the_cap_is_refused() {
+        let one = "--B\nContent-Disposition: attachment; filename=\"a.txt\"\n\nx\n";
+        let body = format!("{}--B--\n", one.repeat(MAX_ATTACHMENTS + 1));
+        let raw = format!(
+            "{STAMPED}\nSubject: many\nContent-Type: multipart/mixed; boundary=B\n\n{body}"
+        )
+        .replace('\n', "\r\n")
+        .into_bytes();
+        assert!(smtp().normalize(&raw).await.is_err());
+    }
+
+    /// Naming the relay is what turns the position rule into a fail-closed
+    /// one: a header the sender wrote is still topmost, but it now has to be
+    /// stamped under the operator's chosen identifier.
+    #[tokio::test]
+    async fn a_named_relay_is_the_only_reporter_whose_verdict_counts() {
+        let named = SmtpSource {
+            authserv_id: Some("mx.acme.example".into()),
+            ..smtp()
+        };
+        let of = |stamp: &str| {
+            format!("Authentication-Results: {stamp}\nSubject: hi\n\nit broke")
+                .replace('\n', "\r\n")
+                .into_bytes()
+        };
+        assert!(named
+            .normalize(&of("mx.acme.example; spf=pass"))
+            .await
+            .is_ok());
+        assert!(named
+            .normalize(&of("MX.Acme.Example 1; spf=pass"))
+            .await
+            .is_ok());
+        assert!(
+            named
+                .normalize(&of("attacker.example; spf=pass"))
+                .await
+                .is_err(),
+            "a verdict stamped by anybody else was accepted"
+        );
+        // Unnamed is the position rule, unchanged — that is what an operator
+        // who has not set the variable already has.
+        assert!(smtp()
+            .normalize(&of("attacker.example; spf=pass"))
+            .await
+            .is_ok());
+    }
+
+    #[test]
+    fn the_reporter_is_the_name_before_the_first_semicolon() {
+        assert!(reported_by("mx.acme.example; spf=pass", "mx.acme.example"));
+        assert!(reported_by(
+            "mx.acme.example 1; spf=pass",
+            "mx.acme.example"
+        ));
+        assert!(reported_by("MX.ACME.EXAMPLE; spf=pass", "mx.acme.example"));
+        assert!(!reported_by(
+            "attacker.example; spf=pass",
+            "mx.acme.example"
+        ));
+        // The name must be the reporter, not something further along the value.
+        assert!(!reported_by(
+            "attacker.example; spf=pass smtp.helo=mx.acme.example",
+            "mx.acme.example"
+        ));
+    }
+
+    #[test]
+    fn a_sender_check_clause_is_read_as_a_whole_token() {
+        assert!(spf_passed("mx.example; spf=pass smtp.mailfrom=a@b"));
+        assert!(spf_passed("mx.example; dkim=pass; spf=pass"));
+        assert!(spf_passed("mx.example 1; SPF=Pass"));
+        assert!(!spf_passed("mx.example; spf=fail"));
+        assert!(!spf_passed("mx.example; dkim=pass"));
+        assert!(!spf_passed("mx.example; none"));
+        // The authserv-id is skipped, so a host that happens to be NAMED for
+        // the verdict does not supply one.
+        assert!(!spf_passed("spf=pass"));
+        // `spf=pass` inside a later property, not as the clause's own result.
+        assert!(!spf_passed("mx.example; dkim=fail header.d=spf=pass"));
     }
 
     #[tokio::test]
