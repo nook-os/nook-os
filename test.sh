@@ -136,6 +136,7 @@ run_lint() {
     scripts/squash-migrations.sh \
     scripts/dev-bootstrap.sh scripts/dev-up.sh scripts/compose-project.sh \
     scripts/dev-prewarm.sh scripts/dev-wait-healthy.sh \
+    scripts/build-job-sandbox.sh deploy/docker/job-sandbox-entrypoint.sh \
     || die "shellcheck"
   pass_if_ran "shell scripts clean"
 

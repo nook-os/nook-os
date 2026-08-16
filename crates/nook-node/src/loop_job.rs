@@ -226,12 +226,20 @@ fn warm_identity(
 /// existing id collides with it. The scan crosses every project bucket rather
 /// than deriving this run's, so the answer does not depend on reproducing
 /// Claude Code's path-munging scheme.
-fn agent_session_exists(session_id: &str) -> bool {
-    let config = std::env::var("CLAUDE_CONFIG_DIR")
-        .map(std::path::PathBuf::from)
+/// Where this node keeps its Claude session — the agent's warm transcripts and
+/// the loop skills both. Resolved once, because it is now also what the job
+/// sandbox mounts (MAIN-611 AC-7), and two answers would mean an agent that
+/// resumes a session the node cannot see.
+fn claude_config_dir() -> PathBuf {
+    std::env::var("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
         .unwrap_or_else(|_| {
-            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".claude")
-        });
+            PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".claude")
+        })
+}
+
+fn agent_session_exists(session_id: &str) -> bool {
+    let config = claude_config_dir();
     let file = format!("{session_id}.jsonl");
     let Ok(projects) = std::fs::read_dir(config.join("projects")) else {
         return false;
@@ -246,11 +254,7 @@ fn agent_session_exists(session_id: &str) -> bool {
 /// instead of paying the resume-fail-relaunch tax forever. Renamed, not
 /// deleted — the transcript may still be worth a human's read.
 fn quarantine_agent_session(session_id: &str) {
-    let config = std::env::var("CLAUDE_CONFIG_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".claude")
-        });
+    let config = claude_config_dir();
     let file = format!("{session_id}.jsonl");
     let Ok(projects) = std::fs::read_dir(config.join("projects")) else {
         return;
@@ -405,22 +409,55 @@ impl Default for WorktreeSettings {
     }
 }
 
+/// What a repo asks of its job sandbox (MAIN-611 AC-2).
+///
+/// A DECLARATION, like the port listeners beside it: nothing is mounted because
+/// the node happens to have it. A repo that wants its package cache warm across
+/// runs names the path here and gets that path and nothing else.
+#[derive(Debug, Default, serde::Deserialize)]
+struct SandboxSettings {
+    /// Host paths mounted read-write into the job container, at the same path.
+    /// `~` is expanded; a path that does not exist is skipped rather than
+    /// failing the run, so a declaration can be shared across machines.
+    #[serde(default)]
+    caches: Vec<String>,
+}
+
 #[derive(Debug, Default, serde::Deserialize)]
 struct RepoSettingsFile {
     #[serde(default)]
     worktree: WorktreeSettings,
+    #[serde(default)]
+    sandbox: SandboxSettings,
 }
 
 /// Parse a repo's `.nook.toml`. A missing, unreadable or malformed file is the
 /// DEFAULT, never an error: seeding is an optimisation, and a typo in a settings
 /// file must not fail a build run.
 fn worktree_settings(worktree: &Path) -> WorktreeSettings {
+    repo_settings(worktree).worktree
+}
+
+/// The declared sandbox caches, resolved to paths that exist on this node.
+fn sandbox_caches(worktree: &Path) -> Vec<crate::sandbox::Mount> {
+    repo_settings(worktree)
+        .sandbox
+        .caches
+        .iter()
+        .map(|c| PathBuf::from(crate::config::expand_path(c)))
+        .filter(|p| p.exists())
+        .map(|p| crate::sandbox::Mount {
+            host: p.clone(),
+            container: p,
+        })
+        .collect()
+}
+
+fn repo_settings(worktree: &Path) -> RepoSettingsFile {
     let Ok(text) = std::fs::read_to_string(worktree.join(".nook.toml")) else {
-        return WorktreeSettings::default();
+        return RepoSettingsFile::default();
     };
-    toml::from_str::<RepoSettingsFile>(&text)
-        .map(|f| f.worktree)
-        .unwrap_or_default()
+    toml::from_str::<RepoSettingsFile>(&text).unwrap_or_default()
 }
 
 /// The workspace's PRIMARY checkout on this node — the one holding the `.env`
@@ -1744,14 +1781,43 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
         return;
     }
 
+    // THE CONFINEMENT (MAIN-611). Built here — after every check that can still
+    // refuse the run, before anything that launches an agent — so a refused run
+    // never starts a container and a launched agent is never outside one.
+    //
+    // Fail closed (AC-8): a host node that cannot set this up refuses the run
+    // rather than falling back to an unconfined launch. It is a `refused`, not
+    // a failure: nothing about the card is wrong, so nothing of the card's
+    // strike budget should be spent, and the dispatcher's own gate normally
+    // stops the job being placed here at all.
+    let sandbox = match start_sandbox(&cfg, &kind, &job_id, &worktree, &cache, &ports) {
+        Ok(sb) => sb,
+        Err(e) => {
+            if keeps_tree {
+                reclaim_and_note(&out, &job_id, &worktree);
+            }
+            refused(&out, &job_id, e);
+            unregister(&dirname);
+            return;
+        }
+    };
+
     let tmux_name = job_tmux_name(&job_id);
     note(
         &out,
         &job_id,
-        format!(
-            "launching claude in {} to run /{skill} {target_task_key}",
-            worktree.display()
-        ),
+        match sandbox.as_ref() {
+            Some(sb) => format!(
+                "launching claude in {} to run /{skill} {target_task_key} — confined to \
+                 container {}",
+                worktree.display(),
+                sb.name()
+            ),
+            None => format!(
+                "launching claude in {} to run /{skill} {target_task_key}",
+                worktree.display()
+            ),
+        },
     );
 
     // Which execution strategy this runtime gets (MAIN-240). Claude speaks
@@ -1772,6 +1838,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
                 warm_session: warm.as_ref().map(|(_, sid)| sid.as_str()),
                 ports: &ports,
                 unsatisfied_ports: &unsatisfied_ports,
+                sandbox: sandbox.as_ref(),
             },
             AgentIdentity {
                 token: nook_token.as_deref(),
@@ -1789,8 +1856,13 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
             &target_task_key,
             seed.as_deref(),
             workspace_id.as_deref(),
+            sandbox.as_ref(),
         ),
     };
+    // Removing the container is what actually ends the run's processes — the
+    // agent, its nested daemon, and any compose stack it left up inside. Done
+    // before the tree is reclaimed, so nothing inside is still writing to it.
+    drop(sandbox);
 
     // A BUILD worktree is NOT cleaned up here: it is this card's workplace
     // until the work merges (MAIN-480 AC-1), and deleting it at the end of
@@ -1809,6 +1881,82 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
     }
     unregister(&dirname);
     finished(&out, &job_id, ok, message);
+}
+
+/// Put this run's agent in its own container, or refuse the run (MAIN-611).
+///
+/// `Ok(None)` is the ONE case that legitimately runs unconfined: a node that is
+/// itself a container (NG-5). It mounts no Docker socket and sets no
+/// `DOCKER_HOST`, so it cannot run a build at all and there is nothing here to
+/// confine — refusing would take the shared operator's spec, review and
+/// epic-run work offline the day this shipped, for no security gained.
+///
+/// Every other answer is `Ok(Some)` or an error. There is no fallback to a
+/// direct launch: an agent whose instructions are untrusted input either runs
+/// in the box or does not run.
+fn start_sandbox(
+    cfg: &NodeConfig,
+    kind: &str,
+    job_id: &str,
+    worktree: &Path,
+    cache: &Path,
+    ports: &[nook_types::LeasedPort],
+) -> Result<Option<crate::sandbox::Sandbox>, String> {
+    use crate::sandbox;
+    match sandbox::probe() {
+        nook_types::SandboxCapability::Exempt { .. } => return Ok(None),
+        nook_types::SandboxCapability::Unavailable { detail } => {
+            return Err(format!(
+                "this node cannot confine a loop-job agent, so it will not run one: \
+                 {detail}. Until it can, the agent would run as {} with that user's \
+                 whole home directory, credentials and LAN.",
+                cfg.node_name
+            ))
+        }
+        nook_types::SandboxCapability::Ready { .. } => {}
+    }
+    let server = cfg.server.clone();
+    let mut add_hosts = Vec::new();
+    let allow = sandbox::control_plane_allow(&server);
+    // A control plane on the host's loopback (the dev stack) is reachable only
+    // through the container's gateway, and its NAME has to resolve there too or
+    // the agent's `nook` cannot reach the board it holds a token for.
+    //
+    // The alias is `HOST_ALIAS`, never the URL's own host: aliasing `localhost`
+    // is written into `/etc/hosts` BEHIND Docker's own `127.0.0.1 localhost`,
+    // the resolver takes the first match, and the entry does nothing. So the
+    // URL handed to the agent is rewritten onto the alias to match.
+    if allow.iter().any(|a| a == sandbox::HOST_GATEWAY) {
+        add_hosts.push(format!("{}:host-gateway", sandbox::HOST_ALIAS));
+    }
+    let spec = sandbox::SandboxSpec {
+        job_id: job_id.to_string(),
+        image: sandbox::image(),
+        profile: sandbox::profile_for(kind),
+        isolation: sandbox::isolation(),
+        worktree: worktree.to_path_buf(),
+        // A linked worktree's `.git` is a FILE pointing into the mirror, so the
+        // container gets source and no repository without this. The mirror of
+        // this one repo — never the clone-cache root above it, which holds every
+        // sibling checkout on the machine (AC-2).
+        gitdir: Some(cache.to_path_buf()),
+        claude_dir: Some(claude_config_dir()).filter(|d| d.is_dir()),
+        caches: sandbox_caches(worktree),
+        ports: ports
+            .iter()
+            .filter_map(|p| u16::try_from(p.port).ok())
+            .collect(),
+        allow,
+        add_hosts,
+        server: sandbox::server_for_container(&server),
+        // The container is root — the nested daemon and the firewall need it —
+        // and the AGENT is not. What it writes into the bind-mounted checkout is
+        // owned by the node's user, so the prune that follows can delete it
+        // (MAIN-537).
+        agent_uid: unsafe { libc::getuid() },
+        agent_gid: unsafe { libc::getgid() },
+    };
+    sandbox::Sandbox::start(&spec).map(Some)
 }
 
 /// Live streaming sessions, so a steering message can be written to the right
@@ -1901,6 +2049,9 @@ struct RunBrief<'a> {
     ports: &'a [nook_types::LeasedPort],
     /// Optional listeners that went unleased, under `NOOK_PORTS_UNSATISFIED`.
     unsatisfied_ports: &'a [String],
+    /// The container this run's agent is confined to (MAIN-611 AC-1). `None`
+    /// only on a node the sandbox profile exempts (NG-5).
+    sandbox: Option<&'a crate::sandbox::Sandbox>,
 }
 
 fn drive_streaming(
@@ -1920,6 +2071,7 @@ fn drive_streaming(
         warm_session,
         ports,
         unsatisfied_ports,
+        sandbox,
     } = brief;
     use crate::job_adapter;
 
@@ -1990,9 +2142,18 @@ fn drive_streaming(
     // `nook login` on this machine — on a shared operator node, one human in one
     // tenant, which is how a job for another tenant's workspace listed the wrong
     // boards and drafted against the wrong one.
+    //
+    // The URL is spelled as the agent must use it where it RUNS. A sandboxed
+    // agent is in a container, and this node's own spelling of a loopback
+    // control plane means the CONTAINER's loopback there — nothing listens on
+    // it, so `nook` preflight fails and the run ends having done nothing.
+    let server_env = match sandbox {
+        Some(_) => crate::sandbox::server_for_container(identity.server),
+        None => identity.server.to_string(),
+    };
     if let Some(t) = identity.token.filter(|t| !t.trim().is_empty()) {
         env.push(("NOOK_TOKEN", t));
-        env.push(("NOOK_SERVER", identity.server));
+        env.push(("NOOK_SERVER", &server_env));
     }
     // The ports this run leased (MAIN-552), each under the variable the
     // WORKSPACE named — so `dev-up.sh` in the worktree binds them instead of
@@ -2031,7 +2192,9 @@ fn drive_streaming(
         env.push(("GIT_SSH_COMMAND", "nook get workspace git-ssh"));
     }
 
-    let mut end = match run_agent_once(out, job_id, worktree, &args, &env, skill, target, seed) {
+    let mut end = match run_agent_once(
+        out, job_id, worktree, &args, &env, skill, target, seed, sandbox,
+    ) {
         Ok(e) => e,
         Err(e) => return (false, e),
     };
@@ -2053,7 +2216,9 @@ fn drive_streaming(
             quarantine_agent_session(sid);
         }
         let cold = job_adapter::claude_stream_args(warm_session.unwrap_or(job_id));
-        end = match run_agent_once(out, job_id, worktree, &cold, &env, skill, target, seed) {
+        end = match run_agent_once(
+            out, job_id, worktree, &cold, &env, skill, target, seed, sandbox,
+        ) {
             Ok(e) => e,
             Err(e) => return (false, e),
         };
@@ -2107,9 +2272,10 @@ fn run_agent_once(
     skill: &str,
     target: &str,
     seed: Option<&str>,
+    sandbox: Option<&crate::sandbox::Sandbox>,
 ) -> Result<AgentEnd, String> {
     use crate::job_adapter::{self, Event, StreamingSession, TurnState};
-    let mut session = StreamingSession::spawn(RUNTIME, args, worktree, env)?;
+    let mut session = StreamingSession::spawn(RUNTIME, args, worktree, env, sandbox)?;
     register_stream(job_id, &session);
 
     let Some(stdout) = session.take_stdout() else {
@@ -2268,6 +2434,7 @@ fn drive_session(
     target: &str,
     seed: Option<&str>,
     workspace_id: Option<&str>,
+    sandbox: Option<&crate::sandbox::Sandbox>,
 ) -> (bool, String) {
     let cwd = worktree.to_string_lossy().to_string();
     // Where the launched shell records the runtime's exit code (AC-4). A sibling
@@ -2294,6 +2461,7 @@ fn drive_session(
         // because of who it is, not because of a variable it was told. Adding a
         // second source of truth here is how the two drift.
         None,
+        sandbox,
     ) {
         return (false, format!("could not launch session: {e}"));
     }

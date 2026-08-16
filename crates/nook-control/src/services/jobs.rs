@@ -2073,6 +2073,7 @@ pub async fn select_executor(
     let mut chosen: Option<NodeId> = None;
     let mut blocked_by_capacity = false;
     let mut cordoned: Vec<String> = Vec::new();
+    let mut unsandboxed: Option<(String, String)> = None;
     for node in candidates {
         // The capacity IN FORCE, not merely what the node advertises (MAIN-508):
         // read from the stored row on every attempt, so an operator's new number
@@ -2088,6 +2089,24 @@ pub async fn select_executor(
                 .map(|r| r.name.clone())
                 .unwrap_or_else(|| node.0.to_string());
             cordoned.push(format!("{name} ({})", c.reason));
+            continue;
+        }
+        // FAIL CLOSED on confinement (MAIN-611 AC-8). A loop agent's
+        // instructions are untrusted input, so a host node that cannot put one
+        // in its own container takes no loop work at all — the job waits for
+        // the node to be fixed rather than running on the owner's home
+        // directory. Read off the stored row for the cordon's reason: it is a
+        // node fact, reported on heartbeat, and it changes without a dispatch.
+        //
+        // Queued, never failed, exactly as `PortsUnavailable` is: this is a
+        // node-side shortage that clears itself, and failing would spend the
+        // card's strike budget on something the card did not cause.
+        if let Some(detail) = row.as_ref().and_then(|r| sandbox_refusal(&r.capabilities)) {
+            let name = row
+                .as_ref()
+                .map(|r| r.name.clone())
+                .unwrap_or_else(|| node.0.to_string());
+            unsandboxed.get_or_insert((name, detail));
             continue;
         }
         let cap = match row {
@@ -2133,6 +2152,20 @@ pub async fn select_executor(
             (
                 "no eligible executor: every eligible node is at its loop-job capacity".to_string(),
                 Some(QueuedReason::AtCapacity),
+            )
+        } else if let Some((name, detail)) = unsandboxed {
+            // Named rather than lumped into "no eligible executor", for the
+            // reason the cordon arm is: the machine IS eligible and IS online,
+            // and the fix is a one-line install on a box this sentence names.
+            (
+                format!(
+                    "no eligible executor: {name} cannot confine a loop-job agent to its own \
+                     container, so it will not run one — {detail}"
+                ),
+                Some(QueuedReason::SandboxUnavailable {
+                    node_name: name,
+                    detail,
+                }),
             )
         } else if job.kind == BUILD_KIND && label_filtered_all {
             // Honest, and never a fallback (AC-3): eligible nodes exist but
@@ -2387,6 +2420,42 @@ async fn pinned_node(
 /// than placing one on a draining machine.
 fn node_cordon(node: &nook_types::Node) -> Option<nook_types::NodeCordon> {
     serde_json::from_value(node.cordon.clone()?).ok()
+}
+
+/// Why this node may not run a loop agent (MAIN-611 AC-8), or `None` if it may.
+///
+/// A node that reports NOTHING is refused. It is an agent from before the
+/// sandbox shipped, and "it did not say" is not evidence that it confines
+/// anything — reading silence as consent is how a fail-closed gate becomes a
+/// fail-open one on exactly the machines that predate it. The fix is an agent
+/// upgrade, and the sentence says so.
+fn sandbox_refusal(capabilities: &serde_json::Value) -> Option<String> {
+    // Read the ONE key, never the whole blob. A node's `capabilities` is a
+    // jsonb document written by whatever agent version wrote it, and
+    // deserializing all of `Capabilities` makes an older or partial report fail
+    // WHOLESALE — which here would read as "cannot sandbox" for a reason that
+    // has nothing to do with sandboxing. Every other reader of this column
+    // (`is_shared_operator`, `loop_profile`) picks its key out for the same
+    // reason.
+    let raw = capabilities.get("sandbox").filter(|v| !v.is_null());
+    let Some(raw) = raw else {
+        return Some(
+            "its agent predates per-job sandboxing and reports no sandbox capability \
+             (upgrade the node agent)"
+                .to_string(),
+        );
+    };
+    match serde_json::from_value::<nook_types::SandboxCapability>(raw.clone()) {
+        Ok(s) if s.may_run_loop_work() => None,
+        Ok(nook_types::SandboxCapability::Unavailable { detail }) => Some(detail),
+        // Every remaining variant is one `may_run_loop_work` already accepted;
+        // this arm exists so a NEW variant is a compile error there and a
+        // permissive default here, in that order.
+        Ok(_) => None,
+        // Unreadable is refused, not waved through: a report we cannot parse is
+        // not a report that the node confines anything.
+        Err(e) => Some(format!("its sandbox report could not be read ({e})")),
+    }
 }
 
 /// Capacity assumed for a node that reports none — an agent old enough to
@@ -3673,5 +3742,72 @@ mod verdict_mirror_tests {
         // The verdict changing at the same head is a real event too.
         assert!(!mirror_is_duplicate(&existing, "abc123", "approved"));
         assert!(!mirror_is_duplicate(&[], "abc123", "approved"));
+    }
+}
+
+#[cfg(test)]
+mod sandbox_gate_tests {
+    use super::sandbox_refusal;
+    use serde_json::json;
+
+    /// The whole gate, in the three answers that let a node take work or not
+    /// (MAIN-611 AC-8).
+    #[test]
+    fn only_a_well_formed_report_lets_a_node_take_loop_work() {
+        assert_eq!(
+            sandbox_refusal(&json!({
+                "sandbox": { "state": "ready", "image": "nook-job-sandbox:latest" }
+            })),
+            None
+        );
+        // NG-5: a containerised node has nothing to confine and keeps working.
+        assert_eq!(
+            sandbox_refusal(&json!({
+                "sandbox": { "state": "exempt", "detail": "/.dockerenv is present" }
+            })),
+            None
+        );
+        assert_eq!(
+            sandbox_refusal(&json!({
+                "sandbox": { "state": "unavailable", "detail": "no Docker daemon" }
+            })),
+            Some("no Docker daemon".to_string())
+        );
+    }
+
+    /// The rest of the capabilities document is NOT parsed, and that is the
+    /// point: this column is written by whatever agent version wrote it, so a
+    /// partial or unfamiliar report must not read as "cannot sandbox" for a
+    /// reason that has nothing to do with sandboxing.
+    #[test]
+    fn an_unfamiliar_capabilities_document_is_read_for_its_sandbox_key_alone() {
+        assert_eq!(
+            sandbox_refusal(&json!({
+                "something_from_a_newer_agent": { "nested": true },
+                "sandbox": { "state": "ready", "image": "x" }
+            })),
+            None
+        );
+    }
+
+    /// Silence and nonsense are both refused. Silence is an agent from before
+    /// this shipped; nonsense is a report we cannot read. Neither is evidence
+    /// that the node confines anything, and reading either as consent is how a
+    /// fail-closed gate becomes fail-open.
+    #[test]
+    fn silence_and_nonsense_are_both_refused() {
+        let absent =
+            sandbox_refusal(&json!({ "loop_kinds": ["spec"] })).expect("no report must refuse");
+        assert!(absent.contains("predates"), "{absent}");
+        assert!(sandbox_refusal(&json!({ "sandbox": null })).is_some());
+
+        // `ready` with no image is malformed, not "ready enough" — the variant
+        // carries the image so an operator can see WHICH image a node is on.
+        let malformed = sandbox_refusal(&json!({ "sandbox": { "state": "ready" } }))
+            .expect("a malformed report must refuse");
+        assert!(malformed.contains("could not be read"), "{malformed}");
+        let unknown = sandbox_refusal(&json!({ "sandbox": { "state": "who_knows" } }))
+            .expect("an unknown state must refuse");
+        assert!(unknown.contains("could not be read"), "{unknown}");
     }
 }

@@ -106,6 +106,7 @@ pub async fn with_worktree(bed: &TestBed, task: TaskId, node: NodeId, key: &str)
 pub fn build_caps(range: Option<(u16, u16)>) -> serde_json::Value {
     let mut c = serde_json::json!({
         "loop_kinds": ["build"],
+        "sandbox": { "state": "ready", "image": "nook-job-sandbox:test" },
         "runtime_auth": [
             { "id": "claude", "label": "Claude Code", "runtime": "claude", "state": "authorized" }
         ]

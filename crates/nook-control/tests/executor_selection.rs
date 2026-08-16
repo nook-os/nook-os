@@ -101,6 +101,7 @@ async fn node(
 fn caps(state: &str, operator: bool) -> serde_json::Value {
     let mut c = json!({
         "loop_kinds": ["spec", "decompose", "review", "epic-run"],
+        "sandbox": { "state": "ready", "image": "nook-job-sandbox:test" },
         "runtime_auth": [
             { "id": "claude", "label": "Claude Code", "runtime": "claude", "state": state }
         ]
@@ -235,6 +236,7 @@ async fn ineligible_runtime_is_skipped() {
     // A node reporting a DIFFERENT runtime authorized, not claude.
     let other = json!({
         "loop_kinds": ["spec", "decompose"],
+        "sandbox": { "state": "ready", "image": "nook-job-sandbox:test" },
         "runtime_auth": [{ "id": "codex", "label": "Codex", "runtime": "codex", "state": "authorized" }]
     });
     let _mine = node(&bed, tenant, Some(person), "online", other).await;
@@ -305,6 +307,7 @@ async fn concurrent_selection_claims_a_job_exactly_once() {
 fn caps_declaring(kinds: &[&str], operator: bool) -> serde_json::Value {
     let mut c = json!({
         "loop_kinds": kinds,
+        "sandbox": { "state": "ready", "image": "nook-job-sandbox:test" },
         "runtime_auth": [
             { "id": "claude", "label": "Claude Code", "runtime": "claude", "state": "authorized" }
         ]
@@ -464,6 +467,121 @@ async fn a_shared_operator_declaring_build_is_still_refused_build_work() {
 
 /// Capacity is a skip, not a failure: the job waits for room rather than being
 /// declared unplaceable.
+/// MAIN-611 AC-8. A host node that cannot confine a loop agent takes no loop
+/// work: the job WAITS, under a typed reason naming the node and what it said,
+/// and it is never `failed` — a node-side shortage must not spend the card's
+/// strike budget, exactly as `PortsUnavailable` does not.
+#[tokio::test]
+async fn a_node_that_cannot_sandbox_takes_no_work_and_the_job_waits() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, tenant, _user, person, job) = setup(&bed).await;
+    let mut caps = caps_declaring(&["spec"], false);
+    caps["sandbox"] = json!({
+        "state": "unavailable",
+        "detail": "no Docker daemon on this node"
+    });
+    let mine = node(&bed, tenant, Some(person), "online", caps).await;
+
+    let placed = jobs::select_executor(&state, tenant, job)
+        .await
+        .expect("select");
+    assert_eq!(
+        placed.state, "queued",
+        "the run must wait, never fail: the card did nothing wrong"
+    );
+    assert_eq!(
+        placed.queued_reason_kind,
+        Some(QueuedReason::SandboxUnavailable {
+            node_name: node_name(&bed, mine).await,
+            detail: "no Docker daemon on this node".into(),
+        }),
+        "the gate is a value a client branches on, not a sentence it matches"
+    );
+    let reason = placed.queued_reason.clone().unwrap_or_default();
+    assert!(
+        reason.contains("no Docker daemon"),
+        "the sentence names what to fix, on the machine to fix it on: {reason}"
+    );
+
+    // The operator installs the image; nothing else changes and it places.
+    let mut fixed = caps_declaring(&["spec"], false);
+    fixed["sandbox"] = json!({ "state": "ready", "image": "nook-job-sandbox:test" });
+    bed.db()
+        .exec(
+            "UPDATE nodes SET capabilities = $2 WHERE id = $1",
+            params![mine, fixed],
+        )
+        .await
+        .expect("fix the node");
+    let placed = jobs::select_executor(&state, tenant, job)
+        .await
+        .expect("select again");
+    assert_eq!(placed.state, "claimed");
+    assert_eq!(placed.executor_node_id, Some(mine));
+
+    bed.teardown().await;
+}
+
+/// A node that reports NOTHING is refused too (MAIN-611 AC-8). Silence is an
+/// agent from before the sandbox shipped, not evidence that it confines
+/// anything — and reading silence as consent is how a fail-closed gate becomes
+/// fail-open on exactly the machines that predate it.
+#[tokio::test]
+async fn a_node_that_reports_no_sandbox_at_all_is_refused() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, tenant, _user, person, job) = setup(&bed).await;
+    let mut caps = caps_declaring(&["spec"], false);
+    caps.as_object_mut().expect("object").remove("sandbox");
+    node(&bed, tenant, Some(person), "online", caps).await;
+
+    let placed = jobs::select_executor(&state, tenant, job)
+        .await
+        .expect("select");
+    assert_eq!(placed.state, "queued");
+    assert!(
+        matches!(
+            placed.queued_reason_kind,
+            Some(QueuedReason::SandboxUnavailable { .. })
+        ),
+        "an unreported sandbox must refuse, not pass: {:?}",
+        placed.queued_reason_kind
+    );
+    let reason = placed.queued_reason.clone().unwrap_or_default();
+    assert!(
+        reason.contains("predates"),
+        "and says the fix is an agent upgrade: {reason}"
+    );
+
+    bed.teardown().await;
+}
+
+/// NG-5: a CONTAINERISED node keeps working. It mounts no Docker socket and
+/// cannot run a build at all, so there is nothing to confine — refusing it
+/// would take the shared operator's spec, review and epic-run work offline the
+/// day this shipped, for no security gained.
+#[tokio::test]
+async fn a_containerised_node_is_exempt_and_still_takes_work() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, tenant, _user, person, job) = setup(&bed).await;
+    let mut caps = caps_declaring(&["spec"], false);
+    caps["sandbox"] = json!({ "state": "exempt", "detail": "/.dockerenv is present" });
+    let mine = node(&bed, tenant, Some(person), "online", caps).await;
+
+    let placed = jobs::select_executor(&state, tenant, job)
+        .await
+        .expect("select");
+    assert_eq!(placed.state, "claimed");
+    assert_eq!(placed.executor_node_id, Some(mine));
+
+    bed.teardown().await;
+}
+
 #[tokio::test]
 async fn a_node_at_capacity_is_skipped_and_the_job_waits() {
     let Some(mut bed) = TestBed::new().await else {
@@ -760,6 +878,7 @@ async fn queued_build_job(bed: &TestBed, tenant: TenantId, user: UserId, target:
 fn build_caps(operator: bool) -> serde_json::Value {
     let mut c = json!({
         "loop_kinds": ["spec", "decompose", "review", "epic-run", "build"],
+        "sandbox": { "state": "ready", "image": "nook-job-sandbox:test" },
         "runtime_auth": [
             { "id": "claude", "label": "Claude Code", "runtime": "claude", "state": "authorized" }
         ]

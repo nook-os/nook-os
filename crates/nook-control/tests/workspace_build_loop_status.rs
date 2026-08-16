@@ -37,6 +37,7 @@ fn req(v: serde_json::Value) -> axum::Json<SetBuildLoopRequest> {
 fn build_caps(slots: Option<u32>) -> serde_json::Value {
     let mut c = json!({
         "loop_kinds": ["spec", "decompose", "review", "epic-run", "build"],
+        "sandbox": { "state": "ready", "image": "nook-job-sandbox:test" },
         "runtime_auth": [
             { "id": "claude", "label": "Claude Code", "runtime": "claude", "state": "authorized" }
         ]
@@ -368,6 +369,7 @@ async fn every_ineligible_node_is_named_with_its_own_ground() {
         "online",
         json!({
             "loop_kinds": ["spec"],
+            "sandbox": { "state": "ready", "image": "nook-job-sandbox:test" },
             "runtime_auth": [
                 { "id": "claude", "label": "Claude Code", "runtime": "claude", "state": "authorized" }
             ],
@@ -383,7 +385,7 @@ async fn every_ineligible_node_is_named_with_its_own_ground() {
         "logged-out",
         Some(person),
         "online",
-        json!({ "loop_kinds": ["build"], "runtime_auth": [], "max_loop_jobs": 2 }),
+        json!({ "loop_kinds": ["build"], "runtime_auth": [], "max_loop_jobs": 2, "sandbox": { "state": "ready", "image": "nook-job-sandbox:test" } }),
     )
     .await;
     label_for_build(&bed, unauthorized).await;
@@ -396,6 +398,7 @@ async fn every_ineligible_node_is_named_with_its_own_ground() {
         "online",
         json!({
             "loop_kinds": ["spec", "build"],
+            "sandbox": { "state": "ready", "image": "nook-job-sandbox:test" },
             "runtime_auth": [
                 { "id": "claude", "label": "Claude Code", "runtime": "claude", "state": "authorized" }
             ],

@@ -186,7 +186,7 @@ async fn a_job_queued_while_off_waits_and_runs_after_enable() {
     // Now give it somewhere to run and turn loops on.
     let node = bed.node(tenant, person).await;
     let capabilities = json(bed.engine()).literal(
-        r#"{"loop_kinds":["spec","decompose"],"runtime_auth":[{"runtime":"claude","state":"authorized"}]}"#,
+        r#"{"loop_kinds":["spec","decompose"],"sandbox":{"state":"ready","image":"nook-job-sandbox:test"},"runtime_auth":[{"runtime":"claude","state":"authorized"}]}"#,
     );
     bed.db()
         .exec(

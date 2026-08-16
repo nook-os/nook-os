@@ -121,6 +121,7 @@ async fn build_node(bed: &TestBed, tenant: TenantId, owner: Uuid, status: &str) 
                 owner,
                 json!({
                     "loop_kinds": ["build"],
+                    "sandbox": { "state": "ready", "image": "nook-job-sandbox:test" },
                     "runtime_auth": [
                         { "id": "claude", "label": "Claude Code",
                           "runtime": "claude", "state": "authorized" }

@@ -106,6 +106,13 @@ pub fn detect() -> Capabilities {
         max_loop_jobs_pinned: max_loop_jobs_pinned(),
         port_range: port_range(),
         runtime_auth: crate::runtime_auth::probe_all(),
+        // Whether a loop-job agent here would be confined to its own container
+        // (MAIN-611). Probed like everything else in this file — ask Docker,
+        // never read a setting and hope — because the dispatcher FAILS CLOSED
+        // on it: a host node that answers `unavailable` claims no loop work at
+        // all, so a wrong answer here is a node that quietly stops working or
+        // one that quietly runs an agent on the owner's home directory.
+        sandbox: Some(crate::sandbox::probe()),
     }
 }
 
