@@ -2304,6 +2304,11 @@ table.nook-table tr.clickable { cursor: pointer; }
   width: 100%;
   /* A grid mid-refit must never bleed over neighboring panels/scrollbars. */
   overflow: hidden;
+  /* Vertical drags are the terminal's own (MAIN-621): claimed by the browser
+     for panning, a touchmove arrives uncancelable and the gesture never
+     reaches tmux. Pinch-zoom is deliberately left to the browser — on a phone
+     it is how a 100-column pane gets read. */
+  touch-action: pan-x pinch-zoom;
 }
 
 /* xterm's viewport always shows a scrollbar; the global grey track reads as a
