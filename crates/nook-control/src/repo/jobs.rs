@@ -140,6 +140,25 @@ pub struct RejectedHead {
     pub review_verdict_source: Option<String>,
 }
 
+/// A pull request whose OUTSTANDING recorded verdict is a merge conflict
+/// (MAIN-627): the loop said "rebase required" and nothing has spoken for the
+/// pull request since.
+///
+/// Separate from [`RejectedHead`] because it answers a different question. That
+/// one asks what a repair is fingerprinted ON, and a fingerprint is spent the
+/// moment a repair concludes at it — which is exactly how a conflict came to be
+/// unrepairable: the rebase never happened, the head never moved, and the row
+/// that said so had already been answered. This asks whether the conflict is
+/// STILL the last word, which no fingerprint can express.
+#[derive(Debug, Clone, nook_db::FromDbRow)]
+pub struct ConflictedPr {
+    pub review_pr_number: i64,
+    /// The head the conflict was recorded at. A rebase moves the PR's head off
+    /// it, which is what makes "still conflicting" decidable without asking
+    /// the forge again.
+    pub review_head_sha: String,
+}
+
 /// The SQL half of MAIN-386's failure ladder: a `failed` build run of card `t`
 /// that no LATER run, and no human, has answered.
 ///
@@ -460,6 +479,19 @@ pub trait LoopJobRepository: Send + Sync {
         tenant: TenantId,
         workspace: WorkspaceId,
     ) -> ApiResult<Vec<RejectedHead>>;
+
+    /// Per PR, the head an OUTSTANDING conflict rejection sits at (MAIN-627).
+    ///
+    /// Outstanding means the control plane's own conflict rejection is the
+    /// NEWEST recorded verdict of any kind for that pull request. A later
+    /// verdict — an agent reviewing the rebase, a human ruling — is the
+    /// conflict having been spoken to; a conflict row that is no longer the
+    /// last word says nothing about the pull request as it stands now.
+    async fn outstanding_conflicts(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Vec<ConflictedPr>>;
 
     /// `review_run_heads`'s twin for BUILD runs (MAIN-458), keyed by the
     /// card's board number — the same key `BuildWork` items carry — with
@@ -1220,6 +1252,37 @@ impl LoopJobRepository for DbLoopJobRepository {
                            AND k.kind = 'review'
                            AND k.review_verdict = 'changes_requested'
                          ORDER BY k.created_at DESC, k.id DESC LIMIT 1)",
+                params![tenant, workspace.0],
+            )
+            .await?)
+    }
+
+    async fn outstanding_conflicts(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Vec<ConflictedPr>> {
+        // The inner query is NOT narrowed to `changes_requested` — that is the
+        // whole difference from `rejected_review_heads` above. An `approved`
+        // recorded after the conflict is the conflict having been answered,
+        // and a query that skipped it would keep reporting a rebase owed on a
+        // pull request the loop has since reviewed clean.
+        Ok(self
+            .db
+            .query_all(
+                &format!(
+                    "SELECT j.review_pr_number, j.review_head_sha
+                       FROM loop_jobs j
+                      WHERE j.tenant_id = $1 AND j.workspace_id = $2 AND j.kind = 'review'
+                        AND j.review_verdict_source = '{CONFLICT_VERDICT_SOURCE}'
+                        AND j.review_pr_number IS NOT NULL AND j.review_head_sha IS NOT NULL
+                        AND j.id = (
+                            SELECT k.id FROM loop_jobs k
+                             WHERE k.workspace_id = j.workspace_id
+                               AND k.review_pr_number = j.review_pr_number
+                               AND k.kind = 'review' AND k.review_verdict IS NOT NULL
+                             ORDER BY k.created_at DESC, k.id DESC LIMIT 1)"
+                ),
                 params![tenant, workspace.0],
             )
             .await?)
@@ -2375,6 +2438,43 @@ impl LoopJobRepository for FakeLoopJobRepository {
                 review_pr_number: pr,
                 review_head_sha: head,
                 review_verdict_source: source,
+            })
+            .collect())
+    }
+
+    async fn outstanding_conflicts(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Vec<ConflictedPr>> {
+        let s = self.inner.lock().unwrap();
+        let mut newest: std::collections::HashMap<
+            i64,
+            (chrono::DateTime<chrono::Utc>, String, Option<String>),
+        > = std::collections::HashMap::new();
+        for j in s.jobs.iter().filter(|j| {
+            j.tenant_id == tenant
+                && j.workspace_id == Some(workspace)
+                && j.kind == "review"
+                && j.review_verdict.is_some()
+        }) {
+            if let (Some(pr), Some(head)) = (j.review_pr_number, j.review_head_sha.as_ref()) {
+                let e = newest.entry(pr).or_insert((
+                    j.created_at,
+                    head.clone(),
+                    j.review_verdict_source.clone(),
+                ));
+                if j.created_at > e.0 {
+                    *e = (j.created_at, head.clone(), j.review_verdict_source.clone());
+                }
+            }
+        }
+        Ok(newest
+            .into_iter()
+            .filter(|(_, (_, _, source))| source.as_deref() == Some(CONFLICT_VERDICT_SOURCE))
+            .map(|(pr, (_, head, _))| ConflictedPr {
+                review_pr_number: pr,
+                review_head_sha: head,
             })
             .collect())
     }

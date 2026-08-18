@@ -58,8 +58,9 @@ pub const FAILURE_BACKOFF: chrono::Duration = crate::services::build_ladder::FIR
 /// failures. A push changes the fingerprint and clears the hold immediately,
 /// so a real fix never waits on the timer.
 ///
-/// The one exception to the fingerprint rule is a human's ruling — see
-/// [`overruled`].
+/// There are two exceptions to the fingerprint rule, and both are facts about
+/// the item that no fingerprint of it can hold: a human's ruling ([`overruled`])
+/// and a pull request that conflicts with its base branch ([`rebase_owed`]).
 pub fn owed<'a>(
     items: &'a [WorkItem],
     heads: &[crate::repo::jobs::RunHeads],
@@ -81,6 +82,7 @@ pub fn owed<'a>(
                     // can express.
                     if h.done_head.as_deref() == Some(item.fingerprint.as_str())
                         && !overruled(item, h)
+                        && !rebase_owed(item, h, now)
                     {
                         return false;
                     }
@@ -126,6 +128,42 @@ fn overruled(item: &WorkItem, heads: &crate::repo::jobs::RunHeads) -> bool {
         // on sight would be a stampede at deploy.
         _ => false,
     }
+}
+
+/// Is this item's pull request conflicting with its base branch RIGHT NOW
+/// (MAIN-627 AC-1)?
+///
+/// A base-branch move changes nothing an item is fingerprinted on — not the
+/// card's content, not the head a repair was rejected at — so the dedupe above
+/// says the last run still speaks for the item, and it does not: it concluded
+/// against a base that has since moved. Left there, a pull request that goes
+/// conflicting while it waits is owed nothing by anyone, forever, and only a
+/// hand rebase ends it. Which is most pull requests, on a board landing several
+/// a day.
+///
+/// PACED by the same window a failed attempt is held for, and for the same
+/// reason (AC-6). A repair that concluded and left the conflict standing
+/// answered nothing, and the conflict is still true one second later — so
+/// without a hold this is a run every sweep, forever, which is the hot loop
+/// [`FAILURE_BACKOFF`] exists to stop. The window is the ladder's, so a card
+/// whose rebases keep failing backs off and escalates exactly as any other
+/// build does.
+///
+/// A `done_head` with no `done_at` is a row written before the column existed
+/// (`overruled` meets the same shape). It is read as owed here rather than as
+/// held, because the population is bounded by "conflicting right now" — a
+/// handful of pull requests — where a ruling's is every card the loop ever
+/// concluded.
+fn rebase_owed(
+    item: &WorkItem,
+    heads: &crate::repo::jobs::RunHeads,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    if item.conflict_base.is_none() {
+        return false;
+    }
+    let hold = crate::services::build_ladder::backoff_for(heads.failure_streak);
+    heads.done_at.is_none_or(|at| now - at >= hold)
 }
 
 /// Raise the runs one workspace is owed.
@@ -195,6 +233,15 @@ mod tests {
             target_task_id: None,
             claim_first: false,
             unblocked_at: None,
+            conflict_base: None,
+        }
+    }
+
+    /// The same item, with its pull request conflicting against `main`.
+    fn conflicting(item: WorkItem) -> WorkItem {
+        WorkItem {
+            conflict_base: Some("main".into()),
+            ..item
         }
     }
 
@@ -273,6 +320,123 @@ mod tests {
             ..heads(341)
         };
         assert!(owed(&items, &[done], 2, now()).0.is_empty());
+    }
+
+    /// MAIN-627 AC-1, and the whole card. A conflicting pull request is owed a
+    /// run at a fingerprint nothing has moved — because nothing CAN move it: a
+    /// base-branch merge is not a change to the card's content and not a change
+    /// to the head the repair was rejected at. Observed on MAIN-331 / PR #493,
+    /// stranded two days with an approved review and no command able to force
+    /// it.
+    #[test]
+    fn a_conflicting_pull_request_is_owed_a_run_at_an_unchanged_fingerprint() {
+        let done = RunHeads {
+            done_head: Some("aaa".into()),
+            done_at: Some(now() - FAILURE_BACKOFF - chrono::Duration::seconds(1)),
+            ..heads(341)
+        };
+        let clean = [item(341, "aaa")];
+        assert!(
+            owed(&clean, std::slice::from_ref(&done), 2, now())
+                .0
+                .is_empty(),
+            "AC-3/NG-3: a clean pull request at an unchanged fingerprint is still owed nothing"
+        );
+        assert_eq!(
+            owed(&[conflicting(item(341, "aaa"))], &[done], 2, now())
+                .0
+                .len(),
+            1,
+            "a conflict defeats the dedupe with the fingerprint identical"
+        );
+    }
+
+    /// AC-3: convergence must not become a loop. The repair lands, the conflict
+    /// clears, and the very next sweep is owed nothing again — with no push, no
+    /// review and no human in between.
+    #[test]
+    fn a_repaired_conflict_is_not_re_raised() {
+        let items = [item(341, "aaa")];
+        let done = RunHeads {
+            done_head: Some("aaa".into()),
+            done_at: Some(now() - chrono::Duration::hours(4)),
+            ..heads(341)
+        };
+        assert!(owed(&items, &[done], 2, now()).0.is_empty());
+    }
+
+    /// A repair that concluded and left the conflict standing is a run that
+    /// answered nothing, and the conflict is still true a second later — so the
+    /// re-raise waits out the same window a failed attempt does, instead of
+    /// firing every sweep forever.
+    #[test]
+    fn a_conflict_re_raise_waits_out_the_hold() {
+        let items = [conflicting(item(341, "aaa"))];
+        let fresh = RunHeads {
+            done_head: Some("aaa".into()),
+            done_at: Some(now() - chrono::Duration::minutes(1)),
+            ..heads(341)
+        };
+        assert!(
+            owed(&items, std::slice::from_ref(&fresh), 2, now())
+                .0
+                .is_empty(),
+            "held inside the window"
+        );
+        let expired = RunHeads {
+            done_at: Some(now() - FAILURE_BACKOFF - chrono::Duration::seconds(1)),
+            ..fresh
+        };
+        assert_eq!(
+            owed(&items, &[expired], 2, now()).0.len(),
+            1,
+            "owed after it"
+        );
+    }
+
+    /// AC-6: the ladder applies to a conflict repair exactly as to any other
+    /// build. Each failure widens the hold, and the third takes the card out of
+    /// auto-fire altogether — `needs-human-review` excludes it from the repair
+    /// lane's own query, so a rebase that cannot be made to work reaches a
+    /// person instead of retrying all night.
+    #[test]
+    fn consecutive_failed_conflict_repairs_climb_the_ladder() {
+        let items = [conflicting(item(341, "aaa"))];
+        for (streak, held_at) in [(1, 4), (2, 9), (3, 19)] {
+            let failed = RunHeads {
+                attempted_head: Some("aaa".into()),
+                attempted_at: Some(now() - chrono::Duration::minutes(held_at)),
+                failure_streak: streak,
+                ..heads(341)
+            };
+            assert!(
+                owed(&items, std::slice::from_ref(&failed), 2, now())
+                    .0
+                    .is_empty(),
+                "a conflict does not shorten the hold after {streak} failure(s)"
+            );
+            let expired = RunHeads {
+                attempted_at: Some(now() - crate::services::build_ladder::backoff_for(streak)),
+                ..failed
+            };
+            assert_eq!(
+                owed(&items, &[expired], 2, now()).0.len(),
+                1,
+                "and the hold does expire"
+            );
+        }
+    }
+
+    /// A conflict is not a licence to run two at once — the live rule outranks
+    /// it, as it outranks a push.
+    #[test]
+    fn a_live_run_still_blocks_a_conflicting_item() {
+        let items = [conflicting(item(341, "aaa"))];
+        let live = RunHeads {
+            live_head: Some("aaa".into()),
+            ..heads(341)
+        };
+        assert!(owed(&items, &[live], 2, now()).0.is_empty());
     }
 
     #[test]

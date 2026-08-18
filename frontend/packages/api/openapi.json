@@ -16730,6 +16730,29 @@
           }
         }
       },
+      "PrConflict": {
+        "type": "object",
+        "description": "Why a card's pull request cannot merge, when the reason is its base branch\nhaving moved (MAIN-627 AC-5).\n\nDerived at read time from the job ledger, never stored: present exactly when\nthe loop's newest recorded verdict for this pull request is its own conflict\nrejection. A later verdict — an agent reviewing the rebase, a human ruling —\nis that conflict having been spoken to, so the field clears itself and there\nis no flag to go stale.",
+        "required": [
+          "pr",
+          "head",
+          "rebase_required"
+        ],
+        "properties": {
+          "head": {
+            "type": "string",
+            "description": "The head the conflict was recorded at."
+          },
+          "pr": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "rebase_required": {
+            "type": "boolean",
+            "description": "What is owed, in the words the board shows: a rebase."
+          }
+        }
+      },
       "PreviewBlockedNode": {
         "type": "object",
         "description": "One node a preview excluded, with EVERY ground it failed on (MAIN-431\nAC-2) — a person choosing a selector needs \"offline, and also tainted\",\nnot whichever refusal happened to be checked first.",
@@ -18716,6 +18739,17 @@
           "is_blocked": {
             "type": "boolean",
             "description": "Derived from the blockers' column types, never stored — a stored flag\nwould drift the moment a blocker moved."
+          },
+          "pr_conflict": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PrConflict",
+                "description": "The card's pull request conflicts with its base branch and a rebase is\nowed (MAIN-627 AC-5). `None` is the ordinary case: no recorded PR, or\nnothing conflicting about it.\n\nHere so the state is answerable without reading a comment thread. It was\nonly ever said in one PR comment and one mirrored card comment, and a\ncard that has stalled on a conflict looks exactly like one that has\nstalled on anything else."
+              }
+            ]
           },
           "related": {
             "type": "array",

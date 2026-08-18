@@ -52,6 +52,12 @@ pub struct PullRequest {
     /// verdict label means nothing routes the PR, however the labels came to
     /// be missing.
     pub labels: Vec<String>,
+    /// The branch this PR merges INTO — `base.ref`, which the list read
+    /// already carries. A conflict repair's brief has to name the branch to
+    /// rebase onto (MAIN-627 AC-2), and it is the PR's own base rather than
+    /// the repo's default: a stacked PR based on another branch conflicts with
+    /// that one, and being told to rebase onto `main` would be wrong.
+    pub base_ref: String,
 }
 
 /// Where a pull request ended up, as the per-PR read reports it.
@@ -947,6 +953,12 @@ fn needing_review(prs: &[serde_json::Value]) -> Vec<PullRequest> {
                             .collect()
                     })
                     .unwrap_or_default(),
+                base_ref: pr
+                    .get("base")
+                    .and_then(|b| b.get("ref"))
+                    .and_then(|r| r.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
             })
         })
         .collect()
@@ -1346,6 +1358,7 @@ mod tests {
                         number: i as u64 + 1,
                         head_sha: format!("sha{i}"),
                         labels: vec![],
+                        base_ref: "main".into(),
                     })
                     .collect()
             })
@@ -1395,6 +1408,7 @@ mod tests {
     fn drafts_do_not_count_and_everything_else_does() {
         let prs = serde_json::json!([
             { "number": 1, "draft": false, "head": { "sha": "aaa" },
+              "base": { "ref": "main" },
               "labels": [ { "name": "loop-approved" }, { "name": "bug" } ] },
             { "number": 2, "draft": true, "head": { "sha": "bbb" } },
             // Absent `draft` is not a draft — an older API shape must not read
@@ -1413,11 +1427,16 @@ mod tests {
                     number: 1,
                     head_sha: "aaa".into(),
                     labels: vec!["loop-approved".into(), "bug".into()],
+                    base_ref: "main".into(),
                 },
+                // An absent `base` is the empty string, not a guess at `main`:
+                // a brief naming a branch nobody said would send the rebase
+                // somewhere real and wrong.
                 PullRequest {
                     number: 3,
                     head_sha: "ccc".into(),
                     labels: vec![],
+                    base_ref: String::new(),
                 },
             ]
         );

@@ -320,6 +320,7 @@ async fn ejected_fixture(
         number: PR,
         head_sha: "aaa".into(),
         labels: vec!["loop-approved".into()],
+        base_ref: "main".into(),
     }]);
     forge.set_body(PR, &f.body);
     forge
@@ -476,6 +477,7 @@ async fn the_rebase_clears_the_repair_and_hands_the_new_head_to_review() {
         target_task_id: None,
         claim_first: false,
         unblocked_at: None,
+        conflict_base: None,
     };
     let now = chrono::Utc::now();
     assert!(
@@ -550,6 +552,7 @@ async fn an_escalated_pr_records_nothing() {
         number: PR,
         head_sha: "aaa".into(),
         labels: vec!["needs-human-review".into()],
+        base_ref: "main".into(),
     }]);
     forge.set_body(PR, &f.body);
     forge.eject(PR, "aaa", "failed_checks");
@@ -595,6 +598,7 @@ async fn an_existing_rejection_at_that_head_is_left_alone() {
         number: PR,
         head_sha: "aaa".into(),
         labels: vec!["loop-approved".into()],
+        base_ref: "main".into(),
     }]);
     forge.set_body(PR, &f.body);
     forge.eject(PR, "aaa", "failed_checks");
@@ -642,11 +646,13 @@ async fn an_ejection_row_and_a_conflict_row_are_told_apart_in_the_listing() {
             number: PR,
             head_sha: "aaa".into(),
             labels: vec!["loop-approved".into()],
+            base_ref: "main".into(),
         },
         PullRequest {
             number: OTHER_PR,
             head_sha: "bbb".into(),
             labels: vec!["loop-approved".into()],
+            base_ref: "main".into(),
         },
     ]);
     forge.set_body(PR, &f.body);

@@ -50,6 +50,7 @@ async fn fixture(bed: &TestBed) -> Fixture {
                 number: 7,
                 head_sha: "aaa".into(),
                 labels: vec![],
+                base_ref: "main".into(),
             },
         ]))),
         std::time::Duration::ZERO,

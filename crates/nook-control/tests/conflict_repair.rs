@@ -257,6 +257,43 @@ async fn agent_verdict(
         .expect("verdict");
 }
 
+/// A raised repair run reports the pull request it was about and completes —
+/// without pushing anything, which is the run MAIN-331 got. `age_minutes`
+/// backdates its conclusion, so a test can stand on either side of the hold a
+/// conclusion that answered nothing earns.
+async fn conclude(
+    bed: &TestBed,
+    state: &nook_control::state::AppState,
+    f: &Fixture,
+    job: JobId,
+    age_minutes: i64,
+) {
+    state.jobs.transition(job, "running").await.expect("run");
+    jobs::record_build_outcome(
+        state,
+        f.tenant,
+        job,
+        &BuildOutcomeRequest {
+            outcome: "pr_opened".into(),
+            url: Some("https://github.com/acme/api/pull/7".into()),
+            question: None,
+        },
+    )
+    .await
+    .expect("outcome");
+    state.jobs.transition(job, "completed").await.expect("done");
+    if age_minutes > 0 {
+        let when = chrono::Utc::now() - chrono::Duration::minutes(age_minutes);
+        bed.db()
+            .exec(
+                "UPDATE loop_jobs SET updated_at = $2 WHERE id = $1",
+                params![job, when],
+            )
+            .await
+            .expect("backdate");
+    }
+}
+
 /// Every conflict-recorded row for this PR, newest last: `(head, verdict, state,
 /// seed)`. Reading `review_verdict_source` is AC-6 — a verdict no agent
 /// produced is marked as such in the ledger itself.
@@ -290,6 +327,7 @@ async fn a_conflict_on_an_approved_pr_raises_exactly_one_repair() {
             number: PR,
             head_sha: "aaa".into(),
             labels: vec!["loop-approved".into()],
+            base_ref: "main".into(),
         }],
     );
     let state = with_forge(&state, &forge);
@@ -380,6 +418,7 @@ async fn the_rebase_clears_the_repair_and_hands_the_new_head_to_review() {
             number: PR,
             head_sha: "aaa".into(),
             labels: vec!["loop-approved".into()],
+            base_ref: "main".into(),
         }],
     );
     forge.set_mergeable(PR, Some(false));
@@ -409,6 +448,7 @@ async fn the_rebase_clears_the_repair_and_hands_the_new_head_to_review() {
         target_task_id: None,
         claim_first: false,
         unblocked_at: None,
+        conflict_base: None,
     };
     let now = chrono::Utc::now();
     assert!(
@@ -470,6 +510,154 @@ async fn the_rebase_clears_the_repair_and_hands_the_new_head_to_review() {
     bed.teardown().await;
 }
 
+/// MAIN-627, end to end, in MAIN-331 / PR #493's exact state: the conflict was
+/// recorded, a repair run concluded against it, and the rebase never happened.
+/// Before this, that was terminal — the fingerprint the repair is deduped on is
+/// the REJECTED head, which a rebase moves and a run that does not rebase does
+/// not, so the card was owed nothing by anyone and `nook builds enqueue`
+/// answered `nothing raised`. Two days on PR #493, approved and unmergeable.
+#[tokio::test]
+async fn a_conflict_a_repair_left_standing_is_owed_another_run() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let f = fixture(&bed).await;
+    let state = bed.app_state().await;
+    agent_verdict(&bed, &state, &f, "aaa", "approved").await;
+
+    let forge = FakeForge::new(
+        f.body.clone(),
+        vec![PullRequest {
+            number: PR,
+            head_sha: "aaa".into(),
+            labels: vec!["loop-approved".into()],
+            base_ref: "main".into(),
+        }],
+    );
+    forge.set_mergeable(PR, Some(false));
+    let state = with_forge(&state, &forge);
+
+    let prs = forge.prs_needing_review(&repo()).await.unwrap();
+    pr_hygiene::heal(&state, &forge, &repo(), f.tenant, f.user, f.ws, &prs)
+        .await
+        .expect("heal");
+    let c = jobs::converge_builds(&state, f.tenant, f.user, f.ws, None)
+        .await
+        .expect("converge");
+    assert_eq!(c.raised, 1, "the conflict earns its first repair");
+    // AC-2: the brief says what has to happen and which branch to rebase onto.
+    // A builder told only "repair PR #7" reads the newest review marker, finds
+    // the verdict it already answered, and hands the card back.
+    let brief = c.jobs[0].seed.clone().expect("seed");
+    assert!(brief.contains("CONFLICTS"), "{brief}");
+    assert!(brief.contains("`main`"), "{brief}");
+    assert!(brief.contains("REBASE, not a rewrite"), "{brief}");
+
+    // The run concludes — reporting the pull request it was already about —
+    // and the branch is exactly as conflicted as it was.
+    let first = c.jobs[0].id;
+    conclude(&bed, &state, &f, first, 0).await;
+
+    assert_eq!(
+        jobs::converge_builds(&state, f.tenant, f.user, f.ws, None)
+            .await
+            .expect("converge")
+            .raised,
+        0,
+        "inside the hold, a conclusion that answered nothing is not retried at once"
+    );
+    // AC-4: a person asking for it now is not made to wait out a hold whose
+    // reason they can see nothing of.
+    let forced = jobs::converge_builds(&state, f.tenant, f.user, f.ws, Some(f.task))
+        .await
+        .expect("forced");
+    assert_eq!(forced.raised, 1, "AC-4: the named card is raised anyway");
+    conclude(&bed, &state, &f, forced.jobs[0].id, 61).await;
+
+    // AC-1: and the automatic path reaches it on its own once the hold is out,
+    // with the fingerprint still exactly what the last outcomed run recorded.
+    let again = jobs::converge_builds(&state, f.tenant, f.user, f.ws, None)
+        .await
+        .expect("converge");
+    assert_eq!(again.raised, 1, "AC-1: the conflict is still owed a rebase");
+    assert_eq!(
+        again.jobs[0].build_fingerprint.as_deref(),
+        Some("repair:aaa"),
+        "at the same fingerprint the run before it concluded on"
+    );
+
+    // AC-3: the rebase lands, and convergence stops — no push to review, no
+    // human, no second opinion needed. Just the head having moved.
+    conclude(&bed, &state, &f, again.jobs[0].id, 61).await;
+    forge.push(PR, "bbb");
+    forge.set_mergeable(PR, Some(true));
+    assert_eq!(
+        jobs::converge_builds(&state, f.tenant, f.user, f.ws, None)
+            .await
+            .expect("converge")
+            .raised,
+        0,
+        "AC-3: a repaired conflict is not re-raised — convergence is not a loop"
+    );
+
+    bed.teardown().await;
+}
+
+/// AC-5: the conflict is answerable from the card's own detail read, without
+/// anybody opening the comment thread — and it clears itself when a later
+/// verdict speaks for the pull request.
+#[tokio::test]
+async fn the_card_says_a_rebase_is_owed_without_a_comment_thread() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let f = fixture(&bed).await;
+    let state = bed.app_state().await;
+    agent_verdict(&bed, &state, &f, "aaa", "approved").await;
+
+    let detail = nook_control::routes::task_detail::detail(&state, f.tenant, f.user, f.task)
+        .await
+        .expect("detail");
+    assert!(
+        detail.pr_conflict.is_none(),
+        "an approved, mergeable pull request claims nothing"
+    );
+
+    let forge = FakeForge::new(
+        f.body.clone(),
+        vec![PullRequest {
+            number: PR,
+            head_sha: "aaa".into(),
+            labels: vec!["loop-approved".into()],
+            base_ref: "main".into(),
+        }],
+    );
+    forge.set_mergeable(PR, Some(false));
+    let state = with_forge(&state, &forge);
+    let prs = forge.prs_needing_review(&repo()).await.unwrap();
+    pr_hygiene::heal(&state, &forge, &repo(), f.tenant, f.user, f.ws, &prs)
+        .await
+        .expect("heal");
+
+    let detail = nook_control::routes::task_detail::detail(&state, f.tenant, f.user, f.task)
+        .await
+        .expect("detail");
+    let conflict = detail
+        .pr_conflict
+        .expect("AC-5: the field the board renders");
+    assert_eq!((conflict.pr, conflict.head.as_str()), (PR as i64, "aaa"));
+    assert!(conflict.rebase_required);
+
+    // A verdict recorded after it is the conflict having been spoken to.
+    agent_verdict(&bed, &state, &f, "bbb", "approved").await;
+    let detail = nook_control::routes::task_detail::detail(&state, f.tenant, f.user, f.task)
+        .await
+        .expect("detail");
+    assert!(detail.pr_conflict.is_none(), "and it clears itself");
+
+    bed.teardown().await;
+}
+
 /// AC-5: `needs-human-review` opts the PR out of all of this, unchanged. A
 /// person owns it, and neither the record nor the label is ours to write.
 #[tokio::test]
@@ -486,6 +674,7 @@ async fn an_escalated_pr_records_nothing() {
             number: PR,
             head_sha: "aaa".into(),
             labels: vec!["needs-human-review".into()],
+            base_ref: "main".into(),
         }],
     );
     forge.set_mergeable(PR, Some(false));
@@ -532,6 +721,7 @@ async fn an_existing_rejection_at_that_head_is_left_alone() {
             number: PR,
             head_sha: "aaa".into(),
             labels: vec!["loop-approved".into()],
+            base_ref: "main".into(),
         }],
     );
     forge.set_mergeable(PR, Some(false));
