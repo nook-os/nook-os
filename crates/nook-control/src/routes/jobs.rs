@@ -130,6 +130,61 @@ pub async fn outcome(
     ))
 }
 
+/// `GET /api/v1/jobs/{id}/email/message` — the investigate run reads the
+/// message it was seeded from, decrypted (MAIN-331 AC-4).
+///
+/// The only route in this deployment that returns the plaintext of somebody's
+/// support mail, which is why it is job-scoped and kind-checked rather than
+/// hung off the link: the caller must BE the run seeded for that message.
+#[utoipa::path(get, path = "/api/v1/jobs/{id}/email/message",
+    operation_id = "job_email_message",
+    params(("id" = String, Path,)),
+    responses((status = 200, body = DecryptedMessage), (status = 400), (status = 404)))]
+pub async fn email_message(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<JobId>,
+) -> ApiResult<Json<DecryptedMessage>> {
+    Ok(Json(
+        crate::services::email_links::investigation::message(
+            &state,
+            auth.tenant_id,
+            auth.user_id,
+            id,
+        )
+        .await?,
+    ))
+}
+
+/// `POST /api/v1/jobs/{id}/email/investigation` — the investigate run reports
+/// what it found (MAIN-331 AC-2), onto the chain it was seeded from.
+///
+/// `record_build_outcome`'s twin for the read-only kind: one call as the run's
+/// last act, so the agent performs no board mechanics of its own. The draft
+/// reply is sealed here and never comes back out through the read model.
+#[utoipa::path(post, path = "/api/v1/jobs/{id}/email/investigation",
+    operation_id = "job_investigation",
+    params(("id" = String, Path,)),
+    request_body = InvestigationReport,
+    responses((status = 200, body = EmailLink), (status = 400), (status = 404)))]
+pub async fn investigation(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<JobId>,
+    Json(req): Json<InvestigationReport>,
+) -> ApiResult<Json<EmailLink>> {
+    Ok(Json(
+        crate::services::email_links::investigation::record(
+            &state,
+            auth.tenant_id,
+            auth.user_id,
+            id,
+            &req,
+        )
+        .await?,
+    ))
+}
+
 /// `POST /api/v1/jobs/{id}/verdict` — a review run reports its conclusion
 /// (MAIN-455). The run's own minted token authorises it, the same identity its
 /// other writes travel as; the control plane posts the comment and labels, so

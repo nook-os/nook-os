@@ -119,7 +119,18 @@ pub fn detect() -> Capabilities {
 /// Every loop stage a node may be configured to run (MAIN-142). `build` is
 /// listed so it can be *validated* — a node may name it, and the control plane
 /// will still refuse to place build work on a shared operator.
-pub const KNOWN_LOOP_KINDS: &[&str] = &["spec", "decompose", "review", "epic-run", "build"];
+///
+/// `investigate` (MAIN-331) carries no such wall: it is read-only, opens no PR
+/// and is handed no forge credential, so a shared operator is exactly where a
+/// tenant's support mail should be looked into.
+pub const KNOWN_LOOP_KINDS: &[&str] = &[
+    "spec",
+    "decompose",
+    "review",
+    "epic-run",
+    "build",
+    "investigate",
+];
 
 /// Which loop stages this node accepts, from `NOOK_LOOP_KINDS` (CSV).
 ///

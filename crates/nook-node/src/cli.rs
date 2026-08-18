@@ -4390,6 +4390,75 @@ pub async fn builds_outcome(
     Ok(())
 }
 
+/// The run this process belongs to. Job-scoped commands read it rather than
+/// taking an id, which is what stops an agent addressing another run's work.
+fn job_of_this_run(verb: &str) -> Result<String> {
+    std::env::var("NOOK_JOB_ID")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .with_context(|| {
+            format!("NOOK_JOB_ID is not set — `nook emails {verb}` runs inside an investigate run")
+        })
+}
+
+/// `nook emails read` (MAIN-331 AC-4) — the sealed support message this run was
+/// seeded from, decrypted by the control plane and printed here.
+///
+/// Straight to stdout with no framing, so it can be piped or read as the
+/// message it is. Nothing is written to disk: the plaintext exists in this
+/// process and in the terminal it prints to, and the run's transcript records
+/// tool NAMES rather than their output — so the words stay out of the database
+/// unless the agent copies them out itself, which the skill forbids.
+pub async fn emails_read() -> Result<()> {
+    let job_id = job_of_this_run("read")?;
+    let r = Client::from_config()?
+        .get(&format!("/api/v1/jobs/{job_id}/email/message"))
+        .await?;
+    print!("{}", r["message"].as_str().unwrap_or_default());
+    Ok(())
+}
+
+/// `nook emails record --findings … --draft-reply …` (MAIN-331 AC-2) — the
+/// investigation's two halves, onto the chain this run was seeded from.
+///
+/// One call for both, because they are one report: the control plane refuses a
+/// half of it, and this end must not be able to land a half either by making
+/// two requests out of one intent.
+pub async fn emails_record(findings: &str, draft_reply: &str) -> Result<()> {
+    let job_id = job_of_this_run("record")?;
+    // `-` reads stdin, the same convention `gh --body-file -` taught — and
+    // there is one stdin, so two of them is a mistake worth naming rather than
+    // an empty second field the caller discovers on the record.
+    if findings == "-" && draft_reply == "-" {
+        anyhow::bail!("only one of --findings and --draft-reply can read stdin");
+    }
+    let read = |v: &str| -> Result<String> {
+        if v == "-" {
+            let mut t = String::new();
+            use std::io::Read;
+            std::io::stdin().read_to_string(&mut t)?;
+            Ok(t)
+        } else {
+            Ok(v.to_string())
+        }
+    };
+    let link = Client::from_config()?
+        .post(
+            &format!("/api/v1/jobs/{job_id}/email/investigation"),
+            serde_json::json!({
+                "findings": read(findings)?,
+                "draft_reply": read(draft_reply)?,
+            }),
+        )
+        .await?;
+    println!(
+        "{} findings and a sealed draft reply recorded on the chain for {}",
+        crate::style::ok_c("✓"),
+        link["task_id"].as_str().unwrap_or("this card"),
+    );
+    Ok(())
+}
+
 /// `nook reviews enqueue <workspace>` (MAIN-408 AC-2) — raise a review now.
 ///
 /// Deduped server-side against the sweep by the shared rule, so running this

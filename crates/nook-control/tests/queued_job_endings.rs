@@ -285,17 +285,19 @@ async fn a_queued_job_on_an_open_card_below_the_threshold_is_untouched() {
     bed.teardown().await;
 }
 
-/// MAIN-329: an `investigate` run waits by design, and a wait nothing can end
-/// is not starvation.
+/// MAIN-331: an `investigate` run starves like any other kind.
 ///
-/// No node advertises the kind, so its `queued_reason` never moves — the exact
-/// signal the escalation reads. Without the exemption every accepted support
-/// email would cancel its own run half an hour later and attach `blocked` to
-/// the card the pipeline had just filed. Aged far past the threshold here, and
-/// beside a `build` run that IS starved, so the test cannot pass by the sweep
-/// simply doing nothing.
+/// The inverse of what MAIN-329 asserted. Its exemption was never about the
+/// kind — it was about there being no machine that could ever run one, which
+/// made "no eligible executor" a sentence nothing could change and starvation
+/// the wrong reading of it. Now the kind has a skill and an executor, a wait
+/// that does not move means the same thing it means for a build: nobody is
+/// going to run this, and a human should hear about it.
+///
+/// Beside a build starved the same way, so the test cannot pass by the sweep
+/// doing nothing at all.
 #[tokio::test]
-async fn an_investigate_run_waits_instead_of_starving() {
+async fn an_investigate_run_starves_like_any_other_kind() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
@@ -321,19 +323,12 @@ async fn an_investigate_run_waits_instead_of_starving() {
     let n = jobs::escalate_starved_queued(&state, tenant, 1_800)
         .await
         .expect("starve scan");
-    assert_eq!(n, 1, "the build starved and the investigate did not");
+    assert_eq!(n, 2, "both starved");
     assert_eq!(job_state(&bed, building).await, "canceled");
-    assert_eq!(job_state(&bed, investigating).await, "queued");
-
-    // The point of the exemption: the support card the pipeline filed is not
-    // marked `blocked`, commented on, or otherwise touched.
+    assert_eq!(job_state(&bed, investigating).await, "canceled");
     assert!(
-        labels_of(&bed, filed).await.is_empty(),
-        "the filed card kept its labels"
-    );
-    assert!(
-        comments_of(&bed, filed).await.is_empty(),
-        "and was not commented on"
+        !comments_of(&bed, filed).await.is_empty(),
+        "and the support card says why nobody investigated it"
     );
 
     bed.teardown().await;

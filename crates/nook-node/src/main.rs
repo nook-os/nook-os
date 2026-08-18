@@ -270,6 +270,18 @@ enum Command {
     /// A new noun group, per docs/cli-style.md — the top level stays frozen.
     #[command(subcommand)]
     Builds(BuildsCommand),
+    /// The support-email chain a read-only investigate run works on (MAIN-331).
+    ///
+    ///     nook emails read                        the sealed original, decrypted
+    ///     nook emails record --findings - …       what the investigation found
+    ///
+    /// Both verbs are JOB-scoped: they read `NOOK_JOB_ID` from the run's own
+    /// environment and address the chain that run was seeded from, so an agent
+    /// can neither read a message it was not sent nor report onto somebody
+    /// else's. A new noun group, per docs/cli-style.md — the top level stays
+    /// frozen.
+    #[command(subcommand)]
+    Emails(EmailsCommand),
     /// The listeners this workspace declared, and the numbers this process
     /// holds for them (MAIN-597).
     ///
@@ -832,6 +844,11 @@ async fn main() -> Result<()> {
             url,
             question,
         }) => cli::builds_outcome(&conclusion, url.as_deref(), question.as_deref()).await,
+        Command::Emails(EmailsCommand::Read) => cli::emails_read().await,
+        Command::Emails(EmailsCommand::Record {
+            findings,
+            draft_reply,
+        }) => cli::emails_record(&findings, &draft_reply).await,
         Command::Ports(PortsCommand::List {
             workspace,
             browsable,
@@ -1485,6 +1502,32 @@ enum BuildsCommand {
         /// for `blocked`; `-` reads stdin.
         #[arg(long)]
         question: Option<String>,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum EmailsCommand {
+    /// Print the support message THIS run was seeded from, decrypted.
+    ///
+    /// The only way to see the whole of it — the card carries a truncated,
+    /// quoted excerpt. It goes to stdout and nowhere else: the content is
+    /// somebody's private mail, so do not paste it into a comment, a
+    /// notification, or your own prose, all of which are stored and shown.
+    Read,
+    /// Record what the investigation found, and the reply drafted from it —
+    /// the run's LAST act, `nook builds outcome`'s twin for the kind that
+    /// writes no code.
+    ///
+    /// The draft is stored encrypted, because a reply quotes the person who
+    /// wrote in, and nothing sends it: a human reads, edits and decides.
+    Record {
+        /// The analysis, for the support staffer. `-` reads stdin.
+        #[arg(long)]
+        findings: String,
+        /// The "here's what we found" reply, addressed to the reporter. `-`
+        /// reads stdin — at most one of the two may be, since there is one.
+        #[arg(long)]
+        draft_reply: String,
     },
 }
 

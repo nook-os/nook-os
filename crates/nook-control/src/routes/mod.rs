@@ -504,6 +504,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/jobs/{id}", get(jobs::get))
         .route("/jobs/{id}/verdict", post(jobs::verdict))
         .route("/jobs/{id}/outcome", post(jobs::outcome))
+        .route("/jobs/{id}/email/message", get(jobs::email_message))
+        .route("/jobs/{id}/email/investigation", post(jobs::investigation))
         .route("/jobs/{id}/cancel", post(jobs::cancel))
         .route("/jobs/{id}/rerun", post(jobs::rerun))
         // MAIN-231: unsolicited human → agent steering on a live run.

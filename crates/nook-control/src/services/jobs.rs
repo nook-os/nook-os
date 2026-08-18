@@ -40,24 +40,27 @@ pub const REVIEW_KIND: &str = "review";
 /// arc's split 2, not this one.
 pub const BUILD_KIND: &str = "build";
 
-/// The READ-ONLY investigator (MAIN-329). In the kind CHECK since migration
-/// 0077, and deliberately absent from [`KINDS`]: it is not something a person
-/// asks for through the create endpoint, it is what the inbound-email pipeline
-/// seeds when a support report becomes a card.
+/// The READ-ONLY investigator (MAIN-329, given its executor by MAIN-331). In
+/// the kind CHECK since migration 0077, and deliberately absent from [`KINDS`]:
+/// it is not something a person asks for through the create endpoint, it is
+/// what the inbound-email pipeline seeds when a support report becomes a card.
 ///
 /// A run of this kind reproduces and explains; it writes nothing and opens no
-/// PR. Today that holds by CONSTRUCTION rather than by discipline: the kind is
-/// deliberately absent from the node's `KNOWN_LOOP_KINDS`, so no machine can
-/// advertise it and placement can never hand one to another kind's skill. The
-/// row is a queued brief until the card that ships the investigator gives it an
-/// executor, and that card inherits the same contract.
+/// PR. Three things hold that by CONSTRUCTION rather than by discipline:
 ///
-/// **A wait nothing can end is not starvation, so this kind is exempt from the
-/// escalation that measures one** (`NEVER_STARVES` in `repo::jobs`). Without
-/// that, "no eligible executor" — a reason stable by construction — would trip
-/// `escalate_starved_queued` at `job_starve_secs`, cancel the run, and attach
-/// `blocked` to the support card the pipeline had just filed. The exemption
-/// goes away with the same card that gives the kind an executor.
+/// * **No forge credential reaches it.** [`dispatch_to_node`] sends none for
+///   this kind and the node suppresses its own fleet fallback, so `gh` inside
+///   the run is unauthenticated and `gh pr create` cannot succeed.
+/// * **Its worktree is per-run and thrown away.** Unlike a build's, nothing
+///   keeps it, so a write in the tree reaches nothing and nobody.
+/// * **No outcome path records a PR for it.** [`record_build_outcome`] refuses
+///   any kind but `build`, and the one call this kind does make writes findings
+///   onto an email chain.
+///
+/// It is otherwise an ordinary kind: it queues, sorts and starves like the
+/// rest. MAIN-329's two exemptions — from the dispatch order and from the
+/// starvation escalation — existed only because no machine could advertise it,
+/// and both were removed here along with the reason for them.
 pub const INVESTIGATE_KIND: &str = "investigate";
 
 /// The runtime a loop job needs authorized on its executor (MAIN-160). Both
@@ -2932,8 +2935,14 @@ pub async fn dispatch_to_node(state: &AppState, tenant: TenantId, job: &LoopJob)
             ssh_key: crate::services::workspace_git_key(state, tenant, workspace_id).await,
             // The workspace's own forge token rides with the run (MAIN-456), so
             // the agent's `gh` speaks as the tenant, not as the fleet. `None`
-            // falls back to the node's env on the other end.
-            gh_token: crate::services::workspace_gh_token(state, tenant, workspace_id).await,
+            // falls back to the node's env on the other end — except for the
+            // read-only kind, which the node knows to leave unauthenticated
+            // (MAIN-331 AC-3). Withholding it here alone would be theatre: the
+            // fleet fallback would hand back exactly what this refused.
+            gh_token: match job.kind.as_str() {
+                INVESTIGATE_KIND => None,
+                _ => crate::services::workspace_gh_token(state, tenant, workspace_id).await,
+            },
             // The deployment's advertised HTTP API (MAIN-465) — NOOK_PUBLIC_API_URL,
             // a dedicated setting. Deliberately NOT agent_public_url (the mTLS
             // agent listener, which resolves somewhere different on purpose)

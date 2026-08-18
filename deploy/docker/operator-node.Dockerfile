@@ -183,7 +183,7 @@ ENV NOOK_SHARED_OPERATOR=1
 # substrate reviews, specs, decomposes and runs epics; building is a person's
 # own machine. Naming `build` here would change nothing anyway — the control
 # plane refuses build work on any shared operator whatever it declares.
-ENV NOOK_LOOP_KINDS=spec,decompose,review,epic-run
+ENV NOOK_LOOP_KINDS=spec,decompose,review,epic-run,investigate
 # How many loop jobs it holds at once. `0` would stop it claiming entirely.
 # The fallback since MAIN-508: `nook set capacity` overrides it centrally, so
 # retuning this machine no longer needs a rebuild or a restart.

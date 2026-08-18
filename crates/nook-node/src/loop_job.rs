@@ -1429,6 +1429,10 @@ fn skill_for(kind: &str) -> Option<&'static str> {
         // epic's children. Same headless run machinery as everything else.
         "epic-run" => Some("nook-epic-runner"),
         "build" => Some("nook-build"),
+        // The READ-ONLY one (MAIN-331): it reproduces and explains a support
+        // report, and reports its findings onto the email chain. No branch, no
+        // PR, and no forge credential to open one with.
+        "investigate" => Some("nook-investigate"),
         _ => None,
     }
 }
@@ -1469,6 +1473,24 @@ fn may_create_cache(_kind: &str) -> bool {
     true
 }
 
+/// The forge credential a run of this kind may hold (MAIN-331 AC-3).
+///
+/// An `investigate` run is READ-ONLY by contract, so it gets none — neither the
+/// workspace's, which the control plane already withheld, nor this machine's
+/// fleet token. Withholding only the first would be theatre: the fallback is on
+/// this side, so the node would hand back exactly what the control plane
+/// refused, and an unauthenticated `gh` is the difference between a run that
+/// cannot open a PR and one that is merely asked not to.
+///
+/// Every other kind keeps the search order MAIN-407/456 gave it: the
+/// workspace's own identity first, the fleet's only if there is none.
+fn forge_token(kind: &str, delivered: Option<String>) -> Option<String> {
+    match kind {
+        "investigate" => None,
+        _ => delivered.or_else(crate::config::fleet_gh_token),
+    }
+}
+
 /// Which server the RUN's `nook` CLI dials: the advertised API outranks the
 /// dialing address (MAIN-465). The job's token was minted by the control plane
 /// that raised the run, and it should be spent — and reported — against that
@@ -1500,6 +1522,8 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
         ports,
         unsatisfied_ports,
     } = job;
+    // Which forge credential this run gets, decided ONCE (see `forge_token`).
+    let gh_token = forge_token(&kind, gh_token);
     // A review run keeps ONE working directory per (workspace, PR), and a
     // build run one per (workspace, card) — the agent-session bucket is keyed
     // on it (see `warm_identity`). Everything else stays per-job.
@@ -2128,13 +2152,14 @@ fn drive_streaming(
     // did not and died at preflight. A credential must not depend on the
     // agent's mood. Absent, nothing is exported at all — an empty `GH_TOKEN`
     // out-prefers a logged-in account, same reasoning as `tmux::spawn`.
+    //
+    // The fallback is resolved in `run` rather than here (MAIN-331): a
+    // read-only run must reach this line with nothing to export, and a fallback
+    // at the point of export would hand it the fleet's token regardless of what
+    // the control plane withheld.
     let gh_env;
-    if let Some(t) = identity
-        .gh_token
-        .map(str::to_string)
-        .or_else(crate::config::fleet_gh_token)
-    {
-        gh_env = t;
+    if let Some(t) = identity.gh_token {
+        gh_env = t.to_string();
         env.push(("GH_TOKEN", &gh_env));
     }
     // The agent's own identity, in the JOB's tenant. `AuthConfig::load` reads a
@@ -3884,6 +3909,7 @@ mod tests {
         assert_eq!(skill_for("review"), Some("nook-review"));
         assert_eq!(skill_for("epic-run"), Some("nook-epic-runner"));
         assert_eq!(skill_for("build"), Some("nook-build"));
+        assert_eq!(skill_for("investigate"), Some("nook-investigate"));
 
         for k in crate::capabilities::KNOWN_LOOP_KINDS {
             let mapped = skill_for(k).is_some();
@@ -4002,6 +4028,43 @@ mod tests {
         for kind in ["review", "spec", "decompose"] {
             assert!(may_create_cache(kind), "{kind} must be able to cache");
         }
+    }
+
+    /// MAIN-331 AC-3: a read-only run holds no forge credential, and the fleet
+    /// fallback does not put one back.
+    ///
+    /// The fallback is the half worth asserting. The control plane sends `None`
+    /// for this kind, which on its own means nothing here — every kind arrives
+    /// with `None` when its workspace configured no identity, and the next line
+    /// used to reach for `NOOK_GH_TOKEN`. So the machine's own token is set for
+    /// the duration of the check, which is the state a real operator node is in.
+    #[test]
+    fn an_investigate_run_is_handed_no_forge_credential() {
+        // Serialized against the other env-reading tests in this module by
+        // being the only one that writes this variable; `fleet_gh_token`'s own
+        // rules are asserted in `config`.
+        std::env::set_var("NOOK_GH_TOKEN", "ghp_fleet");
+        assert_eq!(
+            forge_token("investigate", None),
+            None,
+            "the fleet token must not reinstate what the control plane withheld"
+        );
+        assert_eq!(
+            forge_token("investigate", Some("ghp_workspace".into())),
+            None,
+            "nor may one delivered by mistake be exported"
+        );
+        assert_eq!(
+            forge_token("build", None).as_deref(),
+            Some("ghp_fleet"),
+            "every other kind keeps the fallback"
+        );
+        assert_eq!(
+            forge_token("review", Some("ghp_workspace".into())).as_deref(),
+            Some("ghp_workspace"),
+            "and the workspace's own identity still outranks the fleet's"
+        );
+        std::env::remove_var("NOOK_GH_TOKEN");
     }
 
     /// AC-4 / MAIN-143 AC-5: what counts as a credential.

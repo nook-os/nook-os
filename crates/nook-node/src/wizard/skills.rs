@@ -52,6 +52,13 @@ const EMBEDDED: &[(&str, &str)] = &[
         "nook-yolo",
         include_str!("../../../../skills/nook-yolo/SKILL.md"),
     ),
+    // The READ-ONLY one (MAIN-331). It ships with the rest because the run that
+    // needs it is seeded by an inbound support email, on whichever machine has
+    // capacity — there is no moment at which somebody could install it by hand.
+    (
+        "nook-investigate",
+        include_str!("../../../../skills/nook-investigate/SKILL.md"),
+    ),
 ];
 
 /// Where a given agent keeps its skills.
@@ -337,7 +344,7 @@ mod tests {
     /// here.
     #[test]
     fn the_embedded_skills_look_like_the_real_ones() {
-        // All seven ship, in order, and each is a real document rather than an
+        // All eight ship, in order, and each is a real document rather than an
         // empty file — an `include_str!` at the wrong path still compiles if the
         // file exists, and an agent handed a stub fails in a way nobody traces
         // back here.
@@ -347,7 +354,8 @@ mod tests {
         // pass that actually lands work was the missing fifth. `nook-yolo`
         // joined in MAIN-419 — the same merge authority scoped to the whole
         // board and told to skip rather than halt, which is what makes an
-        // unattended night possible.
+        // unattended night possible. `nook-investigate` joined in MAIN-331,
+        // the read-only one.
         let names: Vec<&str> = EMBEDDED.iter().map(|(n, _)| *n).collect();
         assert_eq!(
             names,
@@ -358,7 +366,8 @@ mod tests {
                 "nook-review",
                 "nook-epic",
                 "nook-epic-runner",
-                "nook-yolo"
+                "nook-yolo",
+                "nook-investigate"
             ]
         );
         for (name, content) in EMBEDDED {

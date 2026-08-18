@@ -38,8 +38,18 @@ pub struct NewEmailLink {
 
 /// The columns the API type is built from, spelled once because every read
 /// selects exactly it.
+///
+/// **`draft_reply_enc` is present only as a NULL test**, and the test is
+/// ALIASED because mapping is by name: unaliased, Postgres calls the column
+/// `?column?` and every read of this table fails at runtime. The draft is customer
+/// content and every read here is a listing or a lookup; selecting the
+/// ciphertext into the shape those return would put it one careless `Debug` away
+/// from a log. Nothing reads it back yet — the inbox that will is C7, and it can
+/// add that read with the caller and the test that justify it.
 const LINK_COLUMNS: &str = "l.id, l.workspace_id, l.task_id, l.loop_job_id, l.pr_ref, \
-                            l.message_id, l.in_reply_to, l.storage_key, l.created_at";
+                            l.message_id, l.in_reply_to, l.storage_key, l.findings, \
+                            (l.draft_reply_enc IS NOT NULL) AS has_draft_reply, \
+                            l.created_at";
 
 /// How many links one listing returns. The inbox pages by nothing yet (C7), and
 /// an unbounded list is what turns a busy tenant's first render into a download.
@@ -88,6 +98,33 @@ pub trait EmailLinkRepository: Send + Sync {
         viewer: UserId,
         workspace: Option<WorkspaceId>,
     ) -> ApiResult<Vec<EmailLink>>;
+
+    /// The chain a RUN is about (MAIN-331): what the investigate job seeded for
+    /// this message is allowed to read and to write onto.
+    ///
+    /// The job id is the whole address, which is what confines the run: it
+    /// cannot name a link, so it cannot reach another message's — and a job
+    /// carrying no link (every kind but this one) resolves to `None` rather
+    /// than to somebody else's row.
+    async fn by_job(
+        &self,
+        tenant: TenantId,
+        viewer: UserId,
+        job: JobId,
+    ) -> ApiResult<Option<EmailLink>>;
+
+    /// Record what the investigation produced. The draft arrives already
+    /// sealed — this layer stores bytes and never holds the vault.
+    ///
+    /// Returns how many rows moved, so a caller can tell "recorded" from "no
+    /// such chain" without a second read.
+    async fn set_investigation(
+        &self,
+        tenant: TenantId,
+        id: Uuid,
+        findings: &str,
+        draft_reply_enc: Vec<u8>,
+    ) -> ApiResult<u64>;
 }
 
 pub struct DbEmailLinkRepository {
@@ -230,6 +267,44 @@ impl EmailLinkRepository for DbEmailLinkRepository {
                     visible = visible_sql("t", "$2"),
                 ),
                 params,
+            )
+            .await?)
+    }
+
+    async fn by_job(
+        &self,
+        tenant: TenantId,
+        viewer: UserId,
+        job: JobId,
+    ) -> ApiResult<Option<EmailLink>> {
+        Ok(self
+            .db
+            .query_opt(
+                &format!(
+                    "SELECT {LINK_COLUMNS} FROM email_links l
+                       JOIN tasks t ON t.id = l.task_id
+                      WHERE l.tenant_id = $1 AND l.loop_job_id = $3 AND {visible}
+                      LIMIT 1",
+                    visible = visible_sql("t", "$2"),
+                ),
+                params![tenant, viewer, job],
+            )
+            .await?)
+    }
+
+    async fn set_investigation(
+        &self,
+        tenant: TenantId,
+        id: Uuid,
+        findings: &str,
+        draft_reply_enc: Vec<u8>,
+    ) -> ApiResult<u64> {
+        Ok(self
+            .db
+            .exec(
+                "UPDATE email_links SET findings = $3, draft_reply_enc = $4
+                  WHERE tenant_id = $1 AND id = $2",
+                params![tenant, id, findings, draft_reply_enc],
             )
             .await?)
     }
