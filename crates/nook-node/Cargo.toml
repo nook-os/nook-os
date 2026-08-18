@@ -49,6 +49,6 @@ walkdir = { workspace = true }
 # same in both.
 regex = { workspace = true }
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
