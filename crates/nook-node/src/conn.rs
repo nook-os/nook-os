@@ -349,11 +349,18 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
     // Connect is where the crash case is actually caught: a node that has just
     // started is running no jobs, so every labelled object on the machine is by
     // definition an orphan.
+    //
+    // The build stacks left on the HOST daemon by runs that predate the sandbox
+    // are collected here too (MAIN-630). Same occasion, different argument:
+    // those are not a crash's leavings but an upgrade's, and every one of them
+    // is holding host ports its card still leases — so the card's own next run
+    // cannot publish them until it goes.
     {
         let cfg = cfg.clone();
         tokio::task::spawn_blocking(move || {
             crate::loop_job::reconcile(&cfg);
             crate::loop_job::sweep_job_sandboxes();
+            crate::compose::reconcile_pre_sandbox_stacks();
         });
     }
 

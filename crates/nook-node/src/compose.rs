@@ -6,10 +6,23 @@
 //! still wanted — that is a card fact — so this module only ever reports what
 //! is running and reaps exactly the projects it is told to, having checked each
 //! name is a build worktree's.
+//!
+//! **One exception, and it is the whole of [`reconcile_pre_sandbox_stacks`]
+//! (MAIN-630): a build stack on the HOST daemon.** Since MAIN-611 a build's
+//! stack runs in its job container's NESTED daemon and dies with it, so a
+//! build-worktree project the host daemon is still running was started before
+//! that shipped and nothing will ever return to it. That is not a card fact —
+//! it is a fact about this machine's daemon, which only this side can see, and
+//! the control plane's own sweep protects exactly these stacks because their
+//! cards are still in flight.
 
 use std::process::Command;
 
-use nook_proto::compose::is_build_stack_project;
+use nook_proto::compose::{is_build_stack_project, is_build_worktree_path};
+
+/// Compose's own labels, on every container it starts.
+pub const COMPOSE_PROJECT_LABEL: &str = "com.docker.compose.project";
+const COMPOSE_WORKING_DIR_LABEL: &str = "com.docker.compose.project.working_dir";
 
 /// What a reap did, in the shape [`nook_proto::NodeToControl::OpResult`] carries.
 pub struct Reaped {
@@ -30,6 +43,133 @@ pub fn build_stacks_held() -> Vec<String> {
         .into_iter()
         .filter(|p| is_build_stack_project(p))
         .collect()
+}
+
+/// A compose project the HOST daemon holds, and the directory it was brought
+/// up from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostProject {
+    pub name: String,
+    pub working_dir: String,
+}
+
+/// Every compose project the host daemon holds, read off its containers' own
+/// labels.
+///
+/// The labels rather than `docker compose ls`, because the WORKING DIRECTORY is
+/// what identifies a stack as ours (MAIN-630 AC-1) and `ls` reports only the
+/// config files — which `-f` and `--project-directory` can put anywhere. A
+/// container records the directory compose was actually run from.
+///
+/// One row per project: every container of a stack carries the same pair.
+pub fn host_projects(ps: &str) -> Vec<HostProject> {
+    let mut out: Vec<HostProject> = Vec::new();
+    for labels in ps.lines() {
+        let (Some(name), Some(working_dir)) = (
+            crate::sandbox::label_value(labels, COMPOSE_PROJECT_LABEL),
+            crate::sandbox::label_value(labels, COMPOSE_WORKING_DIR_LABEL),
+        ) else {
+            continue;
+        };
+        let project = HostProject { name, working_dir };
+        if !out.contains(&project) {
+            out.push(project);
+        }
+    }
+    out
+}
+
+/// The build stacks stranded on the host daemon (MAIN-630 AC-1).
+///
+/// **A build stack on the HOST daemon is dead weight, whatever card it belongs
+/// to.** Since the per-job sandbox shipped (MAIN-611) a build's `dev-up.sh`
+/// runs in the job container's NESTED daemon, which the host daemon cannot see
+/// and which dies with the container — so a build-worktree project the host is
+/// still running is one that was started before the upgrade, and no repair pass
+/// will ever return to it. It holds the host ports its card still leases, which
+/// is what makes the card's own next run fail to publish them.
+///
+/// That is why this asks nothing of the control plane. MAIN-507's sweep already
+/// reaps stacks no UNFINISHED card wants and deliberately spares the rest
+/// (MAIN-480) — and the stranded stack's card is precisely one that is still in
+/// flight, so that sweep protects the very thing blocking it.
+///
+/// The working directory is the whole eligibility test, and it is what keeps
+/// this away from a person's own stack (AC-2, NG-3): only a directory the node
+/// itself created is named `build-<workspace uuid>-<card key>`.
+pub fn stranded_build_stacks(projects: &[HostProject]) -> Vec<&HostProject> {
+    projects
+        .iter()
+        .filter(|p| is_build_worktree_path(&p.working_dir))
+        .collect()
+}
+
+/// Bring a stranded stack down WITHOUT its volumes (MAIN-630 AC-3).
+///
+/// The one difference from [`reap_projects`], and it is deliberate: that reaps
+/// a stack whose card is over, where the dev database is genuinely finished
+/// with. This reaps a stack whose card is still in flight — the port is what is
+/// wanted back, and a volume costs disk rather than blocking anything.
+pub fn stack_down_args(project: &str) -> Vec<String> {
+    vec![
+        "-p".into(),
+        project.into(),
+        "down".into(),
+        "--remove-orphans".into(),
+    ]
+}
+
+/// Bring down every build stack still running on this node's host daemon.
+///
+/// Best effort and never fatal: a failure is one line and the next project is
+/// still attempted, exactly as the sandbox sweep does.
+pub fn reconcile_pre_sandbox_stacks() {
+    if let Some(detail) = crate::sandbox::containerised() {
+        // No socket, so no host daemon to reconcile and no builds run here.
+        tracing::debug!(%detail, "no host build stacks to reconcile: this node runs none");
+        return;
+    }
+    let ps = match docker(&["ps", "-a", "--format", "{{.Labels}}"]) {
+        Ok(ps) => ps,
+        Err(ComposeError::Absent(_)) => return,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not list containers to reconcile host build stacks");
+            return;
+        }
+    };
+    reconcile_with(&host_projects(&ps), |project| {
+        let args = stack_down_args(project);
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        compose(&argv).map(|_| ()).map_err(|e| e.to_string())
+    });
+}
+
+/// The decision, against whichever runner it is handed — so AC-5's "nothing
+/// found means nothing run" is a test rather than a claim.
+fn reconcile_with(
+    projects: &[HostProject],
+    mut down: impl FnMut(&str) -> Result<(), String>,
+) -> usize {
+    let stranded = stranded_build_stacks(projects);
+    if stranded.is_empty() {
+        return 0;
+    }
+    let mut count = 0;
+    for project in stranded {
+        tracing::info!(
+            project = %project.name, working_dir = %project.working_dir,
+            "bringing down a build stack stranded on the host daemon: its \
+             worktree's builds now run in a sandbox of their own, so nothing \
+             will ever return to this one and it is holding its card's ports"
+        );
+        match down(&project.name) {
+            Ok(()) => count += 1,
+            Err(e) => {
+                tracing::warn!(project = %project.name, error = %e, "could not bring it down")
+            }
+        }
+    }
+    count
 }
 
 /// Bring a worktree's stack down, THEN let `remove` take the directory (AC-3).
@@ -213,8 +353,14 @@ impl std::fmt::Display for ComposeError {
 /// else risks picking up whatever `docker-compose.yml` the node's working
 /// directory happens to contain.
 fn compose(args: &[&str]) -> Result<String, ComposeError> {
+    let mut argv = vec!["compose"];
+    argv.extend_from_slice(args);
+    docker(&argv)
+}
+
+/// One docker command, from the neutral working directory above.
+fn docker(args: &[&str]) -> Result<String, ComposeError> {
     let out = Command::new("docker")
-        .arg("compose")
         .args(args)
         .current_dir(std::env::temp_dir())
         .output()
@@ -356,5 +502,154 @@ mod tests {
         assert!(nook_proto::compose::build_stack_projects("/home/ryan/nook-os").is_empty());
         let outcome = reap_then_remove_worktree("/home/ryan/nook-os", removed);
         assert_eq!(outcome.message, "removed", "no stack should be reported");
+    }
+
+    /// One container's `{{.Labels}}` column, as docker renders it.
+    fn labelled(project: &str, working_dir: &str) -> String {
+        format!(
+            "com.docker.compose.config-hash=abc,{COMPOSE_PROJECT_LABEL}={project},\
+             com.docker.compose.service=web,{COMPOSE_WORKING_DIR_LABEL}={working_dir}"
+        )
+    }
+
+    const STRANDED_DIR: &str =
+        "/home/ryan/.nook/clone-cache/host/worktrees/build-019f840f-2d80-7163-b4b1-8b1e12d7e0d3-MAIN-611";
+    const STRANDED: &str = "nook-build-019f840f-2d80-7163-b4b1-8b1e12d7e0d3-main-611";
+
+    /// A stack of every service of one project is one project, and its
+    /// containers agree about where it came from.
+    #[test]
+    fn every_container_of_one_stack_reports_one_project() {
+        let ps = format!(
+            "{}\n{}\n{}",
+            labelled(STRANDED, STRANDED_DIR),
+            labelled(STRANDED, STRANDED_DIR),
+            labelled("nook-os", "/home/ryan/nook-os"),
+        );
+        assert_eq!(
+            host_projects(&ps),
+            vec![
+                HostProject {
+                    name: STRANDED.into(),
+                    working_dir: STRANDED_DIR.into(),
+                },
+                HostProject {
+                    name: "nook-os".into(),
+                    working_dir: "/home/ryan/nook-os".into(),
+                },
+            ]
+        );
+    }
+
+    /// A container that is not compose's — the job sandbox's own, a database
+    /// somebody started by hand — belongs to no project and is invisible here.
+    #[test]
+    fn a_container_outside_compose_names_no_project() {
+        let ps = "nook.job=019f840f-2d80-7163-b4b1-8b1e12d7e0d3\n\n\
+                  org.opencontainers.image.title=Postgres";
+        assert!(host_projects(ps).is_empty());
+    }
+
+    /// AC-1: the identification predicate, both ways round. A host-daemon
+    /// project whose working directory is a build worktree goes; anything else
+    /// stays (AC-2, NG-3) — including a project in a normal checkout, one that
+    /// merely LOOKS like a build, and one whose name is ours but whose
+    /// directory is not.
+    #[test]
+    fn only_a_build_worktrees_stack_is_stranded() {
+        let projects = vec![
+            HostProject {
+                name: STRANDED.into(),
+                working_dir: STRANDED_DIR.into(),
+            },
+            HostProject {
+                name: "nook-os".into(),
+                working_dir: "/home/ryan/nook-os".into(),
+            },
+            HostProject {
+                name: "build-tools".into(),
+                working_dir: "/srv/build-tools".into(),
+            },
+            HostProject {
+                name: "postgres".into(),
+                working_dir: "/home/ryan/experiments/db".into(),
+            },
+            // The name is a build stack's and the directory is a person's; the
+            // directory is what decides.
+            HostProject {
+                name: STRANDED.into(),
+                working_dir: "/home/ryan/nook-os".into(),
+            },
+        ];
+        assert_eq!(
+            stranded_build_stacks(&projects)
+                .into_iter()
+                .map(|p| p.working_dir.as_str())
+                .collect::<Vec<_>>(),
+            vec![STRANDED_DIR]
+        );
+    }
+
+    /// AC-3: containers and networks, and the volumes stay. The card this
+    /// reaps for is still in flight, so its dev database is not finished with.
+    #[test]
+    fn the_teardown_keeps_the_volumes() {
+        let args = stack_down_args(STRANDED);
+        assert_eq!(args, vec!["-p", STRANDED, "down", "--remove-orphans"]);
+        assert!(
+            !args.iter().any(|a| a == "-v" || a == "--volumes"),
+            "{args:?}"
+        );
+    }
+
+    /// AC-5: a node with nothing to reap runs nothing at all — which is every
+    /// node from the day after this ships, on every reconnect.
+    #[test]
+    fn a_node_with_nothing_stranded_runs_nothing() {
+        let mut ran: Vec<String> = Vec::new();
+        let nothing_of_ours = vec![HostProject {
+            name: "nook-os".into(),
+            working_dir: "/home/ryan/nook-os".into(),
+        }];
+        for projects in [Vec::new(), nothing_of_ours] {
+            assert_eq!(
+                reconcile_with(&projects, |p| {
+                    ran.push(p.to_string());
+                    Ok(())
+                }),
+                0
+            );
+        }
+        assert!(ran.is_empty(), "{ran:?}");
+    }
+
+    /// And when there is something: only the stranded project, and a failure
+    /// does not stop the next one.
+    #[test]
+    fn a_failure_does_not_stop_the_rest() {
+        let second = "nook-build-019f840f-2d80-7163-b4b1-8b1e12d7e0d3-main-617";
+        let projects = vec![
+            HostProject {
+                name: STRANDED.into(),
+                working_dir: STRANDED_DIR.into(),
+            },
+            HostProject {
+                name: "nook-os".into(),
+                working_dir: "/home/ryan/nook-os".into(),
+            },
+            HostProject {
+                name: second.into(),
+                working_dir: STRANDED_DIR.replace("MAIN-611", "MAIN-617"),
+            },
+        ];
+        let mut ran: Vec<String> = Vec::new();
+        let brought_down = reconcile_with(&projects, |p| {
+            ran.push(p.to_string());
+            (p != STRANDED)
+                .then_some(())
+                .ok_or_else(|| "daemon said no".to_string())
+        });
+        assert_eq!(ran, vec![STRANDED.to_string(), second.to_string()]);
+        assert_eq!(brought_down, 1);
     }
 }
