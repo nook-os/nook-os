@@ -9,6 +9,7 @@ members = [
     "crates/nook-auth",
     "crates/nook-chat",
     "crates/nook-infra",
+    "crates/nook-k8s",
     "crates/nook-control",
     "crates/nook-dispatcher",
     "crates/nook-mcp",
@@ -34,6 +35,7 @@ nook-desktop-env = { path = "crates/nook-desktop-env" }
 nook-proto = { path = "crates/nook-proto" }
 nook-auth = { path = "crates/nook-auth" }
 nook-infra = { path = "crates/nook-infra" }
+nook-k8s = { path = "crates/nook-k8s" }
 nook-dispatcher = { path = "crates/nook-dispatcher" }
 nook-mcp = { path = "crates/nook-mcp" }
 nook-control = { path = "crates/nook-control" }
