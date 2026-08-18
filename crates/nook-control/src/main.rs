@@ -450,9 +450,6 @@ mod tests {
     use super::{bind_doors, wait_for_shutdown};
     use std::time::Duration;
 
-    /// A free port, released before the call under test uses it. Racy in
-    /// principle, fine in practice and far better than a hard-coded port that
-    /// collides with whatever else the suite is running.
     /// Serialises allocate-then-bind for every test here that needs a port.
     ///
     /// `free_port` cannot hold its reservation: the code under test has to bind
@@ -465,6 +462,12 @@ mod tests {
     /// closes the window inside the binary, which is where the collision was.
     static PORT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+    /// A free port, released before the call under test uses it — still better
+    /// than a hard-coded one that collides with whatever else the suite runs.
+    ///
+    /// The old note here said "racy in principle, fine in practice". It was not
+    /// fine in practice; hold [`PORT_LOCK`] across this call AND the bind that
+    /// follows it.
     async fn free_port() -> String {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap();
