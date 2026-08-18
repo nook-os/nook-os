@@ -17,9 +17,11 @@
 //! container actually get" is the whole security argument, and an argument you
 //! can only observe by starting Docker is one nobody re-checks.
 
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use nook_types::SandboxCapability;
 
@@ -259,9 +261,31 @@ pub struct SandboxSpec {
     pub agent_gid: u32,
 }
 
+/// The label every object this module creates carries, and the ONLY thing
+/// [`sweep_orphans`] matches on (MAIN-617 AC-5).
+///
+/// A NAME would very nearly do — [`container_name`] and [`network_name`] are
+/// both derived from the job id — but "very nearly" is the wrong standard for a
+/// function whose job is deleting things on a machine that also runs the
+/// owner's own work. The label is a claim NookOS made about an object it
+/// created; a name is a coincidence anyone can reproduce.
+pub const JOB_LABEL: &str = "nook.job";
+
 /// The job's own Docker network, named for it so a leftover is identifiable.
 pub fn network_name(job_id: &str) -> String {
     format!("{}-net", container_name(job_id))
+}
+
+/// The network a job's container joins, LABELLED so the sweep can find it again
+/// after the node that created it has died (MAIN-617 AC-2).
+pub fn network_create_args(job_id: &str) -> Vec<String> {
+    vec![
+        "network".into(),
+        "create".into(),
+        "--label".into(),
+        format!("{JOB_LABEL}={job_id}"),
+        network_name(job_id),
+    ]
 }
 
 /// A container's name, derived from the job id so a leftover is identifiable.
@@ -333,7 +357,7 @@ pub fn run_args(spec: &SandboxSpec) -> Vec<String> {
         // node removes it explicitly too (see `Sandbox::stop`).
         "--rm".into(),
         "--label".into(),
-        format!("nook.job={}", spec.job_id),
+        format!("{JOB_LABEL}={}", spec.job_id),
         // A network of the job's OWN, and not the default bridge, because that
         // is what gets Docker's embedded resolver on 127.0.0.11. Measured: on
         // the default bridge the container inherits the host's nameservers,
@@ -622,7 +646,7 @@ impl Sandbox {
         let net = network_name(&spec.job_id);
         let _ = docker(&["rm", "-f", &name]);
         let _ = docker(&["network", "rm", &net]);
-        docker(&["network", "create", &net])
+        docker_args(&network_create_args(&spec.job_id))
             .map_err(|e| format!("could not create the job sandbox network: {e}"))?;
         // THE ENFORCEMENT POINT (AC-5), on the host, before the job container
         // exists — so there is no instant at which a job has a route to the LAN
@@ -772,9 +796,7 @@ impl Sandbox {
 
     /// One `iptables` invocation against the HOST's tables.
     fn host_iptables(&self, args: &[String]) -> Result<String, String> {
-        let argv = host_iptables_args(&self.image, args);
-        let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-        docker(&refs)
+        host_iptables(&self.image, args)
     }
 
     /// Wait for the container itself to answer — all a profile with no nested
@@ -916,6 +938,316 @@ impl Drop for Sandbox {
     }
 }
 
+/// One object a `docker … ls` reported, with the job it belongs to.
+///
+/// `job_id` is `None` for anything unlabelled — the owner's own dev stack, a
+/// sibling checkout's compose project, a container somebody started by hand —
+/// and that is precisely what [`orphans`] refuses to select (AC-5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Listed {
+    pub name: String,
+    pub job_id: Option<String>,
+}
+
+/// Parse `{{.Names}}\t{{.Labels}}` (or `{{.Name}}\t{{.Labels}}`) output.
+///
+/// Docker renders `.Labels` as `k=v,k=v`, so a value containing a comma would
+/// be misread — a job id is a UUID and cannot, and nothing else writes this
+/// label. A line with no tab at all is an object with no labels, which is the
+/// case that must survive rather than the case that must parse.
+pub fn parse_listing(out: &str) -> Vec<Listed> {
+    out.lines()
+        .filter_map(|line| {
+            let (name, labels) = line.split_once('\t').unwrap_or((line, ""));
+            let name = name.trim();
+            (!name.is_empty()).then(|| Listed {
+                name: name.to_string(),
+                job_id: job_label(labels),
+            })
+        })
+        .collect()
+}
+
+fn job_label(labels: &str) -> Option<String> {
+    labels
+        .split(',')
+        .filter_map(|kv| kv.split_once('='))
+        .find(|(k, _)| k.trim() == JOB_LABEL)
+        .map(|(_, v)| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// Every listed object carrying the job label whose job this node is not
+/// running (AC-1).
+///
+/// Two conditions, and the first is the whole of AC-5: an object with no
+/// `nook.job` label is never selected, whatever it is called or how much it
+/// looks like ours. The second is the node's own running set, which after a
+/// restart is EMPTY — so every leftover is an orphan, which is exactly the
+/// crash case this exists for (AC-6).
+pub fn orphans<'a>(listed: &'a [Listed], running: &HashSet<String>) -> Vec<&'a Listed> {
+    listed
+        .iter()
+        .filter(|o| o.job_id.as_ref().is_some_and(|id| !running.contains(id)))
+        .collect()
+}
+
+/// List every container carrying the job label, running or exited.
+///
+/// `-a` because a job container is `--rm` and may already have exited without
+/// the daemon having reaped it; an exited container still holds its anonymous
+/// volume and still owns an endpoint on the network, which is what makes the
+/// network removal below fail if it is skipped.
+pub fn list_containers_args() -> Vec<String> {
+    vec![
+        "ps".into(),
+        "-a".into(),
+        "--filter".into(),
+        format!("label={JOB_LABEL}"),
+        "--format".into(),
+        "{{.Names}}\t{{.Labels}}".into(),
+    ]
+}
+
+/// List EVERY network, labelled or not.
+///
+/// Unfiltered, deliberately: AC-3 needs the SUBNETS of the networks live jobs
+/// hold, and a job started by an agent from before this label existed has an
+/// unlabelled one whose rules must still be spared. Reading a subnet removes
+/// nothing — [`orphans`] is the only thing that decides what goes, and it
+/// requires the label.
+pub fn list_networks_args() -> Vec<String> {
+    vec![
+        "network".into(),
+        "ls".into(),
+        "--format".into(),
+        "{{.Name}}\t{{.Labels}}".into(),
+    ]
+}
+
+/// Remove an orphaned job container AND the anonymous volume it carries (AC-1).
+///
+/// `-v` is the entire volume claim. A `build` job's nested daemon stores a whole
+/// image cache on the anonymous `/var/lib/docker` volume `run_args` declares,
+/// and without this flag that volume outlives the container that named it with
+/// nothing left on the machine able to identify it. Docker's own answer to that
+/// state is `docker volume prune`, which NG-2 forbids for a good reason: it
+/// takes every other unused volume on the machine with it.
+pub fn remove_container_args(name: &str) -> Vec<String> {
+    vec!["rm".into(), "-f".into(), "-v".into(), name.into()]
+}
+
+pub fn remove_network_args(name: &str) -> Vec<String> {
+    vec!["network".into(), "rm".into(), name.into()]
+}
+
+/// The rules in [`HOST_CHAIN`] that police a subnet no live job holds (AC-3).
+///
+/// Read back from `iptables -S NOOK-SANDBOX`, whose output is the exact spec
+/// each rule was added with — which is what makes a `-D` of it match, since
+/// `iptables` deletes a whole rule and never a prefix of one. Every rule in this
+/// chain is one of ours and every one names its job's subnet with `-s`
+/// (see [`host_rules`]), so "no live job has this subnet" is the whole test.
+///
+/// Keyed on the subnet rather than the job id because netfilter records
+/// neither: a rule carries no label, and the only thing it says about itself is
+/// what it policed. That is also the hazard [`Sandbox::stop`] names — Docker
+/// reuses subnets, so a rule left behind polices whichever job is handed the
+/// range next.
+pub fn orphan_rules(saved: &str, live_subnets: &HashSet<String>) -> Vec<Vec<String>> {
+    saved
+        .lines()
+        .filter_map(|line| {
+            let spec: Vec<String> = line.split_whitespace().map(str::to_string).collect();
+            if spec.len() < 3 || spec[0] != "-A" || spec[1] != HOST_CHAIN {
+                return None;
+            }
+            let subnet = rule_source(&spec)?;
+            (!live_subnets.contains(subnet)).then(|| spec[2..].to_vec())
+        })
+        .collect()
+}
+
+/// The `-s` argument of a saved rule, and the subnet it polices.
+///
+/// A rule without one polices the whole machine and is not a rule this module
+/// ever wrote, so it is left alone rather than guessed at.
+fn rule_source(spec: &[String]) -> Option<&str> {
+    spec.iter()
+        .position(|t| t == "-s")
+        .and_then(|i| spec.get(i + 1))
+        .map(String::as_str)
+}
+
+/// Reclaim every job container, network, anonymous volume and firewall rule left
+/// behind by a node that died before [`Sandbox::stop`] could run (MAIN-617).
+///
+/// `stop` is reached only through `Drop`, so it covers exactly one case:
+/// `loop_job::run` returning. A node that is KILLED — crash, OOM, `systemctl
+/// restart nook-node`, a dockerd hiccup mid-run — strands the container, its
+/// user-defined network, its host firewall rules and, for a `build`, an
+/// anonymous volume holding an entire nested image cache. Nothing else in this
+/// tree would ever remove any of it, and the operator's remedy was
+/// `docker system prune -a --volumes` by hand — far too broad on a machine that
+/// also runs their own work.
+///
+/// `running` is this node process's own set of running job ids, and it is
+/// authoritative (NG-4): no control-plane round trip, the same argument
+/// `build_worktrees_held` makes about what a node knows. After a restart it is
+/// empty, which is what makes the crash case work (AC-6).
+///
+/// Best effort throughout (AC-9): every failure is logged and the next object is
+/// still attempted, exactly as `loop_job::reconcile` does.
+pub fn sweep_orphans(running: &HashSet<String>) {
+    if let Some(detail) = containerised() {
+        tracing::debug!(%detail, "no job sandboxes to sweep: this node starts none");
+        return;
+    }
+    let Some(_pass) = SweepGuard::claim() else {
+        return;
+    };
+
+    let containers = match docker_args(&list_containers_args()).map(|o| parse_listing(&o)) {
+        Ok(listed) => listed,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not list job containers to sweep");
+            Vec::new()
+        }
+    };
+    for orphan in orphans(&containers, running) {
+        // The container FIRST, and its network only after: a network with a live
+        // endpoint on it refuses to be removed, and the leftover then collides
+        // with the next run's. `Sandbox::stop`'s order, for `stop`'s reason.
+        report("container", &orphan.name, orphan.job_id.as_deref(), || {
+            docker_args(&remove_container_args(&orphan.name))
+        });
+    }
+
+    let networks = match docker_args(&list_networks_args()).map(|o| parse_listing(&o)) {
+        Ok(listed) => listed,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not list job networks to sweep");
+            return;
+        }
+    };
+    // Rules before the network they name, and after the container: `stop`'s
+    // ordering again, and the reused-subnet hazard it exists for.
+    sweep_host_rules(&networks, running);
+    for orphan in orphans(&networks, running) {
+        report("network", &orphan.name, orphan.job_id.as_deref(), || {
+            docker_args(&remove_network_args(&orphan.name))
+        });
+    }
+}
+
+/// AC-8: every swept object is named, by kind, name and job id, so a reclaim is
+/// auditable after the fact. AC-9: a failure is one line and the sweep goes on.
+fn report(
+    kind: &str,
+    name: &str,
+    job: Option<&str>,
+    remove: impl FnOnce() -> Result<String, String>,
+) {
+    let job = job.unwrap_or("unknown");
+    match remove() {
+        Ok(_) => tracing::info!(kind, name, job, "swept an orphaned job sandbox object"),
+        Err(e) => {
+            tracing::warn!(kind, name, job, error = %e, "could not sweep an orphaned job sandbox object")
+        }
+    }
+}
+
+/// Delete the [`HOST_CHAIN`] rules of jobs that are no longer running (AC-3).
+///
+/// The live subnets come from the networks of the RUNNING jobs, by name and
+/// whether or not those networks carry the label, because a rule of a live job
+/// must be spared on any reading of the evidence. A running job whose network
+/// does not exist yet has no rules yet either — `Sandbox::start` creates the
+/// network before it installs a rule — so its absence is not a gap. Anything
+/// else unreadable leaves the live set INCOMPLETE, and the pass is then
+/// abandoned rather than run on a guess: the cost of being wrong here is a live
+/// job losing its egress policy, which is the whole of MAIN-611.
+fn sweep_host_rules(networks: &[Listed], running: &HashSet<String>) {
+    let present: HashSet<&str> = networks.iter().map(|n| n.name.as_str()).collect();
+    let mut live: HashSet<String> = HashSet::new();
+    for job in running {
+        let net = network_name(job);
+        if !present.contains(net.as_str()) {
+            continue;
+        }
+        match network_subnet(&net) {
+            Ok(subnet) => {
+                live.insert(subnet);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    network = %net, error = %e,
+                    "not sweeping any host firewall rule this pass: a live job's \
+                     subnet is unreadable, so no rule can be shown to be an orphan"
+                );
+                return;
+            }
+        }
+    }
+    // Read before the networks are removed, so a swept rule can still say which
+    // job it belonged to (AC-8). A rule whose network is already gone cannot:
+    // netfilter records no label, and nothing else on the machine remembers.
+    let owner: HashMap<String, String> = orphans(networks, running)
+        .into_iter()
+        .filter_map(|n| {
+            let job = n.job_id.clone()?;
+            network_subnet(&n.name).ok().map(|subnet| (subnet, job))
+        })
+        .collect();
+
+    let image = image();
+    let saved = match host_iptables(&image, &["-S".into(), HOST_CHAIN.into()]) {
+        Ok(saved) => saved,
+        Err(e) => {
+            // No chain is the ordinary state of a node that has never run a job.
+            tracing::debug!(error = %e, "no {HOST_CHAIN} chain to sweep");
+            return;
+        }
+    };
+    for rule in orphan_rules(&saved, &live) {
+        let subnet = rule_source(&rule).unwrap_or_default().to_string();
+        let mut args = vec!["-D".to_string(), HOST_CHAIN.to_string()];
+        args.extend(rule);
+        report(
+            "firewall rule",
+            &args[2..].join(" "),
+            owner.get(&subnet).map(String::as_str),
+            || host_iptables(&image, &args),
+        );
+    }
+}
+
+/// One sweep at a time.
+///
+/// Connect and the ten-minute inventory can fire together — the timer's first
+/// tick is immediate — and two passes racing would each try to remove what the
+/// other already had, turning an ordinary reclaim into a log full of "No such
+/// container". A reconnect storm is the same shape.
+struct SweepGuard;
+
+static SWEEPING: AtomicBool = AtomicBool::new(false);
+
+impl SweepGuard {
+    fn claim() -> Option<SweepGuard> {
+        if SWEEPING.swap(true, Ordering::SeqCst) {
+            tracing::debug!("a job sandbox sweep is already running");
+            return None;
+        }
+        Some(SweepGuard)
+    }
+}
+
+impl Drop for SweepGuard {
+    fn drop(&mut self) {
+        SWEEPING.store(false, Ordering::SeqCst);
+    }
+}
+
 /// Single-quote for `sh`, the only form that needs no knowledge of what is
 /// inside. A tmux launch line carries a `GH_TOKEN`, so this is not cosmetic.
 fn shell_quote(s: &str) -> String {
@@ -984,6 +1316,19 @@ fn first_ipv4(raw: &str) -> Option<String> {
     raw.split_whitespace()
         .find(|v| v.contains('.') && !v.contains(':'))
         .map(str::to_string)
+}
+
+/// One `iptables` invocation against the HOST's tables, for a caller that has
+/// no [`Sandbox`] — the sweep runs on a node that has just started and holds
+/// none.
+fn host_iptables(image: &str, args: &[String]) -> Result<String, String> {
+    docker_args(&host_iptables_args(image, args))
+}
+
+/// [`docker`] for an argv built by one of the pure functions above.
+fn docker_args(args: &[String]) -> Result<String, String> {
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    docker(&refs)
 }
 
 fn docker(args: &[&str]) -> Result<String, String> {
@@ -1525,6 +1870,133 @@ mod escapes {
     }
 }
 
+/// The sweep, run against REAL Docker objects (MAIN-617).
+///
+/// AC-5 asks for a test that RUNS the sweep with an unlabelled container present
+/// and watches it survive, and that is deliberately more than the unit tests
+/// above can say: they prove the selection, and the selection is not what
+/// deletes things on somebody's machine. So this starts a container shaped
+/// exactly like a job's, the operator's own beside it, and calls the real
+/// [`sweep_orphans`].
+///
+/// Opt-in for `escapes`' reason — it needs a daemon and the job image — and
+/// returns early rather than passing vacuously without the flag:
+///
+/// ```text
+/// NOOK_SANDBOX_E2E=1 cargo test --bin nook sweep_e2e -- --test-threads=1
+/// ```
+#[cfg(test)]
+mod sweep_e2e {
+    use super::*;
+
+    fn enabled() -> bool {
+        std::env::var("NOOK_SANDBOX_E2E").as_deref() == Ok("1")
+    }
+
+    /// A container and network labelled exactly as a job's are, carrying the
+    /// `build` profile's anonymous volume — plus an unlabelled container of the
+    /// operator's own beside it.
+    struct Bed {
+        job: String,
+        keepme: String,
+    }
+
+    impl Bed {
+        fn new(tag: &str) -> Bed {
+            let job = format!("sweep-{}-{tag}", std::process::id());
+            let keepme = format!("nook-sweep-keepme-{}-{tag}", std::process::id());
+            let img = image();
+            docker_args(&network_create_args(&job)).expect("the job network");
+            docker(&[
+                "run",
+                "-d",
+                "--name",
+                &container_name(&job),
+                "--label",
+                &format!("{JOB_LABEL}={job}"),
+                "--network",
+                &network_name(&job),
+                // What AC-1 is about: an anonymous volume that, once its
+                // container is gone, nothing on the machine can name again.
+                "-v",
+                "/var/lib/docker",
+                &img,
+            ])
+            .expect("the job container");
+            docker(&["run", "-d", "--name", &keepme, &img]).expect("the operator's own container");
+            Bed { job, keepme }
+        }
+
+        fn is_up(name: &str) -> bool {
+            docker(&["inspect", "--format", "{{.State.Running}}", name]).as_deref() == Ok("true")
+        }
+    }
+
+    impl Drop for Bed {
+        fn drop(&mut self) {
+            let _ = docker(&["rm", "-f", "-v", &container_name(&self.job)]);
+            let _ = docker(&["rm", "-f", "-v", &self.keepme]);
+            let _ = docker(&["network", "rm", &network_name(&self.job)]);
+        }
+    }
+
+    fn volumes() -> HashSet<String> {
+        docker(&["volume", "ls", "-q"])
+            .map(|o| o.lines().map(|l| l.trim().to_string()).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn the_sweep_reclaims_a_dead_jobs_objects_and_touches_nothing_else() {
+        if !enabled() {
+            return;
+        }
+        let before = volumes();
+        let bed = Bed::new("orphan");
+        let anonymous: HashSet<String> = volumes().difference(&before).cloned().collect();
+        assert!(
+            !anonymous.is_empty(),
+            "no anonymous volume was created, so AC-1 cannot be observed here"
+        );
+
+        // A LIVE job survives its own sweep: the ten-minute pass runs while jobs
+        // are building, and removing one of their containers would kill the run.
+        let live: HashSet<String> = [bed.job.clone()].into_iter().collect();
+        sweep_orphans(&live);
+        assert!(
+            Bed::is_up(&container_name(&bed.job)),
+            "the sweep removed the container of a job this node is running"
+        );
+
+        // …and with an EMPTY running set — the state of a node that has just
+        // restarted, which is the crash case (AC-6) — it goes.
+        sweep_orphans(&HashSet::new());
+        assert!(
+            docker(&["inspect", &container_name(&bed.job)]).is_err(),
+            "the orphaned job container survived the sweep (AC-1)"
+        );
+        assert!(
+            docker(&["network", "inspect", &network_name(&bed.job)]).is_err(),
+            "the orphaned job network survived the sweep (AC-2)"
+        );
+        let after = volumes();
+        let left: Vec<&String> = anonymous.intersection(&after).collect();
+        assert!(
+            left.is_empty(),
+            "the anonymous /var/lib/docker volume outlived its container — \
+             `docker rm` was issued without `-v` (AC-1): {left:?}"
+        );
+
+        // AC-5: the operator's own container is untouched, having been present
+        // for both passes.
+        assert!(
+            Bed::is_up(&bed.keepme),
+            "the sweep removed an unlabelled container — the owner's own work is \
+             not this node's to reclaim (AC-5)"
+        );
+    }
+}
+
 /// Source-inspecting guards (AC-10).
 ///
 /// The confinement is only as good as the claim that every job agent goes
@@ -1658,6 +2130,58 @@ mod guards {
             "the unconfined branch is gone, so `chat.rs` — a human's own \
              conversation, which NG-2 exempts — has nothing to spawn with"
         );
+    }
+
+    /// NG-2: no node code path prunes Docker wholesale.
+    ///
+    /// The operator's remedy before MAIN-617 was `docker system prune -a
+    /// --volumes` by hand, which on a machine that also runs the owner's own
+    /// work removes far more than NookOS ever created — their stopped
+    /// containers, their unused volumes, their build cache. The sweep exists so
+    /// nobody needs it, and a future edit reaching for it would be short,
+    /// plausible and destructive: exactly the class a source guard catches and
+    /// no functional test would.
+    #[test]
+    fn nothing_here_prunes_docker_wholesale() {
+        for file in ["sandbox.rs", "loop_job.rs", "conn.rs", "compose.rs"] {
+            let src = code(file);
+            // Stripping comments must not strip the file: a `code` that ever
+            // returned nothing would make every assertion below pass on an
+            // empty string.
+            assert!(
+                src.lines().filter(|l| !l.trim().is_empty()).count() > 50,
+                "{file} read as {} lines of code — this guard is asserting \
+                 nothing",
+                src.lines().count()
+            );
+            for (n, line) in src.lines().enumerate() {
+                let lower = line.to_ascii_lowercase();
+                assert!(
+                    !(lower.contains("prune") && lower.contains("docker")),
+                    "{file}:{} reaches for a docker prune — MAIN-617 NG-2: this \
+                     node removes only what carries the nook.job label:\n{line}",
+                    n + 1
+                );
+            }
+        }
+        // The same claim for a multi-line argv, which the line test above cannot
+        // see. Only this file builds the sweep's argv, and `git worktree prune`
+        // — which loop_job.rs legitimately runs — never appears here, so the
+        // bare token is unambiguous.
+        assert!(
+            !code("sandbox.rs").contains("\"prune\""),
+            "sandbox.rs passes `prune` to docker — MAIN-617 NG-2"
+        );
+    }
+
+    /// A file's CODE: prose is not a call site, and the guards above would
+    /// otherwise be tripped by the very comments that explain why they exist.
+    fn code(file: &str) -> String {
+        source(file)
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Nothing outside `sandbox.rs` may build a `docker run`/`docker exec` for
@@ -2182,6 +2706,170 @@ mod tests {
     #[test]
     fn a_container_name_survives_an_awkward_job_id() {
         assert_eq!(container_name("abc/def:1"), "nook-job-abc_def_1");
+    }
+
+    /// One machine's `docker ps`, as MAIN-617 has to read it: a live job, a job
+    /// a killed node left behind, and the owner's own work.
+    fn listing() -> Vec<Listed> {
+        parse_listing(
+            "nook-job-live\tnook.job=live,com.docker.compose.project=x\n\
+             nook-job-dead\tnook.job=dead\n\
+             keepme\t\n\
+             nook-os-postgres-1\tcom.docker.compose.project=nook-os\n",
+        )
+    }
+
+    /// AC-1: given a listing and a running set, the sweep selects exactly the
+    /// orphans — no live job, and nothing unlabelled.
+    #[test]
+    fn the_sweep_selects_exactly_the_orphaned_job_objects() {
+        let listed = listing();
+        let running: HashSet<String> = ["live".to_string()].into_iter().collect();
+        let names: Vec<&str> = orphans(&listed, &running)
+            .iter()
+            .map(|o| o.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["nook-job-dead"]);
+    }
+
+    /// AC-5, and the reason this module removes by LABEL and never by name: the
+    /// owner's own container, their compose stack, and even a container NAMED
+    /// exactly like a job's are all left alone. A sweep on a developer's laptop
+    /// that took one of those would be worse than the leak it fixes.
+    #[test]
+    fn an_unlabelled_container_is_never_swept_whatever_it_is_called() {
+        let mut listed = listing();
+        // A container NAMED like a job's is the strongest form of the case: it
+        // looks exactly like ours and makes no claim to be.
+        listed.push(Listed {
+            name: container_name("not-really-a-job"),
+            job_id: None,
+        });
+        let survivors: Vec<&str> = listed
+            .iter()
+            .filter(|l| l.job_id.is_none())
+            .map(|l| l.name.as_str())
+            .collect();
+        let swept = orphans(&listed, &HashSet::new());
+        for name in survivors {
+            assert!(
+                !swept.iter().any(|o| o.name == name),
+                "{name} carries no {JOB_LABEL} label and must survive the sweep"
+            );
+        }
+        // …and the daemon is asked for the label too, so an unlabelled object is
+        // never even listed. Belt and braces: the filter is what keeps a busy
+        // machine's listing small, the label test above is what decides.
+        assert!(
+            list_containers_args().contains(&format!("label={JOB_LABEL}")),
+            "{:?}",
+            list_containers_args()
+        );
+    }
+
+    /// AC-6, the crash case: after a restart the running set is empty, so every
+    /// labelled leftover is an orphan. This is the whole point of the ticket —
+    /// `Sandbox::stop` already covers every case in which the node survives.
+    #[test]
+    fn a_restarted_node_treats_every_labelled_container_as_an_orphan() {
+        let listed = listing();
+        let names: Vec<&str> = orphans(&listed, &HashSet::new())
+            .iter()
+            .map(|o| o.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["nook-job-live", "nook-job-dead"]);
+    }
+
+    /// AC-1's volume claim, as an assertion about a vector.
+    ///
+    /// Without `-v` a `build` job's anonymous `/var/lib/docker` volume — a whole
+    /// nested image cache — outlives the container that named it, with nothing
+    /// left on the machine able to identify it. The only remedy left would be
+    /// `docker volume prune`, which NG-2 forbids.
+    #[test]
+    fn removing_an_orphan_takes_its_anonymous_volume_with_it() {
+        assert_eq!(
+            remove_container_args("nook-job-dead"),
+            vec!["rm", "-f", "-v", "nook-job-dead"]
+        );
+        assert_eq!(
+            remove_network_args("nook-job-dead-net"),
+            vec!["network", "rm", "nook-job-dead-net"]
+        );
+    }
+
+    /// A job's network carries the label the sweep matches on (AC-2/AC-5) —
+    /// otherwise an orphaned network could only be removed by NAME, which is
+    /// what AC-5 refuses.
+    #[test]
+    fn a_job_network_is_labelled_for_the_job_that_owns_it() {
+        let args = network_create_args("job-1");
+        assert_eq!(
+            args,
+            vec![
+                "network",
+                "create",
+                "--label",
+                "nook.job=job-1",
+                "nook-job-job-1-net"
+            ]
+        );
+        // The same label the container carries, so one sweep finds both.
+        let container = run_args(&spec()).join(" ");
+        assert!(container.contains("--label nook.job=job-1"), "{container}");
+    }
+
+    /// The listing parser, on the two shapes Docker actually emits: a labelled
+    /// object and one with no labels at all.
+    #[test]
+    fn a_listing_line_yields_its_job_id_or_none() {
+        let listed = listing();
+        assert_eq!(listed[0].job_id.as_deref(), Some("live"));
+        assert_eq!(listed[2].name, "keepme");
+        assert_eq!(listed[2].job_id, None);
+        assert_eq!(listed[3].job_id, None);
+        // A label whose key merely CONTAINS ours is a different label.
+        let other = parse_listing("x\tnook.jobs=1,not.nook.job=2");
+        assert_eq!(other[0].job_id, None);
+    }
+
+    /// AC-3: a rule is deleted only when no live job holds its subnet, and the
+    /// spec deleted is byte-for-byte the one `iptables -S` printed — `-D`
+    /// matches a whole rule, so anything less silently matches nothing.
+    #[test]
+    fn only_rules_for_subnets_no_live_job_holds_are_deleted() {
+        let saved = "\
+-N NOOK-SANDBOX
+-A NOOK-SANDBOX -s 172.30.0.0/16 -d 10.0.0.0/8 -j REJECT --reject-with icmp-admin-prohibited
+-A NOOK-SANDBOX -s 172.31.0.0/16 -d 10.0.0.0/8 -j REJECT --reject-with icmp-admin-prohibited
+-A NOOK-SANDBOX -s 172.31.0.0/16 -d 172.30.0.1 -p tcp --dport 4442 -j RETURN
+-A DOCKER-USER -j NOOK-SANDBOX
+";
+        let live: HashSet<String> = ["172.30.0.0/16".to_string()].into_iter().collect();
+        let picked: Vec<String> = orphan_rules(saved, &live)
+            .iter()
+            .map(|r| r.join(" "))
+            .collect();
+        assert_eq!(
+            picked,
+            vec![
+                "-s 172.31.0.0/16 -d 10.0.0.0/8 -j REJECT --reject-with icmp-admin-prohibited",
+                "-s 172.31.0.0/16 -d 172.30.0.1 -p tcp --dport 4442 -j RETURN",
+            ],
+            "the live job's rules must be untouched, and a rule in another \
+             chain is not this sweep's to delete"
+        );
+        // Nothing live: every rule in the chain is an orphan (AC-6 again).
+        assert_eq!(orphan_rules(saved, &HashSet::new()).len(), 3);
+        // …and every rule this module writes IS selectable, or the sweep would
+        // silently leave the policy behind.
+        let rules = host_rules("10.9.0.0/16", &["203.0.113.7".into()], "4442", None);
+        let saved: String = rules
+            .iter()
+            .map(|r| format!("-A {HOST_CHAIN} {}\n", r.join(" ")))
+            .collect();
+        assert_eq!(orphan_rules(&saved, &HashSet::new()).len(), rules.len());
+        assert!(orphan_rules(&saved, &["10.9.0.0/16".to_string()].into()).is_empty());
     }
 
     /// A tmux launch line is readable with `capture-pane`, so a credential must
