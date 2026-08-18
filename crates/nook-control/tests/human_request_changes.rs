@@ -50,6 +50,7 @@ impl FakeForge {
                 number: PR,
                 head_sha: head.into(),
                 labels: labels.iter().map(|l| l.to_string()).collect(),
+                base_ref: "main".into(),
             }])),
             ..Default::default()
         }
@@ -328,6 +329,7 @@ fn review_item(head: &str) -> WorkItem {
         target_task_id: None,
         claim_first: false,
         unblocked_at: None,
+        conflict_base: None,
     }
 }
 
@@ -673,7 +675,7 @@ async fn a_ruling_holds_the_review_raises_the_repair_and_clears_on_a_push() {
     );
     assert_eq!(
         seed,
-        repair_label(PR, Some(HUMAN_VERDICT_SOURCE)),
+        repair_label(PR, Some(HUMAN_VERDICT_SOURCE), None),
         "the seed IS `repair_label`'s human case"
     );
 

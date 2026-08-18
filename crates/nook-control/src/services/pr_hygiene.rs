@@ -532,6 +532,7 @@ mod tests {
             number,
             head_sha: head.into(),
             labels: labels.iter().map(|s| s.to_string()).collect(),
+            base_ref: "main".into(),
         }
     }
 

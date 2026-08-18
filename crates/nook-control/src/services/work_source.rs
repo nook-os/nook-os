@@ -51,6 +51,17 @@ pub struct WorkItem {
     /// longer speaks for the card. `None` for review items, whose unit is a PR
     /// and which nobody blocks.
     pub unblocked_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The base branch this item's pull request CONFLICTS with right now
+    /// (MAIN-627), or `None` when no rebase is owed — the second thing no
+    /// fingerprint can express.
+    ///
+    /// A base-branch move is not a change to anything an item is fingerprinted
+    /// on: not the card's content, and not the head a repair was rejected at.
+    /// So a pull request that goes conflicting after its last run concluded is
+    /// owed a run that nothing was owed for, which is the whole of MAIN-627 —
+    /// see [`crate::services::run_reconcile::owed`]. The BRANCH rather than a
+    /// bool because the brief has to name it (AC-2).
+    pub conflict_base: Option<String>,
 }
 
 /// Where managed work comes from.
@@ -112,6 +123,7 @@ impl WorkSource for ReviewWork<'_> {
                     target_task_id: None,
                     claim_first: false,
                     unblocked_at: None,
+                    conflict_base: None,
                 })
                 .collect(),
         )
@@ -152,7 +164,23 @@ pub fn repair_fingerprint(head_sha: &str) -> String {
 /// `Loop review of <sha>` marker the repair pass looks for — so a builder told
 /// only "repair PR #N" would find no verdict, conclude there was nothing to
 /// answer, and hand the card back.
-pub fn repair_label(pr: u64, source: Option<&str>) -> String {
+///
+/// A CONFLICT is the third (MAIN-627), and it is the one whose contract is not
+/// on the pull request at all. The reviewer's marker names a head that has
+/// already been answered — a builder that goes looking for must-fix items finds
+/// a verdict it has worked through, concludes there is nothing to do, and hands
+/// the card back at exactly the moment the rebase is owed. So the brief says
+/// what actually has to happen, and names the branch to rebase onto.
+pub fn repair_label(pr: u64, source: Option<&str>, conflict_base: Option<&str>) -> String {
+    if let Some(base) = conflict_base {
+        return format!(
+            "repair PR #{pr} — it CONFLICTS with its base branch `{base}` and cannot be \
+             merged. The contract is a REBASE, not a rewrite: rebase the branch onto \
+             `{base}`, resolve the conflicts, re-verify, and force-push with lease. There \
+             are no review findings to work through — nothing is wrong with the change \
+             itself, the base moved underneath it."
+        );
+    }
     if source == Some(crate::repo::jobs::HUMAN_VERDICT_SOURCE) {
         return format!(
             "repair PR #{pr} — a PERSON requested the changes, not the review agent. Their \
@@ -189,6 +217,13 @@ pub struct BuildWork<'a> {
     /// moves: that fingerprint would clear its own answer and raise a second
     /// repair before any reviewer looked.
     pub rejected_heads: std::collections::HashMap<i64, crate::repo::jobs::RejectedHead>,
+    /// Per PR, the head an OUTSTANDING conflict rejection sits at — the
+    /// control plane's own "rebase required" being the last word said about
+    /// that pull request. Resolved by the CALLER from the job ledger, so this
+    /// costs no forge call: whether the conflict still stands is the recorded
+    /// head against the PR's CURRENT head, and a rebase is precisely what
+    /// moves the latter.
+    pub conflicts: std::collections::HashMap<i64, String>,
     /// The card the manual trigger named — the one case where the
     /// `needs-human-review` exclusion stands down, in BOTH lanes. `None` on the
     /// reconciler's own passes, which is every auto-fire.
@@ -268,6 +303,9 @@ impl BuildWork<'_> {
                         target_task_id: Some(t.id),
                         claim_first: true,
                         unblocked_at: t.unblocked_at,
+                        // A fresh pick has no pull request yet, so it has
+                        // nothing to conflict with.
+                        conflict_base: None,
                     })
                 })
                 .collect(),
@@ -311,6 +349,16 @@ impl BuildWork<'_> {
                 // so nothing raised — a hot loop against a guess is worse
                 // than waiting for the next verdict to record one.
                 let rejected = self.rejected_heads.get(&(pr_number as i64))?;
+                // Still conflicting = the recorded conflict is the last word
+                // AND the head it names is the one the pull request still has.
+                // The head is the test that terminates this: a rebase moves
+                // it, so the repair answers itself the moment it lands, with
+                // no reviewer having to run first.
+                let conflict_base = self
+                    .conflicts
+                    .get(&(pr_number as i64))
+                    .filter(|head| *head == &pr.head_sha)
+                    .map(|_| pr.base_ref.clone());
                 Some(WorkItem {
                     // NEGATED: repair is its own fingerprint space with its
                     // own bookkeeping (see `build_run_heads`), so a repair
@@ -318,12 +366,17 @@ impl BuildWork<'_> {
                     // content was already built.
                     key: -number,
                     fingerprint: repair_fingerprint(&rejected.review_head_sha),
-                    label: repair_label(pr_number, rejected.review_verdict_source.as_deref()),
+                    label: repair_label(
+                        pr_number,
+                        rejected.review_verdict_source.as_deref(),
+                        conflict_base.as_deref(),
+                    ),
                     target_task_id: Some(task),
                     // The card already sits claimed-and-parked in In Review;
                     // re-claiming would drag the board under a human's feet.
                     claim_first: false,
                     unblocked_at,
+                    conflict_base,
                 })
             })
             .collect()
@@ -374,19 +427,43 @@ mod fingerprint_tests {
     /// checks, finds them green, and concludes there is nothing to fix.
     #[test]
     fn a_queue_ejections_repair_says_what_actually_failed() {
-        let ejected = repair_label(7, Some(crate::repo::jobs::EJECTION_VERDICT_SOURCE));
+        let ejected = repair_label(7, Some(crate::repo::jobs::EJECTION_VERDICT_SOURCE), None);
         assert!(ejected.starts_with("repair PR #7 —"));
         assert!(ejected.contains("merge queue EJECTED it"));
         assert!(ejected.contains("CURRENT base branch"));
         assert!(ejected.contains("Rebase onto the current base branch"));
 
-        // A reviewer's own rejection and a conflict both leave their contract
-        // on the pull request, where the builder's repair pass reads it.
-        assert_eq!(repair_label(7, None), "repair PR #7");
+        // A reviewer's own rejection leaves its contract on the pull request,
+        // where the builder's repair pass reads it.
+        assert_eq!(repair_label(7, None, None), "repair PR #7");
+        // A conflict RECORD that is no longer the last word is the same: the
+        // rebase already landed, and what is left is an ordinary repair.
         assert_eq!(
-            repair_label(7, Some(crate::repo::jobs::CONFLICT_VERDICT_SOURCE)),
+            repair_label(7, Some(crate::repo::jobs::CONFLICT_VERDICT_SOURCE), None),
             "repair PR #7"
         );
+    }
+
+    /// MAIN-627 AC-2. A builder told only "repair PR #7" reads the newest
+    /// review marker, finds a verdict it already answered, and hands the card
+    /// back — so the brief has to say both what is wrong and which branch to
+    /// rebase onto. It outranks the recorded source, because a live conflict is
+    /// the thing standing between this pull request and merge whatever the
+    /// ledger says put it in the queue.
+    #[test]
+    fn a_live_conflicts_repair_names_the_rebase_and_the_base_branch() {
+        for source in [
+            None,
+            Some(crate::repo::jobs::CONFLICT_VERDICT_SOURCE),
+            Some(crate::repo::jobs::HUMAN_VERDICT_SOURCE),
+            Some(crate::repo::jobs::EJECTION_VERDICT_SOURCE),
+        ] {
+            let brief = repair_label(7, source, Some("release/8.1"));
+            assert!(brief.starts_with("repair PR #7 —"), "{brief}");
+            assert!(brief.contains("CONFLICTS"), "{brief}");
+            assert!(brief.contains("REBASE, not a rewrite"), "{brief}");
+            assert!(brief.contains("`release/8.1`"), "{brief}");
+        }
     }
 
     /// A new rejected head re-raises; an unchanged one does not — and a card

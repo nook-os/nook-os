@@ -595,6 +595,7 @@ async fn repair_items_key_on_the_rejected_head_and_stay_in_their_lane() {
             number: 7,
             head_sha: "moved9".into(),
             labels: vec!["loop-changes-requested".into()],
+            base_ref: "main".into(),
         }],
     )
     .await;

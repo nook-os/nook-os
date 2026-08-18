@@ -440,6 +440,8 @@ pub async fn detail(
         Vec::new()
     };
 
+    let pr_conflict = pr_conflict(state, tenant, &task).await;
+
     Ok(TaskDetail {
         task,
         comments: comments_of(state, id).await?,
@@ -448,6 +450,29 @@ pub async fn detail(
         related: other,
         is_blocked,
         children,
+        pr_conflict,
+    })
+}
+
+/// MAIN-627 AC-5, derived from the same ledger rule the converger raises the
+/// rebase from — one definition, so the board cannot say "clean" about a card
+/// the loop is about to build a rebase for.
+///
+/// Best-effort: a card's detail read must not 404 because the job ledger was
+/// unreadable, so a failure here is simply no claim about the pull request.
+async fn pr_conflict(state: &AppState, tenant: TenantId, task: &TaskItem) -> Option<PrConflict> {
+    let workspace = task.workspace_id?;
+    let pr: i64 = task.pr_url.as_ref()?.rsplit('/').next()?.parse().ok()?;
+    let rows = state
+        .jobs
+        .outstanding_conflicts(tenant, workspace)
+        .await
+        .ok()?;
+    let row = rows.into_iter().find(|c| c.review_pr_number == pr)?;
+    Some(PrConflict {
+        pr,
+        head: row.review_head_sha,
+        rebase_required: true,
     })
 }
 

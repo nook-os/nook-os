@@ -240,6 +240,7 @@ async fn each_failure_doubles_the_hold_up_to_an_hour() {
                 demand: &state.review_demand,
                 token: None,
                 rejected_heads: Default::default(),
+                conflicts: Default::default(),
                 unblock_task: None,
             };
             let items = source.items(ws, None).await.expect("items");
@@ -755,6 +756,7 @@ async fn the_stop_still_reports_when_the_label_was_already_on() {
             target_task_id: Some(card.id),
             claim_first: false,
             unblocked_at: None,
+            conflict_base: None,
         },
         None,
         false,

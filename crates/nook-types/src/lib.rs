@@ -2663,6 +2663,33 @@ pub struct TaskDetail {
     /// for a non-epic or a childless epic.
     #[serde(default)]
     pub children: Vec<EpicChild>,
+    /// The card's pull request conflicts with its base branch and a rebase is
+    /// owed (MAIN-627 AC-5). `None` is the ordinary case: no recorded PR, or
+    /// nothing conflicting about it.
+    ///
+    /// Here so the state is answerable without reading a comment thread. It was
+    /// only ever said in one PR comment and one mirrored card comment, and a
+    /// card that has stalled on a conflict looks exactly like one that has
+    /// stalled on anything else.
+    #[serde(default)]
+    pub pr_conflict: Option<PrConflict>,
+}
+
+/// Why a card's pull request cannot merge, when the reason is its base branch
+/// having moved (MAIN-627 AC-5).
+///
+/// Derived at read time from the job ledger, never stored: present exactly when
+/// the loop's newest recorded verdict for this pull request is its own conflict
+/// rejection. A later verdict — an agent reviewing the rebase, a human ruling —
+/// is that conflict having been spoken to, so the field clears itself and there
+/// is no flag to go stale.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PrConflict {
+    pub pr: i64,
+    /// The head the conflict was recorded at.
+    pub head: String,
+    /// What is owed, in the words the board shows: a rebase.
+    pub rebase_required: bool,
 }
 
 /// `POST /tasks/{id}/claim` — take the work without racing another agent.

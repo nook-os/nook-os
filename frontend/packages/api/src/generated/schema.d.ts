@@ -7555,6 +7555,24 @@ export interface components {
             parent_message_id?: string | null;
         };
         /**
+         * @description Why a card's pull request cannot merge, when the reason is its base branch
+         *     having moved (MAIN-627 AC-5).
+         *
+         *     Derived at read time from the job ledger, never stored: present exactly when
+         *     the loop's newest recorded verdict for this pull request is its own conflict
+         *     rejection. A later verdict — an agent reviewing the rebase, a human ruling —
+         *     is that conflict having been spoken to, so the field clears itself and there
+         *     is no flag to go stale.
+         */
+        PrConflict: {
+            /** @description The head the conflict was recorded at. */
+            head: string;
+            /** Format: int64 */
+            pr: number;
+            /** @description What is owed, in the words the board shows: a rebase. */
+            rebase_required: boolean;
+        };
+        /**
          * @description One node a preview excluded, with EVERY ground it failed on (MAIN-431
          *     AC-2) — a person choosing a selector needs "offline, and also tainted",
          *     not whichever refusal happened to be checked first.
@@ -8641,6 +8659,7 @@ export interface components {
              *     would drift the moment a blocker moved.
              */
             is_blocked: boolean;
+            pr_conflict?: null | components["schemas"]["PrConflict"];
             /** @description Non-blocking links (`relates`, `duplicates`), both directions. */
             related: components["schemas"]["RelatedTask"][];
             task: components["schemas"]["TaskItem"];

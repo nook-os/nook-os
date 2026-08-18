@@ -4298,6 +4298,40 @@ mod tests {
         assert_ne!(ids[0][..n], ids[1][..n], "widened but still ambiguous");
     }
 
+    /// MAIN-627 AC-4: a card in MAIN-331's exact state — a pull request that
+    /// conflicts with `main`, at a head every automatic gate had already
+    /// concluded on — enqueues a run and says it is a rebase. The `nothing
+    /// raised` line was the whole of what a person could get out of that card.
+    #[test]
+    fn a_forced_conflict_repair_reports_the_rebase_it_raised() {
+        let raised = serde_json::json!({
+            "raised": [{ "seed": "repair PR #493 — it CONFLICTS with its base branch \
+                                  `main` and cannot be merged." }],
+            "live": 0, "withheld": 0,
+        });
+        let line = super::enqueue_report("MAIN-331", &raised);
+        assert!(line.contains("raised a build run for MAIN-331"), "{line}");
+        assert!(line.contains("REBASE"), "{line}");
+        assert!(!line.contains("nothing raised"), "{line}");
+
+        // An ordinary repair still reads as one — the rebase note is not a
+        // label every raised run wears.
+        let plain = serde_json::json!({
+            "raised": [{ "seed": "repair PR #493" }], "live": 0, "withheld": 0,
+        });
+        let line = super::enqueue_report("MAIN-331", &plain);
+        assert!(line.contains("raised a build run for MAIN-331"), "{line}");
+        assert!(!line.contains("REBASE"), "{line}");
+    }
+
+    #[test]
+    fn nothing_raised_and_already_building_stay_distinguishable() {
+        let none = serde_json::json!({ "raised": [], "live": 0, "withheld": 0 });
+        assert!(super::enqueue_report("MAIN-1", &none).contains("nothing raised"));
+        let busy = serde_json::json!({ "raised": [], "live": 1, "withheld": 0 });
+        assert!(super::enqueue_report("MAIN-1", &busy).contains("already building"));
+    }
+
     /// Genuinely identical ids cannot be told apart at any width. It must
     /// terminate at the full length rather than loop or panic.
     #[test]
@@ -4324,20 +4358,39 @@ pub async fn builds_enqueue(task: &str) -> Result<()> {
     let r = client
         .post("/api/v1/builds", serde_json::json!({ "task": task }))
         .await?;
-    let raised = r["raised"].as_array().map(|a| a.len()).unwrap_or(0);
+    println!("{}", enqueue_report(task, &r));
+    Ok(())
+}
+
+/// What the enqueue printed, as a function of the response — so the one line a
+/// person reads after asking for a build is testable without a server.
+///
+/// It says WHICH run it raised, not merely that it did (MAIN-627 AC-4). A
+/// conflict repair is the case that needs it: the card looks untouched either
+/// way, and "raised a build run" beside a pull request nobody can merge is the
+/// same sentence whether the loop understood why or not.
+fn enqueue_report(task: &str, r: &serde_json::Value) -> String {
+    let raised = r["raised"].as_array().map(|a| a.as_slice()).unwrap_or(&[]);
     let live = r["live"].as_i64().unwrap_or(0);
-    if raised > 0 {
-        println!("{} raised a build run for {task}", crate::style::ok_c("✓"));
-    } else if live > 0 {
-        println!("already building — a live run holds this card");
-    } else {
-        println!(
-            "nothing raised — the card is not currently owed a run \
-             (not agent-ready, assigned, held by a recent failed attempt, or \
-              already built at this content)"
+    if let Some(job) = raised.first() {
+        let seed = job["seed"].as_str().unwrap_or_default();
+        let why = if seed.contains("CONFLICTS with its base branch") {
+            " — a REBASE: its pull request conflicts with the base branch"
+        } else {
+            ""
+        };
+        return format!(
+            "{} raised a build run for {task}{why}",
+            crate::style::ok_c("✓")
         );
     }
-    Ok(())
+    if live > 0 {
+        return "already building — a live run holds this card".into();
+    }
+    "nothing raised — the card is not currently owed a run \
+     (not agent-ready, assigned, held by a recent failed attempt, or \
+      already built at this content)"
+        .into()
 }
 
 /// `nook builds outcome <pr|blocked|nothing> …` (MAIN-459 AC-3) — a build run

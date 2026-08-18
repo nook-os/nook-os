@@ -252,6 +252,7 @@ async fn a_run_that_concludes_nothing_hands_its_card_back() {
         demand: &state.review_demand,
         token: None,
         rejected_heads: Default::default(),
+        conflicts: Default::default(),
         unblock_task: None,
     };
     let items = source.items(ws, None).await.expect("items");
@@ -697,6 +698,7 @@ async fn a_repair_run_that_concludes_nothing_leaves_its_card_alone() {
             target_task_id: Some(card.id),
             claim_first: false,
             unblocked_at: None,
+            conflict_base: None,
         },
         None,
         false,

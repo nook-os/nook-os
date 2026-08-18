@@ -852,6 +852,17 @@ pub async fn converge_builds(
     // person's own hold on the work, which is a different statement from "the
     // loop gave up", and the loop no longer writes it at all.
     let unblock_task = only_task;
+    // MAIN-627: which of this repo's pull requests the loop has recorded a
+    // conflict on with nothing said since. From the ledger, not the forge —
+    // whether the conflict still stands is that head against the pull
+    // request's current one, and both are already in hand.
+    let conflicts: std::collections::HashMap<i64, String> = state
+        .jobs
+        .outstanding_conflicts(tenant, workspace)
+        .await?
+        .into_iter()
+        .map(|c| (c.review_pr_number, c.review_head_sha))
+        .collect();
     let source = crate::services::work_source::BuildWork {
         tasks: state.tasks.as_ref(),
         tenant,
@@ -859,6 +870,7 @@ pub async fn converge_builds(
         demand: &state.review_demand,
         token,
         rejected_heads,
+        conflicts,
         unblock_task,
     };
     use crate::services::work_source::WorkSource;
@@ -876,9 +888,26 @@ pub async fn converge_builds(
     // content is "wait", and waiting is exactly what the person declined.
     if only_task.is_some() {
         let named: std::collections::HashSet<i64> = items.iter().map(|i| i.key).collect();
+        // MAIN-627 AC-4: a CONFLICTING item stands its dedupe down too, and it
+        // is the one place a person may overrule that gate. The dedupe's whole
+        // claim is that the last run still speaks for the item, and a pull
+        // request that cannot merge is the case where it does not — so a
+        // person naming the card gets the rebase raised now rather than at the
+        // end of a hold they can see no reason for. NG-3 is untouched: this
+        // reaches only an item the ledger says is conflicting, never a clean
+        // one at an unchanged fingerprint.
+        let conflicted: std::collections::HashSet<i64> = items
+            .iter()
+            .filter(|i| i.conflict_base.is_some())
+            .map(|i| i.key)
+            .collect();
         for h in heads.iter_mut().filter(|h| named.contains(&h.item_key)) {
             h.attempted_at = None;
             h.failure_streak = 0;
+            if conflicted.contains(&h.item_key) {
+                h.done_at = None;
+                h.done_head = None;
+            }
         }
     }
     let (owed, withheld, live) =

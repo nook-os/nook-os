@@ -466,7 +466,8 @@ export function TaskDetail({
     );
   }
 
-  const { task, comments, blocked_by, blocking, related, is_blocked, children } = data;
+  const { task, comments, blocked_by, blocking, related, is_blocked, children, pr_conflict } =
+    data;
   const taskAttachments = forParent("task", task.id);
   const linked = [...blocked_by, ...blocking, ...related];
   const isEpic = task.type === "epic";
@@ -960,6 +961,15 @@ export function TaskDetail({
                       >
                         {task.pr_url.replace(/^https?:\/\//, "")} ↗
                       </a>
+                      {/* MAIN-627 AC-5: the reason a stalled card is stalled,
+                          beside the pull request rather than buried in the
+                          comment thread. A conflict looks like nothing at all
+                          from here otherwise. */}
+                      {pr_conflict && (
+                        <div className="small" style={{ marginTop: 4 }}>
+                          <Pill tone="warn">conflicts with base — rebase owed</Pill>
+                        </div>
+                      )}
                     </div>
                   </>
                 )}
