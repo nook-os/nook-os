@@ -453,6 +453,18 @@ mod tests {
     /// A free port, released before the call under test uses it. Racy in
     /// principle, fine in practice and far better than a hard-coded port that
     /// collides with whatever else the suite is running.
+    /// Serialises allocate-then-bind for every test here that needs a port.
+    ///
+    /// `free_port` cannot hold its reservation: the code under test has to bind
+    /// the port itself, so there is always a window between "this was free" and
+    /// "we bound it". Sibling tests in this binary bind `:0` for their squatters
+    /// and land in that window — which is how `both_doors_come_back_together`
+    /// failed with `Address already in use` on the postgres leg while passing on
+    /// the sqlite leg at the SAME commit. Nothing about it was engine-dependent;
+    /// it was two tests racing for one port. Holding this across both steps
+    /// closes the window inside the binary, which is where the collision was.
+    static PORT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     async fn free_port() -> String {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap();
@@ -467,6 +479,7 @@ mod tests {
     /// enough to push its capabilities.
     #[tokio::test]
     async fn a_boot_that_cannot_take_the_browser_port_never_opens_the_agent_door() {
+        let _port = PORT_LOCK.lock().await;
         // Something else already owns the browser port — a previous server that
         // outlived its restart, which is exactly the dev-loop case.
         let squatter = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -499,6 +512,7 @@ mod tests {
     /// The other order still fails loudly, and leaves nothing behind.
     #[tokio::test]
     async fn a_contended_agent_port_fails_the_boot_and_releases_the_browser_port() {
+        let _port = PORT_LOCK.lock().await;
         let browser = free_port().await;
         let squatter = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let taken_agent = squatter.local_addr().unwrap().to_string();
@@ -519,6 +533,7 @@ mod tests {
     /// together rather than one at a time.
     #[tokio::test]
     async fn both_doors_come_back_together() {
+        let _port = PORT_LOCK.lock().await;
         let browser = free_port().await;
         let agent = free_port().await;
         let (a, b) = bind_doors(&browser, &agent).await.expect("both bind");
