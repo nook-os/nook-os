@@ -342,10 +342,19 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
     }
 
     // Best-effort: on every (re)connect, prune loop-job worktrees orphaned by a
-    // crash or a node restart (MAIN-161 AC-4). Blocking git, non-fatal.
+    // crash or a node restart (MAIN-161 AC-4), and reclaim the job containers,
+    // networks, volumes and firewall rules the same crash stranded (MAIN-617).
+    // Blocking git and docker, non-fatal.
+    //
+    // Connect is where the crash case is actually caught: a node that has just
+    // started is running no jobs, so every labelled object on the machine is by
+    // definition an orphan.
     {
         let cfg = cfg.clone();
-        tokio::task::spawn_blocking(move || crate::loop_job::reconcile(&cfg));
+        tokio::task::spawn_blocking(move || {
+            crate::loop_job::reconcile(&cfg);
+            crate::loop_job::sweep_job_sandboxes();
+        });
     }
 
     // What this node holds for finished cards, on a timer as well as on connect.
@@ -374,6 +383,13 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
             interval.tick().await; // the first tick is immediate: the connect-time report
             let cfg = inventory_cfg.clone();
             let held = tokio::task::spawn_blocking(move || {
+                // The orphaned-sandbox sweep rides the same timer for the same
+                // reason the reports do (MAIN-617 AC-4): a node that stays up
+                // for days accumulates the leavings of every job that died in
+                // between, and a container nobody removes holds a whole nested
+                // image cache. No new timer — this one already runs every ten
+                // minutes and already costs a `docker compose ls`.
+                crate::loop_job::sweep_job_sandboxes();
                 (
                     crate::loop_job::build_worktrees_held(&cfg),
                     crate::compose::build_stacks_held(),

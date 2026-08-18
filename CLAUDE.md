@@ -327,6 +327,20 @@ fake remote on a node that never reports. The dogfood workspace is the opposite
   escapes` runs the escape suite against a REAL job container: reading `$HOME`,
   a sibling checkout and the node identity; `docker run -v /:/host`; sockets and
   pings to RFC1918. Opt-in because it needs Docker and the image.
+- **A killed node's leavings are swept by LABEL, never by a prune (MAIN-617).**
+  `Sandbox::stop` is reached only from `Drop`, so it covers exactly one case —
+  `loop_job::run` returning. A node that is killed (crash, OOM, `systemctl
+  restart nook-node`) stranded the container, its network, its `NOOK-SANDBOX`
+  rules and a `build`'s anonymous `/var/lib/docker` volume forever, and the only
+  remedy was `docker system prune -a --volumes` by hand — far too broad on a
+  machine that also runs the owner's own work. `sandbox::sweep_orphans` now runs
+  on connect beside `loop_job::reconcile` and on the existing ten-minute
+  inventory timer, and removes ONLY objects carrying `nook.job` whose id is not
+  in this process's running set: `docker rm -f -v` (the `-v` is the volume),
+  then the rules whose subnet no live job holds, then the network — `stop`'s own
+  ordering. **After a restart the running set is empty, which is what makes the
+  crash case work.** Nothing unlabelled is ever touched, no code path prunes,
+  and a source guard fails the build if one appears.
 
 ## Loops are OFF by default (MAIN-239)
 

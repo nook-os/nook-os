@@ -89,6 +89,35 @@ fn running_jobs() -> &'static Mutex<HashSet<String>> {
     JOBS.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+/// Job IDS of the jobs running on this node right now, so the sandbox sweep can
+/// tell a live job's container from one a killed node left behind (MAIN-617).
+///
+/// A second set beside `running_jobs`, not a replacement for it: that one holds
+/// WORKTREE DIRECTORY names, which a review run shares across every run of one
+/// PR and a build run across every pass of one card (`warm_identity`). A
+/// container is named and labelled for the JOB, so only a job id can identify
+/// one — and two runs of one PR would otherwise be indistinguishable.
+fn running_job_ids() -> &'static Mutex<HashSet<String>> {
+    static IDS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    IDS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Reclaim the Docker objects and firewall rules of jobs this node is no longer
+/// running (MAIN-617). Best effort and never fatal, exactly like [`reconcile`].
+///
+/// Beside `reconcile` rather than inside it because they sweep different things
+/// for different reasons: `reconcile` deletes worktree DIRECTORIES and its
+/// build-worktree exemption is a card-lifecycle rule (MAIN-480), while this
+/// removes only what carries the `nook.job` label. Nothing here touches a
+/// worktree.
+pub fn sweep_job_sandboxes() {
+    let running = running_job_ids()
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_default();
+    crate::sandbox::sweep_orphans(&running);
+}
+
 /// How many loop jobs are running here right now (MAIN-505).
 ///
 /// LOOP jobs only, which is the whole distinction the update cordon turns on: a
@@ -1517,6 +1546,12 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
     if let Ok(mut s) = running_jobs().lock() {
         s.insert(dirname.clone());
     }
+    // Registered HERE rather than beside `start_sandbox`, so there is no instant
+    // between `docker run` and this node knowing about the container in which a
+    // sweep could see it and call it an orphan (MAIN-617).
+    if let Ok(mut s) = running_job_ids().lock() {
+        s.insert(job_id.clone());
+    }
 
     let base = cache_base(&cfg.server);
     let wt_base = base.join("worktrees");
@@ -1551,7 +1586,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
             Ok(c) => c,
             Err(e) => {
                 finished(&out, &job_id, false, format!("clone cache failed: {e}"));
-                unregister(&dirname);
+                unregister(&dirname, &job_id);
                 return;
             }
         }
@@ -1573,7 +1608,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
                         cfg.node_name
                     ),
                 );
-                unregister(&dirname);
+                unregister(&dirname, &job_id);
                 return;
             }
         }
@@ -1647,7 +1682,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
             Ok(w) => w,
             Err(e) => {
                 finished(&out, &job_id, false, format!("worktree setup failed: {e}"));
-                unregister(&dirname);
+                unregister(&dirname, &job_id);
                 return;
             }
         }
@@ -1713,7 +1748,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
             &default_branch,
         ) {
             refused(&out, &job_id, refusal.message(&worktree));
-            unregister(&dirname);
+            unregister(&dirname, &job_id);
             return;
         }
     }
@@ -1751,7 +1786,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
                      review\" and the job would report success having examined none."
                 ),
             );
-            unregister(&dirname);
+            unregister(&dirname, &job_id);
             return;
         }
     }
@@ -1777,7 +1812,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
                  agent skill directory"
             ),
         );
-        unregister(&dirname);
+        unregister(&dirname, &job_id);
         return;
     }
 
@@ -1797,7 +1832,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
                 reclaim_and_note(&out, &job_id, &worktree);
             }
             refused(&out, &job_id, e);
-            unregister(&dirname);
+            unregister(&dirname, &job_id);
             return;
         }
     };
@@ -1879,7 +1914,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
     } else if let Err(e) = remove_job_worktree(&cache, &worktree) {
         note(&out, &job_id, format!("worktree cleanup: {e}"));
     }
-    unregister(&dirname);
+    unregister(&dirname, &job_id);
     finished(&out, &job_id, ok, message);
 }
 
@@ -2413,9 +2448,14 @@ fn report_turn(out: &Sender<NodeToControl>, job_id: &str, active: bool) {
     });
 }
 
-fn unregister(dirname: &str) {
+/// Both registries, always together: a job id left behind here would make the
+/// sweep spare that job's container forever, which is the leak this replaced.
+fn unregister(dirname: &str, job_id: &str) {
     if let Ok(mut s) = running_jobs().lock() {
         s.remove(dirname);
+    }
+    if let Ok(mut s) = running_job_ids().lock() {
+        s.remove(job_id);
     }
 }
 
@@ -2639,8 +2679,24 @@ mod tests {
         let before = in_flight();
         running_jobs().lock().unwrap().insert(key.to_string());
         assert_eq!(in_flight(), before + 1);
-        unregister(key);
+        unregister(key, "job-in-flight-probe");
         assert_eq!(in_flight(), before);
+    }
+
+    /// MAIN-617: a run registers its JOB ID as well as its worktree name, and
+    /// gives both back. The sweep's whole safety argument is that a live job is
+    /// in this set — a registration that leaked would spare a dead job's
+    /// container forever, and one that never happened would delete a live one's.
+    #[test]
+    fn a_run_registers_and_releases_its_job_id() {
+        let dir = "build-sweep-probe";
+        let job = "0199-sweep-probe";
+        assert!(!running_job_ids().lock().unwrap().contains(job));
+        running_jobs().lock().unwrap().insert(dir.to_string());
+        running_job_ids().lock().unwrap().insert(job.to_string());
+        unregister(dir, job);
+        assert!(!running_job_ids().lock().unwrap().contains(job));
+        assert!(!running_jobs().lock().unwrap().contains(dir));
     }
 
     // ── MAIN-481: seeding a fresh build worktree ───────────────────────────
