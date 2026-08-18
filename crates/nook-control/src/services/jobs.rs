@@ -2949,6 +2949,7 @@ pub async fn dispatch_to_node(state: &AppState, tenant: TenantId, job: &LoopJob)
     // worktree, the same running containers — reads the same numbers without
     // anything having to remember them across runs.
     let (ports, unsatisfied_ports) = build_ports(state, tenant, job, node).await?;
+    let references = job_references(state, tenant, job, node, workspace_id).await?;
 
     let sent = state.registry.send_to_node(
         node,
@@ -2993,6 +2994,7 @@ pub async fn dispatch_to_node(state: &AppState, tenant: TenantId, job: &LoopJob)
             seed: job.seed.clone(),
             ports,
             unsatisfied_ports,
+            references,
         },
     );
     if !sent {
@@ -3009,6 +3011,46 @@ pub async fn dispatch_to_node(state: &AppState, tenant: TenantId, job: &LoopJob)
         .ok();
     transition(state, tenant, job.id, "running").await?;
     Ok(())
+}
+
+/// The workspaces the run's card names with `@slug`, each located on THIS
+/// executor (MAIN-632 AC-4).
+///
+/// The path is the workspace's **clone** on the node — never a worktree, the
+/// same deterministic pick `start-work` makes — because a reference is read
+/// material, not a branch anyone is about to work on (NG-1).
+///
+/// Two things are deliberately not errors. A card with no references is nearly
+/// every card, and a reference the executor holds no checkout of travels with
+/// `path: None` rather than holding the job back: placement is untouched (NG-2)
+/// and the brief says which repo the run did not get (AC-8).
+///
+/// The card's OWN workspace is dropped even when the body names it. The run is
+/// already IN that repo, read-write, and mounting it a second time read-only
+/// would be Docker mounting one host path twice with contradicting modes.
+async fn job_references(
+    state: &AppState,
+    tenant: TenantId,
+    job: &LoopJob,
+    node: NodeId,
+    own_workspace: WorkspaceId,
+) -> ApiResult<Vec<nook_types::WorkspaceRef>> {
+    let Some(task) = job.target_task_id else {
+        return Ok(Vec::new());
+    };
+    let refs = state.tasks.workspace_refs_of(tenant, task).await?;
+    let mut out = Vec::with_capacity(refs.len());
+    for mut r in refs {
+        if r.workspace_id == own_workspace {
+            continue;
+        }
+        r.path = state
+            .tasks
+            .clone_path_on_node(tenant, r.workspace_id, node)
+            .await?;
+        out.push(r);
+    }
+    Ok(out)
 }
 
 /// What this run should export, from what its card holds (MAIN-552).

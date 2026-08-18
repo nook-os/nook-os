@@ -2689,6 +2689,29 @@ pub struct CreateRelationRequest {
     pub kind: String,
 }
 
+/// A workspace a card's description names with `@slug` (MAIN-632).
+///
+/// Resolved and STORED as an id when the description is written, never
+/// re-parsed at read time: a slug rename would otherwise orphan every card that
+/// named the workspace, silently and all at once.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
+pub struct WorkspaceRef {
+    pub workspace_id: WorkspaceId,
+    pub name: String,
+    pub slug: String,
+    pub git_remote_url: Option<String>,
+    /// Where this workspace's clone is on the executor a RUN was placed on
+    /// (AC-4), which is the only context in which the question has an answer.
+    ///
+    /// `None` on a card read — a card is not on a node — and on a run whose
+    /// executor holds no checkout of it (AC-8). That second case is best
+    /// effort by design: a reference is not a scheduling constraint (NG-2), so
+    /// the run proceeds and the agent is told which repo it did not get.
+    #[serde(default)]
+    #[db(skip)]
+    pub path: Option<String>,
+}
+
 /// One whole issue: what the loop reads before it starts work.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct TaskDetail {
@@ -2717,6 +2740,10 @@ pub struct TaskDetail {
     /// stalled on anything else.
     #[serde(default)]
     pub pr_conflict: Option<PrConflict>,
+    /// The workspaces this card's description names with `@slug` (MAIN-632).
+    /// Empty for a card that names none, which is nearly all of them.
+    #[serde(default)]
+    pub workspace_refs: Vec<WorkspaceRef>,
 }
 
 /// Why a card's pull request cannot merge, when the reason is its base branch

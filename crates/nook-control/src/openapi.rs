@@ -452,6 +452,7 @@ use utoipa::OpenApi;
         nook_types::RelatedTask,
         nook_types::EpicChild,
         nook_types::CreateRelationRequest,
+        nook_types::WorkspaceRef,
         nook_types::TaskDetail,
         nook_types::ClaimTaskRequest,
         nook_types::Skill,

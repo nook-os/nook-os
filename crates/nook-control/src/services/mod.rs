@@ -122,3 +122,4 @@ pub mod tunnel_reaper;
 pub mod work_source;
 pub mod workspace_queries;
 pub mod workspace_reaper;
+pub mod workspace_refs;

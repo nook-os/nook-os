@@ -698,6 +698,29 @@ pub trait TaskRepository: Send + Sync {
         task: TaskId,
     ) -> ApiResult<Vec<TaskDescriptionRevision>>;
 
+    // ---- `@slug` workspace references (MAIN-632) ---------------------------
+
+    /// Make the card's stored references say what `description` names with
+    /// `@slug` — a replace, so deleting a mention removes the reference.
+    ///
+    /// Resolution is a tenant-scoped slug lookup (NG-3) and an unresolvable
+    /// token is simply not a reference: writing a description is not a place to
+    /// fail on a typo (AC-2), and the body is stored byte-for-byte either way.
+    async fn sync_workspace_refs(
+        &self,
+        tenant: TenantId,
+        task: TaskId,
+        description: Option<&str>,
+    ) -> ApiResult<()>;
+
+    /// The workspaces a card names, by slug, so the order a reader sees is the
+    /// same one twice running.
+    async fn workspace_refs_of(
+        &self,
+        tenant: TenantId,
+        task: TaskId,
+    ) -> ApiResult<Vec<WorkspaceRef>>;
+
     /// `(visibility, number, board key)` — what decides whether a notification
     /// may carry an excerpt, and how to name the card if not.
     async fn task_visibility_naming(
@@ -2471,6 +2494,70 @@ impl TaskRepository for DbTaskRepository {
             .await?)
     }
 
+    async fn sync_workspace_refs(
+        &self,
+        tenant: TenantId,
+        task: TaskId,
+        description: Option<&str>,
+    ) -> ApiResult<()> {
+        let slugs =
+            crate::services::workspace_refs::mentioned_slugs(description.unwrap_or_default());
+        let mut tx = self.db.begin().await.map_err(nook_db::DbError::from)?;
+        // Delete-then-insert rather than a diff: the description is replaced
+        // whole by every write path there is, so what it names is the whole
+        // answer and a mention removed from the body must take its reference
+        // with it.
+        tx.exec(
+            "DELETE FROM task_workspace_refs WHERE task_id = $1 AND tenant_id = $2",
+            params![task, tenant],
+        )
+        .await?;
+        if !slugs.is_empty() {
+            // Resolution IS the insert: one statement, so an unknown slug
+            // matches no row and stores nothing rather than raising (AC-2), and
+            // the tenant predicate is what makes a cross-tenant slug simply not
+            // a workspace here (NG-3). `IN (…)` and not Postgres' `= ANY
+            // (ARRAY[…])`, which SQLite does not speak.
+            let placeholders: Vec<String> =
+                (0..slugs.len()).map(|i| format!("${}", i + 3)).collect();
+            let mut binds = params![task, tenant];
+            for slug in &slugs {
+                binds.extend(params![slug.as_str()]);
+            }
+            tx.exec(
+                &format!(
+                    "INSERT INTO task_workspace_refs (task_id, workspace_id, tenant_id)
+                     SELECT $1, w.id, $2 FROM workspaces w
+                      WHERE w.tenant_id = $2 AND w.slug IN ({})
+                     ON CONFLICT DO NOTHING",
+                    placeholders.join(", ")
+                ),
+                binds,
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn workspace_refs_of(
+        &self,
+        tenant: TenantId,
+        task: TaskId,
+    ) -> ApiResult<Vec<WorkspaceRef>> {
+        Ok(self
+            .db
+            .query_all(
+                "SELECT w.id AS workspace_id, w.name, w.slug, w.git_remote_url
+                   FROM task_workspace_refs r
+                   JOIN workspaces w ON w.id = r.workspace_id
+                  WHERE r.task_id = $1 AND r.tenant_id = $2
+                  ORDER BY w.slug",
+                params![task, tenant],
+            )
+            .await?)
+    }
+
     async fn task_visibility_naming(
         &self,
         task: TaskId,
@@ -2872,6 +2959,10 @@ struct FakeState {
     relations: Vec<TaskRelation>,
     /// `(checkout, tenant, workspace, node, path, kind, present, remote)`
     checkouts: Vec<Checkout>,
+    /// Workspaces an `@slug` can resolve to (MAIN-632), by tenant.
+    workspaces: Vec<(TenantId, WorkspaceRef)>,
+    /// `(task, workspace)` — the join table, replaced whole on every sync.
+    workspace_refs: Vec<(TaskId, WorkspaceId)>,
 }
 
 /// The fake's reading of the guard both merge-sweep writes carry: the card sits
@@ -2958,6 +3049,28 @@ impl FakeTaskRepository {
             present,
             remote: remote.map(str::to_string),
         });
+        id
+    }
+
+    /// A workspace an `@slug` in a description can resolve to (MAIN-632).
+    pub fn with_workspace(
+        &self,
+        tenant: TenantId,
+        slug: &str,
+        name: &str,
+        remote: Option<&str>,
+    ) -> WorkspaceId {
+        let id = WorkspaceId::new();
+        self.inner.lock().unwrap().workspaces.push((
+            tenant,
+            WorkspaceRef {
+                workspace_id: id,
+                name: name.into(),
+                slug: slug.into(),
+                git_remote_url: remote.map(str::to_string),
+                path: None,
+            },
+        ));
         id
     }
 
@@ -4378,6 +4491,52 @@ impl TaskRepository for FakeTaskRepository {
             .collect();
         // Newest first, id as the tiebreak — the real query's ordering.
         rows.sort_by_key(|r| std::cmp::Reverse((r.created_at, r.id)));
+        Ok(rows)
+    }
+
+    async fn sync_workspace_refs(
+        &self,
+        tenant: TenantId,
+        task: TaskId,
+        description: Option<&str>,
+    ) -> ApiResult<()> {
+        let slugs =
+            crate::services::workspace_refs::mentioned_slugs(description.unwrap_or_default());
+        let mut st = self.inner.lock().unwrap();
+        st.workspace_refs.retain(|(t, _)| *t != task);
+        let resolved: Vec<WorkspaceId> = slugs
+            .iter()
+            .filter_map(|slug| {
+                st.workspaces
+                    .iter()
+                    .find(|(t, w)| *t == tenant && &w.slug == slug)
+                    .map(|(_, w)| w.workspace_id)
+            })
+            .collect();
+        for id in resolved {
+            st.workspace_refs.push((task, id));
+        }
+        Ok(())
+    }
+
+    async fn workspace_refs_of(
+        &self,
+        tenant: TenantId,
+        task: TaskId,
+    ) -> ApiResult<Vec<WorkspaceRef>> {
+        let st = self.inner.lock().unwrap();
+        let mut rows: Vec<WorkspaceRef> = st
+            .workspace_refs
+            .iter()
+            .filter(|(t, _)| *t == task)
+            .filter_map(|(_, w)| {
+                st.workspaces
+                    .iter()
+                    .find(|(tn, ws)| *tn == tenant && ws.workspace_id == *w)
+                    .map(|(_, ws)| ws.clone())
+            })
+            .collect();
+        rows.sort_by(|a, b| a.slug.cmp(&b.slug));
         Ok(rows)
     }
 
