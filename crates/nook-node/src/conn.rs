@@ -650,6 +650,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 cols,
                 rows,
                 ports,
+                secrets,
                 unsatisfied,
                 attempt,
                 // The wire still carries both — the control plane records a
@@ -710,6 +711,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                                 runtime,
                                 cwd,
                                 ports,
+                                secrets,
                                 unsatisfied,
                             })
                         }
@@ -723,6 +725,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                                 cols,
                                 rows,
                                 ports,
+                                secrets,
                                 unsatisfied,
                             })
                         }
@@ -1467,6 +1470,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 seed,
                 ports,
                 unsatisfied_ports,
+                secrets,
                 references,
             } => {
                 // The cordon is enforced HERE, not only where work is placed
@@ -1512,6 +1516,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                             seed,
                             ports,
                             unsatisfied_ports,
+                            secrets,
                             references,
                         },
                     );

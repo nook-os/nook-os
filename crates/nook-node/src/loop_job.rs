@@ -80,6 +80,10 @@ pub struct LoopJob {
     /// `NOOK_PORTS_UNSATISFIED` — the same name a session gets (MAIN-377), so a
     /// consumer telling "not leased" from "not under nook" reads one variable.
     pub unsatisfied_ports: Vec<String>,
+    /// The tenant- and workspace-scoped secret items this run's agent gets
+    /// (MAIN-625 AC-6). Already filtered by the control plane, which is the
+    /// only end that knows the scopes — a node-scoped item never reaches here.
+    pub secrets: Vec<nook_types::SecretEnv>,
     /// The workspaces the run's card names with `@slug` (MAIN-632), each with
     /// its checkout path on THIS node where the control plane found one.
     ///
@@ -1756,6 +1760,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
         nook_token,
         ports,
         unsatisfied_ports,
+        secrets,
         references,
     } = job;
     // Which forge credential this run gets, decided ONCE (see `forge_token`).
@@ -2109,6 +2114,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
                 warm_session: warm.as_ref().map(|(_, sid)| sid.as_str()),
                 ports: &ports,
                 unsatisfied_ports: &unsatisfied_ports,
+                secrets: &secrets,
                 references: &references,
                 sandbox: sandbox.as_ref(),
             },
@@ -2129,6 +2135,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
             seed.as_deref(),
             &references,
             workspace_id.as_deref(),
+            &secrets,
             sandbox.as_ref(),
         ),
     };
@@ -2331,6 +2338,10 @@ struct RunBrief<'a> {
     ports: &'a [nook_types::LeasedPort],
     /// Optional listeners that went unleased, under `NOOK_PORTS_UNSATISFIED`.
     unsatisfied_ports: &'a [String],
+    /// The run's secret items (MAIN-625 AC-6), each under the name it was
+    /// stored with. Exported verbatim: this end recognises none of them, the
+    /// same property that keeps the port names a workspace's business.
+    secrets: &'a [nook_types::SecretEnv],
     /// The workspaces the card names with `@slug` (MAIN-632), as this node can
     /// honour them. Named in the opening turn so the agent knows what it was
     /// handed and what it was not.
@@ -2338,6 +2349,21 @@ struct RunBrief<'a> {
     /// The container this run's agent is confined to (MAIN-611 AC-1). `None`
     /// only on a node the sandbox profile exempts (NG-5).
     sandbox: Option<&'a crate::sandbox::Sandbox>,
+}
+
+/// The pairs a run's delivered secret items contribute to its environment
+/// (MAIN-625 AC-6).
+///
+/// Pure, and for the reason [`crate::sandbox::run_args`] is: "a job's agent is
+/// handed its workspace's secrets" is a claim about a vector, so it is a unit
+/// test rather than a container run. Trivial by design — the control plane has
+/// already applied the scope rules, and this end recognising a name is exactly
+/// what it must never start doing.
+fn secret_env(secrets: &[nook_types::SecretEnv]) -> Vec<(&str, &str)> {
+    secrets
+        .iter()
+        .map(|s| (s.name.as_str(), s.value.as_str()))
+        .collect()
 }
 
 fn drive_streaming(
@@ -2357,6 +2383,7 @@ fn drive_streaming(
         warm_session,
         ports,
         unsatisfied_ports,
+        secrets,
         references,
         sandbox,
     } = brief;
@@ -2375,7 +2402,14 @@ fn drive_streaming(
         Some(sid) => (job_adapter::claude_stream_args(sid), false),
         None => (job_adapter::claude_stream_args(job_id), false),
     };
-    let mut env: Vec<(&str, &str)> = vec![
+    // Secrets go in FIRST, before every variable below (MAIN-625 AC-6).
+    // `docker exec -e` and the direct spawn both take the LAST value for a
+    // name, so this ordering is what stops a secret shadowing the run's own
+    // credential, its leased ports, or the id it reports under. The names nook
+    // sets for itself are refused at write time as well — belt and braces,
+    // because only one of the two survives somebody adding a variable here.
+    let mut env: Vec<(&str, &str)> = secret_env(secrets);
+    env.extend([
         ("NOOK_JOB_ID", job_id),
         // The agent runs headless with `--dangerously-skip-permissions`
         // (job_adapter), which Claude Code refuses under root "for security
@@ -2384,7 +2418,7 @@ fn drive_streaming(
         // how Claude Code sanctions the flag there. Without it the agent exits 1
         // on launch and the run fails before it does anything.
         ("IS_SANDBOX", "1"),
-    ];
+    ]);
     if let Some(s) = seed.filter(|s| !s.trim().is_empty()) {
         env.push(("NOOK_JOB_SEED", s));
     }
@@ -2724,6 +2758,7 @@ fn drive_session(
     seed: Option<&str>,
     references: &[nook_types::WorkspaceRef],
     workspace_id: Option<&str>,
+    secrets: &[nook_types::SecretEnv],
     sandbox: Option<&crate::sandbox::Sandbox>,
 ) -> (bool, String) {
     let cwd = worktree.to_string_lossy().to_string();
@@ -2751,6 +2786,7 @@ fn drive_session(
         // because of who it is, not because of a variable it was told. Adding a
         // second source of truth here is how the two drift.
         None,
+        secrets,
         sandbox,
     ) {
         return (false, format!("could not launch session: {e}"));
@@ -3066,6 +3102,32 @@ mod tests {
         unregister(dir, job);
         assert!(!running_job_ids().lock().unwrap().contains(job));
         assert!(!running_jobs().lock().unwrap().contains(dir));
+    }
+
+    /// MAIN-625 AC-6: the environment handed to a job's agent carries the
+    /// items the control plane selected, verbatim and in order.
+    #[test]
+    fn a_runs_environment_carries_its_delivered_secrets() {
+        let delivered = vec![
+            nook_types::SecretEnv {
+                name: "FLEET_KEY".into(),
+                value: "from-the-tenant".into(),
+            },
+            nook_types::SecretEnv {
+                name: "REPO_KEY".into(),
+                value: "from-the-workspace".into(),
+            },
+        ];
+        assert_eq!(
+            secret_env(&delivered),
+            vec![
+                ("FLEET_KEY", "from-the-tenant"),
+                ("REPO_KEY", "from-the-workspace"),
+            ]
+        );
+        // A run for a workspace with nothing set gains no variables at all —
+        // the overwhelmingly common case, and it must stay free.
+        assert!(secret_env(&[]).is_empty());
     }
 
     // ── MAIN-481: seeding a fresh build worktree ───────────────────────────

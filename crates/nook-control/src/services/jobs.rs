@@ -2994,6 +2994,16 @@ pub async fn dispatch_to_node(state: &AppState, tenant: TenantId, job: &LoopJob)
             seed: job.seed.clone(),
             ports,
             unsatisfied_ports,
+            // The tenant's and this repo's secret items (MAIN-625 AC-6) — the
+            // same set a human's session in this workspace gets, resolved
+            // through the same function so the two surfaces cannot disagree
+            // about who gets what.
+            secrets: crate::services::secret_items::env_for_workspace(
+                state,
+                tenant,
+                Some(workspace_id),
+            )
+            .await,
             references,
         },
     );

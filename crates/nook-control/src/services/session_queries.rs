@@ -241,6 +241,13 @@ pub async fn create_session_at(
         }
     };
 
+    // The tenant's and this repo's secret items (MAIN-625 AC-5). Resolved after
+    // the ports for the same reason they are: the session's environment is
+    // fixed at `tmux new-session` and nothing sets it after, so anything the
+    // session must hold has to be in this message.
+    let secrets =
+        crate::services::secret_items::env_for_workspace(state, tenant, Some(workspace_id)).await;
+
     let sent = state.registry.send_to_node(
         node_id,
         nook_proto::ControlToNode::StartSession {
@@ -255,6 +262,7 @@ pub async fn create_session_at(
             rows: 32,
             ports: ports.ports.clone(),
             unsatisfied: ports.unsatisfied.clone(),
+            secrets,
             attempt: 0,
             // Only a managed session has a purpose to act on; a hand-started
             // one is a terminal and nothing drives it (MAIN-326).
@@ -355,6 +363,10 @@ pub async fn create_ad_hoc_session(
             rows: 32,
             ports: ports.ports.clone(),
             unsatisfied: ports.unsatisfied.clone(),
+            // No workspace, so the tenant's items and nothing else — the same
+            // rule `env_for` applies everywhere, given no workspace to narrow
+            // to.
+            secrets: crate::services::secret_items::env_for_workspace(state, tenant, None).await,
             attempt: 0,
             // An ad-hoc terminal is nobody's declaration, and so no slice of
             // one either.

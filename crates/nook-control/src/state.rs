@@ -79,6 +79,9 @@ pub struct AppState {
     /// ingested (MAIN-333). The sealed credential lives here; `vault` is what
     /// opens it.
     pub email_pollers: Arc<dyn crate::repo::email_pollers::EmailPollerRepository>,
+    /// Named secret items — tenant, workspace and node scoped (MAIN-625). The
+    /// envelope-sealed values live here; `vault` is what opens them.
+    pub secret_items: Arc<dyn crate::repo::secret_items::SecretItemRepository>,
     /// Tenant- and user-scoped settings rows (MAIN-258).
     pub settings: Arc<dyn crate::repo::admin::SettingRepository>,
     /// Org-visibility policy rows (MAIN-305).
@@ -210,6 +213,9 @@ impl AppState {
                 crate::repo::forge_deliveries::DbForgeDeliveryRepository::new(db.clone()),
             ),
             email_pollers: Arc::new(crate::repo::email_pollers::DbEmailPollerRepository::new(
+                db.clone(),
+            )),
+            secret_items: Arc::new(crate::repo::secret_items::DbSecretItemRepository::new(
                 db.clone(),
             )),
             notifications: Arc::new(crate::repo::notifications::DbNotificationRepository::new(

@@ -48,6 +48,10 @@ pub enum Cmd {
         cols: u16,
         rows: u16,
         ports: Vec<nook_types::LeasedPort>,
+        /// The tenant- and workspace-scoped secret items this session gets
+        /// (MAIN-625 AC-5). Carried rather than fetched: tmux takes its
+        /// environment at `new-session` and nothing sets it after.
+        secrets: Vec<nook_types::SecretEnv>,
         /// Declared listeners this session did not get (MAIN-377).
         unsatisfied: Vec<String>,
         /// Exported into the session so the git-ssh shim can name its repo
@@ -69,6 +73,7 @@ pub enum Cmd {
         runtime: String,
         cwd: String,
         ports: Vec<nook_types::LeasedPort>,
+        secrets: Vec<nook_types::SecretEnv>,
         unsatisfied: Vec<String>,
         workspace_id: Option<String>,
         tenant_id: Option<String>,
@@ -211,6 +216,7 @@ impl Manager {
                 cols,
                 rows,
                 ports,
+                secrets,
                 unsatisfied,
                 workspace_id,
                 tenant_id,
@@ -221,6 +227,7 @@ impl Manager {
                 cols,
                 rows,
                 &ports,
+                &secrets,
                 &unsatisfied,
                 workspace_id.as_deref(),
                 tenant_id.as_deref(),
@@ -230,6 +237,7 @@ impl Manager {
                 runtime,
                 cwd,
                 ports,
+                secrets,
                 unsatisfied,
                 workspace_id,
                 tenant_id,
@@ -238,6 +246,7 @@ impl Manager {
                 &runtime,
                 &cwd,
                 &ports,
+                &secrets,
                 &unsatisfied,
                 workspace_id.as_deref(),
                 tenant_id.as_deref(),
@@ -296,6 +305,7 @@ impl Manager {
         cols: u16,
         rows: u16,
         ports: &[nook_types::LeasedPort],
+        secrets: &[nook_types::SecretEnv],
         unsatisfied: &[String],
         workspace_id: Option<&str>,
         tenant_id: Option<&str>,
@@ -342,6 +352,7 @@ impl Manager {
                 runtime,
                 &sid,
                 ports,
+                secrets,
                 unsatisfied,
                 workspace_id,
                 tenant_id,
@@ -377,6 +388,7 @@ impl Manager {
         runtime: &str,
         cwd: &str,
         ports: &[nook_types::LeasedPort],
+        secrets: &[nook_types::SecretEnv],
         unsatisfied: &[String],
         workspace_id: Option<&str>,
         tenant_id: Option<&str>,
@@ -423,6 +435,12 @@ impl Manager {
             ("LANG", "C.UTF-8"),
             ("LC_ALL", "C.UTF-8"),
         ];
+        // Before the ports and before the credentials below, so a secret can
+        // never take a name the session's own machinery needs — the same
+        // ordering rule `tmux::new_session` follows.
+        for s in secrets {
+            env.push((s.name.as_str(), s.value.as_str()));
+        }
         for (k, v) in &port_s {
             env.push((k.as_str(), v.as_str()));
         }

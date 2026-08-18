@@ -328,6 +328,11 @@ pub fn new_session(
     // the node as framework-agnostic as the broker. Empty when the node
     // advertises no range or the workspace declares no listeners.
     ports: &[nook_types::LeasedPort],
+    // The tenant- and workspace-scoped secret items this session gets
+    // (MAIN-625 AC-5). Exported BEFORE the ports, deliberately: tmux takes the
+    // last `-e` for a name, so a secret can never take a leased port's variable
+    // out from under the app that was told to bind it.
+    secrets: &[nook_types::SecretEnv],
     // Declared listeners this session did NOT get (MAIN-377). Exported as
     // `NOOK_PORTS_UNSATISFIED` ONLY when there are some: absent has to keep
     // meaning "nothing was skipped", or a startup script cannot tell the two
@@ -364,10 +369,15 @@ pub fn new_session(
         .iter()
         .map(|p| (p.env.clone(), p.port.to_string()))
         .collect();
-    let mut extra: Vec<(&str, &str)> = port_s
+    let mut extra: Vec<(&str, &str)> = secrets
         .iter()
-        .map(|(env, port)| (env.as_str(), port.as_str()))
+        .map(|s| (s.name.as_str(), s.value.as_str()))
         .collect();
+    extra.extend(
+        port_s
+            .iter()
+            .map(|(env, port)| (env.as_str(), port.as_str())),
+    );
     // Declaration order, comma-separated: the same shape the declaration has,
     // so a script can split on ',' without learning a new format.
     let skipped = unsatisfied.join(",");
@@ -435,6 +445,10 @@ pub fn new_job_session(
     seed: Option<&str>,
     workspace_id: Option<&str>,
     tenant_id: Option<&str>,
+    // The run's secret items (MAIN-625 AC-6), for the same reason a session
+    // gets them: a suite that needs an API key needs it whether a person or an
+    // agent typed the command.
+    secrets: &[nook_types::SecretEnv],
     // The job's container (MAIN-611 AC-1). `Some` runs the runtime inside it;
     // the pane still lives on this machine, so a human reading the session sees
     // exactly what it always showed. `None` is the direct launch, kept for a
@@ -453,7 +467,13 @@ pub fn new_job_session(
     // The human's opening brief (MAIN-231) rides the environment verbatim —
     // line breaks and all — so anything in the session can read the original,
     // not just the flattened line typed at the runtime.
-    let mut env: Vec<(&str, &str)> = vec![("NOOK_JOB_ID", job_id)];
+    // Secrets first, so nothing the run needs to be its own can be taken by
+    // one — the same ordering rule `new_session` follows.
+    let mut env: Vec<(&str, &str)> = secrets
+        .iter()
+        .map(|s| (s.name.as_str(), s.value.as_str()))
+        .collect();
+    env.push(("NOOK_JOB_ID", job_id));
     if let Some(seed) = seed.filter(|s| !s.trim().is_empty()) {
         env.push(("NOOK_JOB_SEED", seed));
     }

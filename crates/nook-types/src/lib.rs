@@ -4995,6 +4995,129 @@ pub struct SecretOnDisk {
     pub in_vault: bool,
 }
 
+// ── Named secret items (MAIN-625) ───────────────────────────────────────────
+//
+// Deliberately a second thing beside [`WorkspaceSecret`], not a replacement for
+// it. That one is a whole `.env` file, sealed with a password the server never
+// sees and delivered only when a human unlocks a browser. These are individually
+// named values the control plane CAN open, because injecting one into a session
+// or a job container is the point and there is nobody at a keyboard to unlock
+// anything when a loop job starts at 03:00.
+
+/// What a secret item is attached to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretScope {
+    /// Everything in the tenant: the fleet's shared credentials.
+    Tenant,
+    /// One repo. Beats a tenant item of the same name.
+    Workspace,
+    /// One machine. Stored and listed, delivered nowhere (MAIN-625 NG-7) —
+    /// a node credential is for the node, not for what runs on it.
+    Node,
+}
+
+impl SecretScope {
+    /// The stored form. A plain text column rather than an enum type, for the
+    /// reason [`ManagedPurpose`] gives: adding a scope is a code change, not a
+    /// migration.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Tenant => "tenant",
+            Self::Workspace => "workspace",
+            Self::Node => "node",
+        }
+    }
+
+    /// Decode a stored or typed value. Unknown is an error rather than a
+    /// fallback: guessing a scope would decide who a secret reaches.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "tenant" => Some(Self::Tenant),
+            "workspace" | "repo" => Some(Self::Workspace),
+            "node" | "machine" => Some(Self::Node),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for SecretScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// One stored item, as every read path returns it.
+///
+/// **There is no value field, and that is the whole of AC-4.** A list that
+/// omitted the value by convention would grow one the first time somebody found
+/// it convenient; a type with nowhere to put it cannot.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SecretItem {
+    pub scope: SecretScope,
+    /// The tenant, workspace or node this belongs to.
+    pub scope_id: Uuid,
+    /// Its name in the environment — `STRIPE_KEY`, `NPM_TOKEN`.
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Set one item, creating it or replacing its value.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct SetSecretItemRequest {
+    pub scope: SecretScope,
+    /// The workspace or node. Omitted for a tenant item, which can only ever
+    /// mean the caller's own tenant.
+    #[serde(default)]
+    pub scope_id: Option<Uuid>,
+    pub name: String,
+    pub value: String,
+}
+
+/// Import a `.env` body as one item per assignment (AC-8).
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct ImportSecretItemsRequest {
+    pub scope: SecretScope,
+    #[serde(default)]
+    pub scope_id: Option<Uuid>,
+    /// The file, verbatim. Parsed here rather than by the caller so every
+    /// surface reads a `.env` the same way.
+    pub content: String,
+}
+
+/// A line the parser could not read. Reported, never silently dropped (AC-8):
+/// a secret that quietly failed to import is a build that fails much later for
+/// a reason nothing connects to this.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SecretImportProblem {
+    /// 1-based, as an editor counts. `None` when the problem is not about a
+    /// line at all — a store that failed after the file parsed cleanly.
+    pub line: Option<u32>,
+    pub reason: String,
+}
+
+/// What an import did. Names only — never a value, and never the line's text,
+/// which would carry one into a log by way of an error message.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ImportSecretItemsResult {
+    /// The names written, in the order the file gave them.
+    pub imported: Vec<String>,
+    pub problems: Vec<SecretImportProblem>,
+}
+
+/// One name and value on its way into a session or a job (MAIN-625 AC-5/AC-6).
+///
+/// The only shape in this file that carries a secret value, and it exists for
+/// exactly one hop: the control plane to the node it has already authenticated,
+/// over the same mTLS socket a git key and a scoped `nook` token already ride.
+/// It is never a response body — see [`SecretItem`] for why that matters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SecretEnv {
+    pub name: String,
+    pub value: String,
+}
+
 /// One improvement someone asked for, and what became of it.
 #[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct FeedbackItem {

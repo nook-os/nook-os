@@ -858,6 +858,12 @@ async fn handle_message(
                     rows: 32,
                     ports: fresh.ports,
                     unsatisfied: fresh.unsatisfied,
+                    secrets: crate::services::secret_items::env_for_workspace(
+                        state,
+                        session.tenant_id,
+                        session.workspace_id,
+                    )
+                    .await,
                     attempt: attempt + 1,
                     // Re-leasing after a port clash is still the same declared
                     // session; it must come back doing its job (MAIN-326) — and

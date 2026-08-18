@@ -505,6 +505,16 @@ pub enum ControlToNode {
         /// what keeps the node as ignorant of frameworks as the broker is.
         #[serde(default)]
         ports: Vec<nook_types::LeasedPort>,
+        /// The tenant- and workspace-scoped secret items this session gets
+        /// (MAIN-625 AC-5), each as the variable its own name gives.
+        ///
+        /// VALUES on the wire, unlike anything the API returns. The socket is
+        /// already the channel a git private key and a scoped `nook` token ride
+        /// — a node that could not be trusted with a secret could not be
+        /// trusted to run the session either. Node-scoped items are NOT here:
+        /// they are delivered nowhere (NG-7).
+        #[serde(default)]
+        secrets: Vec<nook_types::SecretEnv>,
         /// Which try this is. Rides in the message rather than in a table so a
         /// re-send after a port clash cannot loop forever, and so nothing has to
         /// be cleaned up when a session finally starts.
@@ -886,6 +896,15 @@ pub enum ControlToNode {
         /// shared literal everything else also falls back to.
         #[serde(default)]
         unsatisfied_ports: Vec<String>,
+        /// The tenant- and workspace-scoped secret items this run's agent gets
+        /// (MAIN-625 AC-6), each as the variable its own name gives.
+        ///
+        /// The same set a human's session in this workspace gets, for the
+        /// reason the feature exists: a build that needs an API key to run the
+        /// suite needs it whether a person or an agent typed the command.
+        /// Node-scoped items are NOT here (NG-7).
+        #[serde(default)]
+        secrets: Vec<nook_types::SecretEnv>,
         /// The workspaces the run's CARD names with `@slug` (MAIN-632), each
         /// with the path of its checkout on THIS executor where one exists.
         ///

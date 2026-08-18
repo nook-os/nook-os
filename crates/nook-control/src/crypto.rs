@@ -62,6 +62,64 @@ impl Vault {
     pub fn decrypt_string(&self, stored: &[u8]) -> Result<String> {
         Ok(String::from_utf8(self.decrypt(stored)?)?)
     }
+
+    /// Build a vault on a key given directly, rather than from the environment.
+    ///
+    /// Rotation is the case this exists for: re-wrapping an item's data key
+    /// under a second app key (see [`Vault::rewrap`]) needs both keys held at
+    /// once, and `from_env` can only ever produce the one the process booted
+    /// with.
+    pub fn from_key(key: [u8; 32]) -> Self {
+        Self {
+            cipher: Aes256Gcm::new(&Key::<Aes256Gcm>::from(key)),
+        }
+    }
+
+    /// Seal a value under a data key of its own, and wrap that key with the
+    /// app key (MAIN-625 AC-2).
+    ///
+    /// The value is never encrypted under the app key directly. That is what
+    /// makes rotating the app key a re-wrap of 32 bytes per item instead of a
+    /// decrypt-and-re-encrypt of every value — and it means a rotation never
+    /// has to hold a plaintext secret at all.
+    pub fn seal_envelope(&self, plaintext: &[u8]) -> Result<Envelope> {
+        use aes_gcm::aead::rand_core::RngCore;
+        let mut data_key = [0u8; 32];
+        OsRng.fill_bytes(&mut data_key);
+        let ciphertext = Vault::from_key(data_key).encrypt(plaintext)?;
+        Ok(Envelope {
+            wrapped_key: self.encrypt(&data_key)?,
+            ciphertext,
+        })
+    }
+
+    /// Open a sealed value: unwrap its data key with the app key, then use it.
+    pub fn open_envelope(&self, wrapped_key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
+        let data_key: [u8; 32] = self
+            .decrypt(wrapped_key)
+            .context("unwrapping the item's data key")?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("wrapped data key is not 32 bytes"))?;
+        Vault::from_key(data_key).decrypt(ciphertext)
+    }
+
+    /// Re-wrap a data key under another app key, leaving the value's own
+    /// ciphertext untouched.
+    ///
+    /// Untouched is the property, not an optimization: the stored bytes are
+    /// what a backup, a replica and a checksum already agree on, and rotating
+    /// the app key must not rewrite them.
+    pub fn rewrap(&self, wrapped_key: &[u8], to: &Vault) -> Result<Vec<u8>> {
+        to.encrypt(&self.decrypt(wrapped_key)?)
+    }
+}
+
+/// A value sealed under its own data key, with that key wrapped by the app key.
+/// The two halves are stored in separate columns — the wrapping is what an app
+/// key rotation rewrites, and it is deliberately not part of the ciphertext.
+pub struct Envelope {
+    pub wrapped_key: Vec<u8>,
+    pub ciphertext: Vec<u8>,
 }
 
 fn hex_decode(s: &str) -> Result<Vec<u8>> {
@@ -87,6 +145,42 @@ mod tests {
         assert_ne!(a, b, "nonces must differ");
         assert_eq!(vault.decrypt(&a).unwrap(), b"API_KEY=hunter2");
         assert_eq!(vault.decrypt_string(&b).unwrap(), "API_KEY=hunter2");
+    }
+
+    #[test]
+    fn an_envelope_survives_an_app_key_rotation_without_rewriting_its_ciphertext() {
+        // MAIN-625 AC-2. Rotation re-wraps 32 bytes; the value's own ciphertext
+        // is the same bytes before and after, and still opens.
+        std::env::remove_var("SECRETS_KEY");
+        let old = Vault::from_env("test-secret-test-secret-test-secret").unwrap();
+        let new = Vault::from_key([7u8; 32]);
+
+        let sealed = old.seal_envelope(b"hunter2").unwrap();
+        let before = sealed.ciphertext.clone();
+        let rewrapped = old.rewrap(&sealed.wrapped_key, &new).unwrap();
+
+        assert_eq!(
+            sealed.ciphertext, before,
+            "the ciphertext must not be rewritten"
+        );
+        assert_ne!(rewrapped, sealed.wrapped_key, "the wrapping must change");
+        assert_eq!(
+            new.open_envelope(&rewrapped, &sealed.ciphertext).unwrap(),
+            b"hunter2"
+        );
+        // …and the old app key no longer opens the new wrapping.
+        assert!(old.open_envelope(&rewrapped, &sealed.ciphertext).is_err());
+    }
+
+    #[test]
+    fn each_item_gets_a_data_key_of_its_own() {
+        std::env::remove_var("SECRETS_KEY");
+        let vault = Vault::from_env("test-secret-test-secret-test-secret").unwrap();
+        let a = vault.seal_envelope(b"same").unwrap();
+        let b = vault.seal_envelope(b"same").unwrap();
+        assert_ne!(a.wrapped_key, b.wrapped_key);
+        // One item's data key must not open another's value.
+        assert!(vault.open_envelope(&a.wrapped_key, &b.ciphertext).is_err());
     }
 
     #[test]

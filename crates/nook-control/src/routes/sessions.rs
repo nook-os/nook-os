@@ -548,6 +548,15 @@ pub async fn restart(
             // numbers and break every URL and config that pointed at the old
             // ones. Its leases outlive the process for exactly this reason.
             ports: held,
+            // Re-resolved rather than remembered: a restart is the moment a
+            // session picks up a secret that was set, rotated or removed while
+            // it was down, and tmux takes its environment at `new-session`.
+            secrets: crate::services::secret_items::env_for_workspace(
+                &state,
+                session.tenant_id,
+                session.workspace_id,
+            )
+            .await,
             attempt: 0,
             // The same session coming back, so it comes back doing the same
             // job: a review loop restarted as a bare terminal would sit there
