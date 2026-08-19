@@ -28,6 +28,8 @@
 //! Methods are intent-named and coarse; no `sqlx` type appears in any
 //! signature, and row mapping lives inside the impls (AC-2).
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use nook_db::dialect::{time_math, type_mapping};
 use nook_db::paging::{DbPage, ListSpec, PageArgs};
@@ -299,6 +301,62 @@ pub struct ReapedJob {
     /// `None` for a reaped `review` job — it has no ticket.
     pub target_task_id: Option<TaskId>,
     pub node_last_seen_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// What a node is HOLDING right now, split by whether the run is moving
+/// (MAIN-616).
+///
+/// A paused run occupies exactly as much of a machine as a moving one: the node
+/// still holds its live `Sandbox` — container, network, worktree — because
+/// `loop_job::run` has not returned and `Drop` has not fired. So `total()` is
+/// what placement compares against capacity, and the split is what lets a
+/// queued job say *which* of the two is holding the slot.
+///
+/// Deliberately not folded into [`LoopJobRepository::in_flight_on_node`]: that
+/// one answers "what does a disconnect strand", and a paused job must never be
+/// failed by an executor going away. Two questions, two answers, two tests.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HeldJobs {
+    /// `claimed` and `running` — a run with an agent actively working it.
+    pub in_flight: Vec<JobId>,
+    /// Paused on a human's answer, indefinitely and by design.
+    pub waiting_on_human: Vec<JobId>,
+}
+
+impl HeldJobs {
+    /// Every slot the node is occupying, which is what capacity is about.
+    pub fn total(&self) -> u32 {
+        (self.in_flight.len() + self.waiting_on_human.len()) as u32
+    }
+
+    /// Would this node have room if nobody were waiting on a human? The whole
+    /// difference between "answer your interview" and "buy a bigger box".
+    pub fn only_paused_blocks(&self, capacity: u32) -> bool {
+        !self.waiting_on_human.is_empty() && (self.in_flight.len() as u32) < capacity
+    }
+}
+
+/// Bucket `(job, node, state)` rows into [`HeldJobs`] per node — the half of
+/// `held_on_nodes` both repositories share, so AC-5's "the fake agrees with
+/// Postgres" is a property of the code and not of two people writing the same
+/// `match` twice. Each node's ids come back sorted, so the two implementations
+/// are comparable without the caller normalising.
+fn group_held(rows: Vec<(JobId, Option<NodeId>, String)>) -> HashMap<NodeId, HeldJobs> {
+    let mut held: HashMap<NodeId, HeldJobs> = HashMap::new();
+    for (id, node, state) in rows {
+        let Some(node) = node else { continue };
+        let entry = held.entry(node).or_default();
+        match state.as_str() {
+            "waiting_on_human" => entry.waiting_on_human.push(id),
+            "claimed" | "running" => entry.in_flight.push(id),
+            _ => {}
+        }
+    }
+    for h in held.values_mut() {
+        h.in_flight.sort_by_key(|i| i.0);
+        h.waiting_on_human.sort_by_key(|i| i.0);
+    }
+    held
 }
 
 /// A job the reaper found orphaned: still `claimed`/`running` on a HEALTHY node,
@@ -701,7 +759,22 @@ pub trait LoopJobRepository: Send + Sync {
     async fn executor_of(&self, tenant: TenantId, id: JobId) -> ApiResult<Option<Option<NodeId>>>;
 
     /// Jobs still believed to be running on a node — what a disconnect strands.
+    ///
+    /// `waiting_on_human` is deliberately absent: a paused run survives its
+    /// executor disconnecting, and widening this set is how it would start
+    /// being failed. Placement's question is [`Self::held_on_nodes`].
     async fn in_flight_on_node(&self, node: NodeId) -> ApiResult<Vec<JobId>>;
+
+    /// What each node is HOLDING, keyed by node — `claimed`, `running` and
+    /// `waiting_on_human` together (MAIN-616). `Some(node)` narrows to one
+    /// machine, `None` reads the whole fleet; a node holding nothing is simply
+    /// absent from the map.
+    ///
+    /// One method for both shapes on purpose: placement asks about a candidate
+    /// and the Nodes table asks about every row, and two queries that could
+    /// drift are exactly how a table would come to disagree with the gate it is
+    /// explaining.
+    async fn held_on_nodes(&self, node: Option<NodeId>) -> ApiResult<HashMap<NodeId, HeldJobs>>;
 
     /// `tenant`'s `queued` jobs, worthiest first — the order a freed executor
     /// is offered to them (MAIN-509).
@@ -1765,6 +1838,39 @@ impl LoopJobRepository for DbLoopJobRepository {
                 params![node],
             )
             .await?)
+    }
+
+    async fn held_on_nodes(&self, node: Option<NodeId>) -> ApiResult<HashMap<NodeId, HeldJobs>> {
+        // Two spellings of one query rather than an `IS NULL OR = $1` trick: a
+        // nullable parameter compared against a uuid column needs a cast on one
+        // engine and not the other, and the whole-fleet read has no parameter
+        // to cast at all.
+        const STATES: &str = "('claimed', 'running', 'waiting_on_human')";
+        let rows: Vec<(JobId, Option<NodeId>, String)> = match node {
+            Some(n) => {
+                self.db
+                    .query_all(
+                        &format!(
+                            "SELECT id, executor_node_id, state FROM loop_jobs
+                             WHERE executor_node_id = $1 AND state IN {STATES}"
+                        ),
+                        params![n],
+                    )
+                    .await?
+            }
+            None => {
+                self.db
+                    .query_all(
+                        &format!(
+                            "SELECT id, executor_node_id, state FROM loop_jobs
+                             WHERE executor_node_id IS NOT NULL AND state IN {STATES}"
+                        ),
+                        params![],
+                    )
+                    .await?
+            }
+        };
+        Ok(group_held(rows))
     }
 
     async fn queued_in_dispatch_order(&self, tenant: TenantId) -> ApiResult<Vec<JobId>> {
@@ -2950,6 +3056,22 @@ impl LoopJobRepository for FakeLoopJobRepository {
             })
             .map(|j| j.id)
             .collect())
+    }
+
+    async fn held_on_nodes(&self, node: Option<NodeId>) -> ApiResult<HashMap<NodeId, HeldJobs>> {
+        let rows: Vec<(JobId, Option<NodeId>, String)> = self
+            .inner
+            .lock()
+            .unwrap()
+            .jobs
+            .iter()
+            .filter(|j| node.is_none() || j.executor_node_id == node)
+            .map(|j| (j.id, j.executor_node_id, j.state.clone()))
+            .collect();
+        // The state filter is `group_held`'s, not a second copy of it: it drops
+        // everything that is not held, so a terminal row falls out here exactly
+        // as the SQL's `IN` drops it there.
+        Ok(group_held(rows))
     }
 
     async fn queued_in_dispatch_order(&self, tenant: TenantId) -> ApiResult<Vec<JobId>> {

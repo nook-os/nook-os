@@ -6753,6 +6753,23 @@ export interface components {
             effective: number;
             /**
              * Format: int32
+             * @description Loop jobs this node is holding against `effective` right now — running
+             *     AND paused together (MAIN-616), because a paused run keeps its container
+             *     and therefore keeps its slot.
+             *
+             *     `None` where the surface answered only "what number is in force" and
+             *     never counted; a node holding nothing counts zero, which is a different
+             *     statement and renders differently.
+             */
+            held?: number | null;
+            /**
+             * Format: int32
+             * @description Of [`Self::held`], how many are paused on a human's answer — the whole
+             *     difference between a node that is busy and one that is stuck.
+             */
+            held_waiting_on_human?: number | null;
+            /**
+             * Format: int32
              * @description The operator's central value, kept separate so a UI can show what
              *     clearing it will fall back to.
              */
@@ -7794,6 +7811,19 @@ export interface components {
         } | {
             /** @enum {string} */
             kind: "at_capacity";
+        } | {
+            /** @enum {string} */
+            kind: "waiting_on_human";
+            /**
+             * @description A node whose capacity a paused job is holding, so the answer has an
+             *     address.
+             */
+            node_name: string;
+            /**
+             * Format: int32
+             * @description How many of that node's held slots are paused runs.
+             */
+            paused: number;
         } | {
             /** @enum {string} */
             kind: "no_role_label";

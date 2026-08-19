@@ -81,15 +81,21 @@ async fn label_foreign_homes(
 }
 
 /// Everything a node row carries that is computed per response rather than
-/// stored: the foreign-home label (MAIN-353) and the loop capacity in force
-/// (MAIN-508).
+/// stored: the foreign-home label (MAIN-353), the loop capacity in force
+/// (MAIN-508) and what each node is holding against it (MAIN-616).
 ///
-/// One call rather than two at each site, so an endpoint that serves nodes
+/// One call rather than three at each site, so an endpoint that serves nodes
 /// cannot pick up half of it and leave a table showing "-" where every other
 /// table shows a number.
+///
+/// The held counts come from ONE fleet-wide read rather than a query per row:
+/// the set is every job a node is executing anywhere, which is a handful even
+/// on a busy fleet, and a per-row query would make a page of nodes N+1.
 async fn decorate(state: &AppState, acting: TenantId, nodes: &mut [Node]) -> ApiResult<()> {
     label_foreign_homes(state, acting, nodes).await?;
     crate::services::loop_capacity::fill(nodes);
+    let held = state.jobs.held_on_nodes(None).await?;
+    crate::services::loop_capacity::fill_held(nodes, &held);
     Ok(())
 }
 

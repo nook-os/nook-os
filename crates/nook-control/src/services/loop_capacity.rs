@@ -28,7 +28,9 @@
 //! never "busy". That is why the central value is `Option<i32>` and not a
 //! sentinel — absent and zero are different statements.
 
-use nook_types::{Node, NodeCapacity};
+use std::collections::HashMap;
+
+use nook_types::{Node, NodeCapacity, NodeId};
 
 use crate::services::jobs::CAPACITY_WHEN_UNREPORTED;
 
@@ -84,6 +86,8 @@ pub fn of(node: &Node) -> NodeCapacity {
         operator,
         advertised,
         pinned,
+        held: None,
+        held_waiting_on_human: None,
     }
 }
 
@@ -92,6 +96,25 @@ pub fn of(node: &Node) -> NodeCapacity {
 pub fn fill(nodes: &mut [Node]) {
     for n in nodes.iter_mut() {
         n.loop_capacity = Some(of(n));
+    }
+}
+
+/// Add the held breakdown to rows [`fill`] has already stamped (MAIN-616 AC-4).
+///
+/// Separate from `of`, which is a pure function of one node row: what a node is
+/// holding is a `loop_jobs` count and not a node fact, so it arrives from the
+/// caller's one fleet-wide read rather than from a query per row.
+///
+/// A node absent from `held` is holding nothing — zero, not unknown. The map's
+/// key set is every node with live work, so absence is a fact and not a gap.
+pub fn fill_held(nodes: &mut [Node], held: &HashMap<NodeId, crate::repo::jobs::HeldJobs>) {
+    for n in nodes.iter_mut() {
+        let h = held.get(&n.id);
+        let (total, paused) = h.map_or((0, 0), |h| (h.total(), h.waiting_on_human.len() as u32));
+        if let Some(cap) = n.loop_capacity.as_mut() {
+            cap.held = Some(total);
+            cap.held_waiting_on_human = Some(paused);
+        }
     }
 }
 

@@ -274,6 +274,74 @@ async fn in_flight_on_node_covers_claimed_and_running_only() {
     assert_eq!(ids, want, "a finished run is not stranded by a disconnect");
 }
 
+/// MAIN-616: what a node HOLDS is a different set from what a disconnect
+/// strands, and the fake has to answer both — the two paths exist precisely so
+/// counting a paused job for capacity cannot make it failable.
+#[tokio::test]
+async fn held_on_nodes_counts_paused_jobs_and_in_flight_ones_apart() {
+    let repo = FakeLoopJobRepository::new();
+    let t = tenant();
+    let (node, elsewhere) = (NodeId::new(), NodeId::new());
+    let (running, paused, done, other) = (
+        queued(&repo, t, TaskId::new()).await,
+        queued(&repo, t, TaskId::new()).await,
+        queued(&repo, t, TaskId::new()).await,
+        queued(&repo, t, TaskId::new()).await,
+    );
+    // Queued and unplaced — held by nobody, and it must not appear anywhere.
+    queued(&repo, t, TaskId::new()).await;
+    for j in [running, paused, done] {
+        repo.claim_for_executor(j, node).await.unwrap();
+    }
+    repo.claim_for_executor(other, elsewhere).await.unwrap();
+    repo.force_state(running, "running");
+    repo.force_state(paused, "waiting_on_human");
+    repo.force_state(done, "completed");
+
+    let held = repo.held_on_nodes(Some(node)).await.unwrap();
+    let mine = held.get(&node).expect("the node holds work");
+    assert_eq!(
+        mine.in_flight,
+        vec![running],
+        "a finished run holds nothing"
+    );
+    assert_eq!(mine.waiting_on_human, vec![paused]);
+    assert_eq!(
+        mine.total(),
+        2,
+        "the paused run costs a slot like any other"
+    );
+    assert!(
+        mine.only_paused_blocks(2),
+        "with capacity 2 an answer is what frees the slot, not a bigger box"
+    );
+    assert!(
+        !mine.only_paused_blocks(1),
+        "with capacity 1 the running job alone already fills it — answering \
+         would not help, so the reason must not say it would"
+    );
+    assert_eq!(held.len(), 1, "narrowed to the one node asked about");
+
+    let fleet = repo.held_on_nodes(None).await.unwrap();
+    assert_eq!(
+        fleet.get(&elsewhere).map(|h| h.total()),
+        Some(1),
+        "the fleet read sees every node"
+    );
+    assert_eq!(
+        fleet.keys().count(),
+        2,
+        "and nothing else: a queued job on no node is held by nobody"
+    );
+
+    assert_eq!(
+        repo.in_flight_on_node(node).await.unwrap(),
+        vec![running],
+        "AC-2: the disconnect's question is unchanged — the paused job is not \
+         in the set that gets failed"
+    );
+}
+
 // ── transcript ──────────────────────────────────────────────────────────────
 
 #[tokio::test]

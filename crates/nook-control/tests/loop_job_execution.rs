@@ -406,6 +406,50 @@ async fn a_disconnect_fails_only_this_nodes_live_jobs() {
     bed.teardown().await;
 }
 
+/// MAIN-616 AC-2: placement started counting `waiting_on_human` against a
+/// node's capacity, and this is the regression that says the disconnect path
+/// did NOT come along for the ride.
+///
+/// A paused run waits on a person, indefinitely and by design — the answer may
+/// come long after the node agent has been restarted. Failing it because its
+/// executor dropped would throw away an interview a human is halfway through,
+/// which is exactly why the counting change is a second query rather than a
+/// widening of `in_flight_on_node`.
+#[tokio::test]
+async fn a_disconnect_never_fails_a_job_paused_on_a_human() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("lje").await;
+    let target = task_with_key(&bed, tenant, "ACME", 12).await;
+    let n = node(&bed, tenant).await;
+
+    let paused = job(&bed, tenant, target, None, "waiting_on_human", Some(n)).await;
+    let running = job(&bed, tenant, target, None, "running", Some(n)).await;
+    let state = bed.app_state().await;
+
+    jobs::fail_stranded_for_node(&state, n)
+        .await
+        .expect("fail stranded");
+
+    assert_eq!(
+        load(&bed, paused).await.state,
+        "waiting_on_human",
+        "the interview survives its executor going away"
+    );
+    assert_eq!(
+        load(&bed, running).await.state,
+        "failed",
+        "the moving run is still stranded, so this is not a disabled reaper"
+    );
+    assert!(
+        transcript_text(&bed, paused).await.is_empty(),
+        "and nothing was even narrated onto it"
+    );
+
+    bed.teardown().await;
+}
+
 #[tokio::test]
 async fn resolve_repo_prefers_the_executor_then_falls_back() {
     let Some(mut bed) = TestBed::new().await else {

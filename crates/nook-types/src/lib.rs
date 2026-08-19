@@ -847,6 +847,19 @@ pub struct NodeCapacity {
     /// The host has pinned its own number, so the central value is refused
     /// rather than quietly ignored.
     pub pinned: bool,
+    /// Loop jobs this node is holding against `effective` right now — running
+    /// AND paused together (MAIN-616), because a paused run keeps its container
+    /// and therefore keeps its slot.
+    ///
+    /// `None` where the surface answered only "what number is in force" and
+    /// never counted; a node holding nothing counts zero, which is a different
+    /// statement and renders differently.
+    #[serde(default)]
+    pub held: Option<u32>,
+    /// Of [`Self::held`], how many are paused on a human's answer — the whole
+    /// difference between a node that is busy and one that is stuck.
+    #[serde(default)]
+    pub held_waiting_on_human: Option<u32>,
 }
 
 /// A node's refusal to take work unless the work tolerates it (MAIN-314).
@@ -4573,6 +4586,26 @@ pub enum QueuedReason {
     /// Every eligible node is already holding its `max_loop_jobs`, or has been
     /// set to zero to stop it claiming.
     AtCapacity,
+    /// Every eligible node is at capacity, and every one of them would have
+    /// room if a PAUSED job were not holding a slot (MAIN-616).
+    ///
+    /// Separate from [`Self::AtCapacity`] because the remedy is: nobody needs a
+    /// bigger machine, somebody needs to answer an interview. A paused job
+    /// keeps its container, its network and its worktree alive — the interview
+    /// state lives in there — so it costs a slot exactly as a running one does,
+    /// and a fleet that looks busy can in fact be a fleet that is waiting on a
+    /// person who walked away.
+    ///
+    /// Genuine exhaustion still reports [`Self::AtCapacity`]: this variant is
+    /// only for the case where answering the paused runs — or cancelling them —
+    /// is what actually frees a slot.
+    WaitingOnHuman {
+        /// A node whose capacity a paused job is holding, so the answer has an
+        /// address.
+        node_name: String,
+        /// How many of that node's held slots are paused runs.
+        paused: u32,
+    },
     /// Eligible nodes exist, but none carries the label this kind's placement
     /// selector requires — the owner sets it on the Nodes page.
     NoRoleLabel {
