@@ -12,20 +12,20 @@
 // refusal is shown in the server's own words, beside the control that was
 // touched, because the alternative — a disabled button, or a click that
 // silently does nothing — is how somebody concludes the feature is broken.
-import React, { useState } from "react";
+import React from "react";
 import { Link } from "react-router-dom";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { TriangleAlert } from "lucide-react";
-import { api, type Schemas } from "@nookos/api";
+import { api } from "@nookos/api";
 import { Empty, Panel, Pill } from "@nookos/ui";
 import { BuildLoop } from "./BuildLoop";
 import { BuilderStrip } from "./BuilderStrip";
 import {
-  buildLoopSettingsKey,
   buildLoopWhy,
   isLiveRun,
   pinLabel,
-  useBuildLoopSettings,
+  useBuildLoop,
+  useSetBuildLoop,
   useTenantLoopsEnabled,
   useWorkspaceBuilds,
   whyWords,
@@ -36,45 +36,6 @@ import {
 /** The label the escalation ladder raises when a card stops being the loop's
  *  business — the claim reaper's cap, and a PR closed unmerged. */
 const ESCALATION_LABEL = "needs-human-review";
-
-/** The server's own words for a refused write. Its 400/403 names the field or
- *  the rule; any sentence guessed here would be a second, worse answer. */
-function refusalText(error: unknown): string {
-  const e = error as { error?: string } | undefined;
-  return e?.error ?? JSON.stringify(error);
-}
-
-type Patch = Schemas["SetBuildLoopSettingsRequest"];
-
-/** One write path for every control on this surface, so the switch, the pin and
- *  Mission Control's chip cannot handle a refusal three different ways. */
-function useBuildLoopWrite(workspaceId: string) {
-  const queryClient = useQueryClient();
-  const [busy, setBusy] = useState(false);
-  const [refusal, setRefusal] = useState<string | null>(null);
-
-  const save = async (body: Patch) => {
-    setBusy(true);
-    setRefusal(null);
-    const { error } = await api.PUT("/api/v1/workspaces/{id}/build-loop-settings", {
-      params: { path: { id: workspaceId } },
-      body,
-    });
-    setBusy(false);
-    if (error) {
-      setRefusal(refusalText(error));
-      return false;
-    }
-    queryClient.invalidateQueries({ queryKey: buildLoopSettingsKey(workspaceId) });
-    // Enabling evaluates the repo immediately (MAIN-385 AC-6), so the run list
-    // can change within a moment of the click — refresh it rather than waiting
-    // out the poll and looking inert.
-    queryClient.invalidateQueries({ queryKey: ["workspace-builds", workspaceId] });
-    return true;
-  };
-
-  return { save, busy, refusal };
-}
 
 /** The on/off switch. A button rather than a checkbox because it carries a
  *  sentence, not a tick: "off" here means something specific about who raises
@@ -278,9 +239,9 @@ function LiveState({
  * column on two tabs is how the two start disagreeing about what `null` means.
  */
 export function BuildLoopPanel({ workspaceId }: { workspaceId: string }) {
-  const { data: settings } = useBuildLoopSettings(workspaceId);
+  const { data: settings } = useBuildLoop(workspaceId);
   const { data: runs } = useWorkspaceBuilds(workspaceId);
-  const { save, busy, refusal } = useBuildLoopWrite(workspaceId);
+  const { save, busy, refusal } = useSetBuildLoop(workspaceId);
 
   return (
     <Panel title="Build loop">
@@ -307,7 +268,7 @@ export function BuildLoopPanel({ workspaceId }: { workspaceId: string }) {
             </div>
 
             {refusal && (
-              <div className="small err" data-testid="build-loop-settings-refusal">
+              <div className="small err" data-testid="build-loop-switch-refusal">
                 {refusal}
               </div>
             )}
@@ -336,9 +297,9 @@ export function BuildLoopPanel({ workspaceId }: { workspaceId: string }) {
  * link to the tab.
  */
 export function MissionBuildLoop({ workspaceId }: { workspaceId: string }) {
-  const { data: settings } = useBuildLoopSettings(workspaceId);
+  const { data: settings } = useBuildLoop(workspaceId);
   const { data: runs } = useWorkspaceBuilds(workspaceId);
-  const { save, busy, refusal } = useBuildLoopWrite(workspaceId);
+  const { save, busy, refusal } = useSetBuildLoop(workspaceId);
   if (!settings) return null;
   const live = (runs ?? []).filter((r) => isLiveRun(r.state));
   return (

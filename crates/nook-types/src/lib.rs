@@ -1555,15 +1555,6 @@ pub struct ReviewLoopDeclaration {
     pub max_replicas: Option<i32>,
 }
 
-/// The ceiling on this repo's BUILD runs (MAIN-461) — `ReviewLoopDeclaration`'s
-/// twin, kept separate because the two are set independently and a shared type
-/// would let a rename on one silently rename the other's wire shape.
-/// `None` = nobody decided (effective 1), `0` = builds off for this repo.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct BuildLoopDeclaration {
-    pub max_replicas: Option<i32>,
-}
-
 /// A build run's conclusion, sent by the run itself (MAIN-458). The control
 /// plane records it and mirrors it to the board; opening a PR without
 /// reporting it is the silent lie the outcome call ends.
@@ -1783,22 +1774,14 @@ pub struct SetReviewLoopRequest {
     pub max_replicas: serde_json::Value,
 }
 
-/// `SetReviewLoopRequest`'s twin for builds (MAIN-461): the key is required,
-/// and `null` is the deliberate "clear back to unset".
-#[derive(Debug, Clone, Deserialize, ToSchema)]
-pub struct SetBuildLoopRequest {
-    #[schema(value_type = Option<i32>)]
-    pub max_replicas: serde_json::Value,
-}
-
-/// The per-workspace build-loop switch (MAIN-385 AC-8): whether the control
+/// A workspace's whole build-loop declaration (MAIN-641): whether the control
 /// plane fires build runs for this repo by itself, where they are pinned, how
 /// many at once, and who said so.
 ///
-/// Separate from `BuildLoopDeclaration`, which is the ceiling alone and is what
-/// `nook builds scale` has always written. `concurrency` appears in both
-/// because it IS the same column — reported here so one read answers "what is
-/// this repo's build loop doing", written by either.
+/// One shape because it is one concept. The ceiling used to have a second name
+/// (`max_replicas`) on a second route reading the same column, so answering
+/// "is this repo's build loop on, how wide, and can that be honoured" took
+/// three calls and two names for one number.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct BuildLoopSettings {
     pub enabled: bool,
@@ -1814,14 +1797,21 @@ pub struct BuildLoopSettings {
     /// nobody has ever enabled.
     #[serde(default)]
     pub enabled_by: Option<UserId>,
-    /// `build_max_replicas` resolved the way `converge_builds` reads it:
-    /// unset is one, and 0 is this repo's kill switch.
-    pub concurrency: u32,
+    /// The DECLARED ceiling on in-flight build runs — `build_max_replicas`
+    /// raw, and the single name for that column.
+    ///
+    /// Three states, and they stay three all the way to the caller (MAIN-641
+    /// AC-2): `null` is "nobody decided" and resolves to one, `0` is this
+    /// repo's kill switch, `N` is the ceiling. Resolving here is what would
+    /// make a terminal unable to say "unset (default 1)"; the one place the
+    /// resolution happens is [`BuildLoopStatus::desired`].
+    #[serde(default)]
+    pub concurrency: Option<i32>,
 }
 
-/// `PUT /api/v1/workspaces/{id}/build-loop-settings` (MAIN-385 AC-8). Every
-/// field is optional and an ABSENT one leaves that setting alone — a caller
-/// turning the loop on must not have to restate a pin it does not care about.
+/// `PATCH /api/v1/workspaces/{id}/build-loop` (MAIN-641 AC-3). Every field is
+/// optional and an ABSENT one leaves that setting alone — a caller turning the
+/// loop on must not have to restate a pin it does not care about.
 ///
 /// `node` and `concurrency` are three-state on purpose: absent leaves the
 /// setting, `null` clears it (unpin / back to the default ceiling), and a

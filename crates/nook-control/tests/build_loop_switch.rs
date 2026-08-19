@@ -421,38 +421,38 @@ async fn a_card_reaching_an_unstarted_column_evaluates_at_once() {
     bed.teardown().await;
 }
 
-// ── AC-8: the settings endpoint ──────────────────────────────────────────────
+// ── AC-8: the build-loop endpoint (one route since MAIN-641) ────────────────
 
-async fn get_settings(
+async fn get_loop(
     state: &AppState,
     auth: AuthCtx,
     ws: WorkspaceId,
 ) -> nook_types::BuildLoopSettings {
-    nook_control::routes::workspaces::get_build_loop_settings(
+    nook_control::routes::workspaces::get_build_loop(
         axum::extract::State(state.clone()),
         auth,
         axum::extract::Path(ws),
     )
     .await
-    .expect("get settings")
+    .expect("get build loop")
     .0
 }
 
-async fn put_settings(
+async fn patch_loop(
     state: &AppState,
     auth: AuthCtx,
     ws: WorkspaceId,
     body: serde_json::Value,
 ) -> nook_types::BuildLoopSettings {
     let req = serde_json::from_value(body).expect("request body");
-    nook_control::routes::workspaces::set_build_loop_settings(
+    nook_control::routes::workspaces::set_build_loop(
         axum::extract::State(state.clone()),
         auth,
         axum::extract::Path(ws),
         axum::Json(req),
     )
     .await
-    .expect("put settings")
+    .expect("patch build loop")
     .0
 }
 
@@ -469,12 +469,15 @@ async fn the_settings_endpoint_turns_the_loop_on_and_records_the_caller() {
     let ws = bed.workspace(tenant).await;
     let state = bed.app_state().await;
 
-    let before = get_settings(&state, user_ctx(user, tenant), ws).await;
+    let before = get_loop(&state, user_ctx(user, tenant), ws).await;
     assert!(!before.enabled, "off is what a workspace starts as");
     assert_eq!(before.enabled_by, None);
-    assert_eq!(before.concurrency, 1, "unset reads as the default of one");
+    assert_eq!(
+        before.concurrency, None,
+        "unset is reported as unset — the resolution to one lives on /status"
+    );
 
-    let after = put_settings(
+    let after = patch_loop(
         &state,
         user_ctx(user, tenant),
         ws,
@@ -484,9 +487,7 @@ async fn the_settings_endpoint_turns_the_loop_on_and_records_the_caller() {
     assert!(after.enabled);
     assert_eq!(after.enabled_by, Some(user));
     assert!(
-        get_settings(&state, user_ctx(user, tenant), ws)
-            .await
-            .enabled,
+        get_loop(&state, user_ctx(user, tenant), ws).await.enabled,
         "and it is what the next read returns"
     );
 
@@ -514,7 +515,7 @@ async fn null_clears_the_pin_and_the_ceiling() {
         .await
         .expect("node name");
 
-    let set = put_settings(
+    let set = patch_loop(
         &state,
         user_ctx(user, tenant),
         ws,
@@ -523,9 +524,9 @@ async fn null_clears_the_pin_and_the_ceiling() {
     .await;
     assert_eq!(set.node_id, Some(node), "pinned by name");
     assert_eq!(set.node_name.as_deref(), Some(name.as_str()));
-    assert_eq!(set.concurrency, 3);
+    assert_eq!(set.concurrency, Some(3));
 
-    let cleared = put_settings(
+    let cleared = patch_loop(
         &state,
         user_ctx(user, tenant),
         ws,
@@ -534,7 +535,10 @@ async fn null_clears_the_pin_and_the_ceiling() {
     .await;
     assert_eq!(cleared.node_id, None, "null unpins");
     assert_eq!(cleared.node_name, None);
-    assert_eq!(cleared.concurrency, 1, "null returns the ceiling to unset");
+    assert_eq!(
+        cleared.concurrency, None,
+        "null returns the ceiling to unset"
+    );
     assert!(cleared.enabled, "and says nothing about the switch");
 
     bed.teardown().await;
@@ -555,7 +559,7 @@ async fn an_absent_field_changes_nothing_about_that_setting() {
     let node = bed.node(tenant, person).await;
     let state = bed.app_state().await;
 
-    put_settings(
+    patch_loop(
         &state,
         user_ctx(user, tenant),
         ws,
@@ -563,7 +567,7 @@ async fn an_absent_field_changes_nothing_about_that_setting() {
     )
     .await;
 
-    let paused = put_settings(
+    let paused = patch_loop(
         &state,
         user_ctx(user, tenant),
         ws,
@@ -572,7 +576,7 @@ async fn an_absent_field_changes_nothing_about_that_setting() {
     .await;
     assert!(!paused.enabled);
     assert_eq!(paused.node_id, Some(node), "the pin survives a pause");
-    assert_eq!(paused.concurrency, 2, "and so does the ceiling");
+    assert_eq!(paused.concurrency, Some(2), "and so does the ceiling");
     assert_eq!(
         paused.enabled_by,
         Some(user),
@@ -595,7 +599,7 @@ async fn an_unknown_node_is_refused_rather_than_pinned() {
     let state = bed.app_state().await;
 
     let req = serde_json::from_value(json!({ "node": "no-such-machine" })).expect("body");
-    let refused = nook_control::routes::workspaces::set_build_loop_settings(
+    let refused = nook_control::routes::workspaces::set_build_loop(
         axum::extract::State(state.clone()),
         user_ctx(user, tenant),
         axum::extract::Path(ws),
@@ -604,9 +608,7 @@ async fn an_unknown_node_is_refused_rather_than_pinned() {
     .await;
     assert!(refused.is_err(), "an unknown node is not a pin");
     assert_eq!(
-        get_settings(&state, user_ctx(user, tenant), ws)
-            .await
-            .node_id,
+        get_loop(&state, user_ctx(user, tenant), ws).await.node_id,
         None,
         "and the refusal stored nothing"
     );

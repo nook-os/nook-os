@@ -11,27 +11,27 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 const state = vi.hoisted(() => ({
-  decl: { max_replicas: null as number | null },
+  decl: { concurrency: null as number | null },
   runs: [] as { state: string }[],
   status: null as unknown,
-  putError: null as unknown,
+  patchError: null as unknown,
 }));
 
-const put = vi.hoisted(() => vi.fn());
+const patch = vi.hoisted(() => vi.fn());
 
 vi.mock("@nookos/api", () => ({
   api: {
     GET: vi.fn(async (path: string) => {
-      // Status BEFORE the declaration: `build-loop-status` contains
+      // Status BEFORE the declaration: `build-loop/status` contains
       // `build-loop`, so the looser match would answer both with the ceiling.
-      if (path.includes("build-loop-status")) return { data: state.status };
+      if (path.includes("build-loop/status")) return { data: state.status };
       if (path.includes("build-loop")) return { data: state.decl };
       // The run listings answer the pagination contract's envelope
       // (MAIN-557), not a bare array.
       if (path.includes("builds")) return { data: { rows: state.runs, next_cursor: null } };
       return { data: null };
     }),
-    PUT: put,
+    PATCH: patch,
   },
 }));
 
@@ -51,12 +51,12 @@ const healthy = (over: Record<string, unknown> = {}) => ({
 
 beforeEach(() => {
   cleanup();
-  state.decl = { max_replicas: null };
+  state.decl = { concurrency: null };
   state.runs = [];
   state.status = healthy();
-  state.putError = null;
-  put.mockReset();
-  put.mockImplementation(async () => ({ error: state.putError ?? undefined }));
+  state.patchError = null;
+  patch.mockReset();
+  patch.mockImplementation(async () => ({ error: state.patchError ?? undefined }));
 });
 
 const renderPanel = () => {
@@ -88,6 +88,26 @@ describe("BuildLoop", () => {
     expect((await screen.findByTestId("build-loop-state")).textContent).toBe("unset (default 1)");
   });
 
+  // AC-9: `null` and `0` are the two states a reader must not confuse — one is
+  // "nobody decided" and builds one at a time, the other is the kill switch —
+  // and the declaration is nullable now, so a component that rendered the raw
+  // value would show a blank where the effective ceiling belongs.
+  it("renders a null ceiling as unset AND says the effective ceiling is one", async () => {
+    renderPanel();
+    const line = (await screen.findByTestId("build-loop-state")).parentElement;
+    expect(line?.textContent).toContain("unset (default 1)");
+    expect(line?.textContent).toContain("one build run at a time");
+    expect(line?.textContent).not.toContain("0 (off)");
+  });
+
+  it("renders an explicit 0 as the kill switch, never as unset", async () => {
+    state.decl = { concurrency: 0 };
+    renderPanel();
+    const state_ = await screen.findByTestId("build-loop-state");
+    expect(state_.textContent).toBe("0 (off)");
+    expect(state_.parentElement?.textContent).toContain("no build run is raised for this repo");
+  });
+
   it("counts only RUNNING runs, not every row the panel fetched", async () => {
     state.runs = [{ state: "running" }, { state: "completed" }, { state: "completed" }];
     renderPanel();
@@ -104,18 +124,18 @@ describe("BuildLoop", () => {
     await user.type(screen.getByLabelText("build loop maximum"), "3");
     await user.click(screen.getByRole("button", { name: "save" }));
 
-    await waitFor(() => expect(put).toHaveBeenCalled());
-    expect(put.mock.calls[0][1].body).toEqual({ max_replicas: 3 });
+    await waitFor(() => expect(patch).toHaveBeenCalled());
+    expect(patch.mock.calls[0][1].body).toEqual({ concurrency: 3 });
   });
 
   it("clears back to unset — which is not the same write as typing 1", async () => {
-    state.decl = { max_replicas: 2 };
+    state.decl = { concurrency: 2 };
     renderPanel();
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "clear" }));
 
-    await waitFor(() => expect(put).toHaveBeenCalled());
-    expect(put.mock.calls[0][1].body).toEqual({ max_replicas: null });
+    await waitFor(() => expect(patch).toHaveBeenCalled());
+    expect(patch.mock.calls[0][1].body).toEqual({ concurrency: null });
   });
 
   it("offers no clear when there is nothing to clear", async () => {
@@ -125,7 +145,7 @@ describe("BuildLoop", () => {
   });
 
   it("surfaces the server's own refusal instead of a guess", async () => {
-    state.putError = { error: "max_replicas must be between 0 and 10" };
+    state.patchError = { error: "concurrency must be a non-negative integer, or null to unset" };
     renderPanel();
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "set a maximum" }));
@@ -133,7 +153,9 @@ describe("BuildLoop", () => {
     await user.click(screen.getByRole("button", { name: "save" }));
 
     const refusal = await screen.findByTestId("build-loop-refusal");
-    expect(refusal.textContent).toBe("max_replicas must be between 0 and 10");
+    expect(refusal.textContent).toBe(
+      "concurrency must be a non-negative integer, or null to unset",
+    );
   });
 });
 
@@ -184,7 +206,7 @@ describe("blockerWords", () => {
 
 describe("BuildLoop capacity note", () => {
   it("warns beside a ceiling the fleet cannot honour", async () => {
-    state.decl = { max_replicas: 3 };
+    state.decl = { concurrency: 3 };
     state.status = healthy({ desired: 3, capacity: 2, eligible_nodes: 1 });
     renderPanel();
     const note = await screen.findByTestId("build-loop-capacity");
@@ -193,7 +215,7 @@ describe("BuildLoop capacity note", () => {
   });
 
   it("clears the warning once the ceiling comes back within capacity", async () => {
-    state.decl = { max_replicas: 2 };
+    state.decl = { concurrency: 2 };
     state.status = healthy({ desired: 2, capacity: 2, eligible_nodes: 1 });
     renderPanel();
     await screen.findByTestId("build-loop-state");
@@ -232,8 +254,8 @@ describe("BuildLoop capacity note", () => {
     await user.type(screen.getByLabelText("build loop maximum"), "9");
     await user.click(screen.getByRole("button", { name: "save" }));
 
-    await waitFor(() => expect(put).toHaveBeenCalled());
-    expect(put.mock.calls[0][1].body).toEqual({ max_replicas: 9 });
+    await waitFor(() => expect(patch).toHaveBeenCalled());
+    expect(patch.mock.calls[0][1].body).toEqual({ concurrency: 9 });
     expect(screen.queryByTestId("build-loop-refusal")).toBeNull();
   });
 });

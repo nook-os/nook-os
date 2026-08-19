@@ -33,17 +33,18 @@ const state = vi.hoisted(() => ({
   nodes: [] as Record<string, unknown>[],
   tenantLoops: true,
   escalated: [] as Record<string, unknown>[],
-  putError: null as unknown,
+  patchError: null as unknown,
 }));
 
-const put = vi.hoisted(() => vi.fn());
+const patch = vi.hoisted(() => vi.fn());
 
 vi.mock("@nookos/api", () => ({
   api: {
     GET: vi.fn(async (path: string) => {
-      if (path.includes("build-loop-settings")) return { data: state.settings };
-      if (path.includes("build-loop-status")) return { data: null };
-      if (path.includes("build-loop")) return { data: { max_replicas: null } };
+      // Status first: `build-loop/status` contains `build-loop`, so the looser
+      // match would answer both with the declaration.
+      if (path.includes("build-loop/status")) return { data: null };
+      if (path.includes("build-loop")) return { data: state.settings };
       if (path.endsWith("/builds")) return { data: { rows: state.builds, next_cursor: null } };
       if (path.startsWith("/api/v1/jobs/")) return { data: state.job };
       if (path.startsWith("/api/v1/tasks/")) return { data: state.task };
@@ -57,7 +58,7 @@ vi.mock("@nookos/api", () => ({
       if (path.startsWith("/api/v1/workspaces/")) return { data: state.workspace };
       return { data: null };
     }),
-    PUT: put,
+    PATCH: patch,
   },
 }));
 
@@ -93,10 +94,10 @@ beforeEach(() => {
   state.nodes = [];
   state.tenantLoops = true;
   state.escalated = [];
-  state.putError = null;
+  state.patchError = null;
   liveState.jobTurn = {};
-  put.mockReset();
-  put.mockImplementation(async () => ({ error: state.putError ?? undefined }));
+  patch.mockReset();
+  patch.mockImplementation(async () => ({ error: state.patchError ?? undefined }));
 });
 
 function renderPanel(ui: React.ReactNode = <BuildLoopPanel workspaceId="ws-1" />) {
@@ -162,14 +163,14 @@ describe("the controls (AC-1)", () => {
     renderPanel();
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "build loop: on" }));
-    await waitFor(() => expect(put).toHaveBeenCalled());
-    expect(put.mock.calls[0][1].body).toEqual({ enabled: false });
+    await waitFor(() => expect(patch).toHaveBeenCalled());
+    expect(patch.mock.calls[0][1].body).toEqual({ enabled: false });
 
-    put.mockClear();
+    patch.mockClear();
     await screen.findByRole("option", { name: "azul" });
     await user.selectOptions(screen.getByRole("combobox", { name: "build loop node" }), "n1");
-    await waitFor(() => expect(put).toHaveBeenCalled());
-    expect(put.mock.calls[0][1].body).toEqual({ node: "n1" });
+    await waitFor(() => expect(patch).toHaveBeenCalled());
+    expect(patch.mock.calls[0][1].body).toEqual({ node: "n1" });
   });
 
   it("clears a pin with an explicit null rather than omitting the field", async () => {
@@ -187,8 +188,8 @@ describe("the controls (AC-1)", () => {
       await screen.findByRole("combobox", { name: "build loop node" }),
       "",
     );
-    await waitFor(() => expect(put).toHaveBeenCalled());
-    expect(put.mock.calls[0][1].body).toEqual({ node: null });
+    await waitFor(() => expect(patch).toHaveBeenCalled());
+    expect(patch.mock.calls[0][1].body).toEqual({ node: null });
   });
 });
 
@@ -272,7 +273,7 @@ describe("the tenant switch (AC-5)", () => {
     renderPanel();
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "build loop: off" }));
-    await waitFor(() => expect(put).toHaveBeenCalled());
+    await waitFor(() => expect(patch).toHaveBeenCalled());
     expect(shown(screen.getByTestId("build-loop-tenant-off"))).toBe(true);
   });
 
@@ -285,18 +286,18 @@ describe("the tenant switch (AC-5)", () => {
 
 describe("refusals (AC-6)", () => {
   it("shows the server's own words instead of failing silently", async () => {
-    state.putError = { error: "a node token cannot do this — sign in as a user" };
+    state.patchError = { error: "a node token cannot do this — sign in as a user" };
     renderPanel();
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "build loop: on" }));
 
-    const refusal = await screen.findByTestId("build-loop-settings-refusal");
+    const refusal = await screen.findByTestId("build-loop-switch-refusal");
     expect(shown(refusal)).toBe(true);
     expect(refusal.textContent).toBe("a node token cannot do this — sign in as a user");
   });
 
   it("refuses the pin in the same words, on the same surface", async () => {
-    state.putError = { error: 'no node named "azul" in this tenant' };
+    state.patchError = { error: 'no node named "azul" in this tenant' };
     state.nodes = [{ id: "n1", name: "azul", owner_person_id: "p1" }];
     renderPanel();
     const user = userEvent.setup();
@@ -305,23 +306,23 @@ describe("refusals (AC-6)", () => {
       screen.getByRole("combobox", { name: "build loop node" }),
       "n1",
     );
-    expect((await screen.findByTestId("build-loop-settings-refusal")).textContent).toContain(
+    expect((await screen.findByTestId("build-loop-switch-refusal")).textContent).toContain(
       "no node named",
     );
   });
 
   it("clears the refusal once a write is accepted", async () => {
-    state.putError = { error: "nope" };
+    state.patchError = { error: "nope" };
     renderPanel();
     const user = userEvent.setup();
     const flip = await screen.findByRole("button", { name: "build loop: on" });
     await user.click(flip);
-    await screen.findByTestId("build-loop-settings-refusal");
+    await screen.findByTestId("build-loop-switch-refusal");
 
-    state.putError = null;
+    state.patchError = null;
     await user.click(flip);
     await waitFor(() =>
-      expect(screen.queryByTestId("build-loop-settings-refusal")).toBeNull(),
+      expect(screen.queryByTestId("build-loop-switch-refusal")).toBeNull(),
     );
   });
 });
@@ -361,8 +362,8 @@ describe("Mission Control (AC-3, AC-8)", () => {
 
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: "build loop: on" }));
-    await waitFor(() => expect(put).toHaveBeenCalled());
-    expect(put.mock.calls[0][1].body).toEqual({ enabled: false });
+    await waitFor(() => expect(patch).toHaveBeenCalled());
+    expect(patch.mock.calls[0][1].body).toEqual({ enabled: false });
   });
 
   it("reads Auto when nothing is pinned", async () => {
@@ -387,7 +388,7 @@ describe("Mission Control (AC-3, AC-8)", () => {
   });
 
   it("surfaces a refusal here too, rather than a chip that silently does nothing", async () => {
-    state.putError = { error: "this needs tenant owner or admin" };
+    state.patchError = { error: "this needs tenant owner or admin" };
     renderPanel(<MissionBuildLoop workspaceId="ws-1" />);
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "build loop: on" }));

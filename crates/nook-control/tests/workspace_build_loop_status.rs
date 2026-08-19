@@ -28,8 +28,8 @@ fn user_ctx(user: UserId, tenant: TenantId) -> AuthCtx {
     }
 }
 
-fn req(v: serde_json::Value) -> axum::Json<SetBuildLoopRequest> {
-    axum::Json(SetBuildLoopRequest { max_replicas: v })
+fn req(n: i32) -> axum::Json<SetBuildLoopSettingsRequest> {
+    axum::Json(serde_json::from_value(json!({ "concurrency": n })).expect("request body"))
 }
 
 /// Capabilities for a machine that may take build work. `slots` is what the
@@ -579,11 +579,11 @@ async fn a_ceiling_above_capacity_still_saves_and_is_reported_as_shortfall() {
 
     // AC-5: advisory only. Fleet capacity changes without warning, so a
     // refusal correct at write time is wrong an hour later.
-    let saved = set_build_loop(State(state.clone()), auth, Path(ws), req(3.into()))
+    let saved = set_build_loop(State(state.clone()), auth, Path(ws), req(3))
         .await
         .expect("a ceiling above capacity is still a legal declaration")
         .0;
-    assert_eq!(saved.max_replicas, Some(3));
+    assert_eq!(saved.concurrency, Some(3));
 
     let over = build_loop_status(State(state.clone()), auth, Path(ws))
         .await
@@ -593,7 +593,7 @@ async fn a_ceiling_above_capacity_still_saves_and_is_reported_as_shortfall() {
     assert_eq!(over.capacity, 2);
     assert_eq!(over.shortfall, 1, "three asked for, two deliverable");
 
-    let _ = set_build_loop(State(state.clone()), auth, Path(ws), req(2.into()))
+    let _ = set_build_loop(State(state.clone()), auth, Path(ws), req(2))
         .await
         .expect("set 2");
     let level = build_loop_status(State(state.clone()), auth, Path(ws))
@@ -633,7 +633,7 @@ async fn running_counts_the_runs_holding_a_slot_and_never_the_queued_one() {
 
     let state = bed.app_state().await;
     let auth = user_ctx(user, tenant);
-    let _ = set_build_loop(State(state.clone()), auth, Path(ws), req(3.into()))
+    let _ = set_build_loop(State(state.clone()), auth, Path(ws), req(3))
         .await
         .expect("set 3");
 
