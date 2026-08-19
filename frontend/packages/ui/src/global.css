@@ -6440,26 +6440,14 @@ button.chat-tool-line:hover { color: var(--nook-fg-dim); }
   text-overflow: ellipsis;
 }
 
-/* Row actions reveal on hover — dense, no visual weight until reached for. */
-.notebook-row-actions {
-  display: inline-flex;
-  gap: 2px;
-  opacity: 0;
+/* The row an open context menu is about (MAIN-634). The pane is 300px and the
+   menu opens over its neighbours, so without this the subject is a guess.
+   After `:hover` and `.selected`, which it has to beat at equal specificity. */
+.notebook-row.ctx-target {
+  background: color-mix(in srgb, var(--nook-accent) 24%, transparent);
+  color: var(--nook-fg-bright);
+  box-shadow: inset 2px 0 0 var(--nook-accent);
 }
-.notebook-row:hover .notebook-row-actions { opacity: 1; }
-.notebook-row-actions button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  padding: 0;
-  background: none;
-  border: none;
-  color: var(--nook-fg-dim);
-  cursor: pointer;
-}
-.notebook-row-actions button:hover { color: var(--nook-accent); }
 
 /* Right pane */
 .notebook-editor {

@@ -14,16 +14,14 @@ import {
   FilePlus,
   FileText,
   Folder,
-  FolderInput,
   FolderOpen,
   FolderPlus,
-  Pencil,
-  Trash2,
   X,
 } from "lucide-react";
 import { api } from "@nookos/api";
 import type { UserNoteFolder, UserNoteSummary } from "@nookos/api";
 import { EditableMarkdown, Empty, Panel, SearchInput } from "@nookos/ui";
+import { ContextMenuRegion, type ContextMenuItem } from "../contextMenu";
 import { askChoice, askConfirm, askText } from "../dialogs";
 import {
   apiErrorMessage,
@@ -61,12 +59,54 @@ function folderPathChoices(folders: UserNoteFolder[], exclude: Set<string>) {
     .sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: "base" }));
 }
 
+/**
+ * Which row the open context menu is about (MAIN-634 AC-6).
+ *
+ * The shared menu (MAIN-167) reports neither what it opened over nor when it
+ * closed, and this ticket may not change it — so the row marks itself on
+ * `contextmenu` and the mark is dropped on every gesture that dismisses the
+ * menu: a press outside it, a click on one of its items, Escape, a scroll. The
+ * listeners exist only while a row is marked, which is a fraction of a second
+ * at a time.
+ */
+function useContextTarget(): [string | null, (id: string) => void] {
+  const [target, setTarget] = useState<string | null>(null);
+
+  React.useEffect(() => {
+    if (!target) return;
+    const clear = () => setTarget(null);
+    const onMouseDown = (e: MouseEvent) => {
+      // A press INSIDE the menu is the menu being used, not dismissed; the
+      // click that follows it clears the mark. Clearing here would drop the
+      // highlight while the user is still choosing.
+      const el = e.target instanceof Element ? e.target : null;
+      if (!el?.closest(".ctxmenu")) clear();
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") clear();
+    };
+    window.addEventListener("mousedown", onMouseDown, true);
+    window.addEventListener("click", clear, true);
+    window.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("scroll", clear, true);
+    return () => {
+      window.removeEventListener("mousedown", onMouseDown, true);
+      window.removeEventListener("click", clear, true);
+      window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("scroll", clear, true);
+    };
+  }, [target]);
+
+  return [target, setTarget];
+}
+
 export function Notebook() {
   const qc = useQueryClient();
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
+  const [ctxTarget, setCtxTarget] = useContextTarget();
 
   const { data: folders = [] } = useQuery({
     queryKey: ["notebook", "folders"],
@@ -287,6 +327,36 @@ export function Notebook() {
     return true;
   };
 
+  // ── Menus (MAIN-634) ──────────────────────────────────────────────────────
+  // Every item is one of the write handlers above, unchanged — the right-click
+  // replaced the hover buttons as the way IN, not what they did.
+
+  const folderMenu = (folder: UserNoteFolder): ContextMenuItem[] => [
+    { label: "New note", onSelect: () => void createNote(folder.id) },
+    { label: "New sub-folder", onSelect: () => void createFolder(folder.id) },
+    { separator: true },
+    { label: "Rename", onSelect: () => void renameFolder(folder) },
+    { label: "Move…", onSelect: () => void moveFolder(folder) },
+    { separator: true },
+    { label: "Delete folder", danger: true, onSelect: () => void deleteFolder(folder) },
+  ];
+
+  const noteMenu = (note: UserNoteSummary): ContextMenuItem[] => [
+    { label: "Rename", onSelect: () => void renameNote(note) },
+    { label: "Move…", onSelect: () => void moveNote(note) },
+    { separator: true },
+    { label: "Delete", danger: true, onSelect: () => void deleteNote(note) },
+  ];
+
+  // The tree's own background, so the empty space below the rows creates at the
+  // root — the same two things the panel header's buttons do.
+  const rootMenu = (): ContextMenuItem[] => [
+    { label: "New note", onSelect: () => void createNote(null) },
+    { label: "New folder", onSelect: () => void createFolder(null) },
+  ];
+
+  const menus: RowMenus = { folder: folderMenu, note: noteMenu };
+
   const searching = query.trim().length > 0;
   const emptyTree = tree.folders.length === 0 && tree.rootNotes.length === 0;
   // A search narrows the note list, but a matching note in a collapsed folder
@@ -322,7 +392,10 @@ export function Notebook() {
             iconTitle="Search notes"
           />
         </div>
-        <div className="notebook-tree">
+        {/* The region IS the scroller, so the space below the last row is inside
+            it and right-clicking there is still the tree (AC-3). A row's own
+            region is nested deeper and therefore wins (AC-4). */}
+        <ContextMenuRegion className="notebook-tree" items={rootMenu}>
           {emptyTree ? (
             <Empty>
               {searching
@@ -340,16 +413,9 @@ export function Notebook() {
                   selectedId={selectedId}
                   onToggle={toggle}
                   onSelect={setSelectedId}
-                  actions={{
-                    createNote,
-                    createFolder,
-                    renameNote,
-                    renameFolder,
-                    moveNote,
-                    moveFolder,
-                    deleteNote,
-                    deleteFolder,
-                  }}
+                  menus={menus}
+                  ctxTarget={ctxTarget}
+                  onCtxTarget={setCtxTarget}
                 />
               ))}
               {tree.rootNotes.map((note) => (
@@ -359,14 +425,14 @@ export function Notebook() {
                   depth={0}
                   selected={selectedId === note.id}
                   onSelect={setSelectedId}
-                  onRename={renameNote}
-                  onMove={moveNote}
-                  onDelete={deleteNote}
+                  menus={menus}
+                  ctxTarget={ctxTarget}
+                  onCtxTarget={setCtxTarget}
                 />
               ))}
             </>
           )}
-        </div>
+        </ContextMenuRegion>
       </Panel>
 
       <Panel
@@ -448,15 +514,17 @@ function NoteTitle({
   );
 }
 
-interface RowActions {
-  createNote: (folderId: string | null) => void;
-  createFolder: (parentId: string | null) => void;
-  renameNote: (note: UserNoteSummary) => void;
-  renameFolder: (folder: UserNoteFolder) => void;
-  moveNote: (note: UserNoteSummary) => void;
-  moveFolder: (folder: UserNoteFolder) => void;
-  deleteNote: (note: UserNoteSummary) => void;
-  deleteFolder: (folder: UserNoteFolder) => void;
+interface RowMenus {
+  folder: (folder: UserNoteFolder) => ContextMenuItem[];
+  note: (note: UserNoteSummary) => ContextMenuItem[];
+}
+
+/** What every row needs to own its right-click: the menu to offer, and the mark
+ *  that says the open menu is about this row (AC-6). */
+interface RowContext {
+  menus: RowMenus;
+  ctxTarget: string | null;
+  onCtxTarget: (id: string) => void;
 }
 
 function FolderBranch({
@@ -466,7 +534,9 @@ function FolderBranch({
   selectedId,
   onToggle,
   onSelect,
-  actions,
+  menus,
+  ctxTarget,
+  onCtxTarget,
 }: {
   node: FolderNode;
   depth: number;
@@ -474,38 +544,29 @@ function FolderBranch({
   selectedId: string | null;
   onToggle: (id: string) => void;
   onSelect: (id: string) => void;
-  actions: RowActions;
-}) {
+} & RowContext) {
   const isOpen = expanded.has(node.folder.id);
+  const rows: RowContext = { menus, ctxTarget, onCtxTarget };
   return (
     <div className="notebook-branch">
-      <div
-        className="notebook-row notebook-folder-row"
-        style={{ paddingLeft: 6 + depth * 14 }}
-        onClick={() => onToggle(node.folder.id)}
-        title={node.folder.name}
+      <ContextMenuRegion
+        style={{ display: "contents" }}
+        items={() => menus.folder(node.folder)}
       >
-        {isOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-        {isOpen ? <FolderOpen size={13} /> : <Folder size={13} />}
-        <span className="notebook-label">{node.folder.name}</span>
-        <span className="notebook-row-actions" onClick={(e) => e.stopPropagation()}>
-          <button title="new note here" onClick={() => actions.createNote(node.folder.id)}>
-            <FilePlus size={12} />
-          </button>
-          <button title="new sub-folder" onClick={() => actions.createFolder(node.folder.id)}>
-            <FolderPlus size={12} />
-          </button>
-          <button title="rename folder" onClick={() => actions.renameFolder(node.folder)}>
-            <Pencil size={12} />
-          </button>
-          <button title="move folder" onClick={() => actions.moveFolder(node.folder)}>
-            <FolderInput size={12} />
-          </button>
-          <button title="delete folder" onClick={() => actions.deleteFolder(node.folder)}>
-            <Trash2 size={12} />
-          </button>
-        </span>
-      </div>
+        <div
+          className={`notebook-row notebook-folder-row${
+            ctxTarget === node.folder.id ? " ctx-target" : ""
+          }`}
+          style={{ paddingLeft: 6 + depth * 14 }}
+          onClick={() => onToggle(node.folder.id)}
+          onContextMenu={() => onCtxTarget(node.folder.id)}
+          title={node.folder.name}
+        >
+          {isOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+          {isOpen ? <FolderOpen size={13} /> : <Folder size={13} />}
+          <span className="notebook-label">{node.folder.name}</span>
+        </div>
+      </ContextMenuRegion>
       {isOpen && (
         <>
           {node.children.map((child) => (
@@ -517,7 +578,7 @@ function FolderBranch({
               selectedId={selectedId}
               onToggle={onToggle}
               onSelect={onSelect}
-              actions={actions}
+              {...rows}
             />
           ))}
           {node.notes.map((note) => (
@@ -527,9 +588,7 @@ function FolderBranch({
               depth={depth + 1}
               selected={selectedId === note.id}
               onSelect={onSelect}
-              onRename={actions.renameNote}
-              onMove={actions.moveNote}
-              onDelete={actions.deleteNote}
+              {...rows}
             />
           ))}
         </>
@@ -543,38 +602,29 @@ function NoteRow({
   depth,
   selected,
   onSelect,
-  onRename,
-  onMove,
-  onDelete,
+  menus,
+  ctxTarget,
+  onCtxTarget,
 }: {
   note: UserNoteSummary;
   depth: number;
   selected: boolean;
   onSelect: (id: string) => void;
-  onRename: (note: UserNoteSummary) => void;
-  onMove: (note: UserNoteSummary) => void;
-  onDelete: (note: UserNoteSummary) => void;
-}) {
+} & RowContext) {
   return (
-    <div
-      className={`notebook-row notebook-note-row${selected ? " selected" : ""}`}
-      style={{ paddingLeft: 6 + depth * 14 + 13 }}
-      onClick={() => onSelect(note.id)}
-      title={note.title}
-    >
-      <FileText size={13} />
-      <span className="notebook-label">{note.title || "Untitled"}</span>
-      <span className="notebook-row-actions" onClick={(e) => e.stopPropagation()}>
-        <button title="rename note" onClick={() => onRename(note)}>
-          <Pencil size={12} />
-        </button>
-        <button title="move note" onClick={() => onMove(note)}>
-          <FolderInput size={12} />
-        </button>
-        <button title="delete note" onClick={() => onDelete(note)}>
-          <Trash2 size={12} />
-        </button>
-      </span>
-    </div>
+    <ContextMenuRegion style={{ display: "contents" }} items={() => menus.note(note)}>
+      <div
+        className={`notebook-row notebook-note-row${selected ? " selected" : ""}${
+          ctxTarget === note.id ? " ctx-target" : ""
+        }`}
+        style={{ paddingLeft: 6 + depth * 14 + 13 }}
+        onClick={() => onSelect(note.id)}
+        onContextMenu={() => onCtxTarget(note.id)}
+        title={note.title}
+      >
+        <FileText size={13} />
+        <span className="notebook-label">{note.title || "Untitled"}</span>
+      </div>
+    </ContextMenuRegion>
   );
 }
