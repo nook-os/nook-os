@@ -4175,12 +4175,6 @@ pub struct WorktreeRequest {
     pub branch: String,
 }
 
-#[derive(Debug, Clone, Deserialize, ToSchema)]
-pub struct RemoveWorktreeRequest {
-    pub node_id: NodeId,
-    pub path: String,
-}
-
 /// Renaming a session (tabs are named things people recognize).
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct UpdateSessionRequest {

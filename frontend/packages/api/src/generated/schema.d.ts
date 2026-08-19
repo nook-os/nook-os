@@ -4443,7 +4443,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/workspaces/{id}/worktrees/remove": {
+    "/api/v1/workspaces/{id}/worktrees/{checkout_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -4452,8 +4452,8 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: operations["remove_worktree"];
-        delete?: never;
+        post?: never;
+        delete: operations["remove_worktree"];
         options?: never;
         head?: never;
         patch?: never;
@@ -8135,10 +8135,6 @@ export interface components {
             /** Format: uuid */
             relation_id: string;
             title: string;
-        };
-        RemoveWorktreeRequest: {
-            node_id: components["schemas"]["NodeId"];
-            path: string;
         };
         RenameOrgRequest: {
             name: string;
@@ -18422,14 +18418,11 @@ export interface operations {
             header?: never;
             path: {
                 id: string;
+                checkout_id: string;
             };
             cookie?: never;
         };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["RemoveWorktreeRequest"];
-            };
-        };
+        requestBody?: never;
         responses: {
             200: {
                 headers: {
@@ -18438,6 +18431,12 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["OpResponse"];
                 };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

@@ -433,8 +433,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/nodes/{id}/clone", post(gitops::clone_repo))
         .route("/nodes/{id}/projects", post(gitops::init_project))
         .route(
-            "/workspaces/{id}/worktrees/remove",
-            post(gitops::remove_worktree),
+            "/workspaces/{id}/worktrees/{checkout_id}",
+            delete_route(gitops::remove_worktree),
         )
         .route(
             "/workspaces/{id}/notes",

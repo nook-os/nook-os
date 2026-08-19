@@ -525,7 +525,6 @@ use utoipa::OpenApi;
         nook_types::WorktreeRequest,
         nook_types::GitCommitRequest,
         nook_types::GitPushRequest,
-        nook_types::RemoveWorktreeRequest,
         nook_types::InitProjectRequest,
         nook_types::ScheduledNode,
         nook_types::StartWorkRequest,
