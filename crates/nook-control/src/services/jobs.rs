@@ -2104,6 +2104,12 @@ pub async fn select_executor(
     // queued reason.
     let mut chosen: Option<NodeId> = None;
     let mut blocked_by_capacity = false;
+    // Split, because "full" and "full of paused runs" have different remedies
+    // (MAIN-616 AC-3). `truly_full` is what makes the WaitingOnHuman sentence a
+    // lie if it is set: a machine genuinely at capacity is not waiting on
+    // anybody, and answering an interview elsewhere would not free its slot.
+    let mut truly_full = false;
+    let mut paused_holding: Option<(String, u32)> = None;
     let mut cordoned: Vec<String> = Vec::new();
     let mut unsandboxed: Option<(String, String)> = None;
     for node in candidates {
@@ -2141,18 +2147,40 @@ pub async fn select_executor(
             unsandboxed.get_or_insert((name, detail));
             continue;
         }
-        let cap = match row {
-            Some(row) => crate::services::loop_capacity::of(&row).effective,
+        let cap = match &row {
+            Some(row) => crate::services::loop_capacity::of(row).effective,
             None => CAPACITY_WHEN_UNREPORTED,
         };
         if cap == 0 {
             // A deliberate "stop claiming" rather than a busy node.
             blocked_by_capacity = true;
+            truly_full = true;
             continue;
         }
-        let held = state.jobs.in_flight_on_node(node).await?.len() as u32;
-        if held >= cap {
+        // Held, NOT in-flight (MAIN-616 AC-1): a `waiting_on_human` job has not
+        // returned from `loop_job::run`, so the node is still holding its whole
+        // `Sandbox` — container, network, worktree. Counting only the moving
+        // runs let a person who started several specs and answered none
+        // accumulate unbounded live containers on a machine whose capacity says
+        // two. This is a SEPARATE read from `in_flight_on_node`, which stays
+        // the disconnect's question (AC-2).
+        let held = state
+            .jobs
+            .held_on_nodes(Some(node))
+            .await?
+            .remove(&node)
+            .unwrap_or_default();
+        if held.total() >= cap {
             blocked_by_capacity = true;
+            if held.only_paused_blocks(cap) {
+                let name = row
+                    .as_ref()
+                    .map(|r| r.name.clone())
+                    .unwrap_or_else(|| node.0.to_string());
+                paused_holding.get_or_insert((name, held.waiting_on_human.len() as u32));
+            } else {
+                truly_full = true;
+            }
             continue;
         }
         chosen = Some(node);
@@ -2181,10 +2209,30 @@ pub async fn select_executor(
             }
             (r, None)
         } else if blocked_by_capacity {
-            (
-                "no eligible executor: every eligible node is at its loop-job capacity".to_string(),
-                Some(QueuedReason::AtCapacity),
-            )
+            // Only when EVERY capacity-blocked node is paused-blocked
+            // (MAIN-616 AC-3). One machine genuinely full alongside one merely
+            // paused is ordinary busyness with an interview in it, and calling
+            // that "waiting on a human" would promise a person that answering
+            // is the fix when the fleet is in fact short of slots.
+            match paused_holding.filter(|_| !truly_full) {
+                Some((name, paused)) => (
+                    format!(
+                        "no eligible executor: {name} is at its loop-job capacity, and {paused} \
+                         {} paused waiting on a human's answer — a paused run keeps its container, \
+                         so answering or cancelling it is what frees the slot",
+                        if paused == 1 { "job is" } else { "jobs are" }
+                    ),
+                    Some(QueuedReason::WaitingOnHuman {
+                        node_name: name,
+                        paused,
+                    }),
+                ),
+                None => (
+                    "no eligible executor: every eligible node is at its loop-job capacity"
+                        .to_string(),
+                    Some(QueuedReason::AtCapacity),
+                ),
+            }
         } else if let Some((name, detail)) = unsandboxed {
             // Named rather than lumped into "no eligible executor", for the
             // reason the cordon arm is: the machine IS eligible and IS online,

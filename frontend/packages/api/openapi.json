@@ -15252,6 +15252,24 @@
             "description": "The number placement actually applies.",
             "minimum": 0
           },
+          "held": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Loop jobs this node is holding against `effective` right now — running\nAND paused together (MAIN-616), because a paused run keeps its container\nand therefore keeps its slot.\n\n`None` where the surface answered only \"what number is in force\" and\nnever counted; a node holding nothing counts zero, which is a different\nstatement and renders differently.",
+            "minimum": 0
+          },
+          "held_waiting_on_human": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Of [`Self::held`], how many are paused on a human's answer — the whole\ndifference between a node that is busy and one that is stuck.",
+            "minimum": 0
+          },
           "operator": {
             "type": [
               "integer",
@@ -17190,6 +17208,33 @@
                 "enum": [
                   "at_capacity"
                 ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Every eligible node is at capacity, and every one of them would have\nroom if a PAUSED job were not holding a slot (MAIN-616).\n\nSeparate from [`Self::AtCapacity`] because the remedy is: nobody needs a\nbigger machine, somebody needs to answer an interview. A paused job\nkeeps its container, its network and its worktree alive — the interview\nstate lives in there — so it costs a slot exactly as a running one does,\nand a fleet that looks busy can in fact be a fleet that is waiting on a\nperson who walked away.\n\nGenuine exhaustion still reports [`Self::AtCapacity`]: this variant is\nonly for the case where answering the paused runs — or cancelling them —\nis what actually frees a slot.",
+            "required": [
+              "node_name",
+              "paused",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "waiting_on_human"
+                ]
+              },
+              "node_name": {
+                "type": "string",
+                "description": "A node whose capacity a paused job is holding, so the answer has an\naddress."
+              },
+              "paused": {
+                "type": "integer",
+                "format": "int32",
+                "description": "How many of that node's held slots are paused runs.",
+                "minimum": 0
               }
             }
           },

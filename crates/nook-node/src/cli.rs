@@ -1326,20 +1326,11 @@ fn cell(row: &Value, key: &str) -> String {
             .unwrap_or_else(|| "-".into());
     }
     // Nor is `capacity`: it is `loop_capacity` read as the pair that answers the
-    // question (AC-4). The number alone cannot say why it is what it is, and the
-    // source is the whole difference between "this box is small" and "somebody
-    // cordoned it".
+    // question (MAIN-508 AC-4). The number alone cannot say why it is what it
+    // is, and the source is the whole difference between "this box is small"
+    // and "somebody cordoned it".
     if key == "capacity" {
-        let cap = row.get("loop_capacity");
-        let effective = cap.and_then(|c| c.get("effective")).and_then(Value::as_i64);
-        let source = cap
-            .and_then(|c| c.get("source"))
-            .and_then(Value::as_str)
-            .unwrap_or("?");
-        return match effective {
-            Some(n) => format!("{n} ({source})"),
-            None => "-".into(),
-        };
+        return capacity_cell(row.get("loop_capacity"));
     }
     if key == "cordon" {
         return cordon_cell(row.get("cordon"));
@@ -1359,6 +1350,45 @@ fn cell(row: &Value, key: &str) -> String {
         }
     }
     render_value(key, node)
+}
+
+/// A node's loop capacity as one cell: what it is HOLDING over what it may
+/// hold, where the number came from, and how much of the load is not moving.
+///
+/// The held half is MAIN-616's: a `waiting_on_human` job keeps its container
+/// and therefore its slot, so a node can sit at `2/2` with nothing actually
+/// building. `2/2 (operator, 1 waiting on human)` is the line that makes that
+/// legible without a shell on the box; the paused clause is omitted entirely
+/// when there is nothing paused, because a parenthetical reading `0 waiting on
+/// human` on every row is noise on the ordinary case.
+///
+/// A response that never counted (the capacity endpoints, which answer only
+/// "what number is in force") has no `held`, and renders as it did before —
+/// `2 (operator)`. That is different from a node holding nothing, which counts
+/// zero and renders `0/2 (operator)`.
+fn capacity_cell(v: Option<&Value>) -> String {
+    let effective = v.and_then(|c| c.get("effective")).and_then(Value::as_i64);
+    let Some(effective) = effective else {
+        return "-".into();
+    };
+    let source = v
+        .and_then(|c| c.get("source"))
+        .and_then(Value::as_str)
+        .unwrap_or("?");
+    let held = v.and_then(|c| c.get("held")).and_then(Value::as_i64);
+    let paused = v
+        .and_then(|c| c.get("held_waiting_on_human"))
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let number = match held {
+        Some(h) => format!("{h}/{effective}"),
+        None => effective.to_string(),
+    };
+    if paused > 0 {
+        format!("{number} ({source}, {paused} waiting on human)")
+    } else {
+        format!("{number} ({source})")
+    }
 }
 
 /// A node's sandbox capability as one narrow cell (MAIN-611 AC-9).
@@ -4464,6 +4494,46 @@ mod tests {
     #[test]
     fn no_rows_is_not_a_panic() {
         assert_eq!(unique_id_len(&[]), 0);
+    }
+
+    /// MAIN-616 AC-4: a node at capacity with nothing actually running is
+    /// legible from the CLI. `2/2` alone still reads as a busy machine, so the
+    /// paused count is what makes the line answerable.
+    #[test]
+    fn the_capacity_cell_breaks_the_held_count_down() {
+        let cap = serde_json::json!({
+            "effective": 2, "source": "operator", "operator": 2, "advertised": null,
+            "pinned": false, "held": 2, "held_waiting_on_human": 1
+        });
+        assert_eq!(
+            super::capacity_cell(Some(&cap)),
+            "2/2 (operator, 1 waiting on human)"
+        );
+    }
+
+    /// The ordinary row keeps its shape: a parenthetical saying nobody is
+    /// waiting, on every line of a fleet, is noise.
+    #[test]
+    fn a_busy_node_with_nothing_paused_says_only_what_it_is_holding() {
+        let cap = serde_json::json!({
+            "effective": 2, "source": "node", "held": 2, "held_waiting_on_human": 0
+        });
+        assert_eq!(super::capacity_cell(Some(&cap)), "2/2 (node)");
+        let idle = serde_json::json!({
+            "effective": 4, "source": "default", "held": 0, "held_waiting_on_human": 0
+        });
+        assert_eq!(super::capacity_cell(Some(&idle)), "0/4 (default)");
+    }
+
+    /// A response that never counted renders as it did before MAIN-616 — which
+    /// is a different statement from a node holding nothing, and must not be
+    /// dressed up as `0/2`.
+    #[test]
+    fn an_uncounted_capacity_still_renders_its_number() {
+        let cap = serde_json::json!({ "effective": 2, "source": "operator" });
+        assert_eq!(super::capacity_cell(Some(&cap)), "2 (operator)");
+        assert_eq!(super::capacity_cell(None), "-");
+        assert_eq!(super::capacity_cell(Some(&serde_json::Value::Null)), "-");
     }
 }
 

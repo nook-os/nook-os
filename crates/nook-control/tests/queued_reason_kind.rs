@@ -93,6 +93,10 @@ fn every_variant() -> Vec<QueuedReason> {
             node_name: "azul".into(),
             detail: "no Docker daemon on this node".into(),
         },
+        QueuedReason::WaitingOnHuman {
+            node_name: "azul".into(),
+            paused: 2,
+        },
     ]
 }
 

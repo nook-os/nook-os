@@ -658,6 +658,102 @@ async fn a_zero_capacity_node_never_claims() {
     bed.teardown().await;
 }
 
+/// MAIN-616 AC-1: a job paused on a human still holds its slot.
+///
+/// The node has not let go of anything — `loop_job::run` has not returned, so
+/// the `Sandbox` and its container are alive — and counting only the moving
+/// runs is what let three unanswered specs sit on a machine whose capacity says
+/// two.
+#[tokio::test]
+async fn a_job_paused_on_a_human_still_holds_its_nodes_slot() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, tenant, user, person, job) = setup(&bed).await;
+    let mut caps = caps_declaring(&["spec"], false);
+    caps["max_loop_jobs"] = json!(2);
+    let mine = node(&bed, tenant, Some(person), "online", caps).await;
+
+    // One moving, one paused: two slots of a two-slot machine.
+    for job_state in ["running", "waiting_on_human"] {
+        let target = target_task(&bed, tenant, user).await;
+        let held = queued_job(&bed, tenant, user, target).await;
+        bed.db()
+            .exec(
+                "UPDATE loop_jobs SET state = $2, executor_node_id = $3 WHERE id = $1",
+                params![held, job_state, mine],
+            )
+            .await
+            .expect("occupy");
+    }
+
+    let placed = jobs::select_executor(&state, tenant, job)
+        .await
+        .expect("select");
+    assert_eq!(
+        placed.state, "queued",
+        "the third job waits — the paused one has not given the node back"
+    );
+    let reason = placed.queued_reason.clone().unwrap_or_default();
+    assert!(
+        reason.contains("waiting on a human"),
+        "AC-3: the sentence sends an operator to the interview, not to a bigger \
+         machine: {reason}"
+    );
+    let node_name: String = bed
+        .db()
+        .query_scalar("SELECT name FROM nodes WHERE id = $1", params![mine])
+        .await
+        .expect("name");
+    assert_eq!(
+        placed.queued_reason_kind,
+        Some(QueuedReason::WaitingOnHuman {
+            node_name,
+            paused: 1
+        }),
+        "and says it as a value, naming the node the answer is owed to"
+    );
+
+    bed.teardown().await;
+}
+
+/// AC-3's other half: a node that is genuinely full still says so. The remedy
+/// for two running jobs is not "go answer something".
+#[tokio::test]
+async fn a_node_full_of_moving_work_still_reports_plain_capacity() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, tenant, user, person, job) = setup(&bed).await;
+    let mut caps = caps_declaring(&["spec"], false);
+    caps["max_loop_jobs"] = json!(2);
+    let mine = node(&bed, tenant, Some(person), "online", caps).await;
+
+    for _ in 0..2 {
+        let target = target_task(&bed, tenant, user).await;
+        let held = queued_job(&bed, tenant, user, target).await;
+        bed.db()
+            .exec(
+                "UPDATE loop_jobs SET state = 'running', executor_node_id = $2 WHERE id = $1",
+                params![held, mine],
+            )
+            .await
+            .expect("occupy");
+    }
+
+    let placed = jobs::select_executor(&state, tenant, job)
+        .await
+        .expect("select");
+    assert_eq!(placed.state, "queued");
+    assert_eq!(
+        placed.queued_reason_kind,
+        Some(QueuedReason::AtCapacity),
+        "nobody is waiting on a human here"
+    );
+
+    bed.teardown().await;
+}
+
 /// MAIN-508 AC-2, the criterion the whole card turns on: an operator's capacity
 /// is honoured by PLACEMENT, with the node agent untouched.
 ///
