@@ -62,9 +62,13 @@ pub async fn put(
     // Key-specific validation, for the keys whose VALUE carries an invariant the
     // settings table cannot express. `email.inbound` routes real mail by
     // address, so a second tenant claiming one already in use would take
-    // delivery of somebody else's support mail (MAIN-329).
+    // delivery of somebody else's support mail (MAIN-329). `email.reply_policy`
+    // decides whether a drafted reply reaches a customer, and an unrecognised
+    // value there reads as the safe default — so a tenant meaning to opt in
+    // would believe they had and see nothing sent (MAIN-332).
     crate::services::email_inbound::validate_setting(&state, auth.tenant_id, &key, &req.value)
         .await?;
+    crate::services::email_links::reply::validate_setting(&key, &req.value)?;
 
     let user_id = (scope == "user").then_some(auth.user_id);
     let setting = state

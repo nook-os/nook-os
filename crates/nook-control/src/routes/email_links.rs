@@ -14,12 +14,12 @@
 //! bytes is the user-content route's job, behind its own authentication (C7
 //! AC-4).
 
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::Json;
 use nook_types::*;
 use serde::Deserialize;
 
-use crate::auth::AuthCtx;
+use crate::auth::{AuthCtx, Principal};
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 
@@ -106,4 +106,40 @@ pub async fn lookup(
         }
     };
     Ok(Json(link.ok_or(ApiError::NotFound)?))
+}
+
+/// `POST /api/v1/email-links/{id}/reply` — approve the drafted reply and send
+/// it where this tenant's policy says (MAIN-332 AC-2, AC-3).
+///
+/// **A person, never a machine.** This is HC-3's second gate — the one that
+/// decides what a customer sees — so a node principal is refused here even
+/// though it holds a perfectly good token for the rest of this API. An
+/// investigate run drafts the reply and reports it; approving its own draft
+/// would make the gate a formality.
+#[utoipa::path(post, path = "/api/v1/email-links/{id}/reply",
+    operation_id = "send_email_reply",
+    params(("id" = String, Path,)),
+    request_body = SendReplyRequest,
+    responses((status = 200, body = EmailLink), (status = 403), (status = 404), (status = 409)))]
+pub async fn reply(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<uuid::Uuid>,
+    Json(req): Json<SendReplyRequest>,
+) -> ApiResult<Json<EmailLink>> {
+    if !matches!(auth.principal, Principal::User) {
+        return Err(ApiError::ForbiddenMsg(
+            "a drafted reply is approved by a person, not by a machine token".into(),
+        ));
+    }
+    Ok(Json(
+        crate::services::email_links::reply::send(
+            &state,
+            auth.tenant_id,
+            auth.user_id,
+            id,
+            req.reply.as_deref(),
+        )
+        .await?,
+    ))
 }

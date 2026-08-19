@@ -17,6 +17,7 @@
 //! every other surface that hangs content off a card (MAIN-76).
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use nook_db::{params, Db, DbPool};
 use nook_types::*;
 use uuid::Uuid;
@@ -33,6 +34,13 @@ pub struct NewEmailLink {
     pub task: TaskId,
     pub message_id: Option<String>,
     pub in_reply_to: Option<String>,
+    /// The verified envelope sender — the staffer who forwarded the report, and
+    /// the only address a `to_staffer` reply may go to (MAIN-332).
+    pub staffer_address: String,
+    /// The delivery's `Reply-To:`, when it carried one. See the migration for
+    /// why that header and no other.
+    pub customer_address: Option<String>,
+    pub subject: String,
     pub storage_key: String,
 }
 
@@ -47,7 +55,9 @@ pub struct NewEmailLink {
 /// from a log. Nothing reads it back yet — the inbox that will is C7, and it can
 /// add that read with the caller and the test that justify it.
 const LINK_COLUMNS: &str = "l.id, l.workspace_id, l.task_id, l.loop_job_id, l.pr_ref, \
-                            l.message_id, l.in_reply_to, l.storage_key, l.findings, \
+                            l.message_id, l.in_reply_to, l.staffer_address, \
+                            l.customer_address, l.subject, l.reply_sent_at, \
+                            l.reply_recipient, l.storage_key, l.findings, \
                             (l.draft_reply_enc IS NOT NULL) AS has_draft_reply, \
                             l.created_at";
 
@@ -125,6 +135,51 @@ pub trait EmailLinkRepository: Send + Sync {
         findings: &str,
         draft_reply_enc: Vec<u8>,
     ) -> ApiResult<u64>;
+
+    /// One chain by its own id — what the approve action holds (MAIN-332).
+    async fn by_id(
+        &self,
+        tenant: TenantId,
+        viewer: UserId,
+        id: Uuid,
+    ) -> ApiResult<Option<EmailLink>>;
+
+    /// The sealed draft itself, which no other read returns.
+    ///
+    /// The caller is the send path and nothing else: it needs the words, and
+    /// the vault to unseal them lives a layer up. Keeping it off
+    /// [`LINK_COLUMNS`] is what stops the ciphertext riding along on every
+    /// listing — see that constant.
+    async fn draft_reply_enc(&self, tenant: TenantId, id: Uuid) -> ApiResult<Option<Vec<u8>>>;
+
+    /// Replace the sealed draft, for a human who edited it before approving.
+    /// The findings are untouched: an edited reply is not a re-investigation.
+    async fn set_draft_reply(
+        &self,
+        tenant: TenantId,
+        id: Uuid,
+        draft_reply_enc: Vec<u8>,
+    ) -> ApiResult<u64>;
+
+    /// Take the ONE reply this chain gets, naming who it goes to (MAIN-332
+    /// AC-5). Returns how many rows moved — `0` means somebody already has it.
+    ///
+    /// Conditional on `reply_sent_at IS NULL`, and taken BEFORE the transport
+    /// is asked, because the thing being protected is a customer's inbox: two
+    /// approves a second apart would both pass a read-then-send check and the
+    /// person would get the same reply twice. A send that then fails calls
+    /// [`release_reply`](EmailLinkRepository::release_reply).
+    async fn claim_reply(
+        &self,
+        tenant: TenantId,
+        id: Uuid,
+        recipient: &str,
+        sent_at: DateTime<Utc>,
+    ) -> ApiResult<u64>;
+
+    /// Give the claim back: the transport refused, so nothing went and the
+    /// chain must be replyable again.
+    async fn release_reply(&self, tenant: TenantId, id: Uuid) -> ApiResult<()>;
 }
 
 pub struct DbEmailLinkRepository {
@@ -144,8 +199,9 @@ impl EmailLinkRepository for DbEmailLinkRepository {
         self.db
             .exec(
                 "INSERT INTO email_links
-                    (id, tenant_id, workspace_id, task_id, message_id, in_reply_to, storage_key)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                    (id, tenant_id, workspace_id, task_id, message_id, in_reply_to,
+                     staffer_address, customer_address, subject, storage_key)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
                 params![
                     id,
                     new.tenant,
@@ -156,6 +212,9 @@ impl EmailLinkRepository for DbEmailLinkRepository {
                     new.task,
                     new.message_id,
                     new.in_reply_to,
+                    &new.staffer_address,
+                    new.customer_address,
+                    &new.subject,
                     &new.storage_key
                 ],
             )
@@ -307,5 +366,82 @@ impl EmailLinkRepository for DbEmailLinkRepository {
                 params![tenant, id, findings, draft_reply_enc],
             )
             .await?)
+    }
+
+    async fn by_id(
+        &self,
+        tenant: TenantId,
+        viewer: UserId,
+        id: Uuid,
+    ) -> ApiResult<Option<EmailLink>> {
+        Ok(self
+            .db
+            .query_opt(
+                &format!(
+                    "SELECT {LINK_COLUMNS} FROM email_links l
+                       JOIN tasks t ON t.id = l.task_id
+                      WHERE l.tenant_id = $1 AND l.id = $3 AND {visible}",
+                    visible = visible_sql("t", "$2"),
+                ),
+                params![tenant, viewer, id],
+            )
+            .await?)
+    }
+
+    async fn draft_reply_enc(&self, tenant: TenantId, id: Uuid) -> ApiResult<Option<Vec<u8>>> {
+        Ok(self
+            .db
+            .query_scalar_opt::<Option<Vec<u8>>>(
+                "SELECT draft_reply_enc FROM email_links WHERE tenant_id = $1 AND id = $2",
+                params![tenant, id],
+            )
+            .await?
+            // The outer `Option` is "no such chain", the inner is "no draft
+            // yet" — the caller's refusal is the same either way.
+            .flatten())
+    }
+
+    async fn set_draft_reply(
+        &self,
+        tenant: TenantId,
+        id: Uuid,
+        draft_reply_enc: Vec<u8>,
+    ) -> ApiResult<u64> {
+        Ok(self
+            .db
+            .exec(
+                "UPDATE email_links SET draft_reply_enc = $3
+                  WHERE tenant_id = $1 AND id = $2",
+                params![tenant, id, draft_reply_enc],
+            )
+            .await?)
+    }
+
+    async fn claim_reply(
+        &self,
+        tenant: TenantId,
+        id: Uuid,
+        recipient: &str,
+        sent_at: DateTime<Utc>,
+    ) -> ApiResult<u64> {
+        Ok(self
+            .db
+            .exec(
+                "UPDATE email_links SET reply_sent_at = $3, reply_recipient = $4
+                  WHERE tenant_id = $1 AND id = $2 AND reply_sent_at IS NULL",
+                params![tenant, id, sent_at, recipient],
+            )
+            .await?)
+    }
+
+    async fn release_reply(&self, tenant: TenantId, id: Uuid) -> ApiResult<()> {
+        self.db
+            .exec(
+                "UPDATE email_links SET reply_sent_at = NULL, reply_recipient = NULL
+                  WHERE tenant_id = $1 AND id = $2",
+                params![tenant, id],
+            )
+            .await?;
+        Ok(())
     }
 }

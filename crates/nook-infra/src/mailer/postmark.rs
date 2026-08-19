@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use super::{Category, Mailer};
+use super::{Category, Mailer, SendOutcome, Threading};
 
 pub struct PostmarkMailer {
     http: reqwest::Client,
@@ -51,7 +51,19 @@ impl PostmarkMailer {
 
     /// Compose the Postmark request body. Pure, so the field mapping is testable
     /// without HTTP: `HtmlBody` is present only for a multipart message.
-    pub fn payload(from: &str, to: &str, subject: &str, text: &str, html: Option<&str>) -> Value {
+    ///
+    /// Threading rides in `Headers`, Postmark's `[{Name, Value}]` escape hatch
+    /// for the RFC 5322 fields its own schema does not name — and it is omitted
+    /// entirely for a message that is not a reply, so an unthreaded send is the
+    /// byte-identical request it was before threading existed.
+    pub fn payload(
+        from: &str,
+        to: &str,
+        subject: &str,
+        text: &str,
+        html: Option<&str>,
+        threading: &Threading,
+    ) -> Value {
         let mut body = json!({
             "From": from,
             "To": to,
@@ -60,6 +72,19 @@ impl PostmarkMailer {
         });
         if let Some(html) = html {
             body["HtmlBody"] = json!(html);
+        }
+        let headers: Vec<Value> = threading
+            .in_reply_to
+            .iter()
+            .map(|id| json!({ "Name": "In-Reply-To", "Value": id }))
+            .chain(
+                threading
+                    .references_header()
+                    .map(|refs| json!({ "Name": "References", "Value": refs })),
+            )
+            .collect();
+        if !headers.is_empty() {
+            body["Headers"] = json!(headers);
         }
         body
     }
@@ -70,7 +95,7 @@ pub const TOKEN_HEADER: &str = "X-Postmark-Server-Token";
 
 #[async_trait]
 impl Mailer for PostmarkMailer {
-    async fn send(
+    async fn send_threaded(
         &self,
         to: &str,
         subject: &str,
@@ -78,8 +103,9 @@ impl Mailer for PostmarkMailer {
         html_body: Option<&str>,
         // A transport just delivers; the guard has already decided category.
         _category: Category,
-    ) -> Result<()> {
-        let body = Self::payload(&self.from, to, subject, text_body, html_body);
+        threading: &Threading,
+    ) -> Result<SendOutcome> {
+        let body = Self::payload(&self.from, to, subject, text_body, html_body, threading);
         let resp = self
             .http
             .post(&self.api_url)
@@ -114,7 +140,7 @@ impl Mailer for PostmarkMailer {
                 );
             }
         }
-        Ok(())
+        Ok(SendOutcome::Delivered)
     }
 
     fn describe(&self) -> String {
@@ -128,12 +154,14 @@ mod tests {
 
     #[test]
     fn payload_maps_the_fields_and_omits_html_when_absent() {
+        let plain = Threading::default();
         let text_only = PostmarkMailer::payload(
             "NookOS <no-reply@hein.network>",
             "her@example.com",
             "Hello",
             "plain body",
             None,
+            &plain,
         );
         assert_eq!(text_only["From"], "NookOS <no-reply@hein.network>");
         assert_eq!(text_only["To"], "her@example.com");
@@ -143,11 +171,38 @@ mod tests {
             text_only.get("HtmlBody").is_none(),
             "no HtmlBody for a text-only message"
         );
+        assert!(
+            text_only.get("Headers").is_none(),
+            "a message that is not a reply carries no threading headers"
+        );
 
         let with_html =
-            PostmarkMailer::payload("a@b.com", "c@d.com", "S", "t", Some("<b>rich</b>"));
+            PostmarkMailer::payload("a@b.com", "c@d.com", "S", "t", Some("<b>rich</b>"), &plain);
         assert_eq!(with_html["HtmlBody"], "<b>rich</b>");
         assert_eq!(with_html["TextBody"], "t");
+    }
+
+    /// A reply carries both threading headers, in Postmark's `Headers` form.
+    #[test]
+    fn payload_carries_the_thread_as_custom_headers() {
+        let body = PostmarkMailer::payload(
+            "a@b.com",
+            "c@d.com",
+            "Re: it 500s",
+            "we reproduced it",
+            None,
+            &Threading {
+                in_reply_to: Some("<m1@acme.example>".into()),
+                references: vec!["<root@acme.example>".into(), "<m1@acme.example>".into()],
+            },
+        );
+        assert_eq!(
+            body["Headers"],
+            json!([
+                { "Name": "In-Reply-To", "Value": "<m1@acme.example>" },
+                { "Name": "References", "Value": "<root@acme.example> <m1@acme.example>" },
+            ])
+        );
     }
 
     #[test]

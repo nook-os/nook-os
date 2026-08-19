@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use anyhow::Result;
 use async_trait::async_trait;
 
-use super::{Category, Mailer};
+use super::{Category, Mailer, SendOutcome, Threading};
 
 /// One message that would have been sent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,6 +19,10 @@ pub struct CapturedEmail {
     pub subject: String,
     pub text_body: String,
     pub html_body: Option<String>,
+    /// The thread it would have joined. Captured rather than dropped because
+    /// "the reply was threaded" is a claim a test has to be able to check, and
+    /// this is the transport every test runs against.
+    pub threading: Threading,
 }
 
 #[derive(Default)]
@@ -44,14 +48,15 @@ impl CaptureMailer {
 
 #[async_trait]
 impl Mailer for CaptureMailer {
-    async fn send(
+    async fn send_threaded(
         &self,
         to: &str,
         subject: &str,
         text_body: &str,
         html_body: Option<&str>,
         category: Category,
-    ) -> Result<()> {
+        threading: &Threading,
+    ) -> Result<SendOutcome> {
         tracing::info!(
             to,
             subject,
@@ -67,8 +72,12 @@ impl Mailer for CaptureMailer {
             subject: subject.to_string(),
             text_body: text_body.to_string(),
             html_body: html_body.map(str::to_string),
+            threading: threading.clone(),
         });
-        Ok(())
+        // `Delivered` even though nothing left the process: this IS the
+        // transport when it is selected, and the gate that decides a message
+        // was held is the guard's, not a provider's.
+        Ok(SendOutcome::Delivered)
     }
 
     fn describe(&self) -> String {
@@ -111,6 +120,7 @@ mod tests {
                 subject: "Hi".into(),
                 text_body: "plain".into(),
                 html_body: Some("<b>rich</b>".into()),
+                threading: Threading::default(),
             }
         );
         assert_eq!(sent[1].to, "them@example.com");
@@ -139,5 +149,31 @@ mod tests {
         );
         // The oldest kept is the (10)th message, not the very first.
         assert_eq!(sent.first().unwrap().subject, "n10");
+    }
+
+    /// What a threaded send records, so a test asserting "the reply joined the
+    /// customer's thread" has something to assert against.
+    #[tokio::test]
+    async fn records_the_thread_a_message_would_have_joined() {
+        let m = CaptureMailer::new();
+        let thread = Threading {
+            in_reply_to: Some("<a@b>".into()),
+            references: vec!["<root@b>".into(), "<a@b>".into()],
+        };
+        m.send_threaded(
+            "her@example.com",
+            "Re: it 500s",
+            "we reproduced it",
+            None,
+            Category::Transactional,
+            &thread,
+        )
+        .await
+        .unwrap();
+        assert_eq!(m.sent()[0].threading, thread);
+        assert_eq!(
+            thread.references_header().as_deref(),
+            Some("<root@b> <a@b>")
+        );
     }
 }

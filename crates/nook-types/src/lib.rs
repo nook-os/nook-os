@@ -1373,6 +1373,22 @@ pub struct EmailLink {
     pub message_id: Option<String>,
     /// What the message itself was a reply to, verbatim.
     pub in_reply_to: Option<String>,
+    /// The support staffer who forwarded it — the verified envelope sender the
+    /// allow-list matched, and where a `to_staffer` reply goes (MAIN-332).
+    pub staffer_address: Option<String>,
+    /// Where a reply reaches the person who reported the problem: the
+    /// delivery's `Reply-To:`, which is the forwarding staffer's own statement
+    /// of who answers belong to. `None` when the message carried none, and a
+    /// chain without one cannot be replied to by the customer-facing modes.
+    pub customer_address: Option<String>,
+    /// The delivery's subject, which a reply answers with `Re:`.
+    pub subject: Option<String>,
+    /// When the reply actually left, and to whom. Written together, only after
+    /// a transport reported a delivery — so `reply_sent_at` set is a message
+    /// that genuinely went, and it is what stops a second approve sending a
+    /// customer the same reply twice.
+    pub reply_sent_at: Option<DateTime<Utc>>,
+    pub reply_recipient: Option<String>,
     /// Where the sealed raw message lives in the user-content store.
     pub storage_key: String,
     /// What the investigate run found (MAIN-331) — its own analysis, `None`
@@ -1448,6 +1464,19 @@ pub struct InvestigationReport {
     /// The "here's what we found" reply, addressed to the reporter. Sealed
     /// before it is stored; nothing sends it (C4 owns delivery).
     pub draft_reply: String,
+}
+
+/// Approve a drafted reply and send it (MAIN-332 AC-3).
+///
+/// The one server-side thing the approve action needs beyond the link id: a
+/// human who edited the draft in the inbox is approving the text in front of
+/// them, not the one the run wrote, and sending the second while recording the
+/// first would make the chain's record a fiction. Omitted — the whole body may
+/// be omitted — sends the draft as it stands.
+#[derive(Debug, Clone, Default, Deserialize, ToSchema)]
+pub struct SendReplyRequest {
+    #[serde(default)]
+    pub reply: Option<String>,
 }
 
 /// The decrypted original message, handed to the investigate run that asked for

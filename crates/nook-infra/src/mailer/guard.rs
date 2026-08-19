@@ -26,7 +26,7 @@ use async_trait::async_trait;
 use nook_db::dialect::type_mapping;
 use nook_db::{params, Db, DbPool};
 
-use super::{Category, Mailer, SendOutcome};
+use super::{Category, Mailer, SendOutcome, Threading};
 
 pub struct GuardedMailer {
     inner: Arc<dyn Mailer>,
@@ -120,9 +120,7 @@ pub fn recipient_domain(to: &str) -> String {
 }
 
 impl GuardedMailer {
-    /// The gate matrix, run once and reported as an outcome. Both trait methods
-    /// go through here so `send` and `send_reporting` can never disagree about
-    /// whether a message was held.
+    /// The gate matrix, run once and reported as an outcome.
     async fn run(
         &self,
         to: &str,
@@ -130,6 +128,7 @@ impl GuardedMailer {
         text_body: &str,
         html_body: Option<&str>,
         category: Category,
+        threading: &Threading,
     ) -> Result<SendOutcome> {
         // 1. Global enable. Off ⇒ capture, whatever the provider is (AC-2).
         if !self.send_enabled {
@@ -167,13 +166,13 @@ impl GuardedMailer {
         // Real send.
         match self
             .inner
-            .send(to, subject, text_body, html_body, category)
+            .send_threaded(to, subject, text_body, html_body, category, threading)
             .await
         {
-            Ok(()) => {
+            Ok(outcome) => {
                 self.record_sent(to, category).await;
                 tracing::info!(to, subject, category = category.as_str(), "mail sent");
-                Ok(SendOutcome::Delivered)
+                Ok(outcome)
             }
             Err(e) => {
                 tracing::error!(to, subject, error = %e, "mail send failed");
@@ -185,28 +184,17 @@ impl GuardedMailer {
 
 #[async_trait]
 impl Mailer for GuardedMailer {
-    async fn send(
+    async fn send_threaded(
         &self,
         to: &str,
         subject: &str,
         text_body: &str,
         html_body: Option<&str>,
         category: Category,
-    ) -> Result<()> {
-        self.run(to, subject, text_body, html_body, category)
-            .await
-            .map(|_| ())
-    }
-
-    async fn send_reporting(
-        &self,
-        to: &str,
-        subject: &str,
-        text_body: &str,
-        html_body: Option<&str>,
-        category: Category,
+        threading: &Threading,
     ) -> Result<SendOutcome> {
-        self.run(to, subject, text_body, html_body, category).await
+        self.run(to, subject, text_body, html_body, category, threading)
+            .await
     }
 
     fn describe(&self) -> String {

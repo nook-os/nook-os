@@ -10,7 +10,7 @@ use lettre::message::{header::ContentType, Mailbox, MultiPart};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 
-use super::{Category, Mailer};
+use super::{Category, Mailer, SendOutcome, Threading};
 
 pub struct SmtpMailer {
     transport: AsyncSmtpTransport<Tokio1Executor>,
@@ -86,7 +86,7 @@ impl SmtpMailer {
 
 #[async_trait]
 impl Mailer for SmtpMailer {
-    async fn send(
+    async fn send_threaded(
         &self,
         to: &str,
         subject: &str,
@@ -94,7 +94,8 @@ impl Mailer for SmtpMailer {
         html_body: Option<&str>,
         // A transport just delivers; the category is the guard's concern.
         _category: Category,
-    ) -> Result<()> {
+        threading: &Threading,
+    ) -> Result<SendOutcome> {
         let recipient: Mailbox = to
             .parse()
             .with_context(|| format!("invalid recipient address: {to:?}"))?;
@@ -102,6 +103,16 @@ impl Mailer for SmtpMailer {
             .from(self.from.clone())
             .to(recipient)
             .subject(subject);
+        // Set only when there is a thread: an empty `In-Reply-To` is a header
+        // some clients treat as a malformed reply rather than as no reply.
+        let message = match &threading.in_reply_to {
+            Some(id) => message.in_reply_to(id.clone()),
+            None => message,
+        };
+        let message = match threading.references_header() {
+            Some(refs) => message.references(refs),
+            None => message,
+        };
         let message = match html_body {
             Some(html) => message
                 .multipart(MultiPart::alternative_plain_html(
@@ -118,7 +129,7 @@ impl Mailer for SmtpMailer {
             .send(message)
             .await
             .with_context(|| format!("SMTP send to {to} failed"))?;
-        Ok(())
+        Ok(SendOutcome::Delivered)
     }
 
     fn describe(&self) -> String {

@@ -133,6 +133,40 @@ pub fn is_known_provider(name: &str) -> bool {
     PROVIDERS.contains(&name)
 }
 
+/// Where a message belongs in an existing mail thread (RFC 5322 §3.6.4).
+///
+/// Its own type rather than two more `Option<&str>` parameters because the two
+/// fields are one statement — a reply carrying `In-Reply-To` and no
+/// `References` threads in some clients and starts a new conversation in others
+/// — and because [`Threading::default()`] is then the honest spelling of "this
+/// message is not part of a thread", which is what every existing caller sends.
+///
+/// The ids are carried EXACTLY as they arrived, angle brackets included: a
+/// `Message-Id` is an opaque token chosen by whoever wrote the message, and a
+/// receiving client matches it byte for byte.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Threading {
+    /// The message this one answers.
+    pub in_reply_to: Option<String>,
+    /// The conversation so far, oldest first — the parent's own `References`
+    /// followed by its `Message-Id`.
+    pub references: Vec<String>,
+}
+
+impl Threading {
+    /// Nothing to say about a thread. Distinct from "a thread with no parent":
+    /// a transport skips the headers entirely rather than emitting empty ones.
+    pub fn is_empty(&self) -> bool {
+        self.in_reply_to.is_none() && self.references.is_empty()
+    }
+
+    /// The `References` header value — space-separated, which is the only
+    /// separator RFC 5322 allows between msg-ids.
+    pub fn references_header(&self) -> Option<String> {
+        (!self.references.is_empty()).then(|| self.references.join(" "))
+    }
+}
+
 /// Whether a message actually left toward the recipient, or was held back —
 /// with a short reason, for logs, when it was held.
 ///
@@ -151,12 +185,35 @@ pub enum SendOutcome {
 
 #[async_trait]
 pub trait Mailer: Send + Sync {
-    /// Send one message. `html_body`, when present, makes the message
-    /// multipart/alternative with `text_body` as the plain-text fallback.
-    /// Returns `Err` on a delivery failure.
+    /// Send one message, into a thread when it belongs to one. The ONE method
+    /// an implementation writes; [`send`](Mailer::send) and
+    /// [`send_reporting`](Mailer::send_reporting) are spellings of it.
+    ///
+    /// `html_body`, when present, makes the message multipart/alternative with
+    /// `text_body` as the plain-text fallback. Returns `Err` on a delivery
+    /// failure, and [`SendOutcome::Held`] when a gate held the message back —
+    /// a plain transport has no gates and always reports `Delivered`.
     ///
     /// Nothing in this signature is SMTP-specific: a hosted-API transport
     /// implements the same method by POSTing the same fields (AC-7).
+    ///
+    /// **The primitive rather than an extra method beside `send`**, because a
+    /// defaulted threading method is one an implementation can forget: the
+    /// message would go out unthreaded, which looks exactly like a delivered
+    /// reply until somebody notices the customer's client started a second
+    /// conversation (MAIN-332).
+    async fn send_threaded(
+        &self,
+        to: &str,
+        subject: &str,
+        text_body: &str,
+        html_body: Option<&str>,
+        category: Category,
+        threading: &Threading,
+    ) -> Result<SendOutcome>;
+
+    /// Send one message that is not part of a thread — verification, an invite,
+    /// a notification. Every caller predating [`Threading`] is this one.
     async fn send(
         &self,
         to: &str,
@@ -164,13 +221,22 @@ pub trait Mailer: Send + Sync {
         text_body: &str,
         html_body: Option<&str>,
         category: Category,
-    ) -> Result<()>;
+    ) -> Result<()> {
+        self.send_threaded(
+            to,
+            subject,
+            text_body,
+            html_body,
+            category,
+            &Threading::default(),
+        )
+        .await
+        .map(|_| ())
+    }
 
     /// Like [`send`](Mailer::send), but reports whether the message was actually
-    /// delivered or held back by a gate. The default assumes a plain transport
-    /// delivers whenever `send` succeeds — true for capture/smtp/postmark, which
-    /// have no gates of their own. [`GuardedMailer`] overrides it so its gates
-    /// report [`SendOutcome::Held`] instead of a misleading "delivered".
+    /// delivered or held back by a gate — so a caller can log honestly instead
+    /// of reading `Ok(())` as "delivered".
     async fn send_reporting(
         &self,
         to: &str,
@@ -179,9 +245,15 @@ pub trait Mailer: Send + Sync {
         html_body: Option<&str>,
         category: Category,
     ) -> Result<SendOutcome> {
-        self.send(to, subject, text_body, html_body, category)
-            .await
-            .map(|()| SendOutcome::Delivered)
+        self.send_threaded(
+            to,
+            subject,
+            text_body,
+            html_body,
+            category,
+            &Threading::default(),
+        )
+        .await
     }
 
     /// For logs and the health page: which provider, pointed where.
