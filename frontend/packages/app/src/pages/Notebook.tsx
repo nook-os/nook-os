@@ -22,7 +22,7 @@ import { api } from "@nookos/api";
 import type { UserNoteFolder, UserNoteSummary } from "@nookos/api";
 import { EditableMarkdown, Empty, Panel, SearchInput } from "@nookos/ui";
 import { ContextMenuRegion, type ContextMenuItem } from "../contextMenu";
-import { askChoice, askConfirm, askText } from "../dialogs";
+import { askChoice, askConfirm } from "../dialogs";
 import {
   apiErrorMessage,
   buildFolderUpdate,
@@ -38,6 +38,11 @@ import { NotesMcpBanner } from "./NotesMcpBanner";
 const MAX_NAME_LEN = 200;
 
 const ROOT = "__root__";
+
+/** What a created item is called until the inline rename it opens in is
+ *  committed (MAIN-635 AC-8). Escape keeps the item under these. */
+const NEW_NOTE_TITLE = "Untitled";
+const NEW_FOLDER_NAME = "New folder";
 
 /** Human-readable "Work / Ideas" path for every folder, for the move picker. */
 function folderPathChoices(folders: UserNoteFolder[], exclude: Set<string>) {
@@ -104,6 +109,11 @@ export function Notebook() {
   const qc = useQueryClient();
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // The row the keyboard is on — a folder OR a note, and deliberately not
+  // `selectedId`, which stays note-only because it means "open in the editor"
+  // (AC-1). Focusing a folder must not close the note somebody is reading.
+  const [focusedId, setFocusedId] = useState<string | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [ctxTarget, setCtxTarget] = useContextTarget();
@@ -150,46 +160,63 @@ export function Notebook() {
       return next;
     });
 
+  // Every ancestor of a folder, opened — so an item created inside it is on
+  // screen to be renamed rather than hidden behind a collapsed parent (AC-8).
+  const reveal = (folderId: string) => {
+    const byId = new Map(folders.map((f) => [f.id, f]));
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      const seen = new Set<string>();
+      let cur: UserNoteFolder | undefined = byId.get(folderId);
+      while (cur && !seen.has(cur.id)) {
+        seen.add(cur.id);
+        next.add(cur.id);
+        cur = cur.parent_id ? byId.get(cur.parent_id) : undefined;
+      }
+      return next;
+    });
+  };
+
   // ── Writes ────────────────────────────────────────────────────────────────
   // Each clears the banner first, then surfaces the backend's message inline on
   // failure (AC-3) rather than letting it die in the console.
 
   const createNote = async (folderId: string | null) => {
     setError(null);
-    const title = await askText({
-      title: "New note",
-      label: "Title",
-      placeholder: "Untitled",
-      confirmLabel: "create",
-    });
-    if (!title) return;
     const { data, error: err, response } = await api.POST("/api/v1/notebook/notes", {
-      body: { title, folder_id: folderId },
+      body: { title: NEW_NOTE_TITLE, folder_id: folderId },
     });
     if (err || !response.ok) return void setError(apiErrorMessage(err));
+    if (folderId) reveal(folderId);
     refresh();
-    if (data) setSelectedId(data.id);
+    if (data) {
+      setSelectedId(data.id);
+      setFocusedId(data.id);
+      setRenamingId(data.id);
+    }
   };
 
   const createFolder = async (parentId: string | null) => {
     setError(null);
-    const name = await askText({ title: "New folder", label: "Name", confirmLabel: "create" });
-    if (!name) return;
-    const { error: err, response } = await api.POST("/api/v1/notebook/folders", {
-      body: { name, parent_id: parentId },
+    const { data, error: err, response } = await api.POST("/api/v1/notebook/folders", {
+      body: { name: NEW_FOLDER_NAME, parent_id: parentId },
     });
     if (err || !response.ok) return void setError(apiErrorMessage(err));
-    if (parentId) setExpanded((p) => new Set(p).add(parentId));
+    if (parentId) reveal(parentId);
     refresh();
+    if (data) {
+      setFocusedId(data.id);
+      setRenamingId(data.id);
+    }
   };
 
-  const renameNote = async (note: UserNoteSummary) => {
+  // A rename leaves the input the moment it is committed, so the label a failed
+  // or rejected name would have shown is never rendered: the row goes straight
+  // back to the name the server still holds (AC-5/AC-9).
+  const renameNote = async (note: UserNoteSummary, next: string) => {
+    setRenamingId(null);
     setError(null);
-    const title = await askText({
-      title: "Rename note",
-      value: note.title,
-      confirmLabel: "rename",
-    });
+    const title = next.trim();
     if (!title || title === note.title) return;
     const { error: err, response } = await api.PATCH("/api/v1/notebook/notes/{id}", {
       params: { path: { id: note.id } },
@@ -200,13 +227,10 @@ export function Notebook() {
     refresh();
   };
 
-  const renameFolder = async (folder: UserNoteFolder) => {
+  const renameFolder = async (folder: UserNoteFolder, next: string) => {
+    setRenamingId(null);
     setError(null);
-    const name = await askText({
-      title: "Rename folder",
-      value: folder.name,
-      confirmLabel: "rename",
-    });
+    const name = next.trim();
     if (!name || name === folder.name) return;
     const { error: err, response } = await api.PATCH("/api/v1/notebook/folders/{id}", {
       params: { path: { id: folder.id } },
@@ -335,14 +359,14 @@ export function Notebook() {
     { label: "New note", onSelect: () => void createNote(folder.id) },
     { label: "New sub-folder", onSelect: () => void createFolder(folder.id) },
     { separator: true },
-    { label: "Rename", onSelect: () => void renameFolder(folder) },
+    { label: "Rename", onSelect: () => setRenamingId(folder.id) },
     { label: "Move…", onSelect: () => void moveFolder(folder) },
     { separator: true },
     { label: "Delete folder", danger: true, onSelect: () => void deleteFolder(folder) },
   ];
 
   const noteMenu = (note: UserNoteSummary): ContextMenuItem[] => [
-    { label: "Rename", onSelect: () => void renameNote(note) },
+    { label: "Rename", onSelect: () => setRenamingId(note.id) },
     { label: "Move…", onSelect: () => void moveNote(note) },
     { separator: true },
     { label: "Delete", danger: true, onSelect: () => void deleteNote(note) },
@@ -355,7 +379,20 @@ export function Notebook() {
     { label: "New folder", onSelect: () => void createFolder(null) },
   ];
 
-  const menus: RowMenus = { folder: folderMenu, note: noteMenu };
+  const rows: RowContext = {
+    menus: { folder: folderMenu, note: noteMenu },
+    ctxTarget,
+    onCtxTarget: setCtxTarget,
+    focusedId,
+    onFocusRow: setFocusedId,
+    renamingId,
+    onStartRename: setRenamingId,
+    onCancelRename: () => setRenamingId(null),
+    renameFolder,
+    renameNote,
+    deleteFolder,
+    deleteNote,
+  };
 
   const searching = query.trim().length > 0;
   const emptyTree = tree.folders.length === 0 && tree.rootNotes.length === 0;
@@ -413,9 +450,7 @@ export function Notebook() {
                   selectedId={selectedId}
                   onToggle={toggle}
                   onSelect={setSelectedId}
-                  menus={menus}
-                  ctxTarget={ctxTarget}
-                  onCtxTarget={setCtxTarget}
+                  {...rows}
                 />
               ))}
               {tree.rootNotes.map((note) => (
@@ -425,9 +460,7 @@ export function Notebook() {
                   depth={0}
                   selected={selectedId === note.id}
                   onSelect={setSelectedId}
-                  menus={menus}
-                  ctxTarget={ctxTarget}
-                  onCtxTarget={setCtxTarget}
+                  {...rows}
                 />
               ))}
             </>
@@ -519,12 +552,152 @@ interface RowMenus {
   note: (note: UserNoteSummary) => ContextMenuItem[];
 }
 
-/** What every row needs to own its right-click: the menu to offer, and the mark
- *  that says the open menu is about this row (AC-6). */
+/** What every row needs beyond its own item: the menu to offer, the mark that
+ *  says the open menu is about this row (MAIN-634 AC-6), and the focus/rename
+ *  state the tree owns because only one row may hold either. */
 interface RowContext {
   menus: RowMenus;
   ctxTarget: string | null;
   onCtxTarget: (id: string) => void;
+  focusedId: string | null;
+  onFocusRow: (id: string) => void;
+  renamingId: string | null;
+  onStartRename: (id: string) => void;
+  onCancelRename: () => void;
+  renameFolder: (folder: UserNoteFolder, next: string) => void;
+  renameNote: (note: UserNoteSummary, next: string) => void;
+  deleteFolder: (folder: UserNoteFolder) => void;
+  deleteNote: (note: UserNoteSummary) => void;
+}
+
+/**
+ * The shell both row kinds share: the focus target, F2 and Delete, and the swap
+ * of the label for the rename input (AC-2/AC-3/AC-6).
+ *
+ * `tabIndex` on every row rather than a roving one, because AC-2 asks for Tab
+ * to reach the rows and NG-1 rules out the arrow-key navigation a roving index
+ * exists to serve.
+ */
+function TreeRow({
+  id,
+  name,
+  className,
+  paddingLeft,
+  icons,
+  onActivate,
+  onRenameKey,
+  onDeleteKey,
+  onCommitRename,
+  ctx,
+}: {
+  id: string;
+  name: string;
+  className: string;
+  paddingLeft: number;
+  icons: React.ReactNode;
+  onActivate: () => void;
+  onRenameKey: () => void;
+  onDeleteKey: () => void;
+  onCommitRename: (next: string) => void;
+  ctx: RowContext;
+}) {
+  const ref = React.useRef<HTMLDivElement>(null);
+  const renaming = ctx.renamingId === id;
+  const wasRenaming = React.useRef(false);
+  React.useEffect(() => {
+    // Leaving the input drops focus to the document, which would end the
+    // keyboard flow after a single rename — F2 then reaches nothing.
+    if (wasRenaming.current && !renaming) ref.current?.focus();
+    wasRenaming.current = renaming;
+  }, [renaming]);
+
+  return (
+    <div
+      ref={ref}
+      tabIndex={0}
+      className={`notebook-row ${className}${ctx.focusedId === id ? " focused" : ""}${
+        ctx.ctxTarget === id ? " ctx-target" : ""
+      }`}
+      style={{ paddingLeft }}
+      onClick={() => {
+        ctx.onFocusRow(id);
+        ref.current?.focus();
+        onActivate();
+      }}
+      onFocus={() => ctx.onFocusRow(id)}
+      onContextMenu={() => ctx.onCtxTarget(id)}
+      onKeyDown={(e) => {
+        if (renaming) return; // the input owns every key while it is open
+        if (e.key === "F2") {
+          e.preventDefault();
+          onRenameKey();
+        }
+        if (e.key === "Delete") {
+          e.preventDefault();
+          onDeleteKey();
+        }
+      }}
+      title={name}
+    >
+      {icons}
+      {renaming ? (
+        <InlineRename value={name} onCommit={onCommitRename} onCancel={ctx.onCancelRename} />
+      ) : (
+        <span className="notebook-label">{name}</span>
+      )}
+    </div>
+  );
+}
+
+/** The row's label as an editable field (AC-3/AC-4). Blur commits, matching
+ *  `NoteTitle` in the editor pane — the two renaming surfaces on this page are
+ *  a keystroke apart and must not disagree about what leaving the field means. */
+function InlineRename({
+  value,
+  onCommit,
+  onCancel,
+}: {
+  value: string;
+  onCommit: (next: string) => void;
+  onCancel: () => void;
+}) {
+  const [draft, setDraft] = useState(value);
+  const ref = React.useRef<HTMLInputElement>(null);
+  const done = React.useRef(false);
+
+  React.useEffect(() => {
+    ref.current?.focus();
+    ref.current?.select();
+  }, []);
+
+  // Enter blurs, and an unmount can blur too: without this the commit would run
+  // twice, the second time against a row that has already moved on.
+  const finish = (commit: boolean) => {
+    if (done.current) return;
+    done.current = true;
+    if (commit) onCommit(draft);
+    else onCancel();
+  };
+
+  return (
+    <input
+      ref={ref}
+      className="input notebook-rename"
+      value={draft}
+      maxLength={MAX_NAME_LEN}
+      aria-label="Rename"
+      onChange={(e) => setDraft(e.target.value)}
+      // The row beneath would otherwise take the click and collapse the folder
+      // being renamed.
+      onClick={(e) => e.stopPropagation()}
+      onMouseDown={(e) => e.stopPropagation()}
+      onBlur={() => finish(true)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") finish(true);
+        if (e.key === "Escape") finish(false);
+      }}
+    />
+  );
 }
 
 function FolderBranch({
@@ -534,9 +707,7 @@ function FolderBranch({
   selectedId,
   onToggle,
   onSelect,
-  menus,
-  ctxTarget,
-  onCtxTarget,
+  ...ctx
 }: {
   node: FolderNode;
   depth: number;
@@ -545,27 +716,28 @@ function FolderBranch({
   onToggle: (id: string) => void;
   onSelect: (id: string) => void;
 } & RowContext) {
-  const isOpen = expanded.has(node.folder.id);
-  const rows: RowContext = { menus, ctxTarget, onCtxTarget };
+  const folder = node.folder;
+  const isOpen = expanded.has(folder.id);
   return (
     <div className="notebook-branch">
-      <ContextMenuRegion
-        style={{ display: "contents" }}
-        items={() => menus.folder(node.folder)}
-      >
-        <div
-          className={`notebook-row notebook-folder-row${
-            ctxTarget === node.folder.id ? " ctx-target" : ""
-          }`}
-          style={{ paddingLeft: 6 + depth * 14 }}
-          onClick={() => onToggle(node.folder.id)}
-          onContextMenu={() => onCtxTarget(node.folder.id)}
-          title={node.folder.name}
-        >
-          {isOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-          {isOpen ? <FolderOpen size={13} /> : <Folder size={13} />}
-          <span className="notebook-label">{node.folder.name}</span>
-        </div>
+      <ContextMenuRegion style={{ display: "contents" }} items={() => ctx.menus.folder(folder)}>
+        <TreeRow
+          id={folder.id}
+          name={folder.name}
+          className="notebook-folder-row"
+          paddingLeft={6 + depth * 14}
+          icons={
+            <>
+              {isOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+              {isOpen ? <FolderOpen size={13} /> : <Folder size={13} />}
+            </>
+          }
+          onActivate={() => onToggle(folder.id)}
+          onRenameKey={() => ctx.onStartRename(folder.id)}
+          onDeleteKey={() => ctx.deleteFolder(folder)}
+          onCommitRename={(next) => ctx.renameFolder(folder, next)}
+          ctx={ctx}
+        />
       </ContextMenuRegion>
       {isOpen && (
         <>
@@ -578,7 +750,7 @@ function FolderBranch({
               selectedId={selectedId}
               onToggle={onToggle}
               onSelect={onSelect}
-              {...rows}
+              {...ctx}
             />
           ))}
           {node.notes.map((note) => (
@@ -588,7 +760,7 @@ function FolderBranch({
               depth={depth + 1}
               selected={selectedId === note.id}
               onSelect={onSelect}
-              {...rows}
+              {...ctx}
             />
           ))}
         </>
@@ -602,9 +774,7 @@ function NoteRow({
   depth,
   selected,
   onSelect,
-  menus,
-  ctxTarget,
-  onCtxTarget,
+  ...ctx
 }: {
   note: UserNoteSummary;
   depth: number;
@@ -612,19 +782,19 @@ function NoteRow({
   onSelect: (id: string) => void;
 } & RowContext) {
   return (
-    <ContextMenuRegion style={{ display: "contents" }} items={() => menus.note(note)}>
-      <div
-        className={`notebook-row notebook-note-row${selected ? " selected" : ""}${
-          ctxTarget === note.id ? " ctx-target" : ""
-        }`}
-        style={{ paddingLeft: 6 + depth * 14 + 13 }}
-        onClick={() => onSelect(note.id)}
-        onContextMenu={() => onCtxTarget(note.id)}
-        title={note.title}
-      >
-        <FileText size={13} />
-        <span className="notebook-label">{note.title || "Untitled"}</span>
-      </div>
+    <ContextMenuRegion style={{ display: "contents" }} items={() => ctx.menus.note(note)}>
+      <TreeRow
+        id={note.id}
+        name={note.title || "Untitled"}
+        className={`notebook-note-row${selected ? " selected" : ""}`}
+        paddingLeft={6 + depth * 14 + 13}
+        icons={<FileText size={13} />}
+        onActivate={() => onSelect(note.id)}
+        onRenameKey={() => ctx.onStartRename(note.id)}
+        onDeleteKey={() => ctx.deleteNote(note)}
+        onCommitRename={(next) => ctx.renameNote(note, next)}
+        ctx={ctx}
+      />
     </ContextMenuRegion>
   );
 }

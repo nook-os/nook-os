@@ -2,6 +2,11 @@
 // icon buttons. What is worth asserting is not that a menu appears but WHICH
 // menu appears — the folder's, the note's, or the tree's — because a 300px pane
 // that offers "Delete folder" over a note is worse than no menu at all.
+//
+// MAIN-635: the same rows in place — the focus a keyboard user needs, F2/Delete,
+// and the rename that happens on the row instead of in a dialog. The fixtures
+// are MUTABLE from here on: creating an item has to make it appear in the tree,
+// because "the new row is in rename mode" is the whole of AC-8.
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -9,25 +14,58 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { ContextMenuProvider } from "../contextMenu";
 
-const FOLDERS = vi.hoisted(() => [
-  { id: "f1", name: "Work", parent_id: null },
-  { id: "f2", name: "Zebra", parent_id: null },
-]);
-const NOTES = vi.hoisted(() => [
-  { id: "n1", title: "Inside note", folder_id: "f1" },
-  { id: "n2", title: "Root note", folder_id: null },
-]);
+interface Folder {
+  id: string;
+  name: string;
+  parent_id: string | null;
+}
+interface Note {
+  id: string;
+  title: string;
+  folder_id: string | null;
+}
 
+const db = vi.hoisted(() => ({
+  folders: [] as Folder[],
+  notes: [] as Note[],
+  seq: 0,
+}));
+
+// A COPY of each list, as a real fetch would hand back: returning the fixture
+// array itself means a create mutates the very object react-query already
+// holds, so its structural sharing sees no change and nothing re-renders.
 const get = vi.hoisted(() =>
   vi.fn(async (path: string) => {
-    if (path === "/api/v1/notebook/folders") return { data: FOLDERS };
-    if (path === "/api/v1/notebook/notes") return { data: NOTES };
+    if (path === "/api/v1/notebook/folders") return { data: [...db.folders] };
+    if (path === "/api/v1/notebook/notes") return { data: [...db.notes] };
     if (path === "/api/v1/notebook/notes/{id}")
       return { data: { id: "n1", title: "Inside note", content_md: "body" } };
     return { data: [] };
   }),
 );
-const post = vi.hoisted(() => vi.fn(async () => ({ data: { id: "new" }, response: { ok: true } })));
+// Create writes to the fixture, so the refetch the page triggers actually
+// returns the new row.
+const post = vi.hoisted(() =>
+  vi.fn(async (path: string, opts: { body: Record<string, string | null> }) => {
+    db.seq += 1;
+    if (path === "/api/v1/notebook/notes") {
+      const note: Note = {
+        id: `new-n${db.seq}`,
+        title: String(opts.body.title),
+        folder_id: opts.body.folder_id ?? null,
+      };
+      db.notes.push(note);
+      return { data: note, response: { ok: true } };
+    }
+    const folder: Folder = {
+      id: `new-f${db.seq}`,
+      name: String(opts.body.name),
+      parent_id: opts.body.parent_id ?? null,
+    };
+    db.folders.push(folder);
+    return { data: folder, response: { ok: true } };
+  }),
+);
 const patch = vi.hoisted(() => vi.fn(async () => ({ data: {}, response: { ok: true } })));
 const del = vi.hoisted(() => vi.fn(async () => ({ data: {}, response: { ok: true } })));
 
@@ -64,6 +102,20 @@ async function row(label: string): Promise<HTMLElement> {
   return el as HTMLElement;
 }
 
+/** Focus a row the way Tab does, then press a key on it. */
+async function pressOn(label: string, key: string): Promise<HTMLElement> {
+  const el = await row(label);
+  el.focus();
+  fireEvent.keyDown(el, { key });
+  return el;
+}
+
+/** The open rename input, or null. There is at most one — the tree owns the
+ *  state, so a second row cannot be editing at the same time. */
+function renameInput(): HTMLInputElement | null {
+  return screen.queryByLabelText("Rename") as HTMLInputElement | null;
+}
+
 /** The open menu's item labels, in render order. */
 function menuLabels(): string[] {
   return screen.queryAllByRole("menuitem").map((el) => el.textContent ?? "");
@@ -76,6 +128,15 @@ async function openMenuOn(el: HTMLElement) {
 
 beforeEach(() => {
   localStorage.setItem("nook.notesMcpBannerDismissed", "1");
+  db.folders = [
+    { id: "f1", name: "Work", parent_id: null },
+    { id: "f2", name: "Zebra", parent_id: null },
+  ];
+  db.notes = [
+    { id: "n1", title: "Inside note", folder_id: "f1" },
+    { id: "n2", title: "Root note", folder_id: null },
+  ];
+  db.seq = 0;
 });
 afterEach(() => {
   cleanup();
@@ -125,7 +186,7 @@ describe("the notebook tree's context menus", () => {
 
     await waitFor(() =>
       expect(post).toHaveBeenCalledWith("/api/v1/notebook/folders", {
-        body: { name: "typed", parent_id: null },
+        body: { name: "New folder", parent_id: null },
       }),
     );
   });
@@ -234,20 +295,6 @@ describe("the notebook tree's context menus", () => {
     expect(banner.textContent).toContain("note not found");
   });
 
-  it("keeps Rename on the askText dialog rather than editing in place (NG-1)", async () => {
-    renderNotebook();
-    await openMenuOn(await row("Work"));
-    fireEvent.click(screen.getByText("Rename"));
-
-    await waitFor(() => expect(askText).toHaveBeenCalled());
-    await waitFor(() =>
-      expect(patch).toHaveBeenCalledWith("/api/v1/notebook/folders/{id}", {
-        params: { path: { id: "f1" } },
-        body: { name: "typed" },
-      }),
-    );
-  });
-
   it("keeps Move on the askChoice picker (NG-1)", async () => {
     renderNotebook();
     await openMenuOn(await row("Root note"));
@@ -260,5 +307,213 @@ describe("the notebook tree's context menus", () => {
         body: { folder_id: "f1" },
       }),
     );
+  });
+});
+
+describe("the notebook tree's inline rename (MAIN-635)", () => {
+  it("opens an input, pre-filled and selected, on F2 over a folder (AC-3)", async () => {
+    renderNotebook();
+    await pressOn("Work", "F2");
+
+    const input = renameInput();
+    expect(input?.value).toBe("Work");
+    expect(input?.maxLength).toBe(200);
+    expect([input?.selectionStart, input?.selectionEnd]).toEqual([0, 4]);
+  });
+
+  it("opens the same input on F2 over a note (AC-3)", async () => {
+    renderNotebook();
+    await pressOn("Root note", "F2");
+
+    expect(renameInput()?.value).toBe("Root note");
+  });
+
+  it("commits on Enter, and on blur, with the PATCH the dialog used to send (AC-4)", async () => {
+    renderNotebook();
+    await pressOn("Work", "F2");
+    fireEvent.change(renameInput() as HTMLInputElement, { target: { value: "Admin" } });
+    fireEvent.keyDown(renameInput() as HTMLInputElement, { key: "Enter" });
+
+    await waitFor(() =>
+      expect(patch).toHaveBeenCalledWith("/api/v1/notebook/folders/{id}", {
+        params: { path: { id: "f1" } },
+        body: { name: "Admin" },
+      }),
+    );
+    await waitFor(() => expect(renameInput()).toBeNull());
+
+    await pressOn("Root note", "F2");
+    fireEvent.change(renameInput() as HTMLInputElement, { target: { value: "Blurred" } });
+    fireEvent.blur(renameInput() as HTMLInputElement);
+
+    await waitFor(() =>
+      expect(patch).toHaveBeenCalledWith("/api/v1/notebook/notes/{id}", {
+        params: { path: { id: "n2" } },
+        body: { title: "Blurred" },
+      }),
+    );
+  });
+
+  it("reverts on Escape and sends nothing (AC-4)", async () => {
+    renderNotebook();
+    await pressOn("Work", "F2");
+    fireEvent.change(renameInput() as HTMLInputElement, { target: { value: "Discarded" } });
+    fireEvent.keyDown(renameInput() as HTMLInputElement, { key: "Escape" });
+
+    await waitFor(() => expect(renameInput()).toBeNull());
+    expect((await row("Work")).textContent).toContain("Work");
+    expect(patch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["blank", ""],
+    ["whitespace-only", "   "],
+  ])("rejects a %s name locally and reverts (AC-5)", async (_label, value) => {
+    renderNotebook();
+    await pressOn("Work", "F2");
+    fireEvent.change(renameInput() as HTMLInputElement, { target: { value } });
+    fireEvent.blur(renameInput() as HTMLInputElement);
+
+    await waitFor(() => expect(renameInput()).toBeNull());
+    expect((await row("Work")).textContent).toContain("Work");
+    expect(patch).not.toHaveBeenCalled();
+  });
+
+  it("puts a rejected rename in the banner and leaves the old label (AC-9)", async () => {
+    patch.mockResolvedValueOnce({
+      error: { error: "name already taken" },
+      response: { ok: false },
+    } as never);
+    renderNotebook();
+    await pressOn("Work", "F2");
+    fireEvent.change(renameInput() as HTMLInputElement, { target: { value: "Zebra" } });
+    fireEvent.keyDown(renameInput() as HTMLInputElement, { key: "Enter" });
+
+    const banner = await screen.findByRole("alert");
+    expect(banner.textContent).toContain("name already taken");
+    expect((await row("Work")).textContent).toContain("Work");
+  });
+
+  it("enters inline rename from the context menu instead of a dialog (AC-7/AC-10)", async () => {
+    renderNotebook();
+    await openMenuOn(await row("Root note"));
+    fireEvent.click(screen.getByText("Rename"));
+
+    await waitFor(() => expect(renameInput()?.value).toBe("Root note"));
+    expect(askText).not.toHaveBeenCalled();
+  });
+
+  it("creates a note under its default name, in rename mode, and keeps it on Escape (AC-8)", async () => {
+    renderNotebook();
+    await screen.findByText("Work");
+    fireEvent.click(screen.getByTitle("new note at root"));
+
+    await waitFor(() => expect(renameInput()?.value).toBe("Untitled"));
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(post).toHaveBeenCalledWith("/api/v1/notebook/notes", {
+      body: { title: "Untitled", folder_id: null },
+    });
+    expect(askText).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(renameInput() as HTMLInputElement, { key: "Escape" });
+    await waitFor(() => expect(renameInput()).toBeNull());
+    expect(await row("Untitled")).toBeTruthy();
+    expect(del).not.toHaveBeenCalled();
+  });
+
+  it("creates a folder's new note inside it, revealed and renaming (AC-8)", async () => {
+    renderNotebook();
+    await openMenuOn(await row("Work"));
+    fireEvent.click(screen.getByText("New note"));
+
+    await waitFor(() =>
+      expect(post).toHaveBeenCalledWith("/api/v1/notebook/notes", {
+        body: { title: "Untitled", folder_id: "f1" },
+      }),
+    );
+    // Revealed: the folder was collapsed, so its sibling note proves it opened.
+    await screen.findByText("Inside note");
+    await waitFor(() => expect(renameInput()?.value).toBe("Untitled"));
+  });
+
+  it("creates a folder under its default name, in rename mode (AC-8)", async () => {
+    renderNotebook();
+    await screen.findByText("Work");
+    fireEvent.click(screen.getByTitle("new folder at root"));
+
+    await waitFor(() => expect(renameInput()?.value).toBe("New folder"));
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("the notebook tree's row focus and keys (MAIN-635)", () => {
+  it("makes every row tabbable and rings the focused one (AC-1/AC-2)", async () => {
+    renderNotebook();
+    const work = await pressOn("Work", "Tab");
+
+    expect(work.getAttribute("tabindex")).toBe("0");
+    expect((await row("Root note")).getAttribute("tabindex")).toBe("0");
+    expect(work.className).toContain("focused");
+    expect((await row("Root note")).className).not.toContain("focused");
+  });
+
+  it("focuses a folder on click without changing the open note (AC-1)", async () => {
+    renderNotebook();
+    fireEvent.click(await row("Root note"));
+
+    // The note query fired for the clicked note; the editor pane is on it.
+    await waitFor(() =>
+      expect(get).toHaveBeenCalledWith("/api/v1/notebook/notes/{id}", {
+        params: { path: { id: "n2" } },
+      }),
+    );
+    get.mockClear();
+
+    const work = await row("Work");
+    fireEvent.click(work);
+
+    expect(work.className).toContain("focused");
+    expect((await row("Root note")).className).toContain("selected");
+    expect(get).not.toHaveBeenCalledWith(
+      "/api/v1/notebook/notes/{id}",
+      expect.anything(),
+    );
+  });
+
+  it("opens the existing confirm dialog on Delete over a note (AC-6)", async () => {
+    renderNotebook();
+    await pressOn("Root note", "Delete");
+
+    await waitFor(() => expect(askConfirm).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(del).toHaveBeenCalledWith("/api/v1/notebook/notes/{id}", {
+        params: { path: { id: "n2" } },
+      }),
+    );
+  });
+
+  it("opens the folder's confirm dialog on Delete over a folder (AC-6)", async () => {
+    renderNotebook();
+    await pressOn("Work", "Delete");
+
+    await waitFor(() =>
+      expect(askConfirm).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Delete folder "Work"?' }),
+      ),
+    );
+    await waitFor(() =>
+      expect(del).toHaveBeenCalledWith("/api/v1/notebook/folders/{id}", {
+        params: { path: { id: "f1" } },
+      }),
+    );
+  });
+
+  it("leaves Delete to the input while a rename is open (AC-6)", async () => {
+    renderNotebook();
+    await pressOn("Work", "F2");
+    fireEvent.keyDown(renameInput() as HTMLInputElement, { key: "Delete" });
+
+    expect(askConfirm).not.toHaveBeenCalled();
+    expect(renameInput()).not.toBeNull();
   });
 });
