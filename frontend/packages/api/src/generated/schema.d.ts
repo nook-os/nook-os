@@ -5913,6 +5913,31 @@ export interface components {
              */
             worktree?: boolean;
         };
+        /**
+         * @description One filesystem a node reports free space on (MAIN-618).
+         *
+         *     A node samples the two a loop job actually consumes: its job cache, where
+         *     clones and worktrees land, and Docker's data root, where a build's images
+         *     and volumes do. They are commonly the same filesystem, and it is then
+         *     reported ONCE with both names — two rows of identical numbers read as twice
+         *     the headroom.
+         */
+        DiskSample: {
+            /** Format: int64 */
+            free_bytes: number;
+            /**
+             * @description What the node keeps here, for a human: `job cache`, `Docker data root`,
+             *     or both joined when one filesystem holds both.
+             */
+            label: string;
+            /**
+             * @description The mount point the numbers describe, which is what makes a shortage
+             *     actionable — `/` and `/var` are different problems with different fixes.
+             */
+            mount_point: string;
+            /** Format: int64 */
+            total_bytes: number;
+        };
         DispatchItem: {
             rationale: string;
             suggested_runtime?: string | null;
@@ -6959,6 +6984,22 @@ export interface components {
              */
             cpu_percent: number;
             /**
+             * @description One sentence when a sampled filesystem is below this machine's
+             *     `NOOK_MIN_FREE_DISK_GB` floor, naming which and how much is left.
+             *
+             *     Composed by the NODE rather than derived centrally, because the floor is
+             *     a property of the machine and is stated only there (MAIN-618 NG-1) — the
+             *     control plane never learns the number, so it could not phrase this.
+             */
+            disk_shortage?: string | null;
+            /**
+             * @description The filesystems a loop job needs space on (MAIN-618). EMPTY means the
+             *     node said nothing — an agent predating the field — and a reader must
+             *     treat that as "unknown", never as "full": silently cordoning every
+             *     machine that has not been upgraded is the failure this note prevents.
+             */
+            disks?: components["schemas"]["DiskSample"][];
+            /**
              * Format: double
              * @description 1-minute load average (0 on platforms without it).
              */
@@ -7946,6 +7987,16 @@ export interface components {
             /** @enum {string} */
             kind: "sandbox_unavailable";
             /** @description The node that answered, so the fix has an address. */
+            node_name: string;
+        } | {
+            /**
+             * @description Which filesystem and how much is left, in the node's own words —
+             *     the floor is stated on the machine, so only it can say this.
+             */
+            detail: string;
+            /** @enum {string} */
+            kind: "disk_unavailable";
+            /** @description The node that is short, so the fix has an address. */
             node_name: string;
         } | {
             /**

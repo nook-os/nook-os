@@ -226,6 +226,13 @@ function fillClass(pct: number): string {
   return pct >= 90 ? "err" : pct >= 70 ? "warn" : "";
 }
 
+type DiskSample = {
+  label?: string;
+  mount_point?: string;
+  free_bytes?: number;
+  total_bytes?: number;
+};
+
 /** Live node capacity bars — so you can see which machine can take the work. */
 export function ResourceBars({ resources }: { resources: unknown }) {
   const r = (resources ?? {}) as {
@@ -234,6 +241,8 @@ export function ResourceBars({ resources }: { resources: unknown }) {
     mem_total?: number;
     load_avg1?: number;
     active_sessions?: number;
+    disks?: DiskSample[];
+    disk_shortage?: string | null;
   };
   // Offline nodes have no sample, and collapsing to a single line made their
   // rows half the height of a reporting node's — which is what made the table
@@ -248,6 +257,19 @@ export function ResourceBars({ resources }: { resources: unknown }) {
   const cpu = Math.round(r.cpu_percent ?? 0);
   const memPct =
     r.mem_total && r.mem_used ? Math.round((r.mem_used / r.mem_total) * 100) : 0;
+  // The TIGHTEST filesystem the node samples (MAIN-618): it is the one that
+  // decides whether the machine takes loop work, and the roomy one cannot lift
+  // a gate it imposed. Absent for an agent that predates the field, which draws
+  // no bar rather than an empty one.
+  const disk = (r.disks ?? []).reduce<DiskSample | undefined>(
+    (tightest, d) =>
+      tightest === undefined || (d.free_bytes ?? 0) < (tightest.free_bytes ?? 0) ? d : tightest,
+    undefined,
+  );
+  const diskPct =
+    disk?.total_bytes && disk.free_bytes !== undefined
+      ? Math.round(((disk.total_bytes - disk.free_bytes) / disk.total_bytes) * 100)
+      : 0;
   return (
     <div className="res-bars">
       <div className="res-bar">
@@ -266,6 +288,20 @@ export function ResourceBars({ resources }: { resources: unknown }) {
           {gb(r.mem_used ?? 0)}/{gb(r.mem_total ?? 0)}G
         </span>
       </div>
+      {disk && (
+        <div className="res-bar" title={r.disk_shortage ?? disk.label ?? ""}>
+          <span className="label">disk</span>
+          <span className="track">
+            <span
+              className={`fill ${r.disk_shortage ? "err" : fillClass(diskPct)}`}
+              style={{ width: `${diskPct}%` }}
+            />
+          </span>
+          <span className="val">
+            {gb(disk.free_bytes ?? 0)}G free{r.disk_shortage ? " · low" : ""}
+          </span>
+        </div>
+      )}
       <div className="res-bar">
         <span className="label">load</span>
         <span className="val" style={{ width: "auto", textAlign: "left" }}>

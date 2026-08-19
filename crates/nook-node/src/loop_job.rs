@@ -168,11 +168,21 @@ fn refused(out: &Sender<NodeToControl>, job_id: &str, reason: impl Into<String>)
     });
 }
 
+/// Where every control plane's clone cache lives, above the per-cp split.
+///
+/// Named once because `resources::watched_paths` samples free space on the
+/// filesystem holding it (MAIN-618): a second spelling of this path would keep
+/// watching the old one if the root ever moved, and the job-cache row would
+/// then be silently dropped — the disk gate failing OPEN on exactly the
+/// directory it exists to watch.
+pub(crate) fn cache_root() -> PathBuf {
+    PathBuf::from(crate::config::expand_path("~/.nook/clone-cache"))
+}
+
 /// The node-local clone cache root, per control plane so two control planes on
 /// one machine never share a mirror (mirrors MAIN-58's per-cp isolation).
 fn cache_base(server: &str) -> PathBuf {
-    PathBuf::from(crate::config::expand_path("~/.nook/clone-cache"))
-        .join(crate::config::cp_slug(server))
+    cache_root().join(crate::config::cp_slug(server))
 }
 
 /// tmux names and worktree dirs are keyed by a filesystem/tmux-safe slug of the

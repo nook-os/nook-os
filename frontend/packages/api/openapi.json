@@ -13281,6 +13281,36 @@
           }
         }
       },
+      "DiskSample": {
+        "type": "object",
+        "description": "One filesystem a node reports free space on (MAIN-618).\n\nA node samples the two a loop job actually consumes: its job cache, where\nclones and worktrees land, and Docker's data root, where a build's images\nand volumes do. They are commonly the same filesystem, and it is then\nreported ONCE with both names — two rows of identical numbers read as twice\nthe headroom.",
+        "required": [
+          "label",
+          "mount_point",
+          "free_bytes",
+          "total_bytes"
+        ],
+        "properties": {
+          "free_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "label": {
+            "type": "string",
+            "description": "What the node keeps here, for a human: `job cache`, `Docker data root`,\nor both joined when one filesystem holds both."
+          },
+          "mount_point": {
+            "type": "string",
+            "description": "The mount point the numbers describe, which is what makes a shortage\nactionable — `/` and `/var` are different problems with different fixes."
+          },
+          "total_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
       "DispatchItem": {
         "type": "object",
         "required": [
@@ -15449,6 +15479,20 @@
             "format": "float",
             "description": "Overall CPU utilization, 0–100."
           },
+          "disk_shortage": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "One sentence when a sampled filesystem is below this machine's\n`NOOK_MIN_FREE_DISK_GB` floor, naming which and how much is left.\n\nComposed by the NODE rather than derived centrally, because the floor is\na property of the machine and is stated only there (MAIN-618 NG-1) — the\ncontrol plane never learns the number, so it could not phrase this."
+          },
+          "disks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DiskSample"
+            },
+            "description": "The filesystems a loop job needs space on (MAIN-618). EMPTY means the\nnode said nothing — an agent predating the field — and a reader must\ntreat that as \"unknown\", never as \"full\": silently cordoning every\nmachine that has not been upgraded is the failure this note prevents."
+          },
           "load_avg1": {
             "type": "number",
             "format": "double",
@@ -17320,6 +17364,31 @@
               "node_name": {
                 "type": "string",
                 "description": "The node that answered, so the fix has an address."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Every eligible node is below its own free-disk floor (MAIN-618), so a\nrun placed there would die on ENOSPC part-built — which reads as a\nbroken card rather than a full machine.\n\nQueued rather than failed, for [`Self::SandboxUnavailable`]'s reason and\nwith more force: disk frees itself as runs conclude and the sweep runs,\nso the wait is usually minutes, and failing would have spent a strike on\na machine's housekeeping.",
+            "required": [
+              "node_name",
+              "detail",
+              "kind"
+            ],
+            "properties": {
+              "detail": {
+                "type": "string",
+                "description": "Which filesystem and how much is left, in the node's own words —\nthe floor is stated on the machine, so only it can say this."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "disk_unavailable"
+                ]
+              },
+              "node_name": {
+                "type": "string",
+                "description": "The node that is short, so the fix has an address."
               }
             }
           },

@@ -469,6 +469,7 @@ use utoipa::OpenApi;
         nook_types::NodeArtifact,
         nook_types::NodeReleases,
         nook_types::NodeResources,
+        nook_types::DiskSample,
         nook_types::Workspace,
         nook_types::NodeWorkspace,
         nook_types::WorkspaceLocation,
