@@ -18,14 +18,17 @@
 //!   `--dangerously-skip-permissions` because nobody is there. Somebody is
 //!   here, so the runtime asks — and BLOCKS — over the same stdio channel, and
 //!   this module is what holds the blocked request until an answer comes back
-//!   from the browser.
+//!   from the browser. Which requests are worth putting in front of that
+//!   person is `crate::human_permissions`' business (MAIN-620), and "always"
+//!   is this module's: a remembered tool is answered by the reader thread and
+//!   never announced again.
 //!
 //! What it deliberately does not own: the argv (that is `job_adapter`'s, so the
 //! two adapters cannot drift), and the conversation itself (that is the control
 //! plane's — messages are persisted there, which is what makes them survive a
 //! reload, a reconnect and this process dying).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use nook_proto::NodeToControl;
@@ -47,6 +50,14 @@ pub struct ChatHandle {
     /// [`PermissionRequest::input`]), and those never leave this machine — the
     /// browser sends a verdict, not a tool call.
     pending: std::sync::Arc<std::sync::Mutex<HashMap<String, PermissionRequest>>>,
+    /// Tools this session's person said "always" to (MAIN-620 AC-3).
+    ///
+    /// The reader thread consults it BEFORE announcing a request, so a
+    /// remembered tool is answered here and never becomes a prompt again. In
+    /// memory and scoped to this agent process on purpose: "this tool, this
+    /// session" is what the button says, and a durable grant is a different,
+    /// larger decision than the one a person makes to get unblocked.
+    always: std::sync::Arc<std::sync::Mutex<HashSet<String>>>,
     /// Kept only to kill it. Everything else about the process is the reader
     /// thread's.
     child: std::sync::Arc<std::sync::Mutex<StreamingSession>>,
@@ -64,7 +75,13 @@ impl ChatHandle {
     /// second answer to something already settled, or an answer addressed to a
     /// previous process. Either way there is nothing waiting for it, and
     /// making something up would be inventing an approval.
-    pub fn decide(&self, request_id: &str, allow: bool) -> Result<(), String> {
+    ///
+    /// `remember` is "allow always (this tool, this session)" (MAIN-620 AC-3):
+    /// the tool joins [`ChatHandle::always`] and the reader answers it directly
+    /// from then on. Only ever recorded on an ALLOW — remembering a denial
+    /// would refuse a tool for the rest of the session on one tap, with no way
+    /// back short of a restart, and nothing in the UI says that is what it does.
+    pub fn decide(&self, request_id: &str, allow: bool, remember: bool) -> Result<(), String> {
         let req = self
             .pending
             .lock()
@@ -73,6 +90,11 @@ impl ChatHandle {
         let Some(req) = req else {
             return Err(format!("no permission request {request_id} is outstanding"));
         };
+        if allow && remember {
+            if let Ok(mut a) = self.always.lock() {
+                a.insert(req.tool_name.clone());
+            }
+        }
         job_adapter::write_line(
             &self.stdin,
             &job_adapter::permission_response_line(&req, allow),
@@ -111,7 +133,12 @@ pub fn start(
     // keeps everything a person can read — the agent starts fresh, and the id
     // goes on the transcript below so an operator can resume it by hand.
     let agent_session = uuid::Uuid::now_v7().to_string();
-    let args = job_adapter::claude_chat_args(&agent_session);
+    // The managed allow-list (MAIN-620): the agent's routine tooling — `nook`,
+    // reads, edits in this very checkout — stops raising a prompt, and
+    // everything else still does. Best-effort by design; see
+    // `human_permissions::settings_for` for why a failure here is not one.
+    let settings = crate::human_permissions::settings_for(runtime, cwd);
+    let args = job_adapter::claude_chat_args(&agent_session, settings.as_deref());
     // No sandbox, deliberately (MAIN-611 NG-2): this is a person's own
     // conversation on their own machine, not a loop job driven by untrusted
     // instructions, and confining a human's shell is not what that card is for.
@@ -147,10 +174,13 @@ pub fn start(
     let stdin = session.stdin_handle();
     let tail = session.tail.clone();
     let pending = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+    let always = std::sync::Arc::new(std::sync::Mutex::new(HashSet::new()));
     let child = std::sync::Arc::new(std::sync::Mutex::new(session));
 
     let tx = out.clone();
     let pending_reader = pending.clone();
+    let always_reader = always.clone();
+    let stdin_reader = stdin.clone();
     let child_reader = child.clone();
     std::thread::spawn(move || {
         job_adapter::pump_events(stdout, tail, |ev| match ev {
@@ -163,6 +193,22 @@ pub fn start(
             // identically instead of learning a second convention.
             Event::ToolUse { name } => say(&tx, session_id, "agent", format!("· {name}")),
             Event::PermissionRequest(req) => {
+                // Already granted for the rest of this session (MAIN-620 AC-3):
+                // answered here and never announced, so "always" means what the
+                // button says instead of merely pre-filling the next prompt.
+                // The agent's own `· <tool>` line is still in the conversation,
+                // so the tool call remains visible — it just is not a question.
+                let remembered = always_reader
+                    .lock()
+                    .map(|a| a.contains(&req.tool_name))
+                    .unwrap_or(false);
+                if remembered {
+                    let _ = job_adapter::write_line(
+                        &stdin_reader,
+                        &job_adapter::permission_response_line(&req, true),
+                    );
+                    return;
+                }
                 let frame = NodeToControl::ChatPermission {
                     session_id,
                     request_id: req.id.clone(),
@@ -232,6 +278,7 @@ pub fn start(
     Ok(ChatHandle {
         stdin,
         pending,
+        always,
         child,
     })
 }
@@ -312,5 +359,97 @@ mod tests {
             code.contains("uuid::Uuid::now_v7()"),
             "a fresh agent id per launch is what makes restart possible"
         );
+    }
+
+    /// MAIN-620 AC-3, end to end against a stand-in agent: "allow always"
+    /// settles the TOOL, not the request.
+    ///
+    /// Behavioural rather than a source guard, because the property is about
+    /// ordering — the tool has to be remembered before the answer that unblocks
+    /// the agent is written, or the very next request races the set and prompts
+    /// anyway. A stand-in `sh` agent makes that ordering observable: it asks,
+    /// waits for the response on stdin, and asks again about the same tool the
+    /// moment it has one.
+    #[tokio::test]
+    async fn allow_always_answers_the_same_tool_without_asking_again() {
+        use nook_proto::NodeToControl;
+        use nook_types::SessionId;
+        use std::io::Write;
+
+        fn request(id: &str, tool: &str) -> String {
+            format!(
+                r#"{{"type":"control_request","request_id":"{id}","request":{{"subtype":"can_use_tool","tool_name":"{tool}","input":{{}},"description":"{id}"}}}}"#
+            )
+        }
+
+        let dir = std::env::temp_dir().join(format!("nook-chat-always-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).expect("a scratch checkout");
+        let answers = dir.join("answers.jsonl");
+        let runtime = dir.join("agent.sh");
+        let mut f = std::fs::File::create(&runtime).expect("the stand-in agent");
+        write!(
+            f,
+            "#!/bin/sh\nprintf '%s\\n' '{first}'\nread -r a; printf '%s\\n' \"$a\" >> '{answers}'\nprintf '%s\\n' '{second}'\nread -r b; printf '%s\\n' \"$b\" >> '{answers}'\nwhile :; do sleep 30; done\n",
+            first = request("r-1", "Bash"),
+            second = request("r-2", "Bash"),
+            answers = answers.display(),
+        )
+        .expect("write the stand-in");
+        drop(f);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755))
+                .expect("make it executable");
+        }
+
+        let (ctl_tx, mut ctl_rx) = tokio::sync::mpsc::channel(32);
+        let session_id = SessionId::new();
+        let handle = super::start(&ctl_tx, session_id, &runtime.to_string_lossy(), &dir, &[])
+            .expect("the stand-in agent starts");
+
+        // The FIRST request reaches the person, because nothing is remembered
+        // yet — this is the ordinary MAIN-502 exchange.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut asked = Vec::new();
+        while let Ok(Some(msg)) = tokio::time::timeout_at(deadline, ctl_rx.recv()).await {
+            if let NodeToControl::ChatPermission { request_id, .. } = msg {
+                asked.push(request_id);
+                break;
+            }
+        }
+        assert_eq!(asked, vec!["r-1".to_string()], "the first ask is announced");
+
+        handle.decide("r-1", true, true).expect("answer it");
+
+        // …and the SECOND never does. The agent asks about `Bash` again the
+        // instant it is unblocked; both answers landing in the file is what
+        // proves it was answered rather than merely ignored.
+        let until = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut both_answered = false;
+        while tokio::time::Instant::now() < until {
+            if let Ok(text) = std::fs::read_to_string(&answers) {
+                if text.contains("\"r-2\"") {
+                    both_answered = true;
+                    break;
+                }
+            }
+            if let Ok(Some(NodeToControl::ChatPermission { request_id, .. })) =
+                tokio::time::timeout(std::time::Duration::from_millis(200), ctl_rx.recv()).await
+            {
+                panic!("a remembered tool asked again: {request_id}");
+            }
+        }
+        handle.kill();
+        assert!(
+            both_answered,
+            "the second request must be answered by the node, not announced"
+        );
+        let text = std::fs::read_to_string(&answers).unwrap_or_default();
+        assert!(
+            text.matches("\"behavior\":\"allow\"").count() >= 2,
+            "both were allowed: {text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

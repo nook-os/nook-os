@@ -12,6 +12,7 @@ mod device_login;
 mod discovery;
 mod enroll;
 mod gitops;
+mod human_permissions;
 mod job_adapter;
 mod loop_job;
 mod notebook;

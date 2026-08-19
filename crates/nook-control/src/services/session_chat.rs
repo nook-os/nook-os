@@ -82,6 +82,7 @@ pub async fn decide_permission(
     session: &Session,
     request_id: &str,
     allow: bool,
+    remember: bool,
 ) -> ApiResult<()> {
     require_chat(session)?;
     if !state
@@ -99,6 +100,11 @@ pub async fn decide_permission(
             session_id: session.id,
             request_id: request_id.to_string(),
             allow,
+            // Not persisted here, deliberately: "this session" means this agent
+            // process, and the node's own set dies with it. A row outliving the
+            // process it described would grant a tool in a session nobody
+            // decided anything about (MAIN-620 AC-3).
+            remember,
         },
     );
     announce(state, session);

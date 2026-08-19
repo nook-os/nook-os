@@ -781,11 +781,13 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 session_id,
                 request_id,
                 allow,
+                remember,
             } => {
                 let _ = session_tx.send(sessions::Cmd::ChatPermission {
                     session_id,
                     request_id,
                     allow,
+                    remember,
                 });
             }
             ControlToNode::KillSession { session_id } => {

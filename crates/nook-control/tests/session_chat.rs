@@ -476,15 +476,22 @@ async fn a_permission_waits_to_be_answered_and_is_answered_once() {
         "outstanding — this is what puts the buttons on screen"
     );
 
-    session_chat::decide_permission(&state, &session, "req-1", false)
+    session_chat::decide_permission(&state, &session, "req-1", false, false)
         .await
         .expect("the first answer lands");
     match rx.try_recv().expect("the verdict reached the node") {
         nook_proto::ControlToNode::ChatPermissionDecision {
-            request_id, allow, ..
+            request_id,
+            allow,
+            remember,
+            ..
         } => {
             assert_eq!(request_id, "req-1");
             assert!(!allow, "denied");
+            // MAIN-620 AC-3: the flag reaches the node verbatim. Nothing here
+            // interprets it — which tools a session remembers is the node's
+            // set, because that is where the agent process it applies to is.
+            assert!(!remember, "a plain Deny remembers nothing");
         }
         other => panic!("expected ChatPermissionDecision, got {other:?}"),
     }
@@ -492,7 +499,7 @@ async fn a_permission_waits_to_be_answered_and_is_answered_once() {
     // The second device clicks Allow a moment later. It must change nothing —
     // and above all must not send a contradicting verdict to an agent that has
     // already been refused and moved on.
-    let second = session_chat::decide_permission(&state, &session, "req-1", true).await;
+    let second = session_chat::decide_permission(&state, &session, "req-1", true, true).await;
     assert!(second.is_err(), "a settled request cannot be re-answered");
     assert!(
         rx.try_recv().is_err(),
@@ -545,7 +552,7 @@ async fn a_terminal_session_refuses_the_chat_endpoints() {
         "a terminal is typed into, not messaged"
     );
     assert!(
-        session_chat::decide_permission(&state, &term, "req-1", true)
+        session_chat::decide_permission(&state, &term, "req-1", true, false)
             .await
             .is_err(),
         "a terminal has no permission exchange to answer"

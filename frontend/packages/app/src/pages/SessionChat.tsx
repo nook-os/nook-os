@@ -121,10 +121,18 @@ export function SessionChat({ sessionId }: { sessionId: string }) {
   });
 
   const decide = useMutation({
-    mutationFn: async ({ requestId, allow }: { requestId: string; allow: boolean }) => {
+    mutationFn: async ({
+      requestId,
+      allow,
+      remember,
+    }: {
+      requestId: string;
+      allow: boolean;
+      remember?: boolean;
+    }) => {
       const res = await api.POST("/api/v1/sessions/{id}/permissions/{request_id}", {
         params: { path: { id: sessionId, request_id: requestId } },
-        body: { allow },
+        body: { allow, remember: !!remember },
       });
       if (res.error) throw new Error("could not answer that request");
       return res.data;
@@ -163,8 +171,13 @@ export function SessionChat({ sessionId }: { sessionId: string }) {
         beforeComposer={
           // The request's CHOICES only. Its text is already in the log above as
           // a message (AC-6), so repeating it here would say the same thing
-          // twice; what a reader still needs is the two buttons — and the same
+          // twice; what a reader still needs is the buttons — and the same
           // shape the loop's ask uses, so the two surfaces answer alike.
+          //
+          // Three of them since MAIN-620 AC-3, and the middle one is the point:
+          // "always" settles this tool for the rest of the session, so a person
+          // on a phone taps once for a tool the narrowed allow-list did not
+          // anticipate rather than once per call.
           pending?.permission_request_id ? (
             <div className="lw-ask-choices" data-testid="permission-choices">
               <span className="faint small">
@@ -180,7 +193,26 @@ export function SessionChat({ sessionId }: { sessionId: string }) {
                   })
                 }
               >
-                Allow
+                Allow once
+              </button>
+              <button
+                className="btn small"
+                disabled={decide.isPending}
+                title={`Stop asking about ${pending.tool_name} for the rest of this session`}
+                onClick={() =>
+                  decide.mutate({
+                    requestId: pending.permission_request_id!,
+                    allow: true,
+                    remember: true,
+                  })
+                }
+              >
+                {/* The TOOL, named — because that is the scope of the tap. The
+                    request above reads `Bash: rm -rf build/`, so a bare "allow
+                    always" beside it reads as "always this command" while what
+                    it sends is keyed on the tool. AC-3's own parenthetical is
+                    "this tool, this session"; this is that, in the label. */}
+                Allow all {pending.tool_name}
               </button>
               <button
                 className="btn small"

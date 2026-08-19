@@ -342,6 +342,48 @@ fake remote on a node that never reports. The dogfood workspace is the opposite
   crash case work.** Nothing unlabelled is ever touched, no code path prunes,
   and a source guard fails the build if one appears.
 
+## A human session's permission gate is NARROWED, not removed (MAIN-620)
+
+- **A person's session no longer prompts on the agent's routine tooling.** Every
+  tool call used to raise a per-action approval, which on a phone is a page of
+  taps and reads as a deprivileged session. The narrowing is Claude Code's own
+  permission rules, written by `nook_node::human_permissions` and handed to the
+  runtime with `--settings`: the `nook` CLI, the read tools, and file writes
+  **scoped to that session's own checkout**. Everything else — any other shell
+  command, network egress, a write outside the checkout — matches no rule and
+  still asks.
+- **`defaultMode` is pinned to the asking mode**, so the posture is a fact of
+  the launch rather than an inheritance. A node whose own
+  `~/.claude/settings.json` says `bypassPermissions` does not hand a person's
+  session a blanket skip through the back door.
+- **The TUI and the structured chat load the SAME document.** A prompt inside a
+  tmux pane is the one a phone cannot answer, so the two surfaces asking about
+  different things would defeat the whole card; a source guard in `tmux.rs`
+  fails the build if either stops resolving its policy through
+  `human_permissions::settings_for`.
+- **A prompt that does appear offers "allow always (this tool, this session)".**
+  The remembered set lives on the NODE, in the `ChatHandle` beside the blocked
+  requests, and the reader thread answers a remembered tool without announcing
+  it. In memory on purpose: "this session" means this agent process, and a
+  durable grant is a larger decision than the one a person makes to get
+  unblocked.
+- **Headless loop jobs are untouched.** They keep
+  `--dangerously-skip-permissions` — nobody is watching, and the confinement is
+  MAIN-611's container, not an approval prompt. The guard test asserts
+  `loop_job.rs` never reaches for this module.
+- **The document is a pure function of the checkout**, so it is unit-testable
+  without a process. Every launch rewrites it, keyed by the checkout at
+  `~/.config/nook/session-permissions/<hash>.json` — written to a sibling and
+  renamed, because two sessions starting in one tree write the same path — so
+  the directory stops growing at one file per checkout. A write that fails is
+  not an error: the session starts with the old per-action posture rather than
+  not starting.
+- **Only rule forms the runtime MATCHES may go in it.** A file-tool check
+  consults `Edit` rules alone, and an `Edit` rule already covers `Write` and
+  `NotebookEdit`; naming those two as well is not belt-and-braces, it is four
+  rejection warnings on stderr at every launch, in the pane a person is
+  reading. A `tools` test fails the build if an inert form comes back.
+
 ## Loops are OFF by default (MAIN-239)
 
 - The control plane's job machinery — `job_dispatch`, `job_reaper`,

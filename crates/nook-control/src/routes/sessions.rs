@@ -758,8 +758,14 @@ pub async fn decide_permission(
     Json(req): Json<SessionPermissionDecisionRequest>,
 ) -> ApiResult<axum::http::StatusCode> {
     let session = session_for_content(&state, &auth, id).await?;
-    crate::services::session_chat::decide_permission(&state, &session, &request_id, req.allow)
-        .await?;
+    crate::services::session_chat::decide_permission(
+        &state,
+        &session,
+        &request_id,
+        req.allow,
+        req.remember,
+    )
+    .await?;
     events::record(
         &state,
         session.tenant_id,
@@ -767,7 +773,7 @@ pub async fn decide_permission(
             .actor("user", auth.user_id.0)
             .session(id)
             .node(session.node_id)
-            .payload(serde_json::json!({ "allow": req.allow })),
+            .payload(serde_json::json!({ "allow": req.allow, "remember": req.remember })),
     )
     .await;
     Ok(axum::http::StatusCode::NO_CONTENT)
