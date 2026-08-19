@@ -1,4 +1,4 @@
--- SQLite twin of 0081 (hand-authored, per CLAUDE.md). uuid/timestamptz -> TEXT
+-- SQLite twin of 0083 (hand-authored, per CLAUDE.md). uuid/timestamptz -> TEXT
 -- per the dialect map, and the timestamp default is `sqlite_time`'s one form
 -- (MAIN-442) — `CURRENT_TIMESTAMP` neither compares nor orders against a bound
 -- `DateTime<Utc>` on a TEXT column.
