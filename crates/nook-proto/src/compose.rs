@@ -19,17 +19,28 @@
 /// keeps this away from a human's own stack: the caller reaps what this
 /// returns and nothing else.
 pub fn build_stack_projects(worktree_path: &str) -> Vec<String> {
-    let Some(dir) = worktree_path
-        .rsplit(['/', '\\'])
-        .find(|segment| !segment.is_empty())
-    else {
+    let Some(slug) = build_slug(worktree_path) else {
         return Vec::new();
     };
-    let slug = slugify(dir);
-    if !is_build_stack_project(&slug) {
-        return Vec::new();
-    }
     vec![format!("nook-{slug}"), slug]
+}
+
+/// Is this directory a build worktree's — whatever the stack in it is CALLED?
+///
+/// The same judgement [`build_stack_projects`] makes, read from the other end.
+/// A compose project reports the directory it was brought up from, and that is
+/// a stronger claim of ownership than its name: a name can be given with `-p`,
+/// while the directory is one the node itself created (MAIN-630).
+pub fn is_build_worktree_path(path: &str) -> bool {
+    build_slug(path).is_some()
+}
+
+fn build_slug(worktree_path: &str) -> Option<String> {
+    let dir = worktree_path
+        .rsplit(['/', '\\'])
+        .find(|segment| !segment.is_empty())?;
+    let slug = slugify(dir);
+    is_build_stack_project(&slug).then_some(slug)
 }
 
 /// Is this compose project a build worktree's, and therefore reapable?
@@ -115,6 +126,28 @@ mod tests {
             build_stack_projects(&format!("{WT}/")),
             build_stack_projects(WT)
         );
+    }
+
+    /// A directory names a project exactly when it is a build worktree's, so
+    /// the two readings of the same judgement cannot drift apart.
+    #[test]
+    fn a_path_is_a_build_worktrees_exactly_when_it_names_projects() {
+        for path in [
+            WT,
+            &format!("{WT}/"),
+            "/home/ryan/nook-os",
+            "/srv/build-tools",
+            "/",
+            "",
+        ] {
+            assert_eq!(
+                is_build_worktree_path(path),
+                !build_stack_projects(path).is_empty(),
+                "{path}"
+            );
+        }
+        assert!(is_build_worktree_path(WT));
+        assert!(!is_build_worktree_path("/home/ryan/nook-os"));
     }
 
     /// NG-3: nothing outside a build worktree is nameable, so nothing outside

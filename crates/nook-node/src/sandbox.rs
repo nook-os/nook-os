@@ -606,6 +606,122 @@ pub fn egress_script(allow: &[String], port: &str) -> String {
     s
 }
 
+/// Whoever already holds a host port a job container tried to publish.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortHolder {
+    pub container: String,
+    /// The compose project the container belongs to, when it belongs to one.
+    /// That is the name a person brings the squatter down BY, so it is worth
+    /// more than the container's own.
+    pub project: Option<String>,
+}
+
+/// The host port Docker's bind failure names, if a bind failure is what this is.
+///
+/// Docker spells the collision two ways depending on where it is caught —
+/// `Bind for 0.0.0.0:4389 failed: port is already allocated` from the daemon's
+/// port allocator, `listen tcp4 0.0.0.0:4389: bind: address already in use`
+/// from the proxy — and both are the same event to the person reading it.
+pub fn bind_conflict_port(err: &str) -> Option<String> {
+    if !err.contains("port is already allocated") && !err.contains("address already in use") {
+        return None;
+    }
+    err.split_whitespace().find_map(|token| {
+        let (host, port) = token.trim_matches([',', ';', '.', ':']).rsplit_once(':')?;
+        (!host.is_empty() && !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| port.to_string())
+    })
+}
+
+/// Every running container with its published ports and its labels.
+pub fn published_ports_args() -> Vec<String> {
+    vec![
+        "ps".into(),
+        "--format".into(),
+        "{{.Names}}\t{{.Ports}}\t{{.Labels}}".into(),
+    ]
+}
+
+/// The container publishing `port`, out of [`published_ports_args`]' output.
+pub fn holder_of_port(ps: &str, port: &str) -> Option<PortHolder> {
+    ps.lines().find_map(|line| {
+        let mut columns = line.split('\t');
+        let name = columns.next()?.trim();
+        let ports = columns.next().unwrap_or("");
+        let labels = columns.next().unwrap_or("");
+        (!name.is_empty() && publishes(ports, port)).then(|| PortHolder {
+            container: name.to_string(),
+            project: label_value(labels, crate::compose::COMPOSE_PROJECT_LABEL),
+        })
+    })
+}
+
+/// Does this `docker ps` PORTS column bind `port` on the host?
+///
+/// The column is `0.0.0.0:4389->4389/tcp, [::]:4389->4389/tcp`, and only the
+/// half before the arrow is the host's — a container exposing 4389 internally
+/// binds nothing and is not the holder.
+fn publishes(ports: &str, port: &str) -> bool {
+    ports
+        .split(',')
+        .filter_map(|mapping| mapping.split("->").next())
+        .any(|host| {
+            host.trim()
+                .rsplit_once(':')
+                .is_some_and(|(_, bound)| bound == port)
+        })
+}
+
+/// Docker's bind failure, rewritten to name who is squatting (MAIN-630 AC-4).
+///
+/// *"Bind for 0.0.0.0:4389 failed: port is already allocated"* names no cause a
+/// person can act on: the port is one the control plane LEASED this run, so the
+/// holder is almost always a stack of ours that outlived the run that started
+/// it, and finding it meant `docker ps` on the machine by hand. Pure over both
+/// texts — the failure and one `docker ps` — so the mapping is a unit test
+/// rather than a collision somebody has to reproduce.
+///
+/// `None` for any error that is not a bind conflict: an unrecognised failure is
+/// reported exactly as Docker gave it, never decorated with a guess.
+pub fn describe_bind_conflict(err: &str, ps: &str) -> Option<String> {
+    let port = bind_conflict_port(err)?;
+    Some(match holder_of_port(ps, &port) {
+        Some(PortHolder {
+            container,
+            project: Some(project),
+        }) => format!(
+            "host port {port} is held by container `{container}` of compose project \
+             `{project}`; `docker compose -p {project} down` frees it"
+        ),
+        Some(PortHolder {
+            container,
+            project: None,
+        }) => format!("host port {port} is held by container `{container}`"),
+        // Worth saying, and the more urgent of the two: the leased port is
+        // bound by something Docker did not start, so no `compose down` will
+        // free it and the node's own range may overlap something else's.
+        None => format!(
+            "host port {port} is bound by something outside this Docker daemon — \
+             no container publishes it"
+        ),
+    })
+}
+
+/// [`describe_bind_conflict`] against the live daemon, as a clause to append.
+///
+/// Empty for anything that is not a bind conflict, and empty too when the
+/// daemon that just refused a `run` will not answer a `ps` — a second failure
+/// is not a better report of the first.
+fn bind_conflict_hint(err: &str) -> String {
+    if bind_conflict_port(err).is_none() {
+        return String::new();
+    }
+    let ps = docker_args(&published_ports_args()).unwrap_or_default();
+    describe_bind_conflict(err, &ps)
+        .map(|who| format!(" — {who}"))
+        .unwrap_or_default()
+}
+
 /// A live job container. Dropping it removes the container, so every early
 /// return in `loop_job::run` tears the sandbox down without a cleanup branch of
 /// its own.
@@ -684,8 +800,11 @@ impl Sandbox {
         let args = run_args(&spec);
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
         if let Err(e) = docker(&argv) {
+            // Asked before the teardown, so the observation is of the machine
+            // as it was at the failure (AC-4).
+            let holder = bind_conflict_hint(&e);
             sb.stop();
-            return Err(format!("could not start the job sandbox: {e}"));
+            return Err(format!("could not start the job sandbox: {e}{holder}"));
         }
         if let Err(e) = sb.wait_started() {
             sb.stop();
@@ -969,10 +1088,19 @@ pub fn parse_listing(out: &str) -> Vec<Listed> {
 }
 
 fn job_label(labels: &str) -> Option<String> {
+    label_value(labels, JOB_LABEL)
+}
+
+/// One label's value out of docker's `k=v,k=v` rendering.
+///
+/// Shared with `compose.rs`, which reads compose's own labels off the same
+/// column (MAIN-630): the comma caveat above is the same caveat there, and two
+/// copies of this parser would be two places to learn it.
+pub fn label_value(labels: &str, key: &str) -> Option<String> {
     labels
         .split(',')
         .filter_map(|kv| kv.split_once('='))
-        .find(|(k, _)| k.trim() == JOB_LABEL)
+        .find(|(k, _)| k.trim() == key)
         .map(|(_, v)| v.trim().to_string())
         .filter(|v| !v.is_empty())
 }
@@ -2913,5 +3041,76 @@ mod tests {
         let cmd = sb.exec_shell_line("claude", Path::new("/w"), &[]);
         assert!(cmd.contains("'HOME=/home/agent'"), "{cmd}");
         assert!(cmd.contains("'CLAUDE_CONFIG_DIR=/nook-claude'"), "{cmd}");
+    }
+
+    /// The failure MAIN-630 was reported from, verbatim.
+    const BIND_FAILED: &str = "docker: Error response from daemon: failed to set up container \
+         networking: driver failed programming external connectivity on endpoint \
+         nook-job-019f840f-2d80-7163-b4b1-8b1e12d7e0d3: Bind for 0.0.0.0:4389 failed: port is \
+         already allocated";
+
+    /// The `docker ps` of the machine it was observed on: the card's own
+    /// pre-sandbox stack, still up.
+    const PS: &str = "nook-build-019f8-main-611-web-1\t0.0.0.0:4389->5173/tcp, [::]:4389->5173/tcp\tcom.docker.compose.project=nook-build-019f8-main-611,com.docker.compose.service=web\n\
+         nook-build-019f8-main-611-postgres-1\t5432/tcp\tcom.docker.compose.project=nook-build-019f8-main-611,com.docker.compose.service=postgres";
+
+    /// AC-4: the message names the port AND the container holding it, so
+    /// nobody needs `docker ps` to learn what is squatting.
+    #[test]
+    fn a_bind_failure_names_the_container_holding_the_port() {
+        let said = describe_bind_conflict(BIND_FAILED, PS).expect("a bind conflict is recognised");
+        assert!(said.contains("4389"), "{said}");
+        assert!(said.contains("nook-build-019f8-main-611-web-1"), "{said}");
+        assert!(
+            said.contains("docker compose -p nook-build-019f8-main-611 down"),
+            "the compose project is the name a person acts on: {said}"
+        );
+    }
+
+    /// The proxy's spelling of the same event, and a holder outside compose.
+    #[test]
+    fn the_other_spelling_and_a_container_of_nobodys() {
+        let err = "driver failed programming external connectivity on endpoint nook-job-x: \
+                   listen tcp4 0.0.0.0:4389: bind: address already in use";
+        let ps = "some-database\t0.0.0.0:4389->5432/tcp\torg.opencontainers.image.title=Postgres";
+        let said = describe_bind_conflict(err, ps).expect("a bind conflict is recognised");
+        assert_eq!(said, "host port 4389 is held by container `some-database`");
+    }
+
+    /// A port nothing on this daemon publishes is worth saying so: no
+    /// `compose down` will free it.
+    #[test]
+    fn a_port_no_container_holds_says_so() {
+        let said = describe_bind_conflict(BIND_FAILED, "").expect("still a bind conflict");
+        assert!(said.contains("outside this Docker daemon"), "{said}");
+    }
+
+    /// Only the port BOUND on the host counts: a container merely exposing
+    /// 4389 internally is holding nothing.
+    #[test]
+    fn an_exposed_port_is_not_a_bound_one() {
+        let ps = "inner\t4389/tcp\tcom.docker.compose.project=theirs";
+        assert_eq!(holder_of_port(ps, "4389"), None);
+        assert_eq!(
+            holder_of_port("bound\t0.0.0.0:4389->4389/tcp\t", "4389"),
+            Some(PortHolder {
+                container: "bound".into(),
+                project: None,
+            })
+        );
+    }
+
+    /// Anything that is not a bind conflict is reported exactly as Docker gave
+    /// it — a failure this does not understand is never decorated with a guess.
+    #[test]
+    fn another_failure_is_left_alone() {
+        for err in [
+            "docker: Error response from daemon: no such image: nook-job-sandbox:latest",
+            "Cannot connect to the Docker daemon at unix:///var/run/docker.sock",
+            "",
+        ] {
+            assert_eq!(bind_conflict_port(err), None, "{err}");
+            assert_eq!(describe_bind_conflict(err, PS), None, "{err}");
+        }
     }
 }
