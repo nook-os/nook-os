@@ -12958,6 +12958,10 @@
         "type": "object",
         "description": "Deleting a workspace. Records always go; the checkouts on disk only go\nwhen explicitly asked for (and if they stay, discovery re-adds them).",
         "properties": {
+          "delete_board": {
+            "type": "boolean",
+            "description": "Acknowledge that the workspace's board, its columns and every card on it\ngo too (MAIN-637 AC-7).\n\nCards are not files: nothing rediscovers them and no reaper brings them\nback, so a workspace that owns a board refuses to delete until the\ncaller has been told the board key and the card count and says yes to\nthat number. Detached boards and workspaces with no board are unaffected."
+          },
           "delete_files": {
             "type": "boolean",
             "description": "Also delete the checkout directories on every online node."
@@ -12974,6 +12978,13 @@
           "message"
         ],
         "properties": {
+          "board_deleted": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The key of the board that went with the workspace, when one did\n(MAIN-637 AC-7)."
+          },
           "checkouts_remaining": {
             "type": "integer",
             "description": "Checkouts left behind (node offline, or removal failed) — these will\nbe rediscovered.",
@@ -12989,6 +13000,11 @@
           },
           "message": {
             "type": "string"
+          },
+          "tasks_deleted": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many cards that board took with it."
           }
         }
       },
@@ -20100,6 +20116,13 @@
           },
           "name": {
             "type": "string"
+          },
+          "workspace_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Which workspace this board belongs to (MAIN-637). Absent leaves it\nalone, `null` detaches it, an id attaches it — the three cases\n`Option<Option<_>>` exists for.\n\nThis is how an existing board is adopted into a workspace, and it never\ntouches the key: `MAIN` keeps every `MAIN-N` across the move."
           }
         }
       },

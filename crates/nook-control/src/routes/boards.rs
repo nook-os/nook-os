@@ -5,6 +5,7 @@ use nook_types::*;
 use crate::auth::AuthCtx;
 use crate::error::{ApiError, ApiResult};
 use crate::events::{self, EventDraft};
+use crate::services::boards;
 use crate::services::kanban::provider_err;
 use crate::state::AppState;
 
@@ -28,39 +29,18 @@ pub async fn create(
     // rather than left null, because "the board I made in the UI has no keys"
     // is not a state anybody would choose.
     let key = match req.key.as_deref() {
-        Some(k) => validate_key(k)?,
-        None => unique_key(&state, auth.tenant_id, &req.name).await?,
+        Some(k) => boards::validate_key(k)?,
+        None => boards::unique_key(&state, auth.tenant_id, &req.name).await?,
     };
 
-    let board = state
-        .tasks
-        .create_board(
-            auth.tenant_id,
-            req.workspace_id.map(|w| w.0),
-            &req.name,
-            &key,
-        )
-        .await?;
-
-    // Name AND type. A board whose columns have no types is one automation
-    // cannot navigate — "move it to started" has nothing to resolve.
-    let mut columns = Vec::new();
-    for (i, (name, kind)) in [
-        ("Triage", "backlog"),
-        ("Todo", "unstarted"),
-        ("In Progress", "started"),
-        ("In Review", "review"),
-        ("Done", "completed"),
-    ]
-    .iter()
-    .enumerate()
-    {
-        let col = state
-            .tasks
-            .create_column(board.id, name, i as i32, kind)
-            .await?;
-        columns.push(col);
+    if let Some(w) = req.workspace_id {
+        boards::ensure_workspace_is_ours(&state, auth.tenant_id, w).await?;
+        boards::ensure_workspace_free(&state, auth.tenant_id, w, None).await?;
     }
+
+    let (board, columns) =
+        boards::create_with_columns(&state, auth.tenant_id, req.workspace_id, &req.name, &key)
+            .await?;
 
     Ok(Json(BoardDetail {
         board,
@@ -163,7 +143,9 @@ pub async fn create_task(
     Json(req): Json<CreateTaskRequest>,
 ) -> ApiResult<Json<TaskItem>> {
     let provider = provider_for_board(&state, auth.tenant_id, id).await?;
-    let workspace_id = req.workspace_id;
+    // A card and its board must name the same workspace (MAIN-637 AC-6).
+    // Checked before the write, so a mismatch files nothing.
+    boards::ensure_task_workspace_agrees(&state, auth.tenant_id, id, req.workspace_id).await?;
     let task = state
         .kanban
         .get(&provider)
@@ -185,7 +167,6 @@ pub async fn create_task(
             })),
     )
     .await;
-    let _ = workspace_id;
     state.registry.publish(
         auth.tenant_id,
         nook_proto::UiEvent::TaskChanged { task_id: task.id },
@@ -280,6 +261,13 @@ pub async fn update_task(
         }
     }
     let board_id = existing.board_id;
+    // Nothing moves a card between boards, so re-filing it under a different
+    // WORKSPACE is the one way the two can come to disagree after it was
+    // created — the other half of MAIN-637 AC-6, and the same rule.
+    if let Some(new_workspace) = req.workspace_id {
+        boards::ensure_task_workspace_agrees(&state, auth.tenant_id, board_id, new_workspace)
+            .await?;
+    }
     let provider = provider_for_board(&state, auth.tenant_id, board_id).await?;
     let moved_column = req.column_id.is_some() || req.column_type.is_some();
     let task = state
@@ -492,7 +480,7 @@ pub async fn update_board(
     Json(req): Json<UpdateBoardRequest>,
 ) -> ApiResult<Json<Board>> {
     let key = match req.key.as_deref() {
-        Some(k) => Some(validate_key(k)?),
+        Some(k) => Some(boards::validate_key(k)?),
         None => None,
     };
     // Validate the automation config before it can be stored (MAIN-73 AC-1): a
@@ -500,79 +488,34 @@ pub async fn update_board(
     if let Some(automation) = &req.automation {
         crate::services::triggers::validate(automation)?;
     }
+    // Adoption (MAIN-637 AC-1). Checked before the write so a refused
+    // attachment leaves the name and the automation untouched too — a PATCH
+    // that half-applies is worse than one that does nothing.
+    if let Some(Some(w)) = req.workspace_id {
+        if !state.tasks.board_in_tenant(id, auth.tenant_id).await? {
+            return Err(ApiError::NotFound);
+        }
+        boards::ensure_workspace_is_ours(&state, auth.tenant_id, w).await?;
+        boards::ensure_workspace_free(&state, auth.tenant_id, w, Some(id)).await?;
+    }
     let board = state
         .tasks
-        .update_board(id, auth.tenant_id, &req.name, key, req.automation.clone())
+        .update_board(
+            id,
+            auth.tenant_id,
+            &req.name,
+            key,
+            req.automation.clone(),
+            // The key is deliberately NOT touched here: `MAIN` keeps every
+            // `MAIN-N` across an adoption (NG-1).
+            req.workspace_id.map(|w| w.map(|w| w.0)),
+        )
         .await?;
     board.map(Json).ok_or(ApiError::NotFound)
 }
 
-/// The first word of a board's name, as a key.
-///
-/// "NookOS Bootstrap" → `NOOK`. Deliberately not the whole name flattened and
-/// cut, which is what produced `NOOKO` — a key nobody would choose, printed on
-/// every task forever.
-fn derive_key(name: &str) -> String {
-    let first: String = name
-        .split_whitespace()
-        .next()
-        .unwrap_or_default()
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .take(4)
-        .collect::<String>()
-        .to_uppercase();
-    if first.is_empty() {
-        "BOARD".to_string()
-    } else {
-        first
-    }
-}
-
-/// A board key: the `NOOK` in `NOOK-42`.
-fn validate_key(key: &str) -> ApiResult<String> {
-    let k = key.trim().to_uppercase();
-    if k.is_empty() || k.len() > 10 {
-        return Err(ApiError::BadRequest(
-            "a board key must be 1–10 characters".into(),
-        ));
-    }
-    if !k.chars().all(|c| c.is_ascii_alphanumeric()) {
-        return Err(ApiError::BadRequest(format!(
-            "a board key may only contain letters and digits — got {key:?}"
-        )));
-    }
-    Ok(k)
-}
-
-/// Derive a key from a board's name, and make it unique in the tenant.
-///
-/// The FIRST WORD, not the whole name flattened: "NookOS Bootstrap" should be
-/// `NOOK`, not `NOOKO` — which is what you get by running the words together
-/// and cutting at five characters, and which reads as a typo forever after.
-async fn unique_key(state: &AppState, tenant: TenantId, name: &str) -> ApiResult<String> {
-    let base = derive_key(name);
-
-    for n in 1..100 {
-        let candidate = if n == 1 {
-            base.clone()
-        } else {
-            format!("{base}{n}")
-        };
-        let taken = state.tasks.board_key_taken(tenant, &candidate).await?;
-        if !taken {
-            return Ok(candidate);
-        }
-    }
-    Err(ApiError::BadRequest(
-        "could not derive a free board key — pass one explicitly".into(),
-    ))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     /// Creating a task raises a notification, not only an activity event.
     ///
     /// The two are different surfaces: the activity event feeds the Activity
@@ -601,30 +544,6 @@ mod tests {
             "the notification should carry the `task.created` kind so channels \
              can route it"
         );
-    }
-
-    /// "NookOS Bootstrap" must become NOOK. The first implementation flattened
-    /// the whole name and cut at five, producing NOOKO — a key nobody would
-    /// choose, on every task, permanently.
-    #[test]
-    fn a_key_comes_from_the_first_word() {
-        assert_eq!(derive_key("NookOS Bootstrap"), "NOOK");
-        assert_eq!(derive_key("Engineering"), "ENGI");
-        assert_eq!(derive_key("web-ui rewrite"), "WEBU");
-        // A name with no usable letters still needs a key.
-        assert_eq!(derive_key("  "), "BOARD");
-        assert_eq!(derive_key("!!! ???"), "BOARD");
-        assert_eq!(derive_key(""), "BOARD");
-    }
-
-    #[test]
-    fn keys_are_uppercased_and_bounded() {
-        assert_eq!(validate_key("nook").unwrap(), "NOOK");
-        assert_eq!(validate_key(" web ").unwrap(), "WEB");
-        assert!(validate_key("").is_err());
-        assert!(validate_key("has space").is_err());
-        assert!(validate_key("dash-ed").is_err());
-        assert!(validate_key("ABCDEFGHIJK").is_err());
     }
 }
 

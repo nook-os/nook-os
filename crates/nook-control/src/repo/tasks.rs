@@ -238,6 +238,25 @@ pub trait TaskRepository: Send + Sync {
     async fn board_columns(&self, board: BoardId) -> ApiResult<Vec<BoardColumn>>;
     async fn board_tasks(&self, board: BoardId) -> ApiResult<Vec<TaskItem>>;
 
+    /// The board a workspace owns, if any — a workspace has at most one
+    /// (MAIN-637 AC-2/NG-6). Every provider, not just `local`: uniqueness that
+    /// a Jira board could slip past is not uniqueness.
+    async fn board_of_workspace(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Option<Board>>;
+
+    /// How many cards sit on a board. A count, not [`TaskRepository::board_tasks`],
+    /// because the delete confirmation needs the number and not the rows.
+    async fn board_task_count(&self, board: BoardId) -> ApiResult<i64>;
+
+    /// Every board in every tenant (MAIN-637 AC-4/AC-5). Cross-tenant and
+    /// boot-only, which is why it takes no tenant: the backfill needs both
+    /// which workspaces are already served and which boards are attached to
+    /// none, and one unscoped read answers both.
+    async fn boards_across_tenants(&self) -> ApiResult<Vec<Board>>;
+
     /// The `KanbanProvider` name that owns a task, via its board.
     async fn board_provider_for_task(
         &self,
@@ -664,6 +683,8 @@ pub trait TaskRepository: Send + Sync {
 
     async fn delete_task(&self, id: TaskId, tenant: TenantId) -> ApiResult<u64>;
 
+    /// `workspace` is tri-state (MAIN-637 AC-1): `None` leaves the attachment
+    /// alone, `Some(None)` detaches, `Some(Some(w))` attaches.
     async fn update_board(
         &self,
         id: BoardId,
@@ -671,6 +692,7 @@ pub trait TaskRepository: Send + Sync {
         name: &str,
         key: Option<String>,
         automation: Option<serde_json::Value>,
+        workspace: Option<Option<Uuid>>,
     ) -> ApiResult<Option<Board>>;
 
     async fn board_key_taken(&self, tenant: TenantId, key: &str) -> ApiResult<bool>;
@@ -1013,6 +1035,41 @@ impl TaskRepository for DbTaskRepository {
             .query_all(
                 "SELECT * FROM tasks WHERE board_id = $1 ORDER BY position, created_at",
                 params![board],
+            )
+            .await?)
+    }
+
+    async fn board_of_workspace(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Option<Board>> {
+        Ok(self
+            .db
+            .query_opt(
+                "SELECT * FROM boards WHERE tenant_id = $1 AND workspace_id = $2
+                 ORDER BY created_at LIMIT 1",
+                params![tenant, workspace],
+            )
+            .await?)
+    }
+
+    async fn board_task_count(&self, board: BoardId) -> ApiResult<i64> {
+        Ok(self
+            .db
+            .query_scalar(
+                "SELECT count(*) FROM tasks WHERE board_id = $1",
+                params![board],
+            )
+            .await?)
+    }
+
+    async fn boards_across_tenants(&self) -> ApiResult<Vec<Board>> {
+        Ok(self
+            .db
+            .query_all(
+                "SELECT * FROM boards ORDER BY tenant_id, created_at",
+                params![],
             )
             .await?)
     }
@@ -2401,19 +2458,24 @@ impl TaskRepository for DbTaskRepository {
         name: &str,
         key: Option<String>,
         automation: Option<serde_json::Value>,
+        workspace: Option<Option<Uuid>>,
     ) -> ApiResult<Option<Board>> {
-        Ok(self
-            .db
-            .query_opt(
-                &format!(
-                    "UPDATE boards SET name = $3, key = COALESCE($4, key),
-                           automation = COALESCE($5, automation), updated_at = {}
-         WHERE id = $1 AND tenant_id = $2 RETURNING *",
-                    type_mapping(self.db.engine()).now()
-                ),
-                params![id, tenant, name, key, automation],
-            )
-            .await?)
+        // The other three fields ride on COALESCE, which cannot express "set it
+        // to NULL" — and detaching a board is exactly that. So the attachment
+        // gets a clause that is present only when the caller sent the field,
+        // and a bind that follows it (MAIN-637 AC-1).
+        let mut sql = format!(
+            "UPDATE boards SET name = $3, key = COALESCE($4, key),
+                    automation = COALESCE($5, automation), updated_at = {}",
+            type_mapping(self.db.engine()).now()
+        );
+        let mut args = params![id, tenant, name, key, automation];
+        if let Some(w) = workspace {
+            sql.push_str(", workspace_id = $6");
+            args.push(nook_db::IntoDbValue::into_db_value(w));
+        }
+        sql.push_str(" WHERE id = $1 AND tenant_id = $2 RETURNING *");
+        Ok(self.db.query_opt(&sql, args).await?)
     }
 
     async fn board_key_taken(&self, tenant: TenantId, key: &str) -> ApiResult<bool> {
@@ -3270,6 +3332,34 @@ impl TaskRepository for FakeTaskRepository {
             .collect();
         ts.sort_by_key(|t| (t.position, t.created_at));
         Ok(ts)
+    }
+
+    async fn board_of_workspace(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Option<Board>> {
+        let st = self.inner.lock().unwrap();
+        let mut owned: Vec<Board> = st
+            .boards
+            .iter()
+            .filter(|b| b.tenant_id == tenant && b.workspace_id == Some(workspace))
+            .cloned()
+            .collect();
+        owned.sort_by_key(|b| b.created_at);
+        Ok(owned.into_iter().next())
+    }
+
+    async fn board_task_count(&self, board: BoardId) -> ApiResult<i64> {
+        let st = self.inner.lock().unwrap();
+        Ok(st.tasks.iter().filter(|t| t.board_id == board).count() as i64)
+    }
+
+    async fn boards_across_tenants(&self) -> ApiResult<Vec<Board>> {
+        let st = self.inner.lock().unwrap();
+        let mut all = st.boards.clone();
+        all.sort_by_key(|b| (b.tenant_id.0, b.created_at));
+        Ok(all)
     }
 
     async fn board_provider_for_task(
@@ -4395,6 +4485,7 @@ impl TaskRepository for FakeTaskRepository {
         name: &str,
         key: Option<String>,
         automation: Option<serde_json::Value>,
+        workspace: Option<Option<Uuid>>,
     ) -> ApiResult<Option<Board>> {
         let mut st = self.inner.lock().unwrap();
         let Some(b) = st
@@ -4411,6 +4502,11 @@ impl TaskRepository for FakeTaskRepository {
         }
         if let Some(a) = automation {
             b.automation = a;
+        }
+        // The outer `Some` is "the caller sent the field"; the inner one is the
+        // value, `None` being a detach.
+        if let Some(w) = workspace {
+            b.workspace_id = w.map(WorkspaceId);
         }
         b.updated_at = chrono::Utc::now();
         Ok(Some(b.clone()))

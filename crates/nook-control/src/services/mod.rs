@@ -73,6 +73,7 @@ pub async fn tenant_slug(
 pub mod activity_queries;
 pub mod agent_commands;
 pub mod attachments;
+pub mod boards;
 pub mod build_handback;
 pub mod build_ladder;
 pub mod build_loop;

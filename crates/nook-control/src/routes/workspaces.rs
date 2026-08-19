@@ -1527,7 +1527,41 @@ pub async fn create(
                 .filter(|u| !u.trim().is_empty()),
         )
         .await?;
+
+    // A workspace comes with its board (MAIN-637 AC-3). No workspace is ever
+    // left boardless, so the board is created here rather than lazily: a repo
+    // whose cards have nowhere to go is a state nothing downstream expects.
+    //
+    // The two rows have no shared transaction to sit in — they belong to
+    // different repositories — so a board that cannot be made is compensated
+    // by deleting the workspace, which is the closest honest thing to a
+    // rollback and leaves the caller with the failure rather than with half of
+    // what they asked for.
+    if let Err(e) = create_board_for(&state, auth.tenant_id, workspace.id, &workspace.name).await {
+        if let Err(undo) = state.workspaces.delete(workspace.id, auth.tenant_id).await {
+            tracing::error!(
+                workspace = %workspace.id.0,
+                error = %undo,
+                "could not roll back a workspace whose board failed — it is now boardless \
+                 until the boot backfill reaches it"
+            );
+        }
+        return Err(e);
+    }
+
     Ok(Json(workspace))
+}
+
+async fn create_board_for(
+    state: &AppState,
+    tenant: TenantId,
+    workspace: WorkspaceId,
+    name: &str,
+) -> ApiResult<()> {
+    let key = crate::services::boards::unique_key(state, tenant, name).await?;
+    crate::services::boards::create_with_columns(state, tenant, Some(workspace), name, &key)
+        .await?;
+    Ok(())
 }
 
 /// Rename a workspace — the label only.
@@ -1611,6 +1645,16 @@ pub async fn delete(
         .await?
         .ok_or(ApiError::NotFound)?;
 
+    // The board goes with the workspace, and cards are the one thing here that
+    // nothing brings back (MAIN-637 AC-7). Checkouts are rediscovered; a
+    // deleted card is gone. So the caller is told the key and the number and
+    // has to say yes to THAT number — the refusal is the report.
+    let board = state.tasks.board_of_workspace(auth.tenant_id, id).await?;
+    let card_count = match &board {
+        Some(b) => state.tasks.board_task_count(b.id).await?,
+        None => 0,
+    };
+
     // Live sessions would be killed by the cascade with their tmux left
     // orphaned on the node, so they have to be dealt with first — but only the
     // ones a PERSON started. A managed session exists solely because this
@@ -1632,6 +1676,20 @@ pub async fn delete(
         return Err(ApiError::Conflict(format!(
             "{unmanaged} live session(s) somebody started — kill them first"
         )));
+    }
+
+    // After the session check, so a workspace that is refused for both reasons
+    // still reports the one the caller has to act on first.
+    if let Some(b) = &board {
+        if !req.delete_board {
+            return Err(ApiError::Conflict(format!(
+                "deleting '{}' also deletes its board {} ('{}') and {card_count} card(s) — \
+                 re-send with \"delete_board\": true to confirm",
+                workspace.name,
+                b.key.as_deref().unwrap_or("(no key)"),
+                b.name
+            )));
+        }
     }
 
     let mut stranded = 0usize;
@@ -1698,6 +1756,14 @@ pub async fn delete(
         }
     }
 
+    // Before the workspace, not after: `boards.workspace_id` is ON DELETE SET
+    // NULL, so deleting the workspace first would detach the board and leave it
+    // — and its cards — behind as an orphan the backfill then refuses to look
+    // past (AC-5). Deleting the board cascades its columns and its cards.
+    if let Some(b) = &board {
+        state.tasks.delete_board(b.id, auth.tenant_id).await?;
+    }
+
     // Cascades node_workspaces, sessions, notes and secrets; tasks and events
     // keep their history with a null workspace.
     state.workspaces.delete(id, auth.tenant_id).await?;
@@ -1711,6 +1777,8 @@ pub async fn delete(
                 "name": workspace.name,
                 "checkouts_removed": removed,
                 "deleted_files": req.delete_files,
+                "board_deleted": board.as_ref().and_then(|b| b.key.clone()),
+                "tasks_deleted": card_count,
             })),
     )
     .await;
@@ -1734,10 +1802,22 @@ pub async fn delete(
              their tmux may still be running"
         ));
     }
+    let board_deleted = board.as_ref().map(|b| {
+        b.key
+            .clone()
+            .unwrap_or_else(|| format!("(no key) {}", b.name))
+    });
+    if let Some(key) = &board_deleted {
+        message.push_str(&format!(
+            " — board {key} and {card_count} card(s) went with it"
+        ));
+    }
     Ok(Json(DeleteWorkspaceResponse {
         deleted: true,
         checkouts_removed: removed,
         checkouts_remaining: remaining,
+        board_deleted,
+        tasks_deleted: card_count,
         message,
     }))
 }
