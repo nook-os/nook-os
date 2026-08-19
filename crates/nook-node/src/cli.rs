@@ -945,21 +945,57 @@ pub async fn get(
     Ok(())
 }
 
-/// Secrets are per-workspace; list them all with their workspace for context.
+/// Everything in the tenant that is a secret: the named items (MAIN-625) and
+/// the password-sealed `.env` files that predate them.
+///
+/// Both, deliberately. A `nook get secrets` that showed only the sealed files
+/// would answer "what secrets does this tenant have" by hiding most of them.
+/// They are one table because a reader wants one answer; SCOPE is what tells
+/// them apart, and `file` is the sealed kind — a whole file, not an item, and
+/// the only one this command cannot say a thing about beyond its name.
 async fn secrets_across_workspaces(client: &Client, workspace: Option<&str>) -> Result<Value> {
+    let all = workspaces_all(client).await?;
+    let named = |ws: &Value| match workspace {
+        None => true,
+        Some(want) => ["name", "slug"]
+            .iter()
+            .filter_map(|k| ws.get(*k).and_then(Value::as_str))
+            .any(|v| v.eq_ignore_ascii_case(want)),
+    };
+
     let mut out = Vec::new();
-    for ws in workspaces_all(client).await? {
+    // Named items first: they are the tenant's, so they lead the table rather
+    // than trailing one repo's files.
+    //
+    // Narrowing to a repo narrows these too, rather than dropping them: a
+    // `nook get secrets <repo>` that showed only the sealed files would hide
+    // exactly the items the unnarrowed command promises.
+    let items = client.get("/api/v1/secrets").await.unwrap_or(Value::Null);
+    let mut rows = items.as_array().cloned().unwrap_or_default();
+    if workspace.is_some() {
+        let ids: Vec<&str> = all
+            .iter()
+            .filter(|ws| named(ws))
+            .filter_map(|ws| ws.get("id").and_then(Value::as_str))
+            .collect();
+        rows.retain(|r| {
+            r.get("scope_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| ids.contains(&id))
+        });
+    }
+    let labels = crate::secrets::labels_for(client, &rows).await;
+    out.extend(crate::secrets::display_rows(&rows, &labels));
+
+    for ws in all {
         let (Some(id), Some(name)) = (
             ws.get("id").and_then(Value::as_str),
             ws.get("name").and_then(Value::as_str),
         ) else {
             continue;
         };
-        if let Some(want) = workspace {
-            let slug = ws.get("slug").and_then(Value::as_str).unwrap_or_default();
-            if !name.eq_ignore_ascii_case(want) && !slug.eq_ignore_ascii_case(want) {
-                continue;
-            }
+        if !named(&ws) {
+            continue;
         }
         let secrets = client
             .get(&format!("/api/v1/workspaces/{id}/secrets"))
@@ -968,7 +1004,8 @@ async fn secrets_across_workspaces(client: &Client, workspace: Option<&str>) -> 
         for s in secrets.as_array().cloned().unwrap_or_default() {
             let mut row = s.clone();
             if let Some(obj) = row.as_object_mut() {
-                obj.insert("workspace".into(), Value::String(name.to_string()));
+                obj.insert("scope".into(), Value::String("file".into()));
+                obj.insert("target".into(), Value::String(name.to_string()));
             }
             out.push(row);
         }
@@ -1247,7 +1284,11 @@ fn columns(resource: &str, first: &Value) -> Vec<&'static str> {
         // remote moved to `-o wide`/`--json`: it never changes and it was the
         // widest column on the line.
         "workspaces" => vec!["name", "slug", "ready", "nodes", "age"],
-        "secrets" => vec!["workspace", "name", "updated_at"],
+        "secrets" => vec!["scope", "target", "name", "updated_at"],
+        // `nook secrets list`'s own table (MAIN-625). Same four columns as the
+        // fold-in above, so the two surfaces read identically — SCOPE first
+        // because it is what tells you who a secret reaches.
+        "secret_items" => vec!["scope", "target", "name", "updated_at"],
         "tasks" => vec!["title", "column_id", "branch", "pr_url"],
         "events" => vec!["occurred_at", "kind", "actor_type"],
         "themes" => vec!["name", "slug"],
@@ -1475,7 +1516,7 @@ fn filter_rows(rows: Vec<Value>, resource: &str, name: Option<&str>) -> Vec<Valu
     }
 }
 
-fn print_table(resource: &str, rows: &[Value]) {
+pub(crate) fn print_table(resource: &str, rows: &[Value]) {
     print_table_with(resource, rows, false)
 }
 

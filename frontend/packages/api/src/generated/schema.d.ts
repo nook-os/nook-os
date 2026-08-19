@@ -2450,6 +2450,67 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/secrets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Every item in the tenant — names, scopes and timestamps. */
+        get: operations["list_secret_items"];
+        /** Create an item, or replace the value of one that exists. */
+        put: operations["set_secret_item"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/secrets/import": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Import a `.env` body as one item per assignment (AC-8).
+         * @description Partial by design: the assignments that parsed are stored and the lines that
+         *     did not are reported. Refusing the whole file for one bad line would make a
+         *     fifty-line import an exercise in binary search, and the report is what stops
+         *     a skipped line being silent.
+         */
+        post: operations["import_secret_items"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/secrets/{scope}/{scope_id}/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Remove an item. 404 when there was none, rather than a silent success —
+         *     "the secret is gone" and "you named the wrong one" must not read alike.
+         */
+        delete: operations["delete_secret_item"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions": {
         parameters: {
             query?: never;
@@ -6197,6 +6258,26 @@ export interface components {
             role: string;
             tenant_id?: null | components["schemas"]["TenantId"];
         };
+        /** @description Import a `.env` body as one item per assignment (AC-8). */
+        ImportSecretItemsRequest: {
+            /**
+             * @description The file, verbatim. Parsed here rather than by the caller so every
+             *     surface reads a `.env` the same way.
+             */
+            content: string;
+            scope: components["schemas"]["SecretScope"];
+            /** Format: uuid */
+            scope_id?: string | null;
+        };
+        /**
+         * @description What an import did. Names only — never a value, and never the line's text,
+         *     which would carry one into a log by way of an error message.
+         */
+        ImportSecretItemsResult: {
+            /** @description The names written, in the order the file gave them. */
+            imported: string[];
+            problems: components["schemas"]["SecretImportProblem"][];
+        };
         /** @description Adopt a file that already exists in a checkout into the vault. */
         ImportSecretRequest: {
             ephemeral?: boolean;
@@ -8230,6 +8311,41 @@ export interface components {
             /** @description KDF salt, base64. 16 bytes. */
             salt: string;
         };
+        /**
+         * @description A line the parser could not read. Reported, never silently dropped (AC-8):
+         *     a secret that quietly failed to import is a build that fails much later for
+         *     a reason nothing connects to this.
+         */
+        SecretImportProblem: {
+            /**
+             * Format: int32
+             * @description 1-based, as an editor counts. `None` when the problem is not about a
+             *     line at all — a store that failed after the file parsed cleanly.
+             */
+            line?: number | null;
+            reason: string;
+        };
+        /**
+         * @description One stored item, as every read path returns it.
+         *
+         *     **There is no value field, and that is the whole of AC-4.** A list that
+         *     omitted the value by convention would grow one the first time somebody found
+         *     it convenient; a type with nowhere to put it cannot.
+         */
+        SecretItem: {
+            /** Format: date-time */
+            created_at: string;
+            /** @description Its name in the environment — `STRIPE_KEY`, `NPM_TOKEN`. */
+            name: string;
+            scope: components["schemas"]["SecretScope"];
+            /**
+             * Format: uuid
+             * @description The tenant, workspace or node this belongs to.
+             */
+            scope_id: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
         /** @description Whether an import left a `.env` on disk that the vault hasn't adopted yet. */
         SecretOnDisk: {
             /** @description Which checkout it was found in. */
@@ -8238,6 +8354,11 @@ export interface components {
             /** @description Already stored in the vault, so there's nothing to adopt. */
             in_vault: boolean;
         };
+        /**
+         * @description What a secret item is attached to.
+         * @enum {string}
+         */
+        SecretScope: "tenant" | "workspace" | "node";
         /**
          * @description Approve a drafted reply and send it (MAIN-332 AC-3).
          *
@@ -8602,6 +8723,18 @@ export interface components {
         SetReviewLoopRequest: {
             /** Format: int32 */
             max_replicas?: number | null;
+        };
+        /** @description Set one item, creating it or replacing its value. */
+        SetSecretItemRequest: {
+            name: string;
+            scope: components["schemas"]["SecretScope"];
+            /**
+             * Format: uuid
+             * @description The workspace or node. Omitted for a tenant item, which can only ever
+             *     mean the caller's own tenant.
+             */
+            scope_id?: string | null;
+            value: string;
         };
         /**
          * @description Set or clear a workspace's [`SessionSpec`] (MAIN-315). `spec: null` clears
@@ -14374,6 +14507,125 @@ export interface operations {
             };
             /** @description no online node */
             400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_secret_items: {
+        parameters: {
+            query?: {
+                scope?: string | null;
+                scope_id?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecretItem"][];
+                };
+            };
+        };
+    };
+    set_secret_item: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetSecretItemRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecretItem"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    import_secret_items: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ImportSecretItemsRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportSecretItemsResult"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_secret_item: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                scope: string;
+                scope_id: string;
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

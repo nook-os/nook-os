@@ -21,6 +21,7 @@ mod ports;
 mod resources;
 mod runtime_auth;
 mod sandbox;
+mod secrets;
 mod selfupdate;
 mod sessions;
 mod ssh;
@@ -283,6 +284,20 @@ enum Command {
     /// frozen.
     #[command(subcommand)]
     Emails(EmailsCommand),
+    /// Named secret values, injected into every session and loop job for the
+    /// workspace they belong to (MAIN-625).
+    ///
+    ///     nook secrets set workspace API_KEY hunter2   this repo's
+    ///     nook secrets set tenant NPM_TOKEN -          the fleet's, from stdin
+    ///     nook secrets set node azul DISK_KEY x        stored, injected nowhere
+    ///     nook secrets list                            names and times, never values
+    ///
+    /// Deliberately NOT the `.env` vault (`nook get secrets`' `file` rows):
+    /// that is one password-sealed blob per repo, which the server cannot read
+    /// and so cannot deliver to a loop job at 03:00. A new noun group, per
+    /// docs/cli-style.md — the top level stays frozen.
+    #[command(subcommand)]
+    Secrets(SecretsCommand),
     /// The listeners this workspace declared, and the numbers this process
     /// holds for them (MAIN-597).
     ///
@@ -850,6 +865,18 @@ async fn main() -> Result<()> {
             findings,
             draft_reply,
         }) => cli::emails_record(&findings, &draft_reply).await,
+        Command::Secrets(SecretsCommand::Set { scope, args, json }) => {
+            secrets::set(&scope, &args, json).await
+        }
+        Command::Secrets(SecretsCommand::List { scope, json }) => {
+            secrets::list(scope.as_deref(), json).await
+        }
+        Command::Secrets(SecretsCommand::Rm { scope, args }) => secrets::rm(&scope, &args).await,
+        Command::Secrets(SecretsCommand::Import {
+            scope,
+            target,
+            file,
+        }) => secrets::import(&scope, target.as_deref(), file.as_deref()).await,
         Command::Ports(PortsCommand::List {
             workspace,
             browsable,
@@ -1700,6 +1727,55 @@ enum TunnelsCommand {
     /// Close a tunnel. Without a label, closes the ones this session opened —
     /// or, outside a session, the ones on this machine.
     Stop { label: Option<String> },
+}
+
+#[derive(Subcommand)]
+enum SecretsCommand {
+    /// Set a secret: `<scope> [<target>] <NAME> <VALUE>`.
+    ///
+    /// Scope is `tenant`, `workspace` or `node`. The target is the workspace or
+    /// machine it belongs to — omit it for a workspace and the session's own is
+    /// used; a node always names one. `-` as the value reads stdin, so a key
+    /// with newlines (or one that must stay out of shell history) gets in.
+    Set {
+        /// tenant | workspace | node
+        scope: String,
+        /// `[<target>] <NAME> <VALUE>`
+        #[arg(required = true, num_args = 2..=3)]
+        args: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// What is set, and when — never a value.
+    List {
+        /// Only this scope: tenant | workspace | node.
+        #[arg(long)]
+        scope: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a secret: `<scope> [<target>] <NAME>`.
+    Rm {
+        /// tenant | workspace | node
+        scope: String,
+        /// `[<target>] <NAME>`
+        #[arg(required = true, num_args = 1..=2)]
+        args: Vec<String>,
+    },
+    /// Import a `.env` body as one secret per assignment.
+    ///
+    /// Stdin unless `--file` names one. Comments and blanks are skipped,
+    /// `export` prefixes and quotes are handled, and a line that is not an
+    /// assignment is REPORTED rather than dropped.
+    Import {
+        /// tenant | workspace | node
+        scope: String,
+        /// The workspace or machine. Omit for the session's own workspace.
+        target: Option<String>,
+        /// Read from this file instead of stdin.
+        #[arg(long)]
+        file: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]

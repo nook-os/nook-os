@@ -23,6 +23,7 @@ pub mod nodes;
 pub mod notebook;
 pub mod notifications;
 pub mod read_model;
+pub mod secret_items;
 pub mod sessions;
 pub mod task_reports;
 pub mod tasks;

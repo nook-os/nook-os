@@ -108,6 +108,7 @@ pub mod run_reconcile;
 pub mod runtime_auth;
 pub mod runtime_auth_flow;
 pub mod schedule;
+pub mod secret_items;
 pub mod secrets;
 pub mod session_chat;
 pub mod session_queries;

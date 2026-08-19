@@ -27,6 +27,7 @@ pub mod operator;
 pub mod overview;
 pub mod runtime_auth;
 pub mod schedule;
+pub mod secret_items;
 pub mod sessions;
 pub mod settings;
 pub mod skills;
@@ -237,6 +238,18 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/workspaces/{id}/secrets/{name}/import",
             post(gitops::import_secret),
+        )
+        // ── named secret items (MAIN-625) ──
+        //
+        // Tenant-level rather than nested under a workspace, because the
+        // resource is not a workspace's: an item is scoped to a tenant, a
+        // workspace OR a node, and hanging the whole group off `/workspaces`
+        // would have made two of those three read as an exception.
+        .route("/secrets", get(secret_items::list).put(secret_items::set))
+        .route("/secrets/import", post(secret_items::import))
+        .route(
+            "/secrets/{scope}/{scope_id}/{name}",
+            axum::routing::delete(secret_items::delete),
         )
         .route(
             "/git-credentials",
