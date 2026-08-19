@@ -566,6 +566,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/email-links/{id}/reply": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/email-links/{id}/reply` — approve the drafted reply and send
+         *     it where this tenant's policy says (MAIN-332 AC-2, AC-3).
+         * @description **A person, never a machine.** This is HC-3's second gate — the one that
+         *     decides what a customer sees — so a node principal is refused here even
+         *     though it holds a perfectly good token for the rest of this API. An
+         *     investigate run drafts the reply and reports it; approving its own draft
+         *     would make the gate a formality.
+         */
+        post: operations["send_email_reply"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/email/inbound": {
         parameters: {
             query?: never;
@@ -5856,6 +5881,13 @@ export interface components {
             /** Format: date-time */
             created_at: string;
             /**
+             * @description Where a reply reaches the person who reported the problem: the
+             *     delivery's `Reply-To:`, which is the forwarding staffer's own statement
+             *     of who answers belong to. `None` when the message carried none, and a
+             *     chain without one cannot be replied to by the customer-facing modes.
+             */
+            customer_address?: string | null;
+            /**
              * @description What the investigate run found (MAIN-331) — its own analysis, `None`
              *     until the run reports. Text, unlike the draft below: this is what the
              *     product shows a support staffer, not what the reporter wrote.
@@ -5881,8 +5913,24 @@ export interface components {
             message_id?: string | null;
             /** @description The PR that answered it, once one is opened against the card. */
             pr_ref?: string | null;
+            reply_recipient?: string | null;
+            /**
+             * Format: date-time
+             * @description When the reply actually left, and to whom. Written together, only after
+             *     a transport reported a delivery — so `reply_sent_at` set is a message
+             *     that genuinely went, and it is what stops a second approve sending a
+             *     customer the same reply twice.
+             */
+            reply_sent_at?: string | null;
+            /**
+             * @description The support staffer who forwarded it — the verified envelope sender the
+             *     allow-list matched, and where a `to_staffer` reply goes (MAIN-332).
+             */
+            staffer_address?: string | null;
             /** @description Where the sealed raw message lives in the user-content store. */
             storage_key: string;
+            /** @description The delivery's subject, which a reply answers with `Re:`. */
+            subject?: string | null;
             /** @description The ticket the message became. The epic's `ticket_id`. */
             task_id: components["schemas"]["TaskId"];
             workspace_id?: null | components["schemas"]["WorkspaceId"];
@@ -8189,6 +8237,18 @@ export interface components {
             found: boolean;
             /** @description Already stored in the vault, so there's nothing to adopt. */
             in_vault: boolean;
+        };
+        /**
+         * @description Approve a drafted reply and send it (MAIN-332 AC-3).
+         *
+         *     The one server-side thing the approve action needs beyond the link id: a
+         *     human who edited the draft in the inbox is approving the text in front of
+         *     them, not the one the run wrote, and sending the second while recording the
+         *     first would make the chain's record a fiction. Omitted — the whole body may
+         *     be omitted — sends the draft as it stands.
+         */
+        SendReplyRequest: {
+            reply?: string | null;
         };
         /**
          * @description Status values: `starting` | `running` | `detached` | `exited` | `error`.
@@ -10920,6 +10980,49 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    send_email_reply: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SendReplyRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EmailLink"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

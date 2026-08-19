@@ -186,6 +186,9 @@ impl EmailSource for ImapSource {
             attachments,
             message_id: message.message_id().map(str::to_string),
             in_reply_to: message.in_reply_to().as_text().map(str::to_string),
+            reply_to: topmost("reply-to")
+                .map(bare_address)
+                .filter(|a| !a.is_empty()),
             received_at: message
                 .date()
                 .and_then(|d| Utc.timestamp_opt(d.to_timestamp(), 0).single())

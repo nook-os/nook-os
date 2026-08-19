@@ -1145,6 +1145,57 @@
         }
       }
     },
+    "/api/v1/email-links/{id}/reply": {
+      "post": {
+        "tags": [
+          "crate::routes::email_links"
+        ],
+        "summary": "`POST /api/v1/email-links/{id}/reply` — approve the drafted reply and send\nit where this tenant's policy says (MAIN-332 AC-2, AC-3).",
+        "description": "**A person, never a machine.** This is HC-3's second gate — the one that\ndecides what a customer sees — so a node principal is refused here even\nthough it holds a perfectly good token for the rest of this API. An\ninvestigate run drafts the reply and reports it; approving its own draft\nwould make the gate a formality.",
+        "operationId": "send_email_reply",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendReplyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmailLink"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          },
+          "409": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/email/inbound": {
       "post": {
         "tags": [
@@ -13154,6 +13205,13 @@
             "type": "string",
             "format": "date-time"
           },
+          "customer_address": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where a reply reaches the person who reported the problem: the\ndelivery's `Reply-To:`, which is the forwarding staffer's own statement\nof who answers belong to. `None` when the message carried none, and a\nchain without one cannot be replied to by the customer-facing modes."
+          },
           "findings": {
             "type": [
               "string",
@@ -13201,9 +13259,37 @@
             ],
             "description": "The PR that answered it, once one is opened against the card."
           },
+          "reply_recipient": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reply_sent_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the reply actually left, and to whom. Written together, only after\na transport reported a delivery — so `reply_sent_at` set is a message\nthat genuinely went, and it is what stops a second approve sending a\ncustomer the same reply twice."
+          },
+          "staffer_address": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The support staffer who forwarded it — the verified envelope sender the\nallow-list matched, and where a `to_staffer` reply goes (MAIN-332)."
+          },
           "storage_key": {
             "type": "string",
             "description": "Where the sealed raw message lives in the user-content store."
+          },
+          "subject": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The delivery's subject, which a reply answers with `Re:`."
           },
           "task_id": {
             "$ref": "#/components/schemas/TaskId",
@@ -17712,6 +17798,18 @@
           "in_vault": {
             "type": "boolean",
             "description": "Already stored in the vault, so there's nothing to adopt."
+          }
+        }
+      },
+      "SendReplyRequest": {
+        "type": "object",
+        "description": "Approve a drafted reply and send it (MAIN-332 AC-3).\n\nThe one server-side thing the approve action needs beyond the link id: a\nhuman who edited the draft in the inbox is approving the text in front of\nthem, not the one the run wrote, and sending the second while recording the\nfirst would make the chain's record a fiction. Omitted — the whole body may\nbe omitted — sends the draft as it stands.",
+        "properties": {
+          "reply": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },

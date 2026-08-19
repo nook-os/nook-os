@@ -117,6 +117,11 @@ pub struct InboundEmail {
     pub attachments: Vec<InboundAttachment>,
     pub message_id: Option<String>,
     pub in_reply_to: Option<String>,
+    /// The delivery's `Reply-To:` — the forwarding staffer's own statement of
+    /// where an answer belongs, and so the only machine-readable address of the
+    /// person who reported the problem (MAIN-332). Recorded on the chain; a
+    /// reply is only ever sent to it under a policy the tenant opted into.
+    pub reply_to: Option<String>,
     pub received_at: DateTime<Utc>,
     /// Exactly the bytes this source received, untouched. What gets sealed and
     /// stored, and the reason a later reader is never limited to whatever this
@@ -189,6 +194,8 @@ struct WebhookPayload {
     message_id: Option<String>,
     #[serde(default)]
     in_reply_to: Option<String>,
+    #[serde(default)]
+    reply_to: Option<String>,
     #[serde(default)]
     timestamp: Option<i64>,
     #[serde(default)]
@@ -333,6 +340,11 @@ impl EmailSource for ProviderWebhookSource {
             attachments,
             message_id: payload.message_id.or_else(|| header("message-id")),
             in_reply_to: payload.in_reply_to.or_else(|| header("in-reply-to")),
+            reply_to: payload
+                .reply_to
+                .or_else(|| header("reply-to"))
+                .map(|a| bare_address(&a))
+                .filter(|a| !a.is_empty()),
             received_at: payload
                 .timestamp
                 .and_then(|t| DateTime::from_timestamp(t, 0))
@@ -419,6 +431,9 @@ impl EmailSource for SmtpSource {
             attachments: parts.attachments,
             message_id: header("Message-Id"),
             in_reply_to: header("In-Reply-To"),
+            reply_to: header("Reply-To")
+                .map(|a| bare_address(&a))
+                .filter(|a| !a.is_empty()),
             // When WE took delivery, never the `Date:` header. That header is
             // written by the sender, and it reaches the card and the log; a
             // receipt time nobody outside this process chose is the only one
@@ -959,6 +974,12 @@ async fn file(
             task: task.id,
             message_id: email.message_id.clone(),
             in_reply_to: email.in_reply_to.clone(),
+            // The staffer is the sender the allow-list matched, not the `From:`
+            // header — the same address the gate above ran on, so what a
+            // `to_staffer` reply goes to is what was actually authenticated.
+            staffer_address: email.from.clone(),
+            customer_address: email.reply_to.clone(),
+            subject: email.subject.clone(),
             storage_key: stored.raw_key.clone(),
         })
         .await?;
@@ -1324,6 +1345,7 @@ mod tests {
             attachments: vec![],
             message_id: None,
             in_reply_to: None,
+            reply_to: None,
             received_at: DateTime::from_timestamp(0, 0).expect("epoch"),
             raw: Vec::new(),
         }

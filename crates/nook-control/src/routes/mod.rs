@@ -325,6 +325,8 @@ pub fn build_router(state: AppState) -> Router {
         // selector is a sender-authored `Message-Id`, not an id of ours.
         .route("/email-links", get(email_links::list))
         .route("/email-links/lookup", get(email_links::lookup))
+        // The approve gate (MAIN-332): a person sends the drafted reply.
+        .route("/email-links/{id}/reply", post(email_links::reply))
         .route("/labels", get(labels::list).post(labels::create))
         .route("/labels/{id}", delete_route(labels::delete))
         .route("/tasks", get(task_query::query))
