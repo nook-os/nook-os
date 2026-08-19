@@ -6440,6 +6440,27 @@ button.chat-tool-line:hover { color: var(--nook-fg-dim); }
   text-overflow: ellipsis;
 }
 
+/* The row the keyboard is on (MAIN-635). Drawn from the tree's own focus state
+   rather than `:focus-visible`, because a CLICKED folder is focused too and
+   `:focus-visible` deliberately stays dark for a pointer. Inset, so a 24px row
+   at the edge of a 300px pane keeps the ring inside the scroller. */
+.notebook-row.focused {
+  outline: 1px solid var(--nook-accent);
+  outline-offset: -1px;
+}
+
+/* The label swapped for an input (MAIN-635). It has to sit ON the row's 24px
+   line, so it drops the shared `.input` height and padding rather than growing
+   the row while a rename is open. */
+.notebook-rename.input {
+  flex: 1;
+  min-width: 0;
+  height: 20px;
+  padding: 0 4px;
+  font-size: inherit;
+  font-family: inherit;
+}
+
 /* The row an open context menu is about (MAIN-634). The pane is 300px and the
    menu opens over its neighbours, so without this the subject is a guess.
    After `:hover` and `.selected`, which it has to beat at equal specificity. */
