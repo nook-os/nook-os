@@ -2927,7 +2927,44 @@ pub async fn task(key: &str, json: bool, revisions: bool) -> Result<()> {
             println!("{line}");
         }
     }
+    let refs = resp["workspace_refs"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    for line in render_references(&refs) {
+        println!("{line}");
+    }
     Ok(())
+}
+
+/// The **References** section: the workspaces this card's description names
+/// with `@slug` (MAIN-632 AC-3).
+///
+/// A reader — a human or a build agent — otherwise learns of the other side of
+/// a cross-repo feature only from the `@slug` in the prose, with no way to tell
+/// whether it resolved to anything. Naming the remote is what makes it
+/// actionable: it is the repo the run may be given a read-only checkout of.
+///
+/// Empty in, nothing out: a header over an empty list on every card in the
+/// board is noise every reader then has to skip, the same rule the attachment
+/// section follows.
+fn render_references(refs: &[Value]) -> Vec<String> {
+    if refs.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![
+        String::new(),
+        crate::style::dim(&format!("── References · {}", refs.len())),
+    ];
+    for r in refs {
+        let remote = r["git_remote_url"].as_str().unwrap_or("(no git remote)");
+        lines.push(format!(
+            "  @{:<20} {:<24} {remote}",
+            r["slug"].as_str().unwrap_or("—"),
+            r["name"].as_str().unwrap_or(""),
+        ));
+    }
+    lines
 }
 
 /// `nook task <key> --revisions` — the description bodies past replaces
@@ -3769,6 +3806,49 @@ mod claim_guard_tests {
     fn no_session_workspace_never_blocks() {
         assert!(!claim_blocked(None, Some(OTHER), false));
         assert!(!claim_blocked(None, None, false));
+    }
+}
+
+/// `nook task <KEY>`'s References section (MAIN-632 AC-3).
+#[cfg(test)]
+mod task_reference_tests {
+    use super::render_references;
+    use serde_json::json;
+
+    #[test]
+    fn a_card_with_references_lists_name_slug_and_remote() {
+        let out = render_references(&[
+            json!({
+                "workspace_id": "0199-web",
+                "name": "Nook Web",
+                "slug": "nook-web",
+                "git_remote_url": "git@example.test:acme/web.git",
+            }),
+            json!({
+                "workspace_id": "0199-api",
+                "name": "Nook API",
+                "slug": "nook-api",
+                "git_remote_url": null,
+            }),
+        ])
+        .join("\n");
+
+        assert!(out.contains("References"), "{out}");
+        assert!(out.contains("@nook-web"), "{out}");
+        assert!(out.contains("Nook Web"), "{out}");
+        assert!(out.contains("git@example.test:acme/web.git"), "{out}");
+        // A workspace nobody has given a remote is still worth naming — the
+        // reference resolved, which is the fact the reader came for.
+        assert!(out.contains("@nook-api"), "{out}");
+        assert!(out.contains("(no git remote)"), "{out}");
+    }
+
+    /// Nearly every card names nothing, and a header over an empty list on
+    /// every ticket in the board is noise every reader then has to skip — the
+    /// same rule the attachment section follows.
+    #[test]
+    fn a_card_with_no_references_prints_nothing() {
+        assert!(render_references(&[]).is_empty());
     }
 }
 

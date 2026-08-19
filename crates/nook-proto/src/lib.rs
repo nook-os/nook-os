@@ -886,6 +886,19 @@ pub enum ControlToNode {
         /// shared literal everything else also falls back to.
         #[serde(default)]
         unsatisfied_ports: Vec<String>,
+        /// The workspaces the run's CARD names with `@slug` (MAIN-632), each
+        /// with the path of its checkout on THIS executor where one exists.
+        ///
+        /// A card carries one workspace and a run is placed in that one repo,
+        /// so a feature spanning a frontend and a backend had no way to say so
+        /// — the builder guessed at the other side's contract. These are what
+        /// the node mounts read-only (AC-5) and what the brief names (AC-7).
+        ///
+        /// Best effort, never a placement constraint (NG-2): a reference the
+        /// executor holds no checkout of arrives with `path: None` and the run
+        /// proceeds, told which repo it did not get.
+        #[serde(default)]
+        references: Vec<nook_types::WorkspaceRef>,
     },
     /// An unsolicited steering message from a human to a running loop job
     /// (MAIN-231). Pushed to the executor, which types it into the job's live

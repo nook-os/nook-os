@@ -451,6 +451,10 @@ pub async fn detail(
         is_blocked,
         children,
         pr_conflict,
+        // The workspaces the body names with `@slug` (MAIN-632), read from the
+        // stored ids rather than re-parsed here — which is what makes a slug
+        // rename leave the reference intact.
+        workspace_refs: state.tasks.workspace_refs_of(tenant, id).await?,
     })
 }
 

@@ -8831,6 +8831,11 @@ export interface components {
             /** @description Non-blocking links (`relates`, `duplicates`), both directions. */
             related: components["schemas"]["RelatedTask"][];
             task: components["schemas"]["TaskItem"];
+            /**
+             * @description The workspaces this card's description names with `@slug` (MAIN-632).
+             *     Empty for a card that names none, which is nearly all of them.
+             */
+            workspace_refs?: components["schemas"]["WorkspaceRef"][];
         };
         /** Format: uuid */
         TaskId: string;
@@ -9921,6 +9926,29 @@ export interface components {
             path: string;
             /** @description This checkout is a linked git worktree of the workspace's primary repo. */
             worktree?: boolean;
+        };
+        /**
+         * @description A workspace a card's description names with `@slug` (MAIN-632).
+         *
+         *     Resolved and STORED as an id when the description is written, never
+         *     re-parsed at read time: a slug rename would otherwise orphan every card that
+         *     named the workspace, silently and all at once.
+         */
+        WorkspaceRef: {
+            git_remote_url?: string | null;
+            name: string;
+            /**
+             * @description Where this workspace's clone is on the executor a RUN was placed on
+             *     (AC-4), which is the only context in which the question has an answer.
+             *
+             *     `None` on a card read — a card is not on a node — and on a run whose
+             *     executor holds no checkout of it (AC-8). That second case is best
+             *     effort by design: a reference is not a scheduling constraint (NG-2), so
+             *     the run proceeds and the agent is told which repo it did not get.
+             */
+            path?: string | null;
+            slug: string;
+            workspace_id: components["schemas"]["WorkspaceId"];
         };
         /**
          * @description One row of a workspace's Reviews listing (MAIN-557): the run, plus the two

@@ -132,6 +132,20 @@ pub trait KanbanProvider: Send + Sync {
     ) -> ProviderResult<TaskItem>;
 }
 
+/// A reference sync that failed, logged rather than raised (MAIN-632).
+///
+/// The description write it follows has already landed, so failing the call
+/// would report failure for an edit that happened — and the body still says
+/// `@slug`, so the next write of that card re-derives the whole set.
+fn note_ref_failure(task: TaskId, result: ApiResult<()>) {
+    if let Err(e) = result {
+        tracing::error!(
+            task = %task.0,
+            "the card's @workspace references were not stored: {e:?}"
+        );
+    }
+}
+
 // ── Local boards (Postgres) ─────────────────────────────────────────────────
 
 pub struct LocalBoardProvider {
@@ -244,6 +258,18 @@ impl KanbanProvider for LocalBoardProvider {
                     .collect(),
             })
             .await?;
+        // The `@slug` references the body names (MAIN-632). After the create
+        // rather than inside it: the reference rows carry the task's id, so
+        // there is nothing to point at until the insert has landed. Never
+        // fatal for the same reason a description revision is not — the card
+        // exists, and reporting failure for a write that happened would be a
+        // lie the caller then retries.
+        note_ref_failure(
+            task.id,
+            self.repo
+                .sync_workspace_refs(tenant, task.id, req.description.as_deref())
+                .await,
+        );
         Ok(task)
     }
 
@@ -363,6 +389,18 @@ impl KanbanProvider for LocalBoardProvider {
             .await?;
 
         if let Some(t) = updated {
+            // A body that was replaced names a possibly different set of
+            // workspaces (MAIN-632). Only when the patch carried one: an edit
+            // that never mentioned `description` must not drop the references
+            // of a body it did not touch.
+            if req.description.is_some() {
+                note_ref_failure(
+                    t.id,
+                    self.repo
+                        .sync_workspace_refs(tenant, t.id, req.description.as_deref())
+                        .await,
+                );
+            }
             // Only a replace that actually changed the body earns a revision:
             // a no-op rewrite destroyed nothing, and recording it would bury
             // the real clobber under noise.

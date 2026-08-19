@@ -238,6 +238,16 @@ pub struct SandboxSpec {
     /// `[sandbox] caches`. Nothing is mounted because the node happens to have
     /// it; a repo asks for its own package cache by name.
     pub caches: Vec<Mount>,
+    /// Checkouts of the workspaces the run's CARD names with `@slug`
+    /// (MAIN-632), mounted READ-ONLY at their own host paths.
+    ///
+    /// The card is the whole authority: only a workspace it names is here, so
+    /// an unreferenced sibling checkout stays exactly as unreachable as it was
+    /// (AC-6). Read-only because the card produces one PR in its own workspace
+    /// and nothing else (NG-1) — a writable mount would make "no writes to a
+    /// referenced repo" a thing the agent is asked to observe rather than a
+    /// thing the box enforces.
+    pub references: Vec<PathBuf>,
     /// Host ports this run leased (MAIN-552), published from the job container
     /// so a human can still open the build's dev stack in a browser. The lease
     /// is what makes the bind free.
@@ -408,6 +418,13 @@ pub fn run_args(spec: &SandboxSpec) -> Vec<String> {
     for m in &spec.caches {
         a.push("-v".into());
         a.push(bind(&m.host, &m.container));
+    }
+    // The card's `@slug` references (MAIN-632), at their own host paths and
+    // READ-ONLY. Same path for the same reason the checkout is: the agent is
+    // told a path and the path it is told has to be the one on the card.
+    for path in &spec.references {
+        a.push("-v".into());
+        a.push(format!("{}:ro", bind(path, path)));
     }
     for port in &spec.ports {
         a.push("-p".into());
@@ -1679,6 +1696,14 @@ mod escapes {
         /// tore down each other's container and checkout, and the failure read
         /// as a flaky sandbox rather than a harness collision.
         fn new(tag: &str, profile: Profile) -> Bed {
+            Bed::with_references(tag, profile, false)
+        }
+
+        /// `referenced` adds a THIRD checkout beside the two above and passes it
+        /// as a card `@slug` reference (MAIN-632). The sibling is left exactly
+        /// where it was: the pair is the whole point of AC-6 — what the card
+        /// named is readable, what it did not name is not.
+        fn with_references(tag: &str, profile: Profile, referenced: bool) -> Bed {
             let root =
                 std::env::temp_dir().join(format!("nook-escape-{}-{tag}", std::process::id()));
             let worktree = root.join("worktrees/build-mine");
@@ -1692,6 +1717,15 @@ mod escapes {
             std::fs::write(root.join("node.toml"), "join_token = \"NODE-IDENTITY\"")
                 .expect("identity");
             std::fs::write(worktree.join("README"), "the job's own tree").expect("readme");
+            let referenced_dir = root.join("checkouts/nook-web");
+            let references = if referenced {
+                std::fs::create_dir_all(&referenced_dir).expect("referenced checkout");
+                std::fs::write(referenced_dir.join("CONTRACT"), "the other side's shape")
+                    .expect("referenced file");
+                vec![referenced_dir.clone()]
+            } else {
+                Vec::new()
+            };
             let spec = SandboxSpec {
                 job_id: format!("escape-{}-{tag}", std::process::id()),
                 image: image(),
@@ -1701,6 +1735,7 @@ mod escapes {
                 gitdir: None,
                 claude_dir: None,
                 caches: Vec::new(),
+                references,
                 ports: Vec::new(),
                 allow: Vec::new(),
                 add_hosts: Vec::new(),
@@ -1714,6 +1749,14 @@ mod escapes {
 
         fn worktree(&self) -> PathBuf {
             self.root.join("worktrees/build-mine")
+        }
+
+        fn referenced(&self) -> PathBuf {
+            self.root.join("checkouts/nook-web")
+        }
+
+        fn sibling(&self) -> PathBuf {
+            self.root.join("worktrees/build-someone-else")
         }
     }
 
@@ -1774,6 +1817,53 @@ mod escapes {
         assert!(
             bed.worktree().join("WROTE").exists(),
             "the write did not reach the host tree"
+        );
+    }
+
+    /// MAIN-632 AC-5/AC-6, against a real container: what the CARD named is
+    /// readable and not writable, and what it did not name is still absent.
+    ///
+    /// The two assertions have to be in one test. "A referenced checkout is
+    /// readable" passing on its own would be satisfied by mounting the whole
+    /// clone cache, which is precisely the regression AC-6 is guarding, and the
+    /// sibling here is the same decoy `the_host_filesystem_is_not_there_to_read`
+    /// uses — so the pair says the mount list is the card's list.
+    #[test]
+    fn a_referenced_checkout_is_readable_and_a_sibling_is_not() {
+        if !enabled() {
+            return;
+        }
+        let bed = Bed::with_references("refs", profile_for("spec"), true);
+        let sb = &bed.sandbox;
+
+        let (ok, out) = inside(sb, &format!("cat {}/CONTRACT", bed.referenced().display()));
+        assert!(
+            ok && out.contains("the other side's shape"),
+            "the card named this repo and the run cannot read it (AC-5): {out}"
+        );
+
+        // …and cannot write to it. NG-1 says a referenced repo takes no writes,
+        // and a rule the agent is merely asked to observe is not a rule.
+        let (ok, out) = inside(
+            sb,
+            &format!("touch {}/WROTE 2>&1", bed.referenced().display()),
+        );
+        assert!(
+            !ok,
+            "a referenced checkout is writable — the mount is not read-only: {out}"
+        );
+        assert!(
+            !bed.referenced().join("WROTE").exists(),
+            "a write reached the referenced checkout on the host"
+        );
+
+        // AC-6: naming one workspace does not open the machine. The sibling is
+        // the same decoy the filesystem escape test uses.
+        let (_, out) = inside(sb, &format!("cat {}/SECRET 2>&1", bed.sibling().display()));
+        assert!(
+            !out.contains("another card's checkout"),
+            "an UNREFERENCED sibling checkout became readable once references \
+             were mounted (AC-6): {out}"
         );
     }
 
@@ -2351,6 +2441,7 @@ mod tests {
                 host: PathBuf::from("/home/ryan/.cargo/registry"),
                 container: PathBuf::from("/home/ryan/.cargo/registry"),
             }],
+            references: Vec::new(),
             ports: vec![4201, 4202],
             allow: vec!["203.0.113.7".into()],
             add_hosts: Vec::new(),
@@ -2433,6 +2524,59 @@ mod tests {
                 "a mount reaches outside the job's own checkout: {m}"
             );
         }
+    }
+
+    /// MAIN-632 AC-5: a card's `@slug` references are mounted at their own host
+    /// paths and READ-ONLY — every one of them, and nothing writable.
+    ///
+    /// Asserted over the composed argv rather than a live container because
+    /// that is where the claim lives: `:ro` is a suffix on a string, and a
+    /// future edit that drops it would leave every escape test still passing
+    /// (the mount would work, it would just also accept writes).
+    #[test]
+    fn every_reference_is_mounted_read_only() {
+        let mut sp = spec();
+        sp.references = vec![
+            PathBuf::from("/home/ryan/.nook/clone-cache/cp/nook-web"),
+            PathBuf::from("/home/ryan/.nook/clone-cache/cp/nook-api"),
+        ];
+        let args = run_args(&sp);
+        let mounts: Vec<&String> = args
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i > 0 && args[i - 1] == "-v")
+            .map(|(_, v)| v)
+            .collect();
+
+        for path in &sp.references {
+            let p = path.display();
+            assert!(
+                mounts.iter().any(|m| **m == format!("{p}:{p}:ro")),
+                "the reference at {p} is not mounted read-only at its own path: {mounts:?}"
+            );
+            assert!(
+                !mounts.iter().any(|m| **m == format!("{p}:{p}")),
+                "the reference at {p} is ALSO mounted writable — NG-1 says a \
+                 referenced repo takes no writes: {mounts:?}"
+            );
+        }
+        assert_eq!(
+            mounts.iter().filter(|m| m.ends_with(":ro")).count(),
+            sp.references.len(),
+            "read-only is for references and nothing else — the checkout, its \
+             repository and the workspace's caches are all written to: {mounts:?}"
+        );
+    }
+
+    /// A card that names no workspace mounts nothing extra: the reference list
+    /// is the card's, so an empty one is an empty one (AC-6).
+    #[test]
+    fn no_references_means_no_extra_mounts() {
+        let with_none = run_args(&spec());
+        assert!(
+            !with_none.iter().any(|a| a.ends_with(":ro")),
+            "a card with no references still got a read-only mount: {with_none:?}"
+        );
     }
 
     /// The one mount with no host path must stay the one mount with no host

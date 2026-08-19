@@ -1467,6 +1467,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 seed,
                 ports,
                 unsatisfied_ports,
+                references,
             } => {
                 // The cordon is enforced HERE, not only where work is placed
                 // (MAIN-505 AC-2). The control plane's view of it is a push old,
@@ -1511,6 +1512,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                             seed,
                             ports,
                             unsatisfied_ports,
+                            references,
                         },
                     );
                 });

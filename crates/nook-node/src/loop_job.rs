@@ -80,6 +80,13 @@ pub struct LoopJob {
     /// `NOOK_PORTS_UNSATISFIED` — the same name a session gets (MAIN-377), so a
     /// consumer telling "not leased" from "not under nook" reads one variable.
     pub unsatisfied_ports: Vec<String>,
+    /// The workspaces the run's card names with `@slug` (MAIN-632), each with
+    /// its checkout path on THIS node where the control plane found one.
+    ///
+    /// Mounted READ-ONLY (AC-5) and named in the brief (AC-7). A reference with
+    /// no path is a repo this machine does not hold: nothing is mounted and the
+    /// brief says so, because a reference is not a placement constraint (NG-2).
+    pub references: Vec<nook_types::WorkspaceRef>,
 }
 
 /// Worktree directory names of jobs running on this node right now, so
@@ -1435,6 +1442,93 @@ fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// The card's `@slug` references as this MACHINE can honour them (MAIN-632).
+///
+/// The path the control plane sent comes from a `node_workspaces` row, which
+/// records what this node last reported rather than what is on its disk now. A
+/// path that has since gone must not reach `docker run`: Docker CREATES a
+/// missing bind source, as root, on the owner's own machine — so a reference
+/// whose checkout is not there is downgraded to unavailable here, and the brief
+/// says so (AC-8) instead of the agent finding an empty directory.
+fn resolvable_references(mut refs: Vec<nook_types::WorkspaceRef>) -> Vec<nook_types::WorkspaceRef> {
+    for r in &mut refs {
+        if !r.path.as_deref().is_some_and(|p| Path::new(p).is_dir()) {
+            r.path = None;
+        }
+    }
+    refs
+}
+
+/// What the agent is TOLD it has (MAIN-632 AC-7/AC-8) — one line, appended to
+/// the opening turn, because a run that is handed a repo and not told about it
+/// will never look.
+///
+/// Two sentences, and the second is not an afterthought: a reference the
+/// executor holds no checkout of is the ordinary case on a fleet where a
+/// workspace lives on some machines and not others, and an agent that is told
+/// only about what it got would read the silence as "the reference did not
+/// resolve" and go on guessing.
+///
+/// Empty when the card names nothing, which is nearly every card.
+fn references_brief(refs: &[nook_types::WorkspaceRef]) -> String {
+    let (here, absent): (Vec<_>, Vec<_>) = refs.iter().partition(|r| r.path.is_some());
+    let mut out = String::new();
+    if !here.is_empty() {
+        let list: Vec<String> = here
+            .iter()
+            .map(|r| format!("@{} at {}", r.slug, r.path.as_deref().unwrap_or_default()))
+            .collect();
+        out.push_str(&format!(
+            "This card references other repositories, checked out for you inside this \
+             container and mounted READ-ONLY — read them for context, never write to them: {}.",
+            list.join("; ")
+        ));
+    }
+    if !absent.is_empty() {
+        let list: Vec<String> = absent
+            .iter()
+            .map(|r| match r.git_remote_url.as_deref() {
+                Some(url) => format!("@{} ({url})", r.slug),
+                None => format!("@{}", r.slug),
+            })
+            .collect();
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&format!(
+            "It also references {}, which this executor holds no checkout of — \
+             they are not available to read on this run.",
+            list.join("; ")
+        ));
+    }
+    out
+}
+
+/// The opening turn: the skill's slash command, the human's seed, and what the
+/// run was given to read.
+///
+/// Pure so the whole brief is a string a test can assert (AC-7), and shared by
+/// both execution paths so the streaming agent and a tmux one cannot come to be
+/// told different things about the same run.
+fn opening_line(
+    skill: &str,
+    target: &str,
+    seed: Option<&str>,
+    references: &[nook_types::WorkspaceRef],
+) -> String {
+    let mut line = format!("/{skill} {target}");
+    if let Some(s) = seed.filter(|s| !s.trim().is_empty()) {
+        line.push(' ');
+        line.push_str(s);
+    }
+    let refs = references_brief(references);
+    if !refs.is_empty() {
+        line.push(' ');
+        line.push_str(&refs);
+    }
+    line
+}
+
 /// Deliver a human's steering message into a running job's session (MAIN-231):
 /// type it at the live agent, exactly as the skill command was typed. The tmux
 /// name is derived from the job id, so no cross-thread bookkeeping is needed —
@@ -1662,9 +1756,14 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
         nook_token,
         ports,
         unsatisfied_ports,
+        references,
     } = job;
     // Which forge credential this run gets, decided ONCE (see `forge_token`).
     let gh_token = forge_token(&kind, gh_token);
+    // …and what this MACHINE can actually honour of the card's `@slug`
+    // references, decided once for the same reason: the mount list and the
+    // brief must not be able to disagree about which repo the run was given.
+    let references = resolvable_references(references);
     // A review run keeps ONE working directory per (workspace, PR), and a
     // build run one per (workspace, card) — the agent-session bucket is keyed
     // on it (see `warm_identity`). Everything else stays per-job.
@@ -1961,7 +2060,8 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
     // a failure: nothing about the card is wrong, so nothing of the card's
     // strike budget should be spent, and the dispatcher's own gate normally
     // stops the job being placed here at all.
-    let sandbox = match start_sandbox(&cfg, &kind, &job_id, &worktree, &cache, &ports) {
+    let sandbox = match start_sandbox(&cfg, &kind, &job_id, &worktree, &cache, &ports, &references)
+    {
         Ok(sb) => sb,
         Err(e) => {
             if keeps_tree {
@@ -2009,6 +2109,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
                 warm_session: warm.as_ref().map(|(_, sid)| sid.as_str()),
                 ports: &ports,
                 unsatisfied_ports: &unsatisfied_ports,
+                references: &references,
                 sandbox: sandbox.as_ref(),
             },
             AgentIdentity {
@@ -2026,6 +2127,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
             skill,
             &target_task_key,
             seed.as_deref(),
+            &references,
             workspace_id.as_deref(),
             sandbox.as_ref(),
         ),
@@ -2065,6 +2167,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
 /// Every other answer is `Ok(Some)` or an error. There is no fallback to a
 /// direct launch: an agent whose instructions are untrusted input either runs
 /// in the box or does not run.
+#[allow(clippy::too_many_arguments)]
 fn start_sandbox(
     cfg: &NodeConfig,
     kind: &str,
@@ -2072,6 +2175,7 @@ fn start_sandbox(
     worktree: &Path,
     cache: &Path,
     ports: &[nook_types::LeasedPort],
+    references: &[nook_types::WorkspaceRef],
 ) -> Result<Option<crate::sandbox::Sandbox>, String> {
     use crate::sandbox;
     match sandbox::probe() {
@@ -2113,6 +2217,13 @@ fn start_sandbox(
         gitdir: Some(cache.to_path_buf()),
         claude_dir: Some(claude_config_dir()).filter(|d| d.is_dir()),
         caches: sandbox_caches(worktree),
+        // Only what the CARD named, and only what this node holds — which is
+        // what keeps AC-6 true: an unreferenced sibling checkout is not in this
+        // list, so it is not in the container.
+        references: references
+            .iter()
+            .filter_map(|r| r.path.as_deref().map(PathBuf::from))
+            .collect(),
         ports: ports
             .iter()
             .filter_map(|p| u16::try_from(p.port).ok())
@@ -2220,6 +2331,10 @@ struct RunBrief<'a> {
     ports: &'a [nook_types::LeasedPort],
     /// Optional listeners that went unleased, under `NOOK_PORTS_UNSATISFIED`.
     unsatisfied_ports: &'a [String],
+    /// The workspaces the card names with `@slug` (MAIN-632), as this node can
+    /// honour them. Named in the opening turn so the agent knows what it was
+    /// handed and what it was not.
+    references: &'a [nook_types::WorkspaceRef],
     /// The container this run's agent is confined to (MAIN-611 AC-1). `None`
     /// only on a node the sandbox profile exempts (NG-5).
     sandbox: Option<&'a crate::sandbox::Sandbox>,
@@ -2242,6 +2357,7 @@ fn drive_streaming(
         warm_session,
         ports,
         unsatisfied_ports,
+        references,
         sandbox,
     } = brief;
     use crate::job_adapter;
@@ -2365,7 +2481,7 @@ fn drive_streaming(
     }
 
     let mut end = match run_agent_once(
-        out, job_id, worktree, &args, &env, skill, target, seed, sandbox,
+        out, job_id, worktree, &args, &env, skill, target, seed, references, sandbox,
     ) {
         Ok(e) => e,
         Err(e) => return (false, e),
@@ -2389,7 +2505,7 @@ fn drive_streaming(
         }
         let cold = job_adapter::claude_stream_args(warm_session.unwrap_or(job_id));
         end = match run_agent_once(
-            out, job_id, worktree, &cold, &env, skill, target, seed, sandbox,
+            out, job_id, worktree, &cold, &env, skill, target, seed, references, sandbox,
         ) {
             Ok(e) => e,
             Err(e) => return (false, e),
@@ -2444,6 +2560,7 @@ fn run_agent_once(
     skill: &str,
     target: &str,
     seed: Option<&str>,
+    references: &[nook_types::WorkspaceRef],
     sandbox: Option<&crate::sandbox::Sandbox>,
 ) -> Result<AgentEnd, String> {
     use crate::job_adapter::{self, Event, StreamingSession, TurnState};
@@ -2456,14 +2573,9 @@ fn run_agent_once(
         return Err("the agent produced no stdout".into());
     };
 
-    // The opening turn is the skill command — the same line the tmux path typed,
-    // now sent as structured input. A multi-line seed survives intact here,
-    // which the typed path could not manage.
-    let mut opening = format!("/{skill} {target}");
-    if let Some(s) = seed.filter(|s| !s.trim().is_empty()) {
-        opening.push(' ');
-        opening.push_str(s);
-    }
+    // The opening turn is the skill command — the same line the tmux path
+    // types, now sent as structured input.
+    let opening = opening_line(skill, target, seed, references);
     if let Err(e) = session.send(&opening) {
         session.kill();
         unregister_stream(job_id);
@@ -2610,6 +2722,7 @@ fn drive_session(
     skill: &str,
     target: &str,
     seed: Option<&str>,
+    references: &[nook_types::WorkspaceRef],
     workspace_id: Option<&str>,
     sandbox: Option<&crate::sandbox::Sandbox>,
 ) -> (bool, String) {
@@ -2726,11 +2839,10 @@ fn drive_session(
     // skill receives it as its argument — the session env carries the verbatim
     // text for anything that wants the original line breaks.
     std::thread::sleep(SKILL_STARTUP_DELAY);
-    let mut line = format!("/{skill} {target}");
-    if let Some(seed) = seed.map(one_line).filter(|s| !s.is_empty()) {
-        line.push(' ');
-        line.push_str(&seed);
-    }
+    // Flattened AFTER composing, not before: `send_keys -l` submits at the
+    // first newline, and the reference brief is composed from paths that could
+    // carry one.
+    let line = one_line(&opening_line(skill, target, seed, references));
     if let Err(e) = crate::tmux::send_keys(tmux_name, &line) {
         note(out, job_id, format!("could not send skill command: {e}"));
     }
@@ -2805,6 +2917,126 @@ fn exit_is_ok(status: Option<i32>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn reference(slug: &str, path: Option<&str>) -> nook_types::WorkspaceRef {
+        nook_types::WorkspaceRef {
+            workspace_id: nook_types::WorkspaceId::new(),
+            name: format!("The {slug}"),
+            slug: slug.into(),
+            git_remote_url: Some(format!("git@example.test:acme/{slug}.git")),
+            path: path.map(str::to_string),
+        }
+    }
+
+    /// MAIN-632 AC-7: the run is TOLD what it has — every referenced repo, the
+    /// path it is at inside the container, and that it is read-only. An agent
+    /// handed a checkout and not told about it will never look at it.
+    #[test]
+    fn the_brief_names_each_reference_its_path_and_that_it_is_read_only() {
+        let refs = vec![
+            reference("nook-web", Some("/checkouts/nook-web")),
+            reference("nook-api", Some("/checkouts/nook-api")),
+        ];
+        let line = opening_line("nook-build", "MAIN-42", None, &refs);
+
+        assert!(line.starts_with("/nook-build MAIN-42 "), "{line}");
+        for r in &refs {
+            let path = r.path.as_deref().unwrap();
+            assert!(line.contains(path), "the brief omits {path}: {line}");
+            assert!(
+                line.contains(&format!("@{}", r.slug)),
+                "the brief omits @{}: {line}",
+                r.slug
+            );
+        }
+        assert!(
+            line.contains("READ-ONLY"),
+            "the brief does not say the mounts are read-only, so the agent will \
+             discover it by failing to write: {line}"
+        );
+    }
+
+    /// MAIN-632 AC-8: a reference this executor holds no checkout of is named
+    /// as a gap, with the reason. Saying nothing would read as "the mention did
+    /// not resolve", and the agent would go back to guessing.
+    #[test]
+    fn the_brief_names_a_reference_the_executor_could_not_provide() {
+        let line = opening_line(
+            "nook-build",
+            "MAIN-42",
+            None,
+            &[
+                reference("nook-web", Some("/checkouts/nook-web")),
+                reference("nook-api", None),
+            ],
+        );
+        assert!(line.contains("/checkouts/nook-web"), "{line}");
+        assert!(line.contains("@nook-api"), "{line}");
+        assert!(
+            line.contains("no checkout"),
+            "the brief does not say WHY the reference is unavailable: {line}"
+        );
+        assert!(
+            !line.contains("@nook-api at"),
+            "an unavailable reference was given a path: {line}"
+        );
+    }
+
+    /// The seed still reaches the skill, and the reference brief follows it —
+    /// the human's own words are the argument, not an afterthought behind a
+    /// machine-generated sentence.
+    #[test]
+    fn the_seed_stays_the_skills_argument() {
+        let line = opening_line(
+            "nook-spec",
+            "MAIN-42",
+            Some("focus on the retry path"),
+            &[reference("nook-web", Some("/checkouts/nook-web"))],
+        );
+        assert!(
+            line.starts_with("/nook-spec MAIN-42 focus on the retry path "),
+            "{line}"
+        );
+    }
+
+    /// Nearly every card names nothing, and that card's opening turn must be
+    /// byte-for-byte what it was before this shipped.
+    #[test]
+    fn a_card_with_no_references_says_nothing_extra() {
+        assert_eq!(
+            opening_line("nook-spec", "MAIN-42", Some("do it"), &[]),
+            "/nook-spec MAIN-42 do it"
+        );
+        assert_eq!(
+            opening_line("nook-spec", "MAIN-42", None, &[]),
+            "/nook-spec MAIN-42"
+        );
+    }
+
+    /// MAIN-632 AC-8, the node's half: the control plane's path came from a
+    /// `node_workspaces` row, which records what this node last REPORTED. A
+    /// path that has since gone must not reach `docker run` — Docker creates a
+    /// missing bind source, as root, on the owner's own machine.
+    #[test]
+    fn a_reference_whose_checkout_has_gone_is_downgraded_here() {
+        let present = std::env::temp_dir().join(format!(
+            "nook-632-present-{}",
+            uuid::Uuid::now_v7().simple()
+        ));
+        std::fs::create_dir_all(&present).expect("present checkout");
+
+        let refs = resolvable_references(vec![
+            reference("here", present.to_str()),
+            reference("gone", Some("/definitely/not/a/path/on/this/machine")),
+        ]);
+
+        assert_eq!(refs[0].path.as_deref(), present.to_str());
+        assert_eq!(
+            refs[1].path, None,
+            "a path that is not on the disk stays out of the mount list"
+        );
+        let _ = std::fs::remove_dir_all(&present);
+    }
 
     /// MAIN-505 AC-5: what gates an agent update is the LOOP-job registry and
     /// nothing else. Terminal sessions are tmux's — they are never registered
