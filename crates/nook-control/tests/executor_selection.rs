@@ -582,6 +582,274 @@ async fn a_containerised_node_is_exempt_and_still_takes_work() {
     bed.teardown().await;
 }
 
+// ── MAIN-618: the free-disk floor ────────────────────────────────────────────
+
+/// What a node's heartbeat put in `nodes.resources`. The shortage sentence is
+/// composed on the MACHINE — the floor is stated only there — so a fixture
+/// says it the way a node would rather than deriving it.
+async fn report_disk(bed: &TestBed, id: NodeId, disks: serde_json::Value, shortage: Option<&str>) {
+    bed.db()
+        .exec(
+            "UPDATE nodes SET resources = $2 WHERE id = $1",
+            params![
+                id,
+                json!({
+                    "cpu_percent": 4.0,
+                    "mem_used": 1,
+                    "mem_total": 2,
+                    "load_avg1": 0.1,
+                    "active_sessions": 0,
+                    "disks": disks,
+                    "disk_shortage": shortage,
+                })
+            ],
+        )
+        .await
+        .expect("resources");
+}
+
+fn roomy() -> serde_json::Value {
+    json!([{ "label": "job cache, Docker data root", "mount_point": "/",
+             "free_bytes": 300_000_000_000u64, "total_bytes": 500_000_000_000u64 }])
+}
+
+fn nearly_full() -> serde_json::Value {
+    json!([{ "label": "job cache, Docker data root", "mount_point": "/",
+             "free_bytes": 2_000_000_000u64, "total_bytes": 500_000_000_000u64 }])
+}
+
+/// MAIN-618 AC-3/AC-5. A node below its own floor takes no loop work: the job
+/// WAITS under a typed reason carrying the node's words, and it is never
+/// `failed` — a full disk is the machine's problem, and spending the card's
+/// strike budget on it would blame the card. Recovery is the same sample
+/// arriving without the shortage; nothing is restarted and nothing is cleared.
+#[tokio::test]
+async fn a_node_below_its_disk_floor_takes_no_work_and_the_job_waits() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, tenant, _user, person, job) = setup(&bed).await;
+    let mine = node(
+        &bed,
+        tenant,
+        Some(person),
+        "online",
+        caps_declaring(&["spec"], false),
+    )
+    .await;
+    let detail = "below the 20.0 GiB free-disk floor: job cache (/) has 1.9 GiB free of 465.7 GiB";
+    report_disk(&bed, mine, nearly_full(), Some(detail)).await;
+
+    let placed = jobs::select_executor(&state, tenant, job)
+        .await
+        .expect("select");
+    assert_eq!(
+        placed.state, "queued",
+        "the run must wait, never fail: the card did nothing wrong"
+    );
+    assert_eq!(
+        placed.queued_reason_kind,
+        Some(QueuedReason::DiskUnavailable {
+            node_name: node_name(&bed, mine).await,
+            detail: detail.into(),
+        }),
+        "the gate is a value a client branches on, not a sentence it matches"
+    );
+    let reason = placed.queued_reason.clone().unwrap_or_default();
+    assert!(
+        reason.contains("job cache (/)"),
+        "the sentence names the filesystem, so the fix has a target: {reason}"
+    );
+
+    // Space comes back on the next heartbeat. Nothing else changes.
+    report_disk(&bed, mine, roomy(), None).await;
+    let placed = jobs::select_executor(&state, tenant, job)
+        .await
+        .expect("select again");
+    assert_eq!(
+        placed.state, "claimed",
+        "recovery is automatic: one healthy sample is the whole difference"
+    );
+    assert_eq!(placed.executor_node_id, Some(mine));
+
+    bed.teardown().await;
+}
+
+/// MAIN-618: an agent that predates the field is NOT cordoned by it. Silence
+/// here means "unknown", the opposite of the sandbox gate's reading of it —
+/// gating on it would take a whole fleet offline the day the control plane was
+/// upgraded, for a shortage no machine ever reported.
+#[tokio::test]
+async fn a_node_reporting_no_disk_sample_at_all_is_not_gated() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, tenant, _user, person, job) = setup(&bed).await;
+    let mine = node(
+        &bed,
+        tenant,
+        Some(person),
+        "online",
+        caps_declaring(&["spec"], false),
+    )
+    .await;
+    // Exactly what an older agent's heartbeat writes: the four fields it knows.
+    bed.db()
+        .exec(
+            "UPDATE nodes SET resources = $2 WHERE id = $1",
+            params![
+                mine,
+                json!({ "cpu_percent": 4.0, "mem_used": 1, "mem_total": 2,
+                        "load_avg1": 0.1, "active_sessions": 0 })
+            ],
+        )
+        .await
+        .expect("resources");
+
+    let placed = jobs::select_executor(&state, tenant, job)
+        .await
+        .expect("select");
+    assert_eq!(placed.state, "claimed");
+    assert_eq!(placed.executor_node_id, Some(mine));
+
+    bed.teardown().await;
+}
+
+/// MAIN-618 AC-4: the gate is KIND-BLIND, matching the sandbox gate. There is
+/// no kind that does well on a full disk — a spec run writes a checkout too —
+/// and a gate that held only builds would let the other four die on ENOSPC.
+#[tokio::test]
+async fn the_disk_floor_holds_back_every_kind() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("exec-disk").await;
+    let (user, person) = bed.user(tenant, "owner").await;
+    let ws = bed.workspace(tenant).await;
+    let state = bed.app_state().await;
+    let mine = node(&bed, tenant, Some(person), "online", build_caps(false)).await;
+    // BOTH role keys: build placement filters on `role/build` and review on
+    // `role/loop`, and a node missing either would be filtered out before the
+    // disk gate — which would pass this test for the wrong reason.
+    bed.db()
+        .exec(
+            r#"UPDATE nodes SET labels = '{"role/build": "true", "role/loop": "true"}'
+               WHERE id = $1"#,
+            params![mine],
+        )
+        .await
+        .expect("label");
+
+    // A control first, on a roomy node: this machine really is eligible for
+    // work of a kind the loop below will find queued. Without it, a node
+    // filtered out for some unrelated reason would pass the loop's assertions
+    // while proving nothing about the disk floor.
+    report_disk(&bed, mine, roomy(), None).await;
+    let control = JobId::new();
+    bed.db()
+        .exec(
+            "INSERT INTO loop_jobs (id, tenant_id, kind, workspace_id, requested_by, state)
+             VALUES ($1,$2,'review',$3,$4,'queued')",
+            params![control, tenant, ws, user],
+        )
+        .await
+        .expect("control job");
+    assert_eq!(
+        jobs::select_executor(&state, tenant, control)
+            .await
+            .expect("control")
+            .state,
+        "claimed",
+        "the fixture node takes loop work when it has room"
+    );
+
+    report_disk(
+        &bed,
+        mine,
+        nearly_full(),
+        Some("job cache (/) has 1.9 GiB free"),
+    )
+    .await;
+
+    for kind in ["spec", "decompose", "build", "epic-run", "review"] {
+        let job = JobId::new();
+        // A review run is about a repository and carries no card; every other
+        // kind is about one. The column CHECK allows exactly one of the two.
+        let (task, workspace) = if kind == "review" {
+            (None, Some(ws.0))
+        } else {
+            (Some(target_task(&bed, tenant, user).await.0), None)
+        };
+        bed.db()
+            .exec(
+                "INSERT INTO loop_jobs
+                    (id, tenant_id, kind, target_task_id, workspace_id, requested_by, state)
+                 VALUES ($1,$2,$3,$4,$5,$6,'queued')",
+                params![job, tenant, kind, task, workspace, user],
+            )
+            .await
+            .expect("job");
+
+        let placed = jobs::select_executor(&state, tenant, job)
+            .await
+            .expect("select");
+        assert_eq!(placed.state, "queued", "{kind} must wait, not run");
+        assert!(
+            matches!(
+                placed.queued_reason_kind,
+                Some(QueuedReason::DiskUnavailable { .. })
+            ),
+            "{kind} is held by the disk floor, not by something else: {:?}",
+            placed.queued_reason_kind
+        );
+    }
+
+    bed.teardown().await;
+}
+
+/// MAIN-618 AC-7: "waiting for space that never frees" must not become a silent
+/// forever-wait. A job queued on disk is reached by the starvation escalation
+/// exactly like any other queued job.
+#[tokio::test]
+async fn a_job_queued_on_disk_is_still_reachable_by_the_starvation_sweep() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, tenant, _user, person, job) = setup(&bed).await;
+    let mine = node(
+        &bed,
+        tenant,
+        Some(person),
+        "online",
+        caps_declaring(&["spec"], false),
+    )
+    .await;
+    report_disk(
+        &bed,
+        mine,
+        nearly_full(),
+        Some("job cache (/) has 1.9 GiB free"),
+    )
+    .await;
+
+    let placed = jobs::select_executor(&state, tenant, job)
+        .await
+        .expect("select");
+    assert_eq!(placed.state, "queued");
+
+    // `0` seconds: anything queued with a reason is past the threshold, which
+    // is what makes this about REACHABILITY rather than about the clock.
+    let ended = jobs::escalate_starved_queued(&state, tenant, 0)
+        .await
+        .expect("sweep");
+    assert_eq!(
+        ended, 1,
+        "the sweep reaches a disk-queued job like any other"
+    );
+
+    bed.teardown().await;
+}
+
 #[tokio::test]
 async fn a_node_at_capacity_is_skipped_and_the_job_waits() {
     let Some(mut bed) = TestBed::new().await else {

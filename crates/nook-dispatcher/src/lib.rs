@@ -159,6 +159,7 @@ mod tests {
             mem_total: total,
             load_avg1: load,
             active_sessions: sessions,
+            ..Default::default()
         }
     }
 

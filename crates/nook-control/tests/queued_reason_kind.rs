@@ -97,6 +97,10 @@ fn every_variant() -> Vec<QueuedReason> {
             node_name: "azul".into(),
             paused: 2,
         },
+        QueuedReason::DiskUnavailable {
+            node_name: "azul".into(),
+            detail: "below the 20.0 GiB free-disk floor: job cache (/) has 1.9 GiB free".into(),
+        },
     ]
 }
 

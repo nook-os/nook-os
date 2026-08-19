@@ -694,6 +694,39 @@ pub struct NodeResources {
     pub load_avg1: f64,
     /// NookOS-managed sessions currently alive on the node.
     pub active_sessions: u32,
+    /// The filesystems a loop job needs space on (MAIN-618). EMPTY means the
+    /// node said nothing — an agent predating the field — and a reader must
+    /// treat that as "unknown", never as "full": silently cordoning every
+    /// machine that has not been upgraded is the failure this note prevents.
+    #[serde(default)]
+    pub disks: Vec<DiskSample>,
+    /// One sentence when a sampled filesystem is below this machine's
+    /// `NOOK_MIN_FREE_DISK_GB` floor, naming which and how much is left.
+    ///
+    /// Composed by the NODE rather than derived centrally, because the floor is
+    /// a property of the machine and is stated only there (MAIN-618 NG-1) — the
+    /// control plane never learns the number, so it could not phrase this.
+    #[serde(default)]
+    pub disk_shortage: Option<String>,
+}
+
+/// One filesystem a node reports free space on (MAIN-618).
+///
+/// A node samples the two a loop job actually consumes: its job cache, where
+/// clones and worktrees land, and Docker's data root, where a build's images
+/// and volumes do. They are commonly the same filesystem, and it is then
+/// reported ONCE with both names — two rows of identical numbers read as twice
+/// the headroom.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct DiskSample {
+    /// What the node keeps here, for a human: `job cache`, `Docker data root`,
+    /// or both joined when one filesystem holds both.
+    pub label: String,
+    /// The mount point the numbers describe, which is what makes a shortage
+    /// actionable — `/` and `/var` are different problems with different fixes.
+    pub mount_point: String,
+    pub free_bytes: u64,
+    pub total_bytes: u64,
 }
 
 /// Status values: `online` | `offline`.
@@ -4659,6 +4692,21 @@ pub enum QueuedReason {
         /// The node that answered, so the fix has an address.
         node_name: String,
         /// What that node said is missing.
+        detail: String,
+    },
+    /// Every eligible node is below its own free-disk floor (MAIN-618), so a
+    /// run placed there would die on ENOSPC part-built — which reads as a
+    /// broken card rather than a full machine.
+    ///
+    /// Queued rather than failed, for [`Self::SandboxUnavailable`]'s reason and
+    /// with more force: disk frees itself as runs conclude and the sweep runs,
+    /// so the wait is usually minutes, and failing would have spent a strike on
+    /// a machine's housekeeping.
+    DiskUnavailable {
+        /// The node that is short, so the fix has an address.
+        node_name: String,
+        /// Which filesystem and how much is left, in the node's own words —
+        /// the floor is stated on the machine, so only it can say this.
         detail: String,
     },
     /// The chosen node refused this kind at the claim (MAIN-142): a shared

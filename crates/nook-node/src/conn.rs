@@ -72,10 +72,15 @@ pub async fn run(cfg: NodeConfig) -> Result<()> {
     // protect. The hatch is checked once here and announced on every start.
     let insecure = crate::config::check_server_security(&cfg.server, false)?;
     crate::config::warn_if_insecure(insecure, &cfg.server);
+    // Read here for that check's reason (MAIN-618): a floor nobody can parse is
+    // a misconfiguration, and it must stop the agent ONCE, before it registers.
+    // Resolved inside the loop below it would fail after every registration
+    // instead — a node that reads as online and never heartbeats.
+    let min_free_disk = crate::resources::min_free_disk_bytes().map_err(|e| anyhow::anyhow!(e))?;
 
     let mut backoff_secs: u64 = 1;
     loop {
-        match connect_once(&cfg).await {
+        match connect_once(&cfg, min_free_disk).await {
             Ok(()) => {
                 tracing::info!("connection closed — reconnecting");
                 backoff_secs = 1;
@@ -240,7 +245,9 @@ async fn next_outbound(
 }
 
 /// One connection lifetime: register, resync, pump until the socket closes.
-pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
+///
+/// `min_free_disk` is resolved by the caller, once — see [`run`].
+pub async fn connect_once(cfg: &NodeConfig, min_free_disk: u64) -> Result<()> {
     let mut request = ws_url(cfg.agent_endpoint())
         .into_client_request()
         .context("bad server URL")?;
@@ -477,7 +484,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
     let hb_tx = ctl_tx.clone();
     let heartbeat = tokio::spawn(async move {
         let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
-        let mut sampler = crate::resources::Sampler::new();
+        let mut sampler = crate::resources::Sampler::new(min_free_disk);
         loop {
             interval.tick().await;
             let load = serde_json::to_value(sampler.sample()).unwrap_or_default();

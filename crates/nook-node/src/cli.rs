@@ -1266,6 +1266,10 @@ fn columns(resource: &str, first: &Value) -> Vec<&'static str> {
             // loop work at all, and every other column on this line still reads
             // as a healthy idle machine.
             "sandbox",
+            // And since MAIN-618 there is one more: a node below its free-disk
+            // floor claims nothing either. "Is azul out of space" was a
+            // question with no answer short of a shell on azul.
+            "disk",
             "capabilities.runtimes",
             "last_seen_at",
         ],
@@ -1342,6 +1346,11 @@ fn cell(row: &Value, key: &str) -> String {
     if key == "sandbox" {
         return sandbox_cell(row.pointer("/capabilities/sandbox"));
     }
+    // Nor is `disk`: it is the tightest of the filesystems the node samples,
+    // plus whether that has taken it out of the running (MAIN-618 AC-6).
+    if key == "disk" {
+        return disk_cell(row.get("resources"));
+    }
     let mut node = row;
     for part in key.split('.') {
         match node.get(part) {
@@ -1410,6 +1419,38 @@ fn sandbox_cell(v: Option<&Value>) -> String {
         Some("unavailable") => "NO".into(),
         _ => "-".into(),
     }
+}
+
+/// A node's free disk as one narrow cell (MAIN-618 AC-6): the TIGHTEST of the
+/// filesystems it samples, and `LOW` when that has put the node below its own
+/// floor and stopped it claiming loop work.
+///
+/// The tightest rather than each of them, for `cordon_cell`'s reason — this
+/// column has to stay narrow, and the number that decides anything is the
+/// smallest one. Which filesystem, and how much of it, is one `--json` away.
+/// `-` is a node whose agent predates the field, which the dispatcher reads as
+/// "unknown" and never as "full".
+fn disk_cell(v: Option<&Value>) -> String {
+    let disks = match v.and_then(|r| r.get("disks")).and_then(Value::as_array) {
+        Some(d) if !d.is_empty() => d,
+        _ => return "-".into(),
+    };
+    let Some(free) = disks
+        .iter()
+        .filter_map(|d| d.get("free_bytes").and_then(Value::as_u64))
+        .min()
+    else {
+        return "-".into();
+    };
+    let low = v
+        .and_then(|r| r.get("disk_shortage"))
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.trim().is_empty());
+    format!(
+        "{:.0}G{}",
+        free as f64 / 1024.0_f64.powi(3),
+        if low { " LOW" } else { "" }
+    )
 }
 
 /// A node's cordon as one narrow cell (MAIN-505): what it is waiting for and
@@ -4424,6 +4465,38 @@ mod tests {
         let both = super::comment_body("ruled, and fix the resolver", true, true);
         assert_eq!(both["clear_escalation"], serde_json::json!(true));
         assert_eq!(both["request_changes"], serde_json::json!(true));
+    }
+
+    /// MAIN-618 AC-6. The three states this column has to tell apart: a node
+    /// with room, a node the floor has stopped, and a node that has not said.
+    #[test]
+    fn the_disk_column_says_which_node_is_held_back() {
+        const GB: u64 = 1024 * 1024 * 1024;
+        let node = |disks: serde_json::Value, shortage: serde_json::Value| serde_json::json!({ "resources": { "disks": disks, "disk_shortage": shortage } });
+        let roomy = node(
+            serde_json::json!([{ "label": "job cache", "mount_point": "/",
+                                 "free_bytes": 120 * GB, "total_bytes": 500 * GB }]),
+            serde_json::Value::Null,
+        );
+        assert_eq!(super::cell(&roomy, "disk"), "120G");
+
+        // The TIGHTEST filesystem is the one shown: the roomy one cannot lift
+        // a gate the other imposed.
+        let short = node(
+            serde_json::json!([
+                { "label": "job cache", "mount_point": "/home",
+                  "free_bytes": 200 * GB, "total_bytes": 500 * GB },
+                { "label": "Docker data root", "mount_point": "/var/lib/docker",
+                  "free_bytes": 3 * GB, "total_bytes": 100 * GB },
+            ]),
+            serde_json::json!("below the 20.0 GiB free-disk floor: …"),
+        );
+        assert_eq!(super::cell(&short, "disk"), "3G LOW");
+
+        // An agent that predates the field, which is NOT the same as a full
+        // one — the dispatcher does not gate it, and this must not imply it.
+        let silent = serde_json::json!({ "resources": { "cpu_percent": 4.0 } });
+        assert_eq!(super::cell(&silent, "disk"), "-");
     }
 
     #[test]

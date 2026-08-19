@@ -2112,6 +2112,7 @@ pub async fn select_executor(
     let mut paused_holding: Option<(String, u32)> = None;
     let mut cordoned: Vec<String> = Vec::new();
     let mut unsandboxed: Option<(String, String)> = None;
+    let mut low_on_disk: Option<(String, String)> = None;
     for node in candidates {
         // The capacity IN FORCE, not merely what the node advertises (MAIN-508):
         // read from the stored row on every attempt, so an operator's new number
@@ -2145,6 +2146,23 @@ pub async fn select_executor(
                 .map(|r| r.name.clone())
                 .unwrap_or_else(|| node.0.to_string());
             unsandboxed.get_or_insert((name, detail));
+            continue;
+        }
+        // A machine with no room left (MAIN-618). Read off `resources` rather
+        // than `capabilities` because free disk is a LIVE number the heartbeat
+        // carries — which is also what makes recovery automatic (AC-5): the
+        // next sample clears the shortage and this poll simply stops skipping
+        // the node, with nothing to restart and nothing to clear by hand.
+        //
+        // Kind-blind, exactly as the sandbox gate above is (AC-4): a spec run
+        // writes a checkout too, and there is no kind that does well on a full
+        // disk. Queued and never failed, for that gate's reason.
+        if let Some(detail) = row.as_ref().and_then(|r| disk_refusal(&r.resources)) {
+            let name = row
+                .as_ref()
+                .map(|r| r.name.clone())
+                .unwrap_or_else(|| node.0.to_string());
+            low_on_disk.get_or_insert((name, detail));
             continue;
         }
         let cap = match &row {
@@ -2243,6 +2261,20 @@ pub async fn select_executor(
                      container, so it will not run one — {detail}"
                 ),
                 Some(QueuedReason::SandboxUnavailable {
+                    node_name: name,
+                    detail,
+                }),
+            )
+        } else if let Some((name, detail)) = low_on_disk {
+            // Named for the reason the arm above is: the machine is eligible,
+            // online and idle, and every other signal about it reads healthy.
+            // The sentence carries the node's own wording, which names the
+            // filesystem — so the fix has both an address and a target.
+            (
+                format!(
+                    "no eligible executor: {name} is too low on disk to take loop work — {detail}"
+                ),
+                Some(QueuedReason::DiskUnavailable {
                     node_name: name,
                     detail,
                 }),
@@ -2536,6 +2568,28 @@ fn sandbox_refusal(capabilities: &serde_json::Value) -> Option<String> {
         // not a report that the node confines anything.
         Err(e) => Some(format!("its sandbox report could not be read ({e})")),
     }
+}
+
+/// Why this node is too full to take loop work (MAIN-618), or `None` if it has
+/// room — the shortage exactly as the node phrased it.
+///
+/// Silence means UNKNOWN here, and is waved through — the opposite of
+/// [`sandbox_refusal`]'s reading of it, deliberately. An agent that predates
+/// this field has said nothing about its disk, and gating on that would cordon
+/// every machine in a fleet the moment the control plane was upgraded, for a
+/// shortage none of them reported. The sandbox gate can fail closed because
+/// there the silence IS the hazard: an unconfined agent runs on the owner's home
+/// directory. A full disk merely fails the run it fills up, loudly, the way it
+/// did before this ticket.
+fn disk_refusal(resources: &serde_json::Value) -> Option<String> {
+    // One key, for `sandbox_refusal`'s reason: `resources` is whatever the
+    // reporting agent's `NodeResources` serialized to, and a whole-struct
+    // decode would turn an unrelated field's drift into "this node is full".
+    resources
+        .get("disk_shortage")
+        .and_then(|v| v.as_str())
+        .filter(|d| !d.trim().is_empty())
+        .map(str::to_string)
 }
 
 /// Capacity assumed for a node that reports none — an agent old enough to
