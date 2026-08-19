@@ -188,6 +188,22 @@ async fn serve(db: nook_db::DbPool, cfg: Config) -> Result<()> {
     let instance = state.registry.instance_id();
     tracing::info!(%instance, "control plane instance");
 
+    // Give every boardless workspace a board (MAIN-637 AC-4). Awaited rather
+    // than spawned: it is two reads and, on every boot after the first, no
+    // writes — and a request that arrives before it has run would see a
+    // workspace with nowhere to file a card. A failure is not fatal; the
+    // control plane serves fine without it and the next boot tries again.
+    match nook_control::services::boards::backfill(&state).await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(
+            created = n,
+            "board backfill created missing workspace boards"
+        ),
+        Err(e) => {
+            tracing::error!(error = %e, "board backfill failed — workspaces may be boardless")
+        }
+    }
+
     // Drain queued loop jobs onto eligible executors (MAIN-160). Every replica
     // runs it; the queue's atomic receive keeps them from double-claiming.
     nook_control::services::job_dispatch::start(state.clone());

@@ -5806,11 +5806,26 @@ export interface components {
          *     when explicitly asked for (and if they stay, discovery re-adds them).
          */
         DeleteWorkspaceRequest: {
+            /**
+             * @description Acknowledge that the workspace's board, its columns and every card on it
+             *     go too (MAIN-637 AC-7).
+             *
+             *     Cards are not files: nothing rediscovers them and no reaper brings them
+             *     back, so a workspace that owns a board refuses to delete until the
+             *     caller has been told the board key and the card count and says yes to
+             *     that number. Detached boards and workspaces with no board are unaffected.
+             */
+            delete_board?: boolean;
             /** @description Also delete the checkout directories on every online node. */
             delete_files?: boolean;
         };
         /** @description What a workspace delete actually did. */
         DeleteWorkspaceResponse: {
+            /**
+             * @description The key of the board that went with the workspace, when one did
+             *     (MAIN-637 AC-7).
+             */
+            board_deleted?: string | null;
             /**
              * @description Checkouts left behind (node offline, or removal failed) — these will
              *     be rediscovered.
@@ -5820,6 +5835,11 @@ export interface components {
             checkouts_removed: number;
             deleted: boolean;
             message: string;
+            /**
+             * Format: int64
+             * @description How many cards that board took with it.
+             */
+            tasks_deleted?: number;
         };
         /**
          * @description One account you can sign in as, in dev mode only.
@@ -9587,6 +9607,15 @@ export interface components {
              */
             key?: string | null;
             name: string;
+            /**
+             * @description Which workspace this board belongs to (MAIN-637). Absent leaves it
+             *     alone, `null` detaches it, an id attaches it — the three cases
+             *     `Option<Option<_>>` exists for.
+             *
+             *     This is how an existing board is adopted into a workspace, and it never
+             *     touches the key: `MAIN` keeps every `MAIN-N` across the move.
+             */
+            workspace_id?: string | null;
         };
         UpdateChannelRequest: {
             /** @description Omit to keep the stored secrets untouched. */

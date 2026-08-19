@@ -3760,6 +3760,15 @@ pub struct UpdateBoardRequest {
     /// config) before it is stored.
     #[serde(default)]
     pub automation: Option<serde_json::Value>,
+    /// Which workspace this board belongs to (MAIN-637). Absent leaves it
+    /// alone, `null` detaches it, an id attaches it — the three cases
+    /// `Option<Option<_>>` exists for.
+    ///
+    /// This is how an existing board is adopted into a workspace, and it never
+    /// touches the key: `MAIN` keeps every `MAIN-N` across the move.
+    #[serde(default, deserialize_with = "double_option")]
+    #[schema(value_type = Option<String>, nullable)]
+    pub workspace_id: Option<Option<WorkspaceId>>,
 }
 
 #[derive(Debug, Clone, Deserialize, ToSchema)]
@@ -4468,6 +4477,15 @@ pub struct DeleteWorkspaceRequest {
     /// Also delete the checkout directories on every online node.
     #[serde(default)]
     pub delete_files: bool,
+    /// Acknowledge that the workspace's board, its columns and every card on it
+    /// go too (MAIN-637 AC-7).
+    ///
+    /// Cards are not files: nothing rediscovers them and no reaper brings them
+    /// back, so a workspace that owns a board refuses to delete until the
+    /// caller has been told the board key and the card count and says yes to
+    /// that number. Detached boards and workspaces with no board are unaffected.
+    #[serde(default)]
+    pub delete_board: bool,
 }
 
 /// What a workspace delete actually did.
@@ -4479,6 +4497,13 @@ pub struct DeleteWorkspaceResponse {
     /// Checkouts left behind (node offline, or removal failed) — these will
     /// be rediscovered.
     pub checkouts_remaining: usize,
+    /// The key of the board that went with the workspace, when one did
+    /// (MAIN-637 AC-7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board_deleted: Option<String>,
+    /// How many cards that board took with it.
+    #[serde(default)]
+    pub tasks_deleted: i64,
     pub message: String,
 }
 
