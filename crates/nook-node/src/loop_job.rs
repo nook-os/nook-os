@@ -341,7 +341,7 @@ fn existing_mirror_in(
             cache.display()
         ));
     }
-    fetch_mirror(&cache, ssh_key, own_worktree)?;
+    adopt_mirror(&cache, repo_url, ssh_key, own_worktree)?;
     Ok(cache)
 }
 
@@ -355,7 +355,7 @@ fn ensure_mirror_in(
     if cache.join("HEAD").exists() {
         // The fetch needs the key too: a mirror that cloned once still pulls
         // from the same private remote on every later job.
-        fetch_mirror(&cache, ssh_key, own_worktree)?;
+        adopt_mirror(&cache, repo_url, ssh_key, own_worktree)?;
     } else {
         std::fs::create_dir_all(base)
             .map_err(|e| format!("cannot create {}: {e}", base.display()))?;
@@ -366,6 +366,118 @@ fn ensure_mirror_in(
         )?;
     }
     Ok(cache)
+}
+
+/// Take over an existing mirror for THIS job: point it at the URL the job
+/// carries, then fetch (MAIN-629).
+///
+/// A mirror pinned its remote when it was created and nothing ever reconciled
+/// it, so every later run fetched through the mirror's stored URL rather than
+/// the workspace's current one. A workspace moved from HTTPS to SSH — the
+/// ordinary way to start using a deploy key — kept fetching over HTTPS on every
+/// node already holding a mirror; the delivered key is irrelevant to an HTTPS
+/// remote, so git asked for a username, found no tty, and the run died reading
+/// like a credential fault. It is invisible on a public repo, whose HTTPS fetch
+/// succeeds anonymously, and fatal on a private one.
+fn adopt_mirror(
+    cache: &Path,
+    repo_url: &str,
+    ssh_key: Option<&str>,
+    own_worktree: &Path,
+) -> Result<(), String> {
+    reconcile_mirror_remote(cache, repo_url)?;
+    fetch_mirror(cache, ssh_key, own_worktree)
+        .map_err(|e| explain_fetch_failure(cache, repo_url, e))
+}
+
+/// Set the mirror's `origin` to the job's URL when the two name different
+/// remotes. Never a re-clone: the objects a mirror holds are this repo's
+/// objects whichever URL reached them.
+fn reconcile_mirror_remote(cache: &Path, repo_url: &str) -> Result<(), String> {
+    let current = crate::gitops::run_git(&["remote", "get-url", "origin"], Some(cache), None)?;
+    if normalized_remote(&current) == normalized_remote(repo_url) {
+        return Ok(());
+    }
+    crate::gitops::run_git(
+        &["remote", "set-url", "origin", repo_url],
+        Some(cache),
+        None,
+    )?;
+    tracing::info!(
+        mirror = %cache.display(),
+        from = %current,
+        to = %repo_url,
+        "repointed a clone-cache mirror at the workspace's current remote"
+    );
+    Ok(())
+}
+
+/// A remote URL reduced to the place it names, so the spellings of one remote
+/// compare equal and only a real move rewrites the mirror's config.
+///
+/// Cosmetic here means: a trailing slash or `.git`, the host's letter case, and
+/// scp-style `git@host:owner/repo` against its `ssh://git@host/owner/repo`
+/// form. A change of SCHEME is not cosmetic — HTTPS and SSH authenticate
+/// differently, and that difference is the whole reason this reconciles. A
+/// string with no scheme and no scp colon is a local path, which is compared
+/// as written.
+fn normalized_remote(url: &str) -> String {
+    let trimmed = url.trim().trim_end_matches('/');
+    let (scheme, rest) = match trimmed.split_once("://") {
+        Some((scheme, rest)) => (scheme.to_ascii_lowercase(), rest.to_string()),
+        None => match scp_style(trimmed) {
+            Some((authority, path)) => ("ssh".to_string(), format!("{authority}/{path}")),
+            None => return strip_git_suffix(trimmed).to_string(),
+        },
+    };
+    let rest = rest.trim_end_matches('/');
+    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+    // A hostname is case-insensitive; a repository path is not, so only the
+    // host half is folded.
+    let authority = match authority.split_once('@') {
+        Some((user, host)) => format!("{user}@{}", host.to_ascii_lowercase()),
+        None => authority.to_ascii_lowercase(),
+    };
+    format!(
+        "{scheme}://{authority}/{}",
+        strip_git_suffix(path.trim_end_matches('/'))
+    )
+}
+
+/// git's own rule for the scp-style remote: a colon before any slash.
+fn scp_style(url: &str) -> Option<(&str, &str)> {
+    let (authority, path) = url.split_once(':')?;
+    (!authority.is_empty() && !authority.contains('/')).then_some((authority, path))
+}
+
+fn strip_git_suffix(path: &str) -> &str {
+    path.strip_suffix(".git").unwrap_or(path)
+}
+
+/// Name both remotes when a fetch dies for want of a credential (MAIN-629
+/// AC-4). git's own message says only what it could not read; which remote it
+/// was reading, and which one this job expected, is what tells a stale mirror
+/// apart from a genuinely missing credential — and when the two agree, that is
+/// the reader learning the URL is not the fault.
+fn explain_fetch_failure(cache: &Path, repo_url: &str, err: String) -> String {
+    if !is_credential_failure(&err) {
+        return err;
+    }
+    let mirror = crate::gitops::run_git(&["remote", "get-url", "origin"], Some(cache), None)
+        .unwrap_or_else(|_| "<unreadable>".to_string());
+    format!(
+        "{err} — the mirror at {} fetches origin {mirror}; this job carries {repo_url}",
+        cache.display()
+    )
+}
+
+fn is_credential_failure(err: &str) -> bool {
+    let lower = err.to_lowercase();
+    lower.contains("could not read username")
+        || lower.contains("could not read password")
+        || lower.contains("authentication failed")
+        || lower.contains("permission denied")
+        || lower.contains("could not read from remote repository")
 }
 
 /// Fetch into the mirror, healing the one wedge a run may heal itself
@@ -4506,6 +4618,230 @@ mod tests {
             git_in(&cache, &["rev-parse", "refs/heads/main"]),
             git_in(&remote, &["rev-parse", "refs/heads/main"]),
             "the mirror caught up to the moved branch"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── MAIN-629: the mirror follows the workspace's remote ─────────────────
+
+    /// A workspace whose remote MOVED, network-free: two local repos of the
+    /// same `acme/api`, so both URLs slug to the one mirror directory exactly
+    /// as an HTTPS and an SSH spelling of one GitHub repo do. `old` carries a
+    /// `legacy` branch `new` has never heard of — the object that proves, later,
+    /// that the mirror was kept rather than re-cloned.
+    fn two_remotes_of_one_repo(tmp: &Path) -> (PathBuf, PathBuf, String) {
+        let old = tmp.join("old").join("acme").join("api");
+        scratch_remote(&old);
+        git_in(&old, &["checkout", "-q", "-b", "legacy"]);
+        std::fs::write(old.join("legacy.txt"), "only ever on the old remote\n").unwrap();
+        commit_all(&old, "a branch the new remote never had");
+        let legacy = git_in(&old, &["rev-parse", "HEAD"]);
+        git_in(&old, &["checkout", "-q", "main"]);
+
+        let new = tmp.join("new").join("acme").join("api");
+        git_in(
+            tmp,
+            &[
+                "clone",
+                "-q",
+                "--single-branch",
+                "--branch",
+                "main",
+                &old.to_string_lossy(),
+                &new.to_string_lossy(),
+            ],
+        );
+        std::fs::write(new.join("moved.txt"), "landed after the move\n").unwrap();
+        commit_all(&new, "work that only the new remote has");
+        (old, new, legacy)
+    }
+
+    /// AC-1 and AC-2: the run repoints the mirror at the URL the job carries and
+    /// fetches through it — without re-cloning, so the objects it already held
+    /// are still there.
+    #[test]
+    fn a_stale_mirror_is_repointed_at_the_url_the_job_carries() {
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let tmp =
+            std::env::temp_dir().join(format!("nook-629-move-{}", uuid::Uuid::now_v7().simple()));
+        let (old, new, legacy) = two_remotes_of_one_repo(&tmp);
+        let base = tmp.join("cache");
+        let own = tmp
+            .join("worktrees")
+            .join(build_dirname("ws-1", "MAIN-629"));
+
+        let cache = ensure_mirror_in(&base, &old.to_string_lossy(), None, &own).expect("mirror");
+        git_in(&cache, &["cat-file", "-e", &legacy]);
+        // A re-clone would build a new directory; this file could not survive it.
+        std::fs::write(cache.join("nook-same-mirror"), "").unwrap();
+
+        let again = ensure_mirror_in(&base, &new.to_string_lossy(), None, &own)
+            .expect("the moved remote must fetch, not die on the old URL");
+
+        assert_eq!(again, cache, "the same mirror serves both spellings");
+        assert_eq!(
+            git_in(&cache, &["remote", "get-url", "origin"]),
+            new.to_string_lossy(),
+            "AC-1: origin follows the job's URL"
+        );
+        assert!(
+            cache.join("nook-same-mirror").exists(),
+            "AC-2: the mirror was adopted, not re-cloned"
+        );
+        git_in(&cache, &["cat-file", "-e", &legacy]);
+        assert_eq!(
+            git_in(&cache, &["rev-parse", "refs/heads/main"]),
+            git_in(&new, &["rev-parse", "refs/heads/main"]),
+            "and the fetch went through the new remote"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// AC-1 in the shape prod actually wore: a mirror pinned to HTTPS while the
+    /// workspace moved to SSH for a deploy key. Reconciliation only, because the
+    /// fetch that follows is the part that needs a network and a credential.
+    #[test]
+    fn an_https_mirror_follows_the_workspace_to_ssh() {
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let tmp =
+            std::env::temp_dir().join(format!("nook-629-ssh-{}", uuid::Uuid::now_v7().simple()));
+        let cache = mirror_with_origin(&tmp, "https://github.com/acme/api.git");
+        reconcile_mirror_remote(&cache, "git@github.com:acme/api.git").expect("reconcile");
+        assert_eq!(
+            git_in(&cache, &["remote", "get-url", "origin"]),
+            "git@github.com:acme/api.git"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A bare repo standing in for a mirror pinned to `url`.
+    fn mirror_with_origin(tmp: &Path, url: &str) -> PathBuf {
+        let cache = tmp.join("acme__api.git");
+        std::fs::create_dir_all(&cache).unwrap();
+        git_in(&cache, &["init", "-q", "--bare"]);
+        git_in(&cache, &["remote", "add", "origin", url]);
+        cache
+    }
+
+    /// AC-3: a spelling change is not a move. Each pair would fetch from the
+    /// same place, so the mirror's config keeps the words it already had —
+    /// asserted on the stored URL, which a write would have replaced.
+    #[test]
+    fn an_equivalent_spelling_does_not_rewrite_the_mirror() {
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let equivalent = [
+            (
+                "https://github.com/acme/api.git",
+                "https://github.com/acme/api",
+            ),
+            (
+                "https://github.com/acme/api/",
+                "https://github.com/acme/api.git",
+            ),
+            (
+                "git@github.com:acme/api.git",
+                "ssh://git@github.com/acme/api",
+            ),
+            (
+                "https://GitHub.com/acme/api.git",
+                "https://github.com/acme/api.git",
+            ),
+            ("git@github.com:acme/api", "git@github.com:acme/api.git"),
+        ];
+        let tmp =
+            std::env::temp_dir().join(format!("nook-629-same-{}", uuid::Uuid::now_v7().simple()));
+        for (i, (pinned, carried)) in equivalent.iter().enumerate() {
+            let cache = mirror_with_origin(&tmp.join(i.to_string()), pinned);
+            reconcile_mirror_remote(&cache, carried).expect("reconcile");
+            assert_eq!(
+                git_in(&cache, &["remote", "get-url", "origin"]),
+                *pinned,
+                "{pinned} and {carried} are one remote — nothing should have been written"
+            );
+        }
+
+        // The boundary: a change of transport, of host or of repo IS a move.
+        for (a, b) in [
+            (
+                "https://github.com/acme/api.git",
+                "git@github.com:acme/api.git",
+            ),
+            ("git@github.com:acme/api.git", "git@gitlab.com:acme/api.git"),
+            ("git@github.com:acme/api.git", "git@github.com:acme/web.git"),
+            (
+                "https://github.com/acme/api.git",
+                "https://github.com/Acme/api.git",
+            ),
+        ] {
+            assert_ne!(normalized_remote(a), normalized_remote(b), "{a} vs {b}");
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// AC-4: git says only what it could not read. The run says which remote it
+    /// was reading and which one the job expected.
+    #[test]
+    fn a_credential_failure_names_both_remotes() {
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let tmp =
+            std::env::temp_dir().join(format!("nook-629-cred-{}", uuid::Uuid::now_v7().simple()));
+        let cache = mirror_with_origin(&tmp, "https://github.com/acme/api.git");
+        let git_said =
+            "fatal: could not read Username for 'https://github.com': No such device or address";
+
+        let explained =
+            explain_fetch_failure(&cache, "git@github.com:acme/api.git", git_said.to_string());
+        assert!(explained.contains(git_said), "git's own words survive");
+        assert!(
+            explained.contains("https://github.com/acme/api.git"),
+            "names the mirror's remote: {explained}"
+        );
+        assert!(
+            explained.contains("git@github.com:acme/api.git"),
+            "and the one the job carries: {explained}"
+        );
+
+        let unrelated = "fatal: not a git repository".to_string();
+        assert_eq!(
+            explain_fetch_failure(&cache, "git@github.com:acme/api.git", unrelated.clone()),
+            unrelated,
+            "a failure that is not about credentials is passed through untouched"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// AC-5: a review run never creates a mirror, but it adopts one — so it
+    /// reconciles the remote on the same path every other kind does.
+    #[test]
+    fn a_review_run_reconciles_the_mirror_it_may_not_create() {
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let tmp =
+            std::env::temp_dir().join(format!("nook-629-review-{}", uuid::Uuid::now_v7().simple()));
+        let (old, new, _) = two_remotes_of_one_repo(&tmp);
+        let base = tmp.join("cache");
+        let own = tmp.join("worktrees").join(review_dirname("ws-1", 7));
+        ensure_mirror_in(&base, &old.to_string_lossy(), None, &own).expect("mirror");
+
+        let cache = existing_mirror_in(&base, &new.to_string_lossy(), None, &own)
+            .expect("the review run adopts the mirror at the moved URL");
+        assert_eq!(
+            git_in(&cache, &["remote", "get-url", "origin"]),
+            new.to_string_lossy()
         );
         let _ = std::fs::remove_dir_all(&tmp);
     }
