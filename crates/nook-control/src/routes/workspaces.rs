@@ -626,64 +626,19 @@ pub async fn set_review_loop(
     }))
 }
 
-/// `GET /api/v1/workspaces/{id}/build-loop` — the ceiling on build runs for
-/// this repo (MAIN-461 AC-1), `/review-loop`'s twin. Reports the RAW column
-/// for the same reason: `null` is "nobody decided", and resolving it to 1
-/// would erase the distinction the CLI prints as "unset (default 1)".
+/// `GET /api/v1/workspaces/{id}/build-loop` — this repo's whole build loop
+/// (MAIN-641 AC-1): is the control plane firing runs for it by itself, where
+/// are they pinned, how many at once, and who said so.
+///
+/// One route because it is one concept. `concurrency` is the RAW column: `null`
+/// is "nobody decided", and resolving it to 1 here would erase the distinction
+/// the CLI prints as "unset (default 1)". The resolution lives on
+/// `/build-loop/status`, and only there.
 #[utoipa::path(get, path = "/api/v1/workspaces/{id}/build-loop",
     operation_id = "get_build_loop",
     params(("id" = String, Path,)),
-    responses((status = 200, body = BuildLoopDeclaration), (status = 404)))]
-pub async fn get_build_loop(
-    State(state): State<AppState>,
-    auth: AuthCtx,
-    Path(id): Path<WorkspaceId>,
-) -> ApiResult<Json<BuildLoopDeclaration>> {
-    let ws = state
-        .workspaces
-        .get(auth.tenant_id, id)
-        .await?
-        .ok_or(ApiError::NotFound)?;
-    Ok(Json(BuildLoopDeclaration {
-        max_replicas: ws.build_max_replicas,
-    }))
-}
-
-/// `PUT /api/v1/workspaces/{id}/build-loop` — set it, or clear it back to
-/// unset with `{"max_replicas": null}` (MAIN-461 AC-1).
-#[utoipa::path(put, path = "/api/v1/workspaces/{id}/build-loop",
-    operation_id = "set_build_loop",
-    params(("id" = String, Path,)),
-    request_body = SetBuildLoopRequest,
-    responses((status = 200, body = BuildLoopDeclaration), (status = 400), (status = 404)))]
-pub async fn set_build_loop(
-    State(state): State<AppState>,
-    auth: AuthCtx,
-    Path(id): Path<WorkspaceId>,
-    Json(req): Json<SetBuildLoopRequest>,
-) -> ApiResult<Json<BuildLoopDeclaration>> {
-    // A person declares desired state; a node credential is not a person — the
-    // same rule the review-loop PUT applies, for the same reason.
-    auth.require_user()?;
-    let max_replicas = parse_max_replicas(&req.max_replicas)?;
-    let ws = state
-        .workspaces
-        .set_build_max_replicas(auth.tenant_id, id, max_replicas)
-        .await?
-        .ok_or(ApiError::NotFound)?;
-    Ok(Json(BuildLoopDeclaration {
-        max_replicas: ws.build_max_replicas,
-    }))
-}
-
-/// `GET /api/v1/workspaces/{id}/build-loop-settings` — the per-workspace build
-/// loop switch (MAIN-385 AC-8): is the control plane firing runs for this repo
-/// by itself, where are they pinned, how many at once, and who said so.
-#[utoipa::path(get, path = "/api/v1/workspaces/{id}/build-loop-settings",
-    operation_id = "get_build_loop_settings",
-    params(("id" = String, Path,)),
     responses((status = 200, body = BuildLoopSettings), (status = 404)))]
-pub async fn get_build_loop_settings(
+pub async fn get_build_loop(
     State(state): State<AppState>,
     auth: AuthCtx,
     Path(id): Path<WorkspaceId>,
@@ -696,20 +651,22 @@ pub async fn get_build_loop_settings(
     settings_of(&state, auth.tenant_id, &ws).await.map(Json)
 }
 
-/// `PUT /api/v1/workspaces/{id}/build-loop-settings` — turn the loop on or
-/// off, pin or unpin a node, set the concurrency (MAIN-385 AC-8).
+/// `PATCH /api/v1/workspaces/{id}/build-loop` — turn the loop on or off, pin or
+/// unpin a node, set the ceiling (MAIN-641 AC-3).
 ///
-/// Every field is optional and an absent one leaves that setting alone, so
-/// `{"enabled": true}` is a complete request. Turning it ON records the CALLER
-/// as the identity auto-fired runs are requested by (AC-2) — which is why a
-/// node credential is refused here: a job requested by a machine resolves to
-/// no person, and no node would ever be eligible for it.
-#[utoipa::path(put, path = "/api/v1/workspaces/{id}/build-loop-settings",
-    operation_id = "set_build_loop_settings",
+/// PATCH rather than PUT because every field is optional and an absent one
+/// leaves that setting alone, so `{"enabled": true}` is a complete request —
+/// partial-update semantics on a replace verb is what this consolidation ends.
+/// Turning it ON records the CALLER as the identity auto-fired runs are
+/// requested by (MAIN-385 AC-2) — which is why a node credential is refused
+/// here: a job requested by a machine resolves to no person, and no node would
+/// ever be eligible for it.
+#[utoipa::path(patch, path = "/api/v1/workspaces/{id}/build-loop",
+    operation_id = "set_build_loop",
     params(("id" = String, Path,)),
     request_body = SetBuildLoopSettingsRequest,
     responses((status = 200, body = BuildLoopSettings), (status = 400), (status = 404)))]
-pub async fn set_build_loop_settings(
+pub async fn set_build_loop(
     State(state): State<AppState>,
     auth: AuthCtx,
     Path(id): Path<WorkspaceId>,
@@ -724,7 +681,7 @@ pub async fn set_build_loop_settings(
         .ok_or(ApiError::NotFound)?;
 
     // Read-modify-write: the request names only what it wants changed, and the
-    // repository stores the whole triple (see `set_build_loop`).
+    // repository stores the whole triple.
     //
     // The three states are ABSENT / null / value, and they are three because
     // unpinning has to be expressible: a caller who cannot clear a pin cannot
@@ -735,10 +692,20 @@ pub async fn set_build_loop_settings(
         Some(None) => None,
         Some(Some(ident)) => Some(resolve_pin(&state, auth.tenant_id, ident).await?),
     };
-    // The enabler is stamped whenever the switch is on — including a caller who
-    // changes a pin on a loop somebody else enabled, because they are the
-    // person now answerable for the runs it fires.
-    let enabled_by = if enabled {
+    // The enabler is stamped by a caller who touches the SWITCH or the PIN —
+    // including one changing a pin on a loop somebody else enabled, because
+    // they are the person now answerable for the runs it fires (MAIN-385 AC-2).
+    //
+    // A write that mentions NEITHER was never in that set, and since MAIN-641
+    // routed the ceiling through this handler it is a write two ordinary
+    // callers make: `nook builds scale` and Mission Control's ceiling editor.
+    // Re-stamping there hands the loop to whoever last typed a number —
+    // `auto_fire_identity` feeds this column to `converge_builds` as
+    // `requested_by`, and `select_executor` scopes eligibility to nodes that
+    // identity OWNS, so a member with no machines silently strands every
+    // subsequent run at "no eligible executor" while the switch still reads on.
+    let touches_the_switch = req.enabled.is_some() || req.node.is_some();
+    let enabled_by = if enabled && touches_the_switch {
         Some(actor)
     } else {
         ws.build_loop_enabled_by
@@ -778,8 +745,9 @@ pub async fn set_build_loop_settings(
     settings_of(&state, auth.tenant_id, &ws).await.map(Json)
 }
 
-/// The response both halves answer with. The pin's NAME is joined here rather
-/// than by the caller, so a terminal can print "pinned to azul" from one read.
+/// The response the read and the write both answer with. The pin's NAME is
+/// joined here rather than by the caller, so a terminal can print "pinned to
+/// azul" from one read.
 async fn settings_of(
     state: &AppState,
     tenant: TenantId,
@@ -793,9 +761,11 @@ async fn settings_of(
         enabled: ws.build_loop_enabled,
         node_id: ws.build_loop_node_id,
         node_name,
-        // `converge_builds`' own reading, so the number reported is the number
-        // acted on: unset is one, and 0 is this repo's kill switch.
-        concurrency: ws.build_max_replicas.unwrap_or(1).max(0) as u32,
+        // The DECLARATION, unresolved: `null` is "nobody decided" and `0` is
+        // this repo's kill switch, and a reader that cannot tell them apart
+        // cannot say which of the two a person chose. `/build-loop/status`
+        // resolves it, and is the only thing that does.
+        concurrency: ws.build_max_replicas,
         enabled_by: ws.build_loop_enabled_by,
     })
 }
@@ -819,9 +789,9 @@ async fn resolve_pin(state: &AppState, tenant: TenantId, ident: &str) -> ApiResu
         .ok_or_else(|| ApiError::BadRequest(format!("no node named {ident:?} in this tenant")))
 }
 
-/// `GET /api/v1/workspaces/{id}/build-loop-status` — desired versus
-/// DELIVERABLE for the build loop (MAIN-495 AC-1), `/review-loop-status`'s
-/// twin.
+/// `GET /api/v1/workspaces/{id}/build-loop/status` — desired versus
+/// DELIVERABLE for the build loop (MAIN-495 AC-1), a sub-resource of the
+/// declaration it is about (MAIN-641 AC-4).
 ///
 /// The one it cannot borrow is the planner. Reviews resolve a desired number
 /// through the reconciler's `plan_now`; builds have no such thing — what is
@@ -831,10 +801,10 @@ async fn resolve_pin(state: &AppState, tenant: TenantId, ident: &str) -> ApiResu
 /// they own at all: a ceiling of three against one node's two slots changes
 /// nothing observable, and the third run simply queues forever.
 ///
-/// Advisory, never a gate (AC-5). `PUT /build-loop` still takes any valid
+/// Advisory, never a gate (AC-5). `PATCH /build-loop` still takes any valid
 /// number, because fleet capacity changes without warning and a refusal
 /// correct at write time is wrong an hour later.
-#[utoipa::path(get, path = "/api/v1/workspaces/{id}/build-loop-status",
+#[utoipa::path(get, path = "/api/v1/workspaces/{id}/build-loop/status",
     operation_id = "get_build_loop_status",
     params(("id" = String, Path,)),
     responses((status = 200, body = BuildLoopStatus), (status = 404)))]
@@ -851,7 +821,8 @@ pub async fn build_loop_status(
 
     // `converge_builds`' own reading of the column, so the ceiling reported is
     // the ceiling acted on: unset is the default of one, and an explicit 0 is
-    // the repo's kill switch.
+    // the repo's kill switch. The one place on this surface the declaration is
+    // resolved (MAIN-641 AC-4) — the config route reports it raw.
     let desired = ws.build_max_replicas.unwrap_or(1).max(0) as u32;
     let running = state
         .jobs

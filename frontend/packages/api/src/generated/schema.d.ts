@@ -3838,25 +3838,35 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * `GET /api/v1/workspaces/{id}/build-loop` — the ceiling on build runs for
-         *     this repo (MAIN-461 AC-1), `/review-loop`'s twin. Reports the RAW column
-         *     for the same reason: `null` is "nobody decided", and resolving it to 1
-         *     would erase the distinction the CLI prints as "unset (default 1)".
+         * `GET /api/v1/workspaces/{id}/build-loop` — this repo's whole build loop
+         *     (MAIN-641 AC-1): is the control plane firing runs for it by itself, where
+         *     are they pinned, how many at once, and who said so.
+         * @description One route because it is one concept. `concurrency` is the RAW column: `null`
+         *     is "nobody decided", and resolving it to 1 here would erase the distinction
+         *     the CLI prints as "unset (default 1)". The resolution lives on
+         *     `/build-loop/status`, and only there.
          */
         get: operations["get_build_loop"];
-        /**
-         * `PUT /api/v1/workspaces/{id}/build-loop` — set it, or clear it back to
-         *     unset with `{"max_replicas": null}` (MAIN-461 AC-1).
-         */
-        put: operations["set_build_loop"];
+        put?: never;
         post?: never;
         delete?: never;
         options?: never;
         head?: never;
-        patch?: never;
+        /**
+         * `PATCH /api/v1/workspaces/{id}/build-loop` — turn the loop on or off, pin or
+         *     unpin a node, set the ceiling (MAIN-641 AC-3).
+         * @description PATCH rather than PUT because every field is optional and an absent one
+         *     leaves that setting alone, so `{"enabled": true}` is a complete request —
+         *     partial-update semantics on a replace verb is what this consolidation ends.
+         *     Turning it ON records the CALLER as the identity auto-fired runs are
+         *     requested by (MAIN-385 AC-2) — which is why a node credential is refused
+         *     here: a job requested by a machine resolves to no person, and no node would
+         *     ever be eligible for it.
+         */
+        patch: operations["set_build_loop"];
         trace?: never;
     };
-    "/api/v1/workspaces/{id}/build-loop-settings": {
+    "/api/v1/workspaces/{id}/build-loop/status": {
         parameters: {
             query?: never;
             header?: never;
@@ -3864,39 +3874,9 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * `GET /api/v1/workspaces/{id}/build-loop-settings` — the per-workspace build
-         *     loop switch (MAIN-385 AC-8): is the control plane firing runs for this repo
-         *     by itself, where are they pinned, how many at once, and who said so.
-         */
-        get: operations["get_build_loop_settings"];
-        /**
-         * `PUT /api/v1/workspaces/{id}/build-loop-settings` — turn the loop on or
-         *     off, pin or unpin a node, set the concurrency (MAIN-385 AC-8).
-         * @description Every field is optional and an absent one leaves that setting alone, so
-         *     `{"enabled": true}` is a complete request. Turning it ON records the CALLER
-         *     as the identity auto-fired runs are requested by (AC-2) — which is why a
-         *     node credential is refused here: a job requested by a machine resolves to
-         *     no person, and no node would ever be eligible for it.
-         */
-        put: operations["set_build_loop_settings"];
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/workspaces/{id}/build-loop-status": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * `GET /api/v1/workspaces/{id}/build-loop-status` — desired versus
-         *     DELIVERABLE for the build loop (MAIN-495 AC-1), `/review-loop-status`'s
-         *     twin.
+         * `GET /api/v1/workspaces/{id}/build-loop/status` — desired versus
+         *     DELIVERABLE for the build loop (MAIN-495 AC-1), a sub-resource of the
+         *     declaration it is about (MAIN-641 AC-4).
          * @description The one it cannot borrow is the planner. Reviews resolve a desired number
          *     through the reconciler's `plan_now`; builds have no such thing — what is
          *     owed is decided from the board at the moment `converge_builds` runs. So
@@ -3905,7 +3885,7 @@ export interface paths {
          *     they own at all: a ceiling of three against one node's two slots changes
          *     nothing observable, and the third run simply queues forever.
          *
-         *     Advisory, never a gate (AC-5). `PUT /build-loop` still takes any valid
+         *     Advisory, never a gate (AC-5). `PATCH /build-loop` still takes any valid
          *     number, because fleet capacity changes without warning and a refusal
          *     correct at write time is wrong an hour later.
          */
@@ -4862,32 +4842,28 @@ export interface components {
             label: string;
         };
         /**
-         * @description The ceiling on this repo's BUILD runs (MAIN-461) — `ReviewLoopDeclaration`'s
-         *     twin, kept separate because the two are set independently and a shared type
-         *     would let a rename on one silently rename the other's wire shape.
-         *     `None` = nobody decided (effective 1), `0` = builds off for this repo.
-         */
-        BuildLoopDeclaration: {
-            /** Format: int32 */
-            max_replicas?: number | null;
-        };
-        /**
-         * @description The per-workspace build-loop switch (MAIN-385 AC-8): whether the control
+         * @description A workspace's whole build-loop declaration (MAIN-641): whether the control
          *     plane fires build runs for this repo by itself, where they are pinned, how
          *     many at once, and who said so.
          *
-         *     Separate from `BuildLoopDeclaration`, which is the ceiling alone and is what
-         *     `nook builds scale` has always written. `concurrency` appears in both
-         *     because it IS the same column — reported here so one read answers "what is
-         *     this repo's build loop doing", written by either.
+         *     One shape because it is one concept. The ceiling used to have a second name
+         *     (`max_replicas`) on a second route reading the same column, so answering
+         *     "is this repo's build loop on, how wide, and can that be honoured" took
+         *     three calls and two names for one number.
          */
         BuildLoopSettings: {
             /**
              * Format: int32
-             * @description `build_max_replicas` resolved the way `converge_builds` reads it:
-             *     unset is one, and 0 is this repo's kill switch.
+             * @description The DECLARED ceiling on in-flight build runs — `build_max_replicas`
+             *     raw, and the single name for that column.
+             *
+             *     Three states, and they stay three all the way to the caller (MAIN-641
+             *     AC-2): `null` is "nobody decided" and resolves to one, `0` is this
+             *     repo's kill switch, `N` is the ceiling. Resolving here is what would
+             *     make a terminal unable to say "unset (default 1)"; the one place the
+             *     resolution happens is [`BuildLoopStatus::desired`].
              */
-            concurrency: number;
+            concurrency?: number | null;
             enabled: boolean;
             enabled_by?: null | components["schemas"]["UserId"];
             node_id?: null | components["schemas"]["NodeId"];
@@ -8703,17 +8679,9 @@ export interface components {
             panes?: number;
         };
         /**
-         * @description `SetReviewLoopRequest`'s twin for builds (MAIN-461): the key is required,
-         *     and `null` is the deliberate "clear back to unset".
-         */
-        SetBuildLoopRequest: {
-            /** Format: int32 */
-            max_replicas?: number | null;
-        };
-        /**
-         * @description `PUT /api/v1/workspaces/{id}/build-loop-settings` (MAIN-385 AC-8). Every
-         *     field is optional and an ABSENT one leaves that setting alone — a caller
-         *     turning the loop on must not have to restate a pin it does not care about.
+         * @description `PATCH /api/v1/workspaces/{id}/build-loop` (MAIN-641 AC-3). Every field is
+         *     optional and an ABSENT one leaves that setting alone — a caller turning the
+         *     loop on must not have to restate a pin it does not care about.
          *
          *     `node` and `concurrency` are three-state on purpose: absent leaves the
          *     setting, `null` clears it (unpin / back to the default ceiling), and a
@@ -17370,70 +17338,6 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BuildLoopDeclaration"];
-                };
-            };
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    set_build_loop: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["SetBuildLoopRequest"];
-            };
-        };
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["BuildLoopDeclaration"];
-                };
-            };
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    get_build_loop_settings: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
                     "application/json": components["schemas"]["BuildLoopSettings"];
                 };
             };
@@ -17445,7 +17349,7 @@ export interface operations {
             };
         };
     };
-    set_build_loop_settings: {
+    set_build_loop: {
         parameters: {
             query?: never;
             header?: never;

@@ -300,6 +300,13 @@ impl Client {
         self.send(reqwest::Method::PUT, path, Some(body)).await
     }
 
+    /// PATCH is the partial-write verb: the body names only what it wants
+    /// changed and an absent key leaves that setting alone, which is a
+    /// different statement from PUT's "replace this with what I sent".
+    pub async fn patch(&self, path: &str, body: Value) -> Result<Value> {
+        self.send(reqwest::Method::PATCH, path, Some(body)).await
+    }
+
     /// PATCH, returning the HTTP status alongside the body so a caller can react
     /// to a 409 (optimistic-concurrency conflict) instead of only an error
     /// string — the read-guard-retry the safe body edit needs (MAIN-36).
@@ -5095,24 +5102,12 @@ pub async fn builds_scale(workspace: &str, count: Option<&str>) -> Result<()> {
     let id = resolve_workspace(&client, workspace).await?;
     let path = format!("/api/v1/workspaces/{id}/build-loop");
 
-    let current = match count {
+    let current = match builds_scale_body(count)? {
         None => client.get(&path).await?,
-        Some("unset") | Some("null") => {
-            client
-                .put(&path, serde_json::json!({ "max_replicas": null }))
-                .await?
-        }
-        Some(raw) => {
-            let n: u32 = raw.parse().with_context(|| {
-                format!("'{raw}' is not a non-negative whole number (or `unset`)")
-            })?;
-            client
-                .put(&path, serde_json::json!({ "max_replicas": n }))
-                .await?
-        }
+        Some(body) => client.patch(&path, body).await?,
     };
 
-    match current["max_replicas"].as_i64() {
+    match current["concurrency"].as_i64() {
         None => println!(
             "build runs: {} — the default ceiling",
             crate::style::ok_c("unset (default 1)")
@@ -5129,6 +5124,73 @@ pub async fn builds_scale(workspace: &str, count: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// The PATCH body `builds scale` sends, or `None` for the read a bare
+/// `nook builds scale <ws>` is.
+///
+/// `concurrency` is the whole declaration's name for this column (MAIN-641
+/// AC-2), and the body names ONLY it — so scaling a repo cannot disturb its
+/// switch or its pin, which is what makes one route safe for both commands.
+/// Split out from the IO so the shape of that body is testable without a
+/// server, because it is the shape that has to be right.
+fn builds_scale_body(count: Option<&str>) -> Result<Option<Value>> {
+    Ok(match count {
+        None => None,
+        Some("unset") | Some("null") => Some(serde_json::json!({ "concurrency": null })),
+        Some(raw) => {
+            let n: u32 = raw.parse().with_context(|| {
+                format!("'{raw}' is not a non-negative whole number (or `unset`)")
+            })?;
+            Some(serde_json::json!({ "concurrency": n }))
+        }
+    })
+}
+
+/// The PATCH body `builds loop` sends, or `None` when nothing was asked to
+/// change and the command is a read.
+///
+/// Every write is partial: an argument nobody passed is ABSENT from the body,
+/// not sent as a null, because the endpoint reads those as "leave it alone" and
+/// "clear it" respectively. Typos are refused here so a person hears the
+/// argument they typed rather than a 400 about a JSON field they never saw.
+fn builds_loop_body(
+    state: Option<&str>,
+    node: Option<&str>,
+    concurrency: Option<&str>,
+) -> Result<Option<Value>> {
+    let mut body = serde_json::Map::new();
+    match state {
+        None => {}
+        Some("on") => {
+            body.insert("enabled".into(), Value::Bool(true));
+        }
+        Some("off") => {
+            body.insert("enabled".into(), Value::Bool(false));
+        }
+        Some(other) => bail!("'{other}' is not a state — say `on` or `off`"),
+    }
+    if let Some(n) = node {
+        body.insert(
+            "node".into(),
+            match n {
+                "none" | "unset" | "null" => Value::Null,
+                name => Value::String(name.to_string()),
+            },
+        );
+    }
+    if let Some(c) = concurrency {
+        body.insert(
+            "concurrency".into(),
+            match c {
+                "unset" | "null" => Value::Null,
+                raw => serde_json::json!(raw.parse::<u32>().with_context(|| format!(
+                    "'{raw}' is not a non-negative whole number (or `unset`)"
+                ))?),
+            },
+        );
+    }
+    Ok((!body.is_empty()).then_some(Value::Object(body)))
+}
+
 /// `nook builds loop <workspace> [on|off] [--node …] [--concurrency …]`
 /// (MAIN-385 AC-8) — the per-workspace build-loop switch.
 ///
@@ -5143,51 +5205,19 @@ pub async fn builds_loop(
     node: Option<&str>,
     concurrency: Option<&str>,
 ) -> Result<()> {
+    let body = builds_loop_body(state, node, concurrency)?;
     let client = Client::from_config()?;
     let id = resolve_workspace(&client, workspace).await?;
-    let path = format!("/api/v1/workspaces/{id}/build-loop-settings");
+    let path = format!("/api/v1/workspaces/{id}/build-loop");
 
-    let mut body = serde_json::Map::new();
-    match state {
-        None => {}
-        Some("on") => {
-            body.insert("enabled".into(), serde_json::Value::Bool(true));
-        }
-        Some("off") => {
-            body.insert("enabled".into(), serde_json::Value::Bool(false));
-        }
-        Some(other) => bail!("'{other}' is not a state — say `on` or `off`"),
-    }
-    // Parsed here so a typo is a CLI error naming the argument, rather than a
-    // round trip that comes back as a 400 about a JSON field nobody typed.
-    if let Some(n) = node {
-        body.insert(
-            "node".into(),
-            match n {
-                "none" | "unset" | "null" => serde_json::Value::Null,
-                name => serde_json::Value::String(name.to_string()),
-            },
-        );
-    }
-    if let Some(c) = concurrency {
-        body.insert(
-            "concurrency".into(),
-            match c {
-                "unset" | "null" => serde_json::Value::Null,
-                raw => serde_json::json!(raw.parse::<u32>().with_context(|| format!(
-                    "'{raw}' is not a non-negative whole number (or `unset`)"
-                ))?),
-            },
-        );
-    }
-
-    let current = if body.is_empty() {
-        client.get(&path).await?
-    } else {
-        client.put(&path, serde_json::Value::Object(body)).await?
+    let current = match body {
+        None => client.get(&path).await?,
+        Some(body) => client.patch(&path, body).await?,
     };
 
     let on = current["enabled"].as_bool().unwrap_or(false);
+    // `null` is unset, and unset is the default ceiling of one — the same
+    // reading `/build-loop/status` reports as `desired`.
     let concurrency = current["concurrency"].as_u64().unwrap_or(1);
     if on {
         println!(
@@ -5208,6 +5238,62 @@ pub async fn builds_loop(
         None => println!("  no pinned node — placed on whichever of your nodes is free"),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod build_loop_body_tests {
+    use super::*;
+
+    /// MAIN-641 AC-6: `scale` writes `{"concurrency": …}` and `unset` still
+    /// sends a null. The KEY is what moved — the value semantics are the ones
+    /// `nook builds scale` has always had.
+    #[test]
+    fn scale_names_concurrency_and_keeps_unset_reachable() {
+        assert!(
+            builds_scale_body(None).expect("read").is_none(),
+            "a bare `nook builds scale <ws>` is a read, not a write of nothing"
+        );
+        assert_eq!(
+            builds_scale_body(Some("3")).expect("set"),
+            Some(serde_json::json!({ "concurrency": 3 }))
+        );
+        for spelling in ["unset", "null"] {
+            assert_eq!(
+                builds_scale_body(Some(spelling)).expect("clear"),
+                Some(serde_json::json!({ "concurrency": null })),
+                "`{spelling}` is how a terminal reaches the third state back"
+            );
+        }
+        assert!(builds_scale_body(Some("lots")).is_err());
+        assert!(builds_scale_body(Some("-1")).is_err());
+    }
+
+    /// The absent/null/value distinction the one route rests on: what nobody
+    /// typed must not appear in the body at all, or `builds loop --node azul`
+    /// would silently unset the ceiling somebody else declared.
+    #[test]
+    fn loop_sends_only_what_was_typed() {
+        assert!(builds_loop_body(None, None, None).expect("read").is_none());
+        assert_eq!(
+            builds_loop_body(Some("on"), None, None).expect("on"),
+            Some(serde_json::json!({ "enabled": true }))
+        );
+        assert_eq!(
+            builds_loop_body(None, Some("azul"), None).expect("pin"),
+            Some(serde_json::json!({ "node": "azul" }))
+        );
+        assert_eq!(
+            builds_loop_body(None, Some("none"), None).expect("unpin"),
+            Some(serde_json::json!({ "node": null })),
+            "`--node none` clears the pin, which absence could never say"
+        );
+        assert_eq!(
+            builds_loop_body(Some("off"), Some("azul"), Some("unset")).expect("all three"),
+            Some(serde_json::json!({ "enabled": false, "node": "azul", "concurrency": null }))
+        );
+        assert!(builds_loop_body(Some("maybe"), None, None).is_err());
+        assert!(builds_loop_body(None, None, Some("plenty")).is_err());
+    }
 }
 
 // ── issues: the board verbs a skill drives a card with (MAIN-138) ────────────

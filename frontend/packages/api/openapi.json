@@ -8942,87 +8942,9 @@
         "tags": [
           "crate::routes::workspaces"
         ],
-        "summary": "`GET /api/v1/workspaces/{id}/build-loop` — the ceiling on build runs for\nthis repo (MAIN-461 AC-1), `/review-loop`'s twin. Reports the RAW column\nfor the same reason: `null` is \"nobody decided\", and resolving it to 1\nwould erase the distinction the CLI prints as \"unset (default 1)\".",
+        "summary": "`GET /api/v1/workspaces/{id}/build-loop` — this repo's whole build loop\n(MAIN-641 AC-1): is the control plane firing runs for it by itself, where\nare they pinned, how many at once, and who said so.",
+        "description": "One route because it is one concept. `concurrency` is the RAW column: `null`\nis \"nobody decided\", and resolving it to 1 here would erase the distinction\nthe CLI prints as \"unset (default 1)\". The resolution lives on\n`/build-loop/status`, and only there.",
         "operationId": "get_build_loop",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/BuildLoopDeclaration"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": ""
-          }
-        }
-      },
-      "put": {
-        "tags": [
-          "crate::routes::workspaces"
-        ],
-        "summary": "`PUT /api/v1/workspaces/{id}/build-loop` — set it, or clear it back to\nunset with `{\"max_replicas\": null}` (MAIN-461 AC-1).",
-        "operationId": "set_build_loop",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SetBuildLoopRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/BuildLoopDeclaration"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": ""
-          },
-          "404": {
-            "description": ""
-          }
-        }
-      }
-    },
-    "/api/v1/workspaces/{id}/build-loop-settings": {
-      "get": {
-        "tags": [
-          "crate::routes::workspaces"
-        ],
-        "summary": "`GET /api/v1/workspaces/{id}/build-loop-settings` — the per-workspace build\nloop switch (MAIN-385 AC-8): is the control plane firing runs for this repo\nby itself, where are they pinned, how many at once, and who said so.",
-        "operationId": "get_build_loop_settings",
         "parameters": [
           {
             "name": "id",
@@ -9049,13 +8971,13 @@
           }
         }
       },
-      "put": {
+      "patch": {
         "tags": [
           "crate::routes::workspaces"
         ],
-        "summary": "`PUT /api/v1/workspaces/{id}/build-loop-settings` — turn the loop on or\noff, pin or unpin a node, set the concurrency (MAIN-385 AC-8).",
-        "description": "Every field is optional and an absent one leaves that setting alone, so\n`{\"enabled\": true}` is a complete request. Turning it ON records the CALLER\nas the identity auto-fired runs are requested by (AC-2) — which is why a\nnode credential is refused here: a job requested by a machine resolves to\nno person, and no node would ever be eligible for it.",
-        "operationId": "set_build_loop_settings",
+        "summary": "`PATCH /api/v1/workspaces/{id}/build-loop` — turn the loop on or off, pin or\nunpin a node, set the ceiling (MAIN-641 AC-3).",
+        "description": "PATCH rather than PUT because every field is optional and an absent one\nleaves that setting alone, so `{\"enabled\": true}` is a complete request —\npartial-update semantics on a replace verb is what this consolidation ends.\nTurning it ON records the CALLER as the identity auto-fired runs are\nrequested by (MAIN-385 AC-2) — which is why a node credential is refused\nhere: a job requested by a machine resolves to no person, and no node would\never be eligible for it.",
+        "operationId": "set_build_loop",
         "parameters": [
           {
             "name": "id",
@@ -9096,13 +9018,13 @@
         }
       }
     },
-    "/api/v1/workspaces/{id}/build-loop-status": {
+    "/api/v1/workspaces/{id}/build-loop/status": {
       "get": {
         "tags": [
           "crate::routes::workspaces"
         ],
-        "summary": "`GET /api/v1/workspaces/{id}/build-loop-status` — desired versus\nDELIVERABLE for the build loop (MAIN-495 AC-1), `/review-loop-status`'s\ntwin.",
-        "description": "The one it cannot borrow is the planner. Reviews resolve a desired number\nthrough the reconciler's `plan_now`; builds have no such thing — what is\nowed is decided from the board at the moment `converge_builds` runs. So\n`desired` here is the DECLARATION, and the question this endpoint exists to\nanswer is whether the number somebody typed can be honoured by the machines\nthey own at all: a ceiling of three against one node's two slots changes\nnothing observable, and the third run simply queues forever.\n\nAdvisory, never a gate (AC-5). `PUT /build-loop` still takes any valid\nnumber, because fleet capacity changes without warning and a refusal\ncorrect at write time is wrong an hour later.",
+        "summary": "`GET /api/v1/workspaces/{id}/build-loop/status` — desired versus\nDELIVERABLE for the build loop (MAIN-495 AC-1), a sub-resource of the\ndeclaration it is about (MAIN-641 AC-4).",
+        "description": "The one it cannot borrow is the planner. Reviews resolve a desired number\nthrough the reconciler's `plan_now`; builds have no such thing — what is\nowed is decided from the board at the moment `converge_builds` runs. So\n`desired` here is the DECLARATION, and the question this endpoint exists to\nanswer is whether the number somebody typed can be honoured by the machines\nthey own at all: a ceiling of three against one node's two slots changes\nnothing observable, and the third run simply queues forever.\n\nAdvisory, never a gate (AC-5). `PATCH /build-loop` still takes any valid\nnumber, because fleet capacity changes without warning and a refusal\ncorrect at write time is wrong an hour later.",
         "operationId": "get_build_loop_status",
         "parameters": [
           {
@@ -11317,32 +11239,20 @@
         ],
         "description": "Why one node of the fleet contributes nothing to a viewer's BUILD capacity\n(MAIN-495).\n\nA third vocabulary beside [`NodeBlocker`] and [`QueuedReason`], and\ndeliberately so: those answer \"why can this SESSION not be placed\" and \"why\nis this JOB still queued\", and this answers \"why does this MACHINE deliver\nno build slots to me\". The variants are the legs of the very query\n`select_executor` resolves through, one for one, so a node excluded from\nthe capacity sum is excluded for a reason a person can act on.\n\nOne reason per node, in a fixed order — ownership, then liveness, then what\nthe node reports about itself. The permanent grounds come first: telling an\noperator their teammate's laptop is offline invites them to wait for\nsomething that would never have counted anyway."
       },
-      "BuildLoopDeclaration": {
+      "BuildLoopSettings": {
         "type": "object",
-        "description": "The ceiling on this repo's BUILD runs (MAIN-461) — `ReviewLoopDeclaration`'s\ntwin, kept separate because the two are set independently and a shared type\nwould let a rename on one silently rename the other's wire shape.\n`None` = nobody decided (effective 1), `0` = builds off for this repo.",
+        "description": "A workspace's whole build-loop declaration (MAIN-641): whether the control\nplane fires build runs for this repo by itself, where they are pinned, how\nmany at once, and who said so.\n\nOne shape because it is one concept. The ceiling used to have a second name\n(`max_replicas`) on a second route reading the same column, so answering\n\"is this repo's build loop on, how wide, and can that be honoured\" took\nthree calls and two names for one number.",
+        "required": [
+          "enabled"
+        ],
         "properties": {
-          "max_replicas": {
+          "concurrency": {
             "type": [
               "integer",
               "null"
             ],
-            "format": "int32"
-          }
-        }
-      },
-      "BuildLoopSettings": {
-        "type": "object",
-        "description": "The per-workspace build-loop switch (MAIN-385 AC-8): whether the control\nplane fires build runs for this repo by itself, where they are pinned, how\nmany at once, and who said so.\n\nSeparate from `BuildLoopDeclaration`, which is the ceiling alone and is what\n`nook builds scale` has always written. `concurrency` appears in both\nbecause it IS the same column — reported here so one read answers \"what is\nthis repo's build loop doing\", written by either.",
-        "required": [
-          "enabled",
-          "concurrency"
-        ],
-        "properties": {
-          "concurrency": {
-            "type": "integer",
             "format": "int32",
-            "description": "`build_max_replicas` resolved the way `converge_builds` reads it:\nunset is one, and 0 is this repo's kill switch.",
-            "minimum": 0
+            "description": "The DECLARED ceiling on in-flight build runs — `build_max_replicas`\nraw, and the single name for that column.\n\nThree states, and they stay three all the way to the caller (MAIN-641\nAC-2): `null` is \"nobody decided\" and resolves to one, `0` is this\nrepo's kill switch, `N` is the ceiling. Resolving here is what would\nmake a terminal unable to say \"unset (default 1)\"; the one place the\nresolution happens is [`BuildLoopStatus::desired`]."
           },
           "enabled": {
             "type": "boolean"
@@ -18561,22 +18471,9 @@
           }
         }
       },
-      "SetBuildLoopRequest": {
-        "type": "object",
-        "description": "`SetReviewLoopRequest`'s twin for builds (MAIN-461): the key is required,\nand `null` is the deliberate \"clear back to unset\".",
-        "properties": {
-          "max_replicas": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32"
-          }
-        }
-      },
       "SetBuildLoopSettingsRequest": {
         "type": "object",
-        "description": "`PUT /api/v1/workspaces/{id}/build-loop-settings` (MAIN-385 AC-8). Every\nfield is optional and an ABSENT one leaves that setting alone — a caller\nturning the loop on must not have to restate a pin it does not care about.\n\n`node` and `concurrency` are three-state on purpose: absent leaves the\nsetting, `null` clears it (unpin / back to the default ceiling), and a\nvalue sets it. That is `double_option`'s whole job — a plain\n`Option<T>` applies a JSON `null` to the option itself, so \"clear it\" and\n\"leave it alone\" would arrive identical and `--node none` would silently\ndo nothing.",
+        "description": "`PATCH /api/v1/workspaces/{id}/build-loop` (MAIN-641 AC-3). Every field is\noptional and an ABSENT one leaves that setting alone — a caller turning the\nloop on must not have to restate a pin it does not care about.\n\n`node` and `concurrency` are three-state on purpose: absent leaves the\nsetting, `null` clears it (unpin / back to the default ceiling), and a\nvalue sets it. That is `double_option`'s whole job — a plain\n`Option<T>` applies a JSON `null` to the option itself, so \"clear it\" and\n\"leave it alone\" would arrive identical and `--node none` would silently\ndo nothing.",
         "properties": {
           "concurrency": {
             "type": [

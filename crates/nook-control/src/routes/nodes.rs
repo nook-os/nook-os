@@ -24,7 +24,7 @@ pub(crate) async fn node_tenant(state: &AppState, id: NodeId) -> ApiResult<nook_
 ///
 /// `pub(crate)` because it is the tree's ONE answer to "how much of this fleet
 /// may this caller see", and any endpoint returning node identities owes the
-/// same answer — `/build-loop-status` names blocked nodes and reaches for it
+/// same answer — `/build-loop/status` names blocked nodes and reaches for it
 /// here rather than deciding again (MAIN-495).
 pub(crate) async fn visibility_scope(
     state: &AppState,

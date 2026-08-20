@@ -115,6 +115,28 @@ describe("buildLoopWhy", () => {
     expect(why).toEqual({ kind: "at-concurrency", live: 2, concurrency: 2 });
   });
 
+  // MAIN-641: the declaration is nullable now, and `null` is not `0`. Reading
+  // an unset repo as "concurrency is 0" would put the kill switch's sentence on
+  // a repo nobody has ever configured.
+  it("reads an unset ceiling as the default of one, never as the kill switch", () => {
+    expect(
+      buildLoopWhy({
+        tenantLoops: true,
+        settings: settings({ concurrency: null }),
+        runs: [],
+        now: NOW,
+      }).kind,
+    ).toBe("no-work");
+    expect(
+      buildLoopWhy({
+        tenantLoops: true,
+        settings: settings({ concurrency: null }),
+        runs: [run()],
+        now: NOW,
+      }),
+    ).toEqual({ kind: "at-concurrency", live: 1, concurrency: 1 });
+  });
+
   it("names the hold a concluded-nothing run put its card in", () => {
     const why = buildLoopWhy({
       tenantLoops: true,

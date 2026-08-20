@@ -10,10 +10,41 @@
 // as a function of its inputs. Everything here reads the SAME records the
 // control plane decided from: the settings row, the run list, the newest run's
 // own state, and the tenant switch. Nothing is inferred from a sentence.
-import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type LoopJob, type Schemas, type WorkspaceLocation } from "@nookos/api";
 
 export type BuildLoopSettings = Schemas["BuildLoopSettings"];
+
+/** The PATCH body: every field optional, `null` meaning "clear this one"
+ *  (MAIN-641 AC-3). */
+export type SetBuildLoopRequest = Schemas["SetBuildLoopSettingsRequest"];
+
+/** One node the status says delivers nothing, and the ground it failed on. */
+export type BuildBlocker = {
+  node_id: string;
+  node_name: string;
+  reason: { kind: string; label?: string; runtime?: string; job_kind?: string };
+};
+
+/** `/build-loop/status`, as the surfaces here read it. */
+export type BuildLoopStatus = {
+  desired: number;
+  running: number;
+  shortfall: number;
+  capacity: number;
+  eligible_nodes: number;
+  blocked: BuildBlocker[];
+};
+
+/** The declared ceiling resolved the way the server resolves it for `desired`:
+ *  `null` is "nobody decided", and the default is one. Never shown INSTEAD of
+ *  the declaration (AC-9) — `0` is the kill switch and unset is not, and a
+ *  reader who cannot tell them apart is the confusion this consolidation is
+ *  about. */
+function effectiveConcurrency(settings: BuildLoopSettings | null | undefined): number {
+  return Math.max(0, settings?.concurrency ?? 1);
+}
 
 /** A run in one of these states is holding this repo's ceiling. The same four
  *  `live_build_states` counts, spelled the same way — what counts as in flight
@@ -98,7 +129,10 @@ export function buildLoopWhy({
   if (!settings) return { kind: "loading" };
   if (tenantLoops === false) return { kind: "tenant-off" };
   if (!settings.enabled) return { kind: "switch-off" };
-  if (settings.concurrency === 0) return { kind: "ceiling-zero" };
+  // The RESOLVED ceiling, because this is a question about what the loop does:
+  // an unset repo raises one run, and only an explicit 0 raises none.
+  const ceiling = effectiveConcurrency(settings);
+  if (ceiling === 0) return { kind: "ceiling-zero" };
 
   const live = (runs ?? []).filter((r) => isLiveRun(r.state));
   // A queued run naming its own gate outranks the count: with a ceiling of one
@@ -106,8 +140,8 @@ export function buildLoopWhy({
   // that run is stuck is the thing somebody has to go and fix.
   const stuck = live.find((r) => r.state === "queued" && r.queued_reason);
   if (stuck) return { kind: "queued", reason: stuck.queued_reason as string, run: stuck };
-  if (live.length >= settings.concurrency) {
-    return { kind: "at-concurrency", live: live.length, concurrency: settings.concurrency };
+  if (live.length >= ceiling) {
+    return { kind: "at-concurrency", live: live.length, concurrency: ceiling };
   }
   if (newest && concludedNothing(newest)) {
     const until = Date.parse(newest.updated_at) + FAILURE_BACKOFF_MS;
@@ -197,21 +231,77 @@ export function branchOf(
   return (locations ?? []).find((l) => l.path === task.worktree_path)?.git_branch ?? null;
 }
 
-/** This repo's build-loop settings. Its own key, shared by every surface that
- *  shows the switch, so flipping it in Mission Control repaints the panel. */
-export const buildLoopSettingsKey = (workspaceId: string) =>
-  ["build-loop-settings", workspaceId] as const;
+/** This repo's build-loop declaration. Its own key, shared by every surface
+ *  that shows the switch or the ceiling, so flipping it in Mission Control
+ *  repaints the panel. */
+export const buildLoopKey = (workspaceId: string) => ["build-loop", workspaceId] as const;
 
-export function useBuildLoopSettings(workspaceId: string) {
+/** The status sub-resource, keyed UNDER the declaration it is about — so
+ *  invalidating the declaration after a write refreshes the resolved ceiling
+ *  too, which is the number that just changed. */
+export const buildLoopStatusKey = (workspaceId: string) =>
+  ["build-loop", workspaceId, "status"] as const;
+
+export function useBuildLoop(workspaceId: string) {
   return useQuery({
-    queryKey: buildLoopSettingsKey(workspaceId),
+    queryKey: buildLoopKey(workspaceId),
     queryFn: async () =>
       ((
-        await api.GET("/api/v1/workspaces/{id}/build-loop-settings", {
+        await api.GET("/api/v1/workspaces/{id}/build-loop", {
           params: { path: { id: workspaceId } },
         })
       ).data as BuildLoopSettings | undefined) ?? null,
   });
+}
+
+export function useBuildLoopStatus(workspaceId: string) {
+  return useQuery({
+    queryKey: buildLoopStatusKey(workspaceId),
+    queryFn: async () =>
+      ((
+        await api.GET("/api/v1/workspaces/{id}/build-loop/status", {
+          params: { path: { id: workspaceId } },
+        })
+      ).data as BuildLoopStatus | undefined) ?? null,
+    refetchInterval: 10000,
+  });
+}
+
+/** The one write path for every build-loop control, so the switch, the pin, the
+ *  ceiling and Mission Control's chip cannot handle a refusal four different
+ *  ways.
+ *
+ *  A hook rather than a mutation object because the refusal is rendered beside
+ *  the control that was touched, in the SERVER's own words — its 400 names the
+ *  field or the rule, and any sentence guessed here would be a second, worse
+ *  answer. */
+export function useSetBuildLoop(workspaceId: string) {
+  const queryClient = useQueryClient();
+  const [busy, setBusy] = useState(false);
+  const [refusal, setRefusal] = useState<string | null>(null);
+
+  const save = async (body: SetBuildLoopRequest): Promise<boolean> => {
+    setBusy(true);
+    setRefusal(null);
+    const { error } = await api.PATCH("/api/v1/workspaces/{id}/build-loop", {
+      params: { path: { id: workspaceId } },
+      body,
+    });
+    setBusy(false);
+    if (error) {
+      const e = error as { error?: string } | undefined;
+      setRefusal(e?.error ?? JSON.stringify(error));
+      return false;
+    }
+    queryClient.invalidateQueries({ queryKey: buildLoopKey(workspaceId) });
+    // Enabling evaluates the repo immediately (MAIN-385 AC-6), so the run list
+    // can change within a moment of the click — refresh it rather than waiting
+    // out the poll and looking inert.
+    queryClient.invalidateQueries({ queryKey: ["workspace-builds", workspaceId] });
+    return true;
+  };
+
+  return { save, busy, refusal };
 }
 
 /** This repo's build runs. The key `WorkspaceRuns` and `BuildLoop` already

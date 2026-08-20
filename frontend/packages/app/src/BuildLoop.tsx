@@ -12,7 +12,7 @@
 // shown here is COUNTED from the runs list, and it says so rather than implying
 // one.
 //
-// What builds DO have now is `/build-loop-status` (MAIN-495), and it answers a
+// What builds DO have now is `/build-loop/status` (MAIN-495), and it answers a
 // different question — not how many runs are wanted, but whether the number
 // somebody typed can be honoured by the machines they own. A ceiling of three
 // against one node's two slots changes nothing observable, so the third run
@@ -20,10 +20,20 @@
 // out loud. It is ADVISORY: the write still saves any valid number, because
 // fleet capacity changes without warning and a refusal correct at write time is
 // wrong an hour later.
+//
+// Every read and write goes through `buildRuns`' hooks (MAIN-641 AC-7): the
+// declaration is one route now, and one module owning its key is what stops two
+// panels disagreeing about what they just wrote.
 import React, { useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "@nookos/api";
 import { Pill } from "@nookos/ui";
+import {
+  useBuildLoop,
+  useBuildLoopStatus,
+  useSetBuildLoop,
+  useWorkspaceBuilds,
+  type BuildBlocker,
+  type BuildLoopStatus,
+} from "./buildRuns";
 
 /** The ceiling in words. Split out for the same reason `reviewLoopSummary` is:
  *  `null` and `0` are different states that a number alone cannot show, and the
@@ -41,23 +51,6 @@ export function buildLoopSummary(max: number | null): { state: string; detail: s
   };
 }
 
-/** One node the status says delivers nothing, and the ground it failed on. */
-type BuildBlocker = {
-  node_id: string;
-  node_name: string;
-  reason: { kind: string; label?: string; runtime?: string; job_kind?: string };
-};
-
-/** `/build-loop-status`, as this panel reads it. */
-export type BuildStatus = {
-  desired: number;
-  running: number;
-  shortfall: number;
-  capacity: number;
-  eligible_nodes: number;
-  blocked: BuildBlocker[];
-};
-
 /** The note beside the ceiling, or `null` when the declaration and the fleet
  *  agree and there is nothing to say.
  *
@@ -66,7 +59,7 @@ export type BuildStatus = {
  *  raise instead of for the machine to label. A ceiling of 0 says nothing at
  *  all — builds are off for this repo, so what the fleet could have delivered
  *  is not a question anyone asked. */
-export function buildCapacityNote(status: BuildStatus | null | undefined): string | null {
+export function buildCapacityNote(status: BuildLoopStatus | null | undefined): string | null {
   if (!status || status.desired === 0) return null;
   if (status.eligible_nodes === 0) return "no node of yours accepts build work";
   if (status.desired > status.capacity) {
@@ -97,78 +90,30 @@ export function blockerWords(reason: BuildBlocker["reason"]): string {
   }
 }
 
-/** The server's own words for a refused write — its 400 names the field that
- *  was just typed into, which beats any sentence guessed here. */
-function refusalText(error: unknown): string {
-  const e = error as { error?: string } | undefined;
-  return e?.error ?? JSON.stringify(error);
-}
-
 export function BuildLoop({ workspaceId }: { workspaceId: string }) {
-  const queryClient = useQueryClient();
   const [draft, setDraft] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [refusal, setRefusal] = useState<string | null>(null);
 
-  const { data: decl } = useQuery({
-    queryKey: ["build-loop", workspaceId],
-    queryFn: async () =>
-      (
-        await api.GET("/api/v1/workspaces/{id}/build-loop", {
-          params: { path: { id: workspaceId } },
-        })
-      ).data ?? null,
-  });
-
-  // Counted, not planned — see the header. Shares the Builds panel's key so the
+  const { data: decl } = useBuildLoop(workspaceId);
+  // Counted, not planned — see the header. The Builds panel's own hook, so the
   // two never disagree about how many runs are live.
-  const { data: runs } = useQuery({
-    queryKey: ["workspace-builds", workspaceId],
-    queryFn: async () =>
-      ((
-        await api.GET("/api/v1/workspaces/{id}/builds", {
-          params: { path: { id: workspaceId } },
-        })
-      ).data?.rows as { state: string }[] | undefined) ?? [],
-    refetchInterval: 10000,
-  });
-
-  const { data: status } = useQuery({
-    queryKey: ["build-loop-status", workspaceId],
-    queryFn: async () =>
-      ((
-        await api.GET("/api/v1/workspaces/{id}/build-loop-status", {
-          params: { path: { id: workspaceId } },
-        })
-      ).data as BuildStatus | undefined) ?? null,
-    refetchInterval: 10000,
-  });
+  const { data: runs } = useWorkspaceBuilds(workspaceId);
+  const { data: status } = useBuildLoopStatus(workspaceId);
+  const { save: patch, busy, refusal } = useSetBuildLoop(workspaceId);
 
   // `undefined` is "not fetched yet" and `null` is "no declaration". Collapsing
   // them would render the loading state as "unset (default 1)" — a claim about
   // the repo made before anything about the repo is known.
   const loaded = decl !== undefined;
-  const max = decl ? ((decl as { max_replicas?: number | null }).max_replicas ?? null) : null;
+  const max = decl?.concurrency ?? null;
   const summary = buildLoopSummary(max);
   const editing = draft !== null;
   const running = (runs ?? []).filter((r) => r.state === "running").length;
   const note = buildCapacityNote(status);
 
+  // Only the ceiling: a PATCH naming one field leaves the switch and the pin
+  // exactly as they were, which is why the two controls can share one route.
   const save = async (next: number | null) => {
-    setBusy(true);
-    setRefusal(null);
-    const { error } = await api.PUT("/api/v1/workspaces/{id}/build-loop", {
-      params: { path: { id: workspaceId } },
-      body: { max_replicas: next },
-    });
-    setBusy(false);
-    if (error) {
-      setRefusal(refusalText(error));
-      return;
-    }
-    setDraft(null);
-    queryClient.invalidateQueries({ queryKey: ["build-loop", workspaceId] });
-    queryClient.invalidateQueries({ queryKey: ["build-loop-status", workspaceId] });
+    if (await patch({ concurrency: next })) setDraft(null);
   };
 
   return (
