@@ -267,6 +267,9 @@ async fn mutating_gitops_routes_require_person_may_use_node() {
     let (stranger, _p) = bed.user(tenant, "member").await;
     let node = bed.node(tenant, owner_person).await;
     let ws = bed.workspace(tenant).await;
+    // A real checkout row: since MAIN-642 removal names one by id, and its
+    // authorization is only reached once the id resolves inside this workspace.
+    let tree = checkout(&bed, tenant, node, ws, "/p", "worktree", false).await;
 
     // Run each route with the given identity and return its result.
     macro_rules! run {
@@ -335,16 +338,8 @@ async fn mutating_gitops_routes_require_person_may_use_node() {
             ),
             run!(
                 "remove_worktree",
-                gitops::remove_worktree(
-                    State(state.clone()),
-                    ctx(user, tenant),
-                    Path(ws),
-                    Json(RemoveWorktreeRequest {
-                        node_id: node,
-                        path: "/p".into()
-                    }),
-                )
-                .await
+                gitops::remove_worktree(State(state.clone()), ctx(user, tenant), Path((ws, tree)))
+                    .await
             ),
             run!(
                 "init_project",

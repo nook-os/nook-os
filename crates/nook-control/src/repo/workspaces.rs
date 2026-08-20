@@ -365,15 +365,19 @@ pub trait WorkspaceRepository: Send + Sync {
         node: NodeId,
     ) -> ApiResult<Option<String>>;
 
-    /// Is `path` a known checkout of this workspace on this node? The guard
-    /// that stops a caller naming an arbitrary directory for removal.
-    async fn checkout_at(
+    /// Where the checkout `id` names lives — its node and path — but only if it
+    /// belongs to this tenant AND this workspace (MAIN-642).
+    ///
+    /// The scoping is the guard: an id that exists under another workspace or
+    /// another tenant comes back `None`, so removal answers 404 and never
+    /// touches somebody else's tree. Naming a row rather than a directory is
+    /// also what stops a caller pointing removal at an arbitrary path.
+    async fn checkout_node_and_path(
         &self,
         tenant: TenantId,
         workspace: WorkspaceId,
-        node: NodeId,
-        path: &str,
-    ) -> ApiResult<Option<String>>;
+        id: NodeWorkspaceId,
+    ) -> ApiResult<Option<(NodeId, String)>>;
 
     async fn checkouts_of(&self, workspace: WorkspaceId) -> ApiResult<Vec<CheckoutRef>>;
 
@@ -1263,19 +1267,18 @@ impl WorkspaceRepository for DbWorkspaceRepository {
             .await?)
     }
 
-    async fn checkout_at(
+    async fn checkout_node_and_path(
         &self,
         tenant: TenantId,
         workspace: WorkspaceId,
-        node: NodeId,
-        path: &str,
-    ) -> ApiResult<Option<String>> {
+        id: NodeWorkspaceId,
+    ) -> ApiResult<Option<(NodeId, String)>> {
         Ok(self
             .db
-            .query_scalar_opt(
-                "SELECT path FROM node_workspaces
-                 WHERE tenant_id = $1 AND workspace_id = $2 AND node_id = $3 AND path = $4",
-                params![tenant, workspace, node, path],
+            .query_opt(
+                "SELECT node_id, path FROM node_workspaces
+                 WHERE tenant_id = $1 AND workspace_id = $2 AND id = $3",
+                params![tenant, workspace, id],
             )
             .await?)
     }
@@ -2669,26 +2672,20 @@ impl WorkspaceRepository for FakeWorkspaceRepository {
         Ok(clones.first().map(|c| c.path.clone()))
     }
 
-    async fn checkout_at(
+    async fn checkout_node_and_path(
         &self,
         tenant: TenantId,
         workspace: WorkspaceId,
-        node: NodeId,
-        path: &str,
-    ) -> ApiResult<Option<String>> {
+        id: NodeWorkspaceId,
+    ) -> ApiResult<Option<(NodeId, String)>> {
         Ok(self
             .inner
             .lock()
             .unwrap()
             .checkouts
             .iter()
-            .find(|c| {
-                c.tenant == tenant
-                    && c.workspace_id == workspace
-                    && c.node_id == node
-                    && c.path == path
-            })
-            .map(|c| c.path.clone()))
+            .find(|c| c.tenant == tenant && c.workspace_id == workspace && c.id == id)
+            .map(|c| (c.node_id, c.path.clone())))
     }
 
     async fn checkouts_of(&self, workspace: WorkspaceId) -> ApiResult<Vec<CheckoutRef>> {

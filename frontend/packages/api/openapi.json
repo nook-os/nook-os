@@ -10409,8 +10409,8 @@
         }
       }
     },
-    "/api/v1/workspaces/{id}/worktrees/remove": {
-      "post": {
+    "/api/v1/workspaces/{id}/worktrees/{checkout_id}": {
+      "delete": {
         "tags": [
           "crate::routes::gitops"
         ],
@@ -10423,18 +10423,16 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "checkout_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/RemoveWorktreeRequest"
-              }
-            }
-          },
-          "required": true
-        },
         "responses": {
           "200": {
             "description": "",
@@ -10445,6 +10443,9 @@
                 }
               }
             }
+          },
+          "404": {
+            "description": ""
           }
         }
       }
@@ -17538,21 +17539,6 @@
             "format": "uuid"
           },
           "title": {
-            "type": "string"
-          }
-        }
-      },
-      "RemoveWorktreeRequest": {
-        "type": "object",
-        "required": [
-          "node_id",
-          "path"
-        ],
-        "properties": {
-          "node_id": {
-            "$ref": "#/components/schemas/NodeId"
-          },
-          "path": {
             "type": "string"
           }
         }

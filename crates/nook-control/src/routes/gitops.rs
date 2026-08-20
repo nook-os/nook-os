@@ -522,36 +522,33 @@ pub async fn git_push(
     }))
 }
 
-#[utoipa::path(post, path = "/api/v1/workspaces/{id}/worktrees/remove",
+#[utoipa::path(delete, path = "/api/v1/workspaces/{id}/worktrees/{checkout_id}",
     operation_id = "remove_worktree",
-    params(("id" = String, Path,)),
-    request_body = RemoveWorktreeRequest,
-    responses((status = 200, body = OpResponse)))]
+    params(("id" = String, Path,), ("checkout_id" = String, Path,)),
+    responses((status = 200, body = OpResponse), (status = 404)))]
 pub async fn remove_worktree(
     State(state): State<AppState>,
     auth: AuthCtx,
-    Path(workspace_id): Path<WorkspaceId>,
-    Json(req): Json<RemoveWorktreeRequest>,
+    Path((workspace_id, checkout_id)): Path<(WorkspaceId, NodeWorkspaceId)>,
 ) -> ApiResult<Json<OpResponse>> {
+    // The lookup comes FIRST, and it is scoped to the tenant and the workspace in
+    // the path: a checkout id belonging to another workspace is simply not found
+    // here (MAIN-642). Authorizing first would make the 403 an existence oracle —
+    // "you may not use that node" says the row is real.
+    let (node_id, path) = state
+        .workspaces
+        .checkout_node_and_path(auth.tenant_id, workspace_id, checkout_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
     // Removing a checkout deletes files on that machine — session-start-grade
     // authorization (own/share the node, or be it) (MAIN-227).
-    auth.require_node_may_use(&state, req.node_id).await?;
-    // The path must be a known checkout of this workspace on that node.
-    if state
-        .workspaces
-        .checkout_at(auth.tenant_id, workspace_id, req.node_id, &req.path)
-        .await?
-        .is_none()
-    {
-        return Err(ApiError::NotFound);
-    }
+    auth.require_node_may_use(&state, node_id).await?;
 
-    let path = req.path.clone();
     let rx = state
         .registry
-        .request_op(req.node_id, |request_id| ControlToNode::RemoveWorktree {
+        .request_op(node_id, |request_id| ControlToNode::RemoveWorktree {
             request_id,
-            worktree_path: req.path.clone(),
+            worktree_path: path.clone(),
             // A human removing a checkout said nothing about its branch.
             delete_branch: false,
         })
@@ -567,7 +564,7 @@ pub async fn remove_worktree(
         EventDraft::new("workspace.worktree_removed")
             .actor("user", auth.user_id.0)
             .workspace(workspace_id)
-            .node(req.node_id)
+            .node(node_id)
             .payload(serde_json::json!({ "path": path, "ok": payload.ok })),
     )
     .await;
