@@ -1424,10 +1424,10 @@ mod tests {
     fn the_allow_list_compares_bare_addresses_case_insensitively() {
         let cfg = InboundConfig {
             address: "support@acme.example".into(),
-            allow_from: vec!["Ryan <Ryan@Authava.com>".into()],
+            allow_from: vec!["Dana <Dana@Acme.Example>".into()],
             workspace_id: None,
         };
-        assert!(cfg.allows("ryan@authava.com"));
+        assert!(cfg.allows("dana@acme.example"));
         assert!(!cfg.allows("someone@else.example"));
     }
 

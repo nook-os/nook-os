@@ -330,8 +330,11 @@ pub fn compose_file(a: &ServerAnswers) -> String {
     s.push_str("    environment:\n      CONTROL_PLANE_ORIGIN: http://control-plane:8080\n");
     s.push_str("    depends_on: [control-plane]\n");
     if traefik {
+        // 8080, not 80: the image's nginx is unprivileged and binds 8080
+        // (MAIN-650). `expose` is the CONTAINER's port, so this is the number
+        // Traefik connects to -- at 80 the router resolves and then 502s.
         s.push_str(
-            "    expose: [\"80\"]\n    networks:\n      internal:\n      traefik_default:\n",
+            "    expose: [\"8080\"]\n    networks:\n      internal:\n      traefik_default:\n",
         );
         s.push_str("    labels:\n      - \"traefik.enable=true\"\n");
         s.push_str("      - \"traefik.docker.network=traefik_default\"\n");
@@ -343,9 +346,11 @@ pub fn compose_file(a: &ServerAnswers) -> String {
         s.push_str("      - \"traefik.http.routers.nook-web.entrypoints=websecure\"\n");
         s.push_str("      - \"traefik.http.routers.nook-web.tls=true\"\n");
         s.push_str("      - \"traefik.http.routers.nook-web.priority=10\"\n");
-        s.push_str("      - \"traefik.http.services.nook-web.loadbalancer.server.port=80\"\n");
+        s.push_str("      - \"traefik.http.services.nook-web.loadbalancer.server.port=8080\"\n");
     } else {
-        s.push_str("    ports:\n      - \"80:80\"\n");
+        // Host 80 is unchanged -- people type no port in a browser. Only the
+        // container side moves, because that is where nginx now listens.
+        s.push_str("    ports:\n      - \"80:8080\"\n");
     }
 
     s.push_str("\nvolumes:\n  pgdata:\n");
@@ -371,7 +376,7 @@ pub fn docker_run_script(a: &ServerAnswers) -> String {
         s,
         "docker run -d --name nook-web --network nook --restart unless-stopped \\\n  \
            -e CONTROL_PLANE_ORIGIN=http://nook-control:8080 \\\n  \
-           -p 80:80 \\\n  \
+           -p 80:8080 \\\n  \
            ghcr.io/nook-os/nook-web:{}",
         a.version
     );
@@ -575,6 +580,44 @@ mod tests {
     /// started from, so "unchanged" is a comparison rather than a claim.
     const COMPOSE_TRAEFIK_BEFORE_TUNNELS: &str =
         include_str!("testdata/compose-traefik.golden.yml");
+
+    /// Every install path this file writes must reach the web container on
+    /// **8080**, because the image's nginx is unprivileged and binds that
+    /// (MAIN-650). The Helm chart has indirection that made this correct --
+    /// a Service `targetPort: http` resolved by name -- and this generator has
+    /// none, so the number is written out three times and every one of them is
+    /// load-bearing.
+    ///
+    /// Asserted across all three paths together, and asserted NEGATIVELY too:
+    /// the failure this prevents is silent. Behind Traefik a stale `80` still
+    /// routes and then 502s on connect; on the published-port paths the host
+    /// binding maps to a dead container port and the SPA is simply unreachable.
+    /// Nothing errors at generation time in either case.
+    #[test]
+    fn every_install_path_reaches_the_web_container_on_8080() {
+        // Behind Traefik: `expose` and the service port are both the CONTAINER
+        // side, so both move.
+        let c = compose_file(&answers(Deployment::ComposeTraefik));
+        assert!(
+            c.contains("traefik.http.services.nook-web.loadbalancer.server.port=8080"),
+            "{c}"
+        );
+        assert!(
+            !c.contains("nook-web.loadbalancer.server.port=80\""),
+            "a stale 80 here routes and then 502s: {c}"
+        );
+
+        // Published directly: the HOST side stays 80 -- nobody types a port in
+        // a browser -- and only the container side moves.
+        let c = compose_file(&answers(Deployment::Compose));
+        assert!(c.contains("\"80:8080\""), "{c}");
+        assert!(!c.contains("\"80:80\""), "{c}");
+
+        // And the same for the path that has no compose file at all.
+        let d = docker_run_script(&answers(Deployment::DockerRun));
+        assert!(d.contains("-p 80:8080"), "{d}");
+        assert!(!d.contains("-p 80:80 "), "{d}");
+    }
 
     /// No tunnel domain has to mean no diff at all — not a router with an empty
     /// host, not `TUNNEL_DOMAIN=`, which the control plane would read as a zone

@@ -67,8 +67,14 @@ web:
     fsGroup: 101
     seccompProfile:
       type: RuntimeDefault
-  # -- Container securityContext for web. NET_BIND_SERVICE lets a non-root nginx
-  #    bind port 80; everything else is dropped.
+  # -- Container securityContext for web. nginx listens on 8080 (MAIN-650), so
+  #    it needs no capability at all — everything is dropped.
+  #
+  #    This used to add NET_BIND_SERVICE and claim it let a non-root nginx bind
+  #    80. It does not: Kubernetes `capabilities.add` fills the bounding and
+  #    permitted sets, and an unprivileged process needs the capability AMBIENT,
+  #    which Kubernetes does not support. The pod crash-looped on
+  #    `bind() to 0.0.0.0:80 failed (13: Permission denied)` on every cluster.
   securityContext:
     runAsNonRoot: true
     allowPrivilegeEscalation: false
@@ -76,8 +82,6 @@ web:
     capabilities:
       drop:
         - ALL
-      add:
-        - NET_BIND_SERVICE
 
 # ── Queue worker (drains the durable work queue, MAIN-153) ───────────────────
 worker:
@@ -179,7 +183,9 @@ secretKeys:
   sessionSecret: SESSION_SECRET
   # -- Secret key holding the vault key (64 hex chars). Env: SECRETS_KEY. "" to omit.
   secretsKey: ""
-  # -- Secret key holding the OIDC client secret. Env: OIDC_CLIENT_SECRET. "" to omit.
+  # -- Secret key holding the OIDC client secret. Env: OIDC_CLIENT_SECRET. "" to
+  #    omit — and omitting is right for a registered or otherwise public client,
+  #    which PKCE authenticates instead of a secret (MAIN-651).
   oidcClientSecret: ""
   # -- Secret key holding the FLEET's GitHub token (MAIN-407), read by the
   #    control plane to size review loops to a repo's open PRs (MAIN-448).
@@ -228,7 +234,13 @@ config:
   oidc:
     # -- OIDC_ISSUER_URL of your identity provider.
     issuerUrl: ""
-    # -- OIDC_CLIENT_ID (the confidential client).
+    # -- OIDC_CLIENT_ID. OPTIONAL: leave it empty and the control plane
+    #    registers a public client for itself at the IdP (RFC 7591) and
+    #    remembers it, so an issuer and a redirect are a complete configuration
+    #    (MAIN-651). Set it to use a client you created yourself — doing so wins
+    #    outright and no registration is attempted. An IdP that offers neither a
+    #    registration_endpoint nor public clients needs this set, and says so in
+    #    the log.
     clientId: ""
     # -- OIDC_REDIRECT_URL (usually <publicBaseUrl>/api/v1/auth/callback).
     redirectUrl: ""

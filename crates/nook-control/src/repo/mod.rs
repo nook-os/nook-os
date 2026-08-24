@@ -22,6 +22,7 @@ pub mod jobs;
 pub mod nodes;
 pub mod notebook;
 pub mod notifications;
+pub mod oidc_client;
 pub mod read_model;
 pub mod secret_items;
 pub mod sessions;

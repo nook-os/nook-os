@@ -1840,24 +1840,64 @@ pub fn server_for_container(server: &str) -> String {
 /// a packet is allowed. A control plane on loopback (the dev stack) is reached
 /// through the container's default gateway instead, since the container's own
 /// loopback is not the host's.
+/// What one resolved address contributes to the allow list, or `None` when it
+/// cannot be expressed as a rule.
+///
+/// IPv4 ONLY, because `host_rules` is IPv4. `iptables` handed an IPv6 literal
+/// does not warn and skip it — it fails the whole install with "getaddrinfo:
+/// Address family for hostname not supported", and `Sandbox::start` treats that
+/// as fatal, so the node claims work and then fails every job (MAIN-648).
+/// Deciding it here keeps the knowledge of what a rule can express in one place.
+fn allow_entry(ip: IpAddr) -> Option<String> {
+    let v4 = match ip {
+        IpAddr::V4(v4) => v4,
+        // `::ffff:a.b.c.d` is an IPv4 address wearing a v6 spelling, and it is
+        // what a dual-stack resolver commonly returns for an IPv4-only host.
+        // Unwrap it rather than drop it.
+        IpAddr::V6(v6) => v6.to_ipv4_mapped()?,
+    };
+    // A loopback control plane is not reachable from inside at all; the
+    // container reaches the host through its gateway, and the run args add
+    // `host.docker.internal` for the name.
+    Some(if v4.is_loopback() {
+        HOST_GATEWAY.to_string()
+    } else {
+        v4.to_string()
+    })
+}
+
+/// The addresses the egress policy lets through: the control plane, resolved
+/// now, on this node.
+///
+/// BY ADDRESS (AC-5), which is the point — "it is private" is never the reason
+/// a packet is allowed.
 pub fn control_plane_allow(server: &str) -> Vec<String> {
     let Some((host, port)) = host_and_port(server) else {
         return Vec::new();
     };
     let mut out = Vec::new();
+    let mut skipped_v6 = 0usize;
     if let Ok(addrs) = format!("{host}:{port}").to_socket_addrs() {
         for a in addrs {
-            match a.ip() {
-                // A loopback control plane is not reachable from inside at all;
-                // the container reaches the host through its gateway, and the
-                // run args add `host.docker.internal` for the name.
-                IpAddr::V4(v4) if v4.is_loopback() => out.push(HOST_GATEWAY.into()),
-                ip => out.push(ip.to_string()),
+            match allow_entry(a.ip()) {
+                Some(entry) => out.push(entry),
+                None => skipped_v6 += 1,
             }
         }
     }
     out.sort();
     out.dedup();
+    // Every answer was IPv6. Saying nothing would hand back an empty allow list,
+    // which reads as "no control plane to permit" and yields a policy that
+    // silently blocks the job's own control plane.
+    if out.is_empty() && skipped_v6 > 0 {
+        tracing::warn!(
+            host = %host,
+            skipped_v6,
+            "the control plane resolves only to IPv6, and the host egress rules are IPv4 — \
+             the job container cannot reach it"
+        );
+    }
     out
 }
 
@@ -2640,6 +2680,47 @@ mod guards {
 
 #[cfg(test)]
 mod tests {
+
+    /// MAIN-648: the host rules are IPv4, so a resolver answer that includes a
+    /// real IPv6 address must not become one. `iptables` handed an v6 literal
+    /// fails the whole install — "getaddrinfo: Address family for hostname not
+    /// supported" — and a sandbox whose policy did not apply is not a sandbox,
+    /// so the node claims work and then fails every job.
+    #[test]
+    fn only_ipv4_reaches_the_host_rules() {
+        use std::net::IpAddr;
+
+        // An ordinary A record.
+        assert_eq!(
+            super::allow_entry("104.21.96.102".parse::<IpAddr>().unwrap()),
+            Some("104.21.96.102".to_string())
+        );
+
+        // A real AAAA answer cannot be expressed as an IPv4 rule. Skipped, not
+        // stringified into one.
+        assert_eq!(
+            super::allow_entry("2606:4700:3035::6815:6066".parse::<IpAddr>().unwrap()),
+            None
+        );
+
+        // `::ffff:a.b.c.d` is an IPv4 address wearing a v6 spelling — the shape a
+        // dual-stack resolver returns for an IPv4-only host. Unwrapped, not dropped.
+        assert_eq!(
+            super::allow_entry("::ffff:10.12.29.201".parse::<IpAddr>().unwrap()),
+            Some("10.12.29.201".to_string())
+        );
+
+        // A loopback control plane is the gateway, in either spelling: the
+        // container's own loopback is not the host's.
+        assert_eq!(
+            super::allow_entry("127.0.0.1".parse::<IpAddr>().unwrap()),
+            Some(super::HOST_GATEWAY.to_string())
+        );
+        assert_eq!(
+            super::allow_entry("::ffff:127.0.0.1".parse::<IpAddr>().unwrap()),
+            Some(super::HOST_GATEWAY.to_string())
+        );
+    }
     use super::*;
 
     fn spec() -> SandboxSpec {

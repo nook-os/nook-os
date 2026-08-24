@@ -152,7 +152,7 @@ impl AppState {
     pub async fn new(db: DbPool, cfg: Config, oidc: Option<OidcContext>) -> Self {
         // Discovery state is built from config; `oidc` seeds the already-
         // discovered context from the boot-time attempt (MAIN-169).
-        let oidc = Arc::new(OidcState::new(&cfg, oidc));
+        let oidc = Arc::new(OidcState::new(&cfg, db.clone(), oidc));
         let cookie_key = crate::auth::cookie_key(&cfg.session_secret);
         let vault = Vault::from_env(&cfg.session_secret).expect("vault init failed");
         // Two stores and one verdict: the baked dist, the upload directory,

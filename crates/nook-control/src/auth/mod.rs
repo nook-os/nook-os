@@ -1,6 +1,7 @@
 //! Authentication: generic OIDC (any standards-compliant IdP) + opaque
 //! server-side sessions. Identity always belongs to the customer's IdP.
 
+pub mod dcr;
 pub mod password;
 
 pub mod perm;
@@ -25,15 +26,30 @@ use crate::state::AppState;
 pub const SESSION_COOKIE: &str = "nook_session";
 pub const FLOW_COOKIE: &str = "nook_oidc_flow";
 
-/// Discovered IdP metadata, cached at startup. The OIDC client itself is
-/// rebuilt per request from this (pure construction, no network).
+/// Discovered IdP metadata plus the client this instance authenticates as. The
+/// OIDC client itself is rebuilt per request from this (pure construction, no
+/// network).
+///
+/// The credentials live here rather than being read from config at each use
+/// because they no longer all come from config: with no `OIDC_CLIENT_ID` set,
+/// the id is one the instance registered for itself (MAIN-651). Holding them
+/// beside the metadata keeps the existing invariant that a context exists only
+/// when a login can actually be attempted.
 pub struct OidcContext {
     pub metadata: CoreProviderMetadata,
     pub http: openidconnect::reqwest::Client,
+    pub client_id: String,
+    /// `None` for a public client — every registered one, and any explicitly
+    /// configured client whose IdP wants none.
+    pub client_secret: Option<String>,
 }
 
 impl OidcContext {
-    pub async fn discover(issuer_url: &str) -> anyhow::Result<Self> {
+    pub async fn discover(
+        issuer_url: &str,
+        cfg: &crate::config::Config,
+        db: &nook_db::DbPool,
+    ) -> anyhow::Result<Self> {
         let http = openidconnect::reqwest::ClientBuilder::new()
             // Never follow redirects during token exchange (OIDC spec hygiene).
             .redirect(openidconnect::reqwest::redirect::Policy::none())
@@ -41,8 +57,53 @@ impl OidcContext {
         let metadata =
             CoreProviderMetadata::discover_async(IssuerUrl::new(issuer_url.to_string())?, &http)
                 .await?;
-        Ok(Self { metadata, http })
+        let (client_id, client_secret) =
+            resolve_client(&metadata, &http, cfg, db, issuer_url).await?;
+        Ok(Self {
+            metadata,
+            http,
+            client_id,
+            client_secret,
+        })
     }
+}
+
+/// Which client this instance is, in precedence order: what the operator
+/// configured, then what it registered for itself earlier, then a fresh
+/// registration.
+///
+/// Configuration wins outright. An operator who names a client has made a
+/// choice, and registering another behind their back would leave two clients at
+/// the IdP where they created one -- so `OIDC_CLIENT_ID` short-circuits before
+/// the database is even read.
+async fn resolve_client(
+    metadata: &CoreProviderMetadata,
+    http: &openidconnect::reqwest::Client,
+    cfg: &crate::config::Config,
+    db: &nook_db::DbPool,
+    issuer: &str,
+) -> anyhow::Result<(String, Option<String>)> {
+    if let Some(id) = cfg.oidc_client_id.clone() {
+        return Ok((id, cfg.oidc_client_secret.clone()));
+    }
+
+    if let Some(id) = crate::repo::oidc_client::remembered(db, issuer).await? {
+        return Ok((id, None));
+    }
+
+    let redirect = cfg.oidc_redirect_url.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("OIDC_REDIRECT_URL must be set before a client can be registered")
+    })?;
+    let registered = dcr::register(http, metadata, redirect, "NookOS").await?;
+    // Remembered before it is returned: a registration this process forgets is
+    // one the IdP still holds, and the next boot would make another.
+    crate::repo::oidc_client::remember(db, issuer, &registered.client_id).await?;
+    tracing::info!(
+        issuer,
+        client_id = %registered.client_id,
+        "registered this instance at the IdP (RFC 7591) -- no client id was configured"
+    );
+    Ok((registered.client_id, None))
 }
 
 /// The instance's OIDC discovery state, hot-swappable after boot (MAIN-169).
@@ -73,6 +134,11 @@ pub struct OidcState {
     /// network round-trip so a burst of concurrent logins makes ONE attempt at
     /// the IdP, not one per request.
     discovering: tokio::sync::Mutex<()>,
+    /// Discovery now also resolves WHICH client this instance is, which can mean
+    /// reading a remembered registration or making one, so it needs both of
+    /// these (MAIN-651).
+    cfg: crate::config::Config,
+    db: nook_db::DbPool,
 }
 
 impl OidcState {
@@ -80,7 +146,11 @@ impl OidcState {
     /// one-shot attempt the server still makes at boot). When OIDC is not fully
     /// configured the issuer is `None` and every state query reports "not
     /// configured", regardless of any seed.
-    pub fn new(cfg: &crate::config::Config, discovered: Option<OidcContext>) -> Self {
+    pub fn new(
+        cfg: &crate::config::Config,
+        db: nook_db::DbPool,
+        discovered: Option<OidcContext>,
+    ) -> Self {
         let issuer = if cfg.oidc_configured() {
             cfg.oidc_issuer_url.clone()
         } else {
@@ -94,6 +164,8 @@ impl OidcState {
             issuer,
             ctx,
             discovering: tokio::sync::Mutex::new(()),
+            cfg: cfg.clone(),
+            db,
         }
     }
 
@@ -129,7 +201,7 @@ impl OidcState {
         if let Some(c) = self.current() {
             return Ok(Some(c));
         }
-        let ctx = Arc::new(OidcContext::discover(&issuer).await?);
+        let ctx = Arc::new(OidcContext::discover(&issuer, &self.cfg, &self.db).await?);
         *self.ctx.write().expect("oidc ctx lock") = Some(ctx.clone());
         tracing::info!(issuer = %issuer, "OIDC discovery complete");
         Ok(Some(ctx))
@@ -150,17 +222,30 @@ mod oidc_state_tests {
         c
     }
 
-    #[test]
-    fn not_configured_is_never_degraded() {
-        let s = OidcState::new(&cfg_with_issuer(None), None);
+    /// These cover the not-configured and degraded paths, which never read a
+    /// row — the pool is here because `OidcState` now holds one, not because
+    /// any of them query it.
+    async fn pool() -> nook_db::DbPool {
+        nook_db::connect("sqlite::memory:", 1)
+            .await
+            .expect("in-memory sqlite")
+    }
+
+    #[tokio::test]
+    async fn not_configured_is_never_degraded() {
+        let s = OidcState::new(&cfg_with_issuer(None), pool().await, None);
         assert!(!s.configured());
         assert!(!s.degraded());
         assert!(s.current().is_none());
     }
 
-    #[test]
-    fn configured_without_discovery_is_degraded() {
-        let s = OidcState::new(&cfg_with_issuer(Some("https://idp.example.test")), None);
+    #[tokio::test]
+    async fn configured_without_discovery_is_degraded() {
+        let s = OidcState::new(
+            &cfg_with_issuer(Some("https://idp.example.test")),
+            pool().await,
+            None,
+        );
         assert!(s.configured());
         assert!(
             s.degraded(),
@@ -174,6 +259,7 @@ mod oidc_state_tests {
         // A host that will not resolve/connect stands in for the outage.
         let s = OidcState::new(
             &cfg_with_issuer(Some("https://idp.invalid.nonexistent.test")),
+            pool().await,
             None,
         );
         let err = s.discover_now().await;
@@ -187,7 +273,7 @@ mod oidc_state_tests {
 
     #[tokio::test]
     async fn discover_now_is_a_noop_when_not_configured() {
-        let s = OidcState::new(&cfg_with_issuer(None), None);
+        let s = OidcState::new(&cfg_with_issuer(None), pool().await, None);
         let out = s
             .discover_now()
             .await

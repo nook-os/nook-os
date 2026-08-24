@@ -20,4 +20,4 @@ ENV CHAT_ORIGIN=http://chat:8082
 ENV DNS_RESOLVER=127.0.0.11
 COPY deploy/docker/nginx.conf.template /etc/nginx/templates/default.conf.template
 COPY --from=build /src/frontend/apps/web/dist /usr/share/nginx/html
-EXPOSE 80
+EXPOSE 8080

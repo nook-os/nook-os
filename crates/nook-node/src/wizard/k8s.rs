@@ -123,6 +123,12 @@ pub struct InitOptions {
 pub enum DiscoveryProbe {
     Reachable {
         device_authorization_endpoint: Option<String>,
+        /// Whether the IdP will register a client for us: it advertises a
+        /// `registration_endpoint` AND offers public clients (MAIN-651). Both
+        /// halves are required — a registration endpoint that only issues
+        /// confidential clients cannot help, because the control plane refuses
+        /// a registration that comes back with a secret.
+        registers_clients: bool,
     },
     Unreachable,
 }
@@ -240,6 +246,21 @@ pub struct Outcome {
     pub secret_command: String,
     pub helm_command: String,
     pub backed_up: bool,
+    /// The steps `--agent` needs and the chart cannot do for you: create the
+    /// listener's TLS Secret, then fill in its public address once the
+    /// LoadBalancer has one (MAIN-650).
+    ///
+    /// Empty when the agent listener is off. A field rather than a `println!`
+    /// in `init` so a test can assert the hand-off actually says this — its
+    /// absence is what made a fresh install mount a Secret nobody had created.
+    pub agent_steps: Vec<String>,
+    /// The database the chart does NOT create, named before the install rather
+    /// than discovered from a CrashLoopBackOff (MAIN-650).
+    pub database_note: String,
+    /// What editing the Secret later requires. Helm cannot roll a Deployment on
+    /// a change to a Secret it does not render, so this says the quiet part
+    /// (MAIN-650).
+    pub secret_change_note: String,
 }
 
 /// CLI entry point: open a terminal if there is one, do the work, print the
@@ -255,14 +276,25 @@ pub fn init(opts: InitOptions) -> Result<()> {
         println!("  (previous values backed up beside it as values.yaml.bak)");
     }
     println!();
-    println!("1. Create the Secret the chart references — it holds the ONLY secret");
+    println!("1. {}", out.database_note);
+    println!();
+    println!("2. Create the Secret the chart references — it holds the ONLY secret");
     println!("   material; the values file has none. A fresh SESSION_SECRET is below:");
     println!();
     println!("{}", indent(&out.secret_command));
     println!();
-    println!("2. Install (or upgrade) the control plane:");
+    let mut n = 3;
+    for step in &out.agent_steps {
+        println!("{n}. {step}");
+        println!();
+        n += 1;
+    }
+    println!("{n}. Install (or upgrade) the control plane:");
     println!();
     println!("{}", indent(&out.helm_command));
+    println!();
+    n += 1;
+    println!("{n}. {}", out.secret_change_note);
     println!();
     if !have("helm") {
         println!("Helm 3 is not installed here — get it to run the command above:");
@@ -396,10 +428,15 @@ pub fn run(opts: InitOptions, tty: Option<Tty>, discover: &Discover) -> Result<O
 
         // Verify discovery. Reachability only (NG-3); a miss warns and proceeds.
         let discovery = discover(&issuer_url);
+        let mut registers_clients = false;
         let advertises_device = match &discovery {
             DiscoveryProbe::Reachable {
                 device_authorization_endpoint,
-            } => device_authorization_endpoint.is_some(),
+                registers_clients: registers,
+            } => {
+                registers_clients = *registers;
+                device_authorization_endpoint.is_some()
+            }
             DiscoveryProbe::Unreachable => {
                 warn(
                     &mut tty,
@@ -412,20 +449,47 @@ pub fn run(opts: InitOptions, tty: Option<Tty>, discover: &Discover) -> Result<O
             }
         };
 
-        let client_id = resolve_required(
-            &mut tty,
-            "OIDC client ID (OIDC_CLIENT_ID)",
-            "--oidc-client-id",
-            opts.oidc_client_id.clone(),
-            existing.oidc_client_id.clone(),
-        )?;
-        // Secret: printed only (NG-4). Interactively always collected (AC-3); a
-        // secret-less non-interactive run wires the key and leaves the operator to
-        // put the value in the Secret themselves.
-        oidc_client_secret = match &mut tty {
-            Some(t) => Some(t.text("OIDC client secret (OIDC_CLIENT_SECRET)", None)?),
-            None => some_trimmed(opts.oidc_client_secret.clone().unwrap_or_default()),
+        // An IdP that registers clients makes this OPTIONAL: left blank, the
+        // control plane registers a public client for itself at boot and
+        // remembers it (MAIN-651). Required only where that cannot happen --
+        // asking for an id the operator would have to go and create is exactly
+        // the hand-work this install path is trying to delete.
+        let client_id = if registers_clients {
+            let given = resolve(
+                &mut tty,
+                "OIDC client ID (OIDC_CLIENT_ID) — blank to register one automatically",
+                opts.oidc_client_id.clone(),
+                existing.oidc_client_id.clone(),
+                String::new(),
+            )?;
+            let given = given.trim().to_string();
+            if given.is_empty() {
+                note(
+                    &mut tty,
+                    "no client ID given — the control plane will register a public client                      at this IdP on first boot and remember it (RFC 7591).",
+                );
+            }
+            given
+        } else {
+            resolve_required(
+                &mut tty,
+                "OIDC client ID (OIDC_CLIENT_ID)",
+                "--oidc-client-id",
+                opts.oidc_client_id.clone(),
+                existing.oidc_client_id.clone(),
+            )?
         };
+        // Secret: printed only (NG-4). Interactively collected (AC-3); a
+        // secret-less non-interactive run wires the key and leaves the operator to
+        // put the value in the Secret themselves. Skipped entirely when the client
+        // is to be registered: a registered client is PUBLIC and has no secret, so
+        // prompting for one would ask for something that will never exist.
+        if !client_id.is_empty() {
+            oidc_client_secret = match &mut tty {
+                Some(t) => Some(t.text("OIDC client secret (OIDC_CLIENT_SECRET)", None)?),
+                None => some_trimmed(opts.oidc_client_secret.clone().unwrap_or_default()),
+            };
+        }
         // Scopes: prompted only on the Advanced path; Recommended keeps the default.
         let scopes = if advanced {
             resolve(
@@ -448,13 +512,30 @@ pub fn run(opts: InitOptions, tty: Option<Tty>, discover: &Discover) -> Result<O
 
         // Device login: always the (public) device client id; a manual
         // authorization endpoint only when discovery does not advertise one (AC-3).
-        let device_client_id = resolve_required(
-            &mut tty,
-            "OIDC device (public) client ID (OIDC_DEVICE_CLIENT_ID)",
-            "--oidc-device-client-id",
-            opts.oidc_device_client_id.clone(),
-            existing.oidc_device_client_id.clone(),
-        )?;
+        // Optional on the same condition as the client ID above (MAIN-651): the
+        // control plane falls back to whichever client it resolved when none is
+        // named, and a registered client is already public, which is the only
+        // property the device grant needs of it. Where nothing will be
+        // registered there is nothing to fall back to, so it stays required.
+        let device_client_id = if registers_clients {
+            resolve(
+                &mut tty,
+                "OIDC device client ID (OIDC_DEVICE_CLIENT_ID) — blank to reuse the main client",
+                opts.oidc_device_client_id.clone(),
+                existing.oidc_device_client_id.clone(),
+                String::new(),
+            )?
+            .trim()
+            .to_string()
+        } else {
+            resolve_required(
+                &mut tty,
+                "OIDC device (public) client ID (OIDC_DEVICE_CLIENT_ID)",
+                "--oidc-device-client-id",
+                opts.oidc_device_client_id.clone(),
+                existing.oidc_device_client_id.clone(),
+            )?
+        };
         if !advertises_device {
             let endpoint = resolve_required(
                 &mut tty,
@@ -914,6 +995,15 @@ pub fn run(opts: InitOptions, tty: Option<Tty>, discover: &Discover) -> Result<O
         DEFAULT_NAMESPACE.into(),
     )?;
 
+    // Before the values below take ownership of these: the hand-off has to say
+    // what `--agent` still needs, and it cannot read them once they have moved.
+    let secret_change_note = secret_change_note(&release, &namespace);
+    let agent_steps = agent_steps_for(
+        agent_tls_secret.as_deref(),
+        agent_public_url.as_deref(),
+        &namespace,
+    );
+
     let values = Values {
         existing_secret,
         public_base_url,
@@ -979,7 +1069,110 @@ pub fn run(opts: InitOptions, tty: Option<Tty>, discover: &Discover) -> Result<O
         secret_command,
         helm_command,
         backed_up,
+        agent_steps,
+        database_note: database_note(),
+        secret_change_note,
     })
+}
+
+/// The database step (MAIN-650 AC-6).
+///
+/// The chart brings no Postgres: `existingSecret` carries a `DATABASE_URL` and
+/// that is the whole contract. An operator who has only ever run the compose
+/// stack has never had to create one, so the omission surfaced as a control
+/// plane that installed cleanly and then crash-looped on connect.
+fn database_note() -> String {
+    [
+        "The chart does NOT create a database. Before installing, have a",
+        "   PostgreSQL instance and a database that already EXISTS — the control",
+        "   plane migrates a database, it does not create one. Put its URL in the",
+        "   Secret above as DATABASE_URL:",
+        "",
+        "     postgres://USER:PASSWORD@HOST:5432/nook?sslmode=require",
+        "",
+        "   Managed Postgres (DigitalOcean, RDS, Cloud SQL) generally REQUIRES",
+        "   TLS: without sslmode=require the connection is refused, and the error",
+        "   names the handshake rather than the missing parameter.",
+    ]
+    .join("\n")
+}
+
+/// Editing the Secret afterwards (MAIN-650 AC-5).
+///
+/// The Deployments carry a checksum over the ConfigMap, so config changes roll
+/// the pods by themselves. A Secret cannot work that way here: `existingSecret`
+/// is created and owned by the operator, outside the chart, so Helm never
+/// renders it and has nothing to hash. Rather than pretend otherwise, the
+/// hand-off says what to run.
+fn secret_change_note(release: &str, namespace: &str) -> String {
+    [
+        "Editing the Secret later does NOT restart anything. The chart rolls the",
+        "   pods when its own config changes, but the Secret is yours and Helm",
+        "   never sees it — so after changing a value in it, roll them yourself:",
+        "",
+        &format!(
+            "     kubectl rollout restart deploy -n {namespace} \\\n       -l app.kubernetes.io/instance={release}"
+        ),
+    ]
+    .join("\n")
+}
+
+/// What `--agent` still needs from a person, in order (MAIN-650).
+///
+/// The chart references `agent.tlsSecret` and mounts it; nothing creates it, and
+/// the hand-off used to say nothing at all — so an install that followed the
+/// printed steps exactly produced a pod mounting a Secret that did not exist.
+///
+/// `publicUrl` is the other half: it is baked into join tokens, so it must be
+/// set BEFORE install, and it is the LoadBalancer's address, which does not
+/// exist UNTIL after install. That ordering cannot be designed away here, so it
+/// is stated instead.
+fn agent_steps_for(
+    tls_secret: Option<&str>,
+    public_url: Option<&str>,
+    namespace: &str,
+) -> Vec<String> {
+    let Some(secret) = tls_secret.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Vec::new();
+    };
+
+    let mut steps = vec![[
+        "Create the agent listener's TLS Secret — the chart MOUNTS it and does",
+        "   not create it, so an install without this mounts a Secret that does",
+        "   not exist:",
+        "",
+        "     openssl req -x509 -newkey rsa:2048 -nodes -days 365 \\",
+        "       -keyout agent.key -out agent.crt -subj \"/CN=nook-agent\"",
+        &format!("     kubectl create secret tls {secret} -n {namespace} \\"),
+        "       --cert=agent.crt --key=agent.key",
+    ]
+    .join("\n")];
+
+    // A public address that does not start with a digit is a name or a
+    // placeholder, not an address the LoadBalancer handed out.
+    let unresolved = public_url
+        .map(str::trim)
+        .is_none_or(|u| u.is_empty() || !u.starts_with(|c: char| c.is_ascii_digit()));
+    if unresolved {
+        steps.push(
+            [
+                "Fill in the agent's public address AFTER installing. It is baked",
+                "   into join tokens so it cannot stay blank, and it is the",
+                "   LoadBalancer's address, which does not exist until the Service",
+                "   is created:",
+                "",
+                &format!(
+                    "     kubectl -n {namespace} get svc -l app.kubernetes.io/component=agent \\"
+                ),
+                "       -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}'",
+                "",
+                "   Then re-run this command with --agent-url <that-ip>:8081 and",
+                "   `helm upgrade` using the regenerated values.",
+            ]
+            .join("\n"),
+        );
+    }
+    steps
 }
 
 fn values_path(nook_dir: &Path, release: &str) -> PathBuf {
@@ -1070,6 +1263,15 @@ fn confirm(tty: &mut Option<Tty>, question: &str, seed: bool) -> Result<bool> {
 
 /// Print a warning to the terminal if there is one, else to stderr — so a
 /// discovery miss is visible whether or not a person is watching (AC-3).
+/// Say something that is not a problem. `warn`'s twin, kept separate so a
+/// deliberate choice does not print with a warning's siren.
+fn note(tty: &mut Option<Tty>, msg: &str) {
+    match tty {
+        Some(t) => t.say(&format!("• {msg}")),
+        None => eprintln!("note: {msg}"),
+    }
+}
+
 fn warn(tty: &mut Option<Tty>, msg: &str) {
     match tty {
         Some(t) => t.say(&format!("⚠ {msg}")),
@@ -1134,22 +1336,43 @@ fn real_discovery(issuer: &str) -> DiscoveryProbe {
                 return None;
             }
             let doc: serde_json::Value = resp.json().await.ok()?;
-            Some(
+            Some((
                 doc.get("device_authorization_endpoint")
                     .and_then(|v| v.as_str())
                     .map(str::to_string),
-            )
+                registers_clients(&doc),
+            ))
         })
     })
     .join()
     .ok()
     .flatten();
     match fetched {
-        Some(device_authorization_endpoint) => DiscoveryProbe::Reachable {
+        Some((device_authorization_endpoint, registers_clients)) => DiscoveryProbe::Reachable {
             device_authorization_endpoint,
+            registers_clients,
         },
         None => DiscoveryProbe::Unreachable,
     }
+}
+
+/// Read a discovery document for the two things RFC 7591 registration needs.
+///
+/// Absence of `token_endpoint_auth_methods_supported` is NOT permission: RFC
+/// 8414 §2 says an omitted field means `client_secret_basic`, so a provider
+/// that says nothing is saying "confidential". Reading silence as consent here
+/// would offer to register against an IdP that then hands back a secret, and the
+/// control plane refuses those.
+fn registers_clients(doc: &serde_json::Value) -> bool {
+    let has_endpoint = doc
+        .get("registration_endpoint")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.trim().is_empty());
+    let public_ok = doc
+        .get("token_endpoint_auth_methods_supported")
+        .and_then(|v| v.as_array())
+        .is_some_and(|m| m.iter().any(|v| v.as_str() == Some("none")));
+    has_endpoint && public_ok
 }
 
 fn have(cmd: &str) -> bool {
@@ -1198,10 +1421,17 @@ fn render_values(v: &Values, m: &Meta) -> String {
     if let Some(o) = &v.oidc {
         s.push_str("  oidc:\n");
         s.push_str(&format!("    issuerUrl: {}\n", o.issuer_url));
-        s.push_str(&format!("    clientId: {}\n", o.client_id));
+        // Omitted rather than written empty when the client is to be registered
+        // (MAIN-651): a bare `clientId:` is YAML null, and the chart's own
+        // default is the empty string. Saying nothing leaves the default alone.
+        if !o.client_id.is_empty() {
+            s.push_str(&format!("    clientId: {}\n", o.client_id));
+        }
         s.push_str(&format!("    redirectUrl: {}\n", o.redirect_url));
         s.push_str(&format!("    scopes: \"{}\"\n", o.scopes));
-        s.push_str(&format!("    deviceClientId: {}\n", o.device_client_id));
+        if !o.device_client_id.is_empty() {
+            s.push_str(&format!("    deviceClientId: {}\n", o.device_client_id));
+        }
     }
     if let Some(m) = &v.mail {
         s.push_str("  mail:\n");
@@ -1624,6 +1854,68 @@ fn scalar(text: &str, key: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// MAIN-650: an install that followed the printed steps exactly produced a
+    /// pod mounting a Secret nobody had created, because the hand-off never
+    /// mentioned it. The steps are asserted here rather than eyeballed — their
+    /// ABSENCE was the whole defect.
+    /// MAIN-650 AC-6: the database is a prerequisite the chart cannot satisfy,
+    /// and an install that does not mention it fails after Helm reports success.
+    #[test]
+    fn the_handoff_names_the_database_the_chart_does_not_create() {
+        let note = super::database_note();
+        assert!(note.contains("does NOT create a database"), "{note}");
+        assert!(note.contains("DATABASE_URL"), "{note}");
+        // A managed instance refuses a plaintext connection, and the error it
+        // gives names the handshake rather than the missing parameter.
+        assert!(note.contains("sslmode=require"), "{note}");
+        // The control plane migrates a database; it does not create one.
+        assert!(note.contains("EXISTS"), "{note}");
+    }
+
+    /// MAIN-650 AC-5: the ConfigMap checksum rolls the pods on a config change,
+    /// but `existingSecret` is outside the chart and Helm has nothing to hash —
+    /// so the hand-off has to say so rather than leave an edit looking applied.
+    #[test]
+    fn the_handoff_says_a_secret_edit_needs_a_restart() {
+        let note = super::secret_change_note("nook", "nook-system");
+        assert!(note.contains("does NOT restart anything"), "{note}");
+        // Selector rather than a rendered name: the Deployment's name depends on
+        // release/chart interplay, and a wrong literal is worse than no command.
+        assert!(
+            note.contains("kubectl rollout restart deploy -n nook-system"),
+            "{note}"
+        );
+        assert!(note.contains("app.kubernetes.io/instance=nook"), "{note}");
+    }
+
+    #[test]
+    fn the_agent_handoff_says_what_the_chart_cannot_do_for_you() {
+        let steps =
+            super::agent_steps_for(Some("nook-agent-tls"), Some("PLACEHOLDER:8081"), "nook");
+        let all = steps.join("\n");
+
+        // The Secret the chart mounts and does not create.
+        assert!(
+            all.contains("kubectl create secret tls nook-agent-tls -n nook"),
+            "{all}"
+        );
+        assert!(all.contains("openssl req -x509"), "{all}");
+
+        // The ordering: the address is the LoadBalancer's, so it cannot be known
+        // before the Service exists, yet it is baked into join tokens.
+        assert!(all.contains("AFTER installing"), "{all}");
+        assert!(all.contains("--agent-url"), "{all}");
+
+        // A real address means the second step is done; only the Secret remains.
+        let settled =
+            super::agent_steps_for(Some("nook-agent-tls"), Some("152.42.155.192:8081"), "nook");
+        assert_eq!(settled.len(), 1, "{settled:?}");
+
+        // The listener is off: the hand-off says nothing about it at all.
+        assert!(super::agent_steps_for(None, None, "nook").is_empty());
+        assert!(super::agent_steps_for(Some("  "), None, "nook").is_empty());
+    }
     use super::*;
 
     fn base_opts(dir: &Path) -> InitOptions {
@@ -1929,10 +2221,23 @@ mod tests {
     // ── the MAIN-63 branches (non-interactive; per AC-1 the flag paths
     //    reproduce the interactive results) ──────────────────────────────────
 
-    /// A discovery probe that advertises a device endpoint (or not).
+    /// A discovery probe that advertises a device endpoint (or not), from an IdP
+    /// that does not register clients — the shape most of these tests want.
     fn probe_advertising(advertised: bool) -> impl Fn(&str) -> DiscoveryProbe {
         move |_: &str| DiscoveryProbe::Reachable {
             device_authorization_endpoint: advertised.then(|| "https://id.example/device".into()),
+            registers_clients: false,
+        }
+    }
+
+    /// An IdP that will register a public client for us (MAIN-651). It
+    /// advertises a device endpoint too, which is not incidental: a provider
+    /// modern enough to implement RFC 7591 publishes RFC 8628 as well, and a
+    /// fixture without one would test a combination that does not occur.
+    fn probe_registering() -> impl Fn(&str) -> DiscoveryProbe {
+        |_: &str| DiscoveryProbe::Reachable {
+            device_authorization_endpoint: Some("https://id.example/device".into()),
+            registers_clients: true,
         }
     }
 
@@ -2222,6 +2527,86 @@ mod tests {
         assert!(!out.secret_command.contains("OIDC_CLIENT_SECRET")); // no value this run
                                                                      // …but the wiring survives, so the operator's existing Secret still works.
         assert!(text.contains("  oidcClientSecret: OIDC_CLIENT_SECRET"));
+    }
+
+    /// MAIN-651: an IdP that registers clients makes the client ID optional, so
+    /// the install path stops asking for something the operator would have to go
+    /// and create by hand.
+    #[test]
+    fn a_registering_idp_makes_the_client_id_optional() {
+        let dir = tmp();
+        let out = run(
+            InitOptions {
+                host: Some("nook.example.com".into()),
+                oidc: true,
+                oidc_issuer: Some("https://id.example".into()),
+                ..base_opts(&dir)
+            },
+            None,
+            &probe_registering(),
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&out.path).unwrap();
+
+        // The OIDC block is written, and the id is left for the boot-time
+        // registration to supply -- omitted, not an empty scalar (which is null).
+        assert!(text.contains("issuerUrl: https://id.example"), "{text}");
+        // Neither id is written: both are left for the boot-time registration,
+        // and both are OMITTED rather than empty scalars (which are YAML null).
+        assert!(!text.contains("clientId:"), "{text}");
+        assert!(!text.contains("deviceClientId:"), "{text}");
+        // A registered client is public, so no secret key is wired for it.
+        assert!(
+            !out.secret_command.contains("OIDC_CLIENT_SECRET"),
+            "{}",
+            out.secret_command
+        );
+    }
+
+    /// The other half of the same rule: where the IdP will NOT register, the id
+    /// is still required and the error names the flag. Silence about a client
+    /// that cannot be obtained is how OIDC ends up degraded after a clean run.
+    #[test]
+    fn an_idp_that_does_not_register_still_requires_the_client_id() {
+        let dir = tmp();
+        let err = run(
+            InitOptions {
+                host: Some("nook.example.com".into()),
+                oidc: true,
+                oidc_issuer: Some("https://id.example".into()),
+                ..base_opts(&dir)
+            },
+            None,
+            &probe_advertising(false),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("--oidc-client-id"), "{err}");
+    }
+
+    /// Both halves are required before registration is offered. RFC 8414 §2
+    /// makes an omitted `token_endpoint_auth_methods_supported` mean
+    /// `client_secret_basic`, so silence is confidential, not permissive.
+    #[test]
+    fn registration_needs_an_endpoint_and_a_public_client() {
+        let both = serde_json::json!({
+            "registration_endpoint": "https://id.example/reg",
+            "token_endpoint_auth_methods_supported": ["client_secret_post", "none"],
+        });
+        assert!(super::registers_clients(&both));
+
+        let confidential_only = serde_json::json!({
+            "registration_endpoint": "https://id.example/reg",
+            "token_endpoint_auth_methods_supported": ["client_secret_basic"],
+        });
+        assert!(!super::registers_clients(&confidential_only));
+
+        // Endpoint, but the field omitted entirely: NOT permission.
+        let silent = serde_json::json!({"registration_endpoint": "https://id.example/reg"});
+        assert!(!super::registers_clients(&silent));
+
+        // Public clients, but nowhere to register.
+        let no_endpoint = serde_json::json!({"token_endpoint_auth_methods_supported": ["none"]});
+        assert!(!super::registers_clients(&no_endpoint));
     }
 
     #[test]

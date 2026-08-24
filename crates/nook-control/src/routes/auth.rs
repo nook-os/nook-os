@@ -30,14 +30,10 @@ macro_rules! oidc_client {
     ($state:expr, $oidc:expr) => {
         CoreClient::from_provider_metadata(
             $oidc.metadata.clone(),
-            ClientId::new(
-                $state
-                    .cfg
-                    .oidc_client_id
-                    .clone()
-                    .ok_or_else(|| ApiError::BadRequest("OIDC not configured".into()))?,
-            ),
-            $state.cfg.oidc_client_secret.clone().map(ClientSecret::new),
+            // The context carries the client this instance actually is: the
+            // configured one, or the one it registered for itself (MAIN-651).
+            ClientId::new($oidc.client_id.clone()),
+            $oidc.client_secret.clone().map(ClientSecret::new),
         )
         .set_redirect_uri(
             RedirectUrl::new(

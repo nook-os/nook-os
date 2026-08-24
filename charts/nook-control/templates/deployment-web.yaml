@@ -34,7 +34,7 @@ spec:
             {{- toYaml .Values.web.securityContext | nindent 12 }}
           ports:
             - name: http
-              containerPort: 80
+              containerPort: 8080
               protocol: TCP
           env:
             # nginx proxies /api (and /mcp, /healthz, .well-known) here — the
