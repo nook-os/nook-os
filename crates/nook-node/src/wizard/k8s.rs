@@ -248,6 +248,13 @@ pub struct Outcome {
     /// in `init` so a test can assert the hand-off actually says this — its
     /// absence is what made a fresh install mount a Secret nobody had created.
     pub agent_steps: Vec<String>,
+    /// The database the chart does NOT create, named before the install rather
+    /// than discovered from a CrashLoopBackOff (MAIN-650).
+    pub database_note: String,
+    /// What editing the Secret later requires. Helm cannot roll a Deployment on
+    /// a change to a Secret it does not render, so this says the quiet part
+    /// (MAIN-650).
+    pub secret_change_note: String,
 }
 
 /// CLI entry point: open a terminal if there is one, do the work, print the
@@ -263,12 +270,14 @@ pub fn init(opts: InitOptions) -> Result<()> {
         println!("  (previous values backed up beside it as values.yaml.bak)");
     }
     println!();
-    println!("1. Create the Secret the chart references — it holds the ONLY secret");
+    println!("1. {}", out.database_note);
+    println!();
+    println!("2. Create the Secret the chart references — it holds the ONLY secret");
     println!("   material; the values file has none. A fresh SESSION_SECRET is below:");
     println!();
     println!("{}", indent(&out.secret_command));
     println!();
-    let mut n = 2;
+    let mut n = 3;
     for step in &out.agent_steps {
         println!("{n}. {step}");
         println!();
@@ -277,6 +286,9 @@ pub fn init(opts: InitOptions) -> Result<()> {
     println!("{n}. Install (or upgrade) the control plane:");
     println!();
     println!("{}", indent(&out.helm_command));
+    println!();
+    n += 1;
+    println!("{n}. {}", out.secret_change_note);
     println!();
     if !have("helm") {
         println!("Helm 3 is not installed here — get it to run the command above:");
@@ -930,6 +942,7 @@ pub fn run(opts: InitOptions, tty: Option<Tty>, discover: &Discover) -> Result<O
 
     // Before the values below take ownership of these: the hand-off has to say
     // what `--agent` still needs, and it cannot read them once they have moved.
+    let secret_change_note = secret_change_note(&release, &namespace);
     let agent_steps = agent_steps_for(
         agent_tls_secret.as_deref(),
         agent_public_url.as_deref(),
@@ -1002,7 +1015,51 @@ pub fn run(opts: InitOptions, tty: Option<Tty>, discover: &Discover) -> Result<O
         helm_command,
         backed_up,
         agent_steps,
+        database_note: database_note(),
+        secret_change_note,
     })
+}
+
+/// The database step (MAIN-650 AC-6).
+///
+/// The chart brings no Postgres: `existingSecret` carries a `DATABASE_URL` and
+/// that is the whole contract. An operator who has only ever run the compose
+/// stack has never had to create one, so the omission surfaced as a control
+/// plane that installed cleanly and then crash-looped on connect.
+fn database_note() -> String {
+    [
+        "The chart does NOT create a database. Before installing, have a",
+        "   PostgreSQL instance and a database that already EXISTS — the control",
+        "   plane migrates a database, it does not create one. Put its URL in the",
+        "   Secret above as DATABASE_URL:",
+        "",
+        "     postgres://USER:PASSWORD@HOST:5432/nook?sslmode=require",
+        "",
+        "   Managed Postgres (DigitalOcean, RDS, Cloud SQL) generally REQUIRES",
+        "   TLS: without sslmode=require the connection is refused, and the error",
+        "   names the handshake rather than the missing parameter.",
+    ]
+    .join("\n")
+}
+
+/// Editing the Secret afterwards (MAIN-650 AC-5).
+///
+/// The Deployments carry a checksum over the ConfigMap, so config changes roll
+/// the pods by themselves. A Secret cannot work that way here: `existingSecret`
+/// is created and owned by the operator, outside the chart, so Helm never
+/// renders it and has nothing to hash. Rather than pretend otherwise, the
+/// hand-off says what to run.
+fn secret_change_note(release: &str, namespace: &str) -> String {
+    [
+        "Editing the Secret later does NOT restart anything. The chart rolls the",
+        "   pods when its own config changes, but the Secret is yours and Helm",
+        "   never sees it — so after changing a value in it, roll them yourself:",
+        "",
+        &format!(
+            "     kubectl rollout restart deploy -n {namespace} \\\n       -l app.kubernetes.io/instance={release}"
+        ),
+    ]
+    .join("\n")
 }
 
 /// What `--agent` still needs from a person, in order (MAIN-650).
@@ -1710,6 +1767,36 @@ mod tests {
     /// pod mounting a Secret nobody had created, because the hand-off never
     /// mentioned it. The steps are asserted here rather than eyeballed — their
     /// ABSENCE was the whole defect.
+    /// MAIN-650 AC-6: the database is a prerequisite the chart cannot satisfy,
+    /// and an install that does not mention it fails after Helm reports success.
+    #[test]
+    fn the_handoff_names_the_database_the_chart_does_not_create() {
+        let note = super::database_note();
+        assert!(note.contains("does NOT create a database"), "{note}");
+        assert!(note.contains("DATABASE_URL"), "{note}");
+        // A managed instance refuses a plaintext connection, and the error it
+        // gives names the handshake rather than the missing parameter.
+        assert!(note.contains("sslmode=require"), "{note}");
+        // The control plane migrates a database; it does not create one.
+        assert!(note.contains("EXISTS"), "{note}");
+    }
+
+    /// MAIN-650 AC-5: the ConfigMap checksum rolls the pods on a config change,
+    /// but `existingSecret` is outside the chart and Helm has nothing to hash —
+    /// so the hand-off has to say so rather than leave an edit looking applied.
+    #[test]
+    fn the_handoff_says_a_secret_edit_needs_a_restart() {
+        let note = super::secret_change_note("nook", "nook-system");
+        assert!(note.contains("does NOT restart anything"), "{note}");
+        // Selector rather than a rendered name: the Deployment's name depends on
+        // release/chart interplay, and a wrong literal is worse than no command.
+        assert!(
+            note.contains("kubectl rollout restart deploy -n nook-system"),
+            "{note}"
+        );
+        assert!(note.contains("app.kubernetes.io/instance=nook"), "{note}");
+    }
+
     #[test]
     fn the_agent_handoff_says_what_the_chart_cannot_do_for_you() {
         let steps =
