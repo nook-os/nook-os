@@ -123,6 +123,51 @@ async fn job(
     id
 }
 
+/// A job of a stated kind, with the target `loop_jobs_target_check` requires of
+/// it: a ticket for `build`, a workspace and no ticket for `review`.
+async fn kinded_job(
+    bed: &TestBed,
+    tenant: TenantId,
+    kind: &str,
+    target: Option<TaskId>,
+    ws: Option<WorkspaceId>,
+    state: &str,
+    executor: NodeId,
+) -> JobId {
+    let id = JobId::new();
+    bed.db()
+        .exec(
+            "INSERT INTO loop_jobs
+            (id, tenant_id, kind, target_task_id, workspace_id, requested_by, state, executor_node_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+            params![
+                id,
+                tenant,
+                kind,
+                target.map(|t| t.0),
+                ws.map(|w| w.0),
+                Uuid::now_v7(),
+                state,
+                executor.0
+            ],
+        )
+        .await
+        .expect("kinded job");
+    id
+}
+
+/// Record a run's conclusion the way the outcome call does: the column alone,
+/// and deliberately NOT `state` — which is the shape this whole card is about.
+async fn record_conclusion(bed: &TestBed, id: JobId, column: &str, value: &str) {
+    bed.db()
+        .exec(
+            &format!("UPDATE loop_jobs SET {column} = $2 WHERE id = $1"),
+            params![id, value],
+        )
+        .await
+        .expect("record the conclusion");
+}
+
 async fn load(bed: &TestBed, id: JobId) -> LoopJob {
     // Through the `Db` surface, not raw sqlx: row mapping is `FromDbRow` since
     // MAIN-327, and a DTO no longer implements sqlx's `FromRow` at all.
@@ -402,6 +447,159 @@ async fn a_disconnect_fails_only_this_nodes_live_jobs() {
     assert!(transcript_text(&bed, running)
         .await
         .contains("disconnected"));
+
+    bed.teardown().await;
+}
+
+/// MAIN-645 AC-1/AC-5: the disconnect path itself, not the rule it asks.
+///
+/// A build run that reported `pr_opened` and then lost its node is CONCLUDED.
+/// Failing it charged the card a strike for work that had succeeded, and
+/// MAIN-505's agent-update drain makes that window ordinary: a node installs
+/// its update the moment its last run concludes, which is exactly when the
+/// completion signal is still in flight.
+///
+/// The sibling with nothing recorded is in the same sweep on purpose — `failed`
+/// has to survive this change, or the reaper stops reporting real losses.
+#[tokio::test]
+async fn a_disconnect_concludes_a_build_that_recorded_its_outcome() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("lje").await;
+    // Two cards, not one: `loop_jobs_one_live_build_per_task` allows a single
+    // live build per ticket, and both of these are live until the sweep runs.
+    // Separate board keys because `task_with_key` seeds a board per call and
+    // `idx_boards_tenant_key` is unique.
+    let reported_target = task_with_key(&bed, tenant, "ACME", 13).await;
+    let silent_target = task_with_key(&bed, tenant, "BOLT", 14).await;
+    let n = node(&bed, tenant).await;
+
+    let reported = kinded_job(
+        &bed,
+        tenant,
+        "build",
+        Some(reported_target),
+        None,
+        "running",
+        n,
+    )
+    .await;
+    record_conclusion(&bed, reported, "build_outcome", "pr_opened").await;
+    let silent = kinded_job(
+        &bed,
+        tenant,
+        "build",
+        Some(silent_target),
+        None,
+        "running",
+        n,
+    )
+    .await;
+    let state = bed.app_state().await;
+
+    jobs::fail_stranded_for_node(&state, n)
+        .await
+        .expect("disconnect sweep");
+
+    assert_eq!(
+        load(&bed, reported).await.state,
+        "completed",
+        "a recorded outcome concludes the run, however its signal was lost"
+    );
+    assert_eq!(
+        load(&bed, silent).await.state,
+        "failed",
+        "nothing recorded is still a real loss"
+    );
+
+    // AC-5: the line names the outcome AND the disconnect. Either alone reads
+    // as the wrong event to whoever opens the run.
+    let line = transcript_text(&bed, reported).await;
+    assert!(line.contains("pr_opened"), "the outcome is named: {line}");
+    assert!(
+        line.contains("disconnected"),
+        "the disconnect is named: {line}"
+    );
+    assert!(
+        !line.contains("job failed"),
+        "a concluded run must not say it failed: {line}"
+    );
+
+    bed.teardown().await;
+}
+
+/// MAIN-645 AC-3: the same question, the other kind — and the half that was
+/// still divergent.
+///
+/// The stall reaper's rule is kind-wise (`repo::jobs::concluded`), so a review
+/// run that posted its verdict and went quiet is `completed`. Reading
+/// `build_outcome` alone here answered `None` for every review run, so the
+/// identical run that lost its NODE was still `failed` — two reapers, two
+/// answers, for exactly the kind nobody thought to check.
+///
+/// It is not cosmetic: `review_run_heads` counts a head as reviewed only on
+/// `completed AND review_verdict IS NOT NULL`, so the recorded verdict was
+/// discarded, the PR read as still owed a review, and `run_reconcile` raised a
+/// duplicate run at the same head once the backoff expired.
+#[tokio::test]
+async fn a_disconnect_concludes_a_review_that_recorded_its_verdict() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("lje").await;
+    let ws = bed.workspace(tenant).await;
+    let n = node(&bed, tenant).await;
+
+    let verdicted = kinded_job(&bed, tenant, "review", None, Some(ws), "running", n).await;
+    record_conclusion(&bed, verdicted, "review_verdict", "approved").await;
+    let state = bed.app_state().await;
+
+    jobs::fail_stranded_for_node(&state, n)
+        .await
+        .expect("disconnect sweep");
+
+    assert_eq!(
+        load(&bed, verdicted).await.state,
+        "completed",
+        "a recorded verdict concludes a review run too"
+    );
+    let line = transcript_text(&bed, verdicted).await;
+    assert!(line.contains("approved"), "the verdict is named: {line}");
+    assert!(
+        line.contains("disconnected"),
+        "the disconnect is named: {line}"
+    );
+
+    bed.teardown().await;
+}
+
+/// The rule is kind-wise, not column-wise (`repo::jobs::recorded_outcome`, the
+/// Rust twin of `concluded()`). A `spec` run records no conclusion at all, so a
+/// value sitting in a column that kind never writes must not conclude it —
+/// otherwise a stray write would silently exempt a lost run from `failed`.
+#[tokio::test]
+async fn a_disconnect_fails_a_spec_run_whatever_is_in_the_outcome_columns() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("lje").await;
+    let target = task_with_key(&bed, tenant, "ACME", 15).await;
+    let n = node(&bed, tenant).await;
+
+    let spec = kinded_job(&bed, tenant, "spec", Some(target), None, "running", n).await;
+    record_conclusion(&bed, spec, "build_outcome", "pr_opened").await;
+    let state = bed.app_state().await;
+
+    jobs::fail_stranded_for_node(&state, n)
+        .await
+        .expect("disconnect sweep");
+
+    assert_eq!(
+        load(&bed, spec).await.state,
+        "failed",
+        "a spec run concludes nothing, so it was really lost"
+    );
 
     bed.teardown().await;
 }
