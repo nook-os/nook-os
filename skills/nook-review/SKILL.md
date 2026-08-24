@@ -1,7 +1,7 @@
 ---
 name: nook-review
 description: "Review open PRs against their linked NookOS board issue and required GitHub checks, then post a three-group verdict with loop labels. Use when asked to run the loop's reviewer or review its PR queue. Designed for /loop; never merges or pushes code."
-version: 1.7.0
+version: 1.8.0
 author: NookOS
 license: MIT
 platforms: [linux, macos]
@@ -70,7 +70,7 @@ Never touch another PR because yours needed nothing.
   whole issue:
 
   ```bash
-  nook task <KEY>
+  nook issues get <KEY>
   ```
 
   **`<KEY>` is whatever that line names — do not assume a prefix.** Boards do
@@ -93,7 +93,7 @@ Never touch another PR because yours needed nothing.
   `loop-changes-requested` and the builder repairs it.
 
   **Check this only when the ticket resolved** — i.e. `Closes` was present and
-  `nook task` returned the issue. A PR with no key is already going to
+  `nook issues get` returned the issue. A PR with no key is already going to
   `needs-human-review`, and adding a title finding on top would just be noise on
   a PR nobody is going to repair automatically.
 - **Account for the type.** An `epic` is a tracker/roadmap parent, not a unit of
@@ -196,11 +196,11 @@ as a failure, never post the comment by hand as a fallback.
 
 The control plane also mirrors the verdict COMMENT onto the board card itself
 (MAIN-477) — collapsed, so a redelivered conclusion never stacks duplicates —
-through the `Closes <KEY>` join in the PR body. Do not `nook comment` the
+through the `Closes <KEY>` join in the PR body. Do not `nook issues comment` the
 verdict line yourself. What remains yours is the card's LABEL state:
 
 ```bash
-nook label <KEY> <the verdict label>          # and --remove the one it replaces
+nook issues label <KEY> <the verdict label>          # and --remove the one it replaces
 ```
 
 Attach and detach are idempotent: re-applying a label the card already carries

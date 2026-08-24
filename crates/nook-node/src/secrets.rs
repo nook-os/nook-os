@@ -129,7 +129,7 @@ fn split_args(
 
 /// `nook secrets set <scope> [<target>] <NAME> <VALUE>`.
 ///
-/// `-` as the value reads stdin, the convention `nook set-description`
+/// `-` as the value reads stdin, the convention `nook issues set-description`
 /// established (MAIN-470 AC-1) — which is how a key with newlines in it, or one
 /// that must not appear in shell history, gets in.
 pub async fn set(scope: &str, args: &[String], json_out: bool) -> Result<()> {

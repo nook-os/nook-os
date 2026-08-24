@@ -1,7 +1,7 @@
 ---
 name: nook-yolo
 description: "Merge the workspace's loop-approved PRs, unattended, all night. Consumes what the build and review loops produce and lands what their evidence clears — board-wide, not one epic. Runs NO builds and NO reviews itself, writes no code, and never pushes. Skips and records anything it cannot land; never halts the night."
-version: 1.2.0
+version: 1.3.0
 author: NookOS
 license: MIT
 platforms: [linux, macos]
@@ -64,14 +64,14 @@ title, because a pass keeps no memory of the last one:
 
 ```bash
 DAY=$(date -I)
-nook tasks --backlog --json | \
+nook issues list --backlog --json | \
   python3 -c "import sys,json;print(next((t['key'] for t in json.load(sys.stdin) if t['title']==f'Yolo run $DAY'),''))"
 ```
 
 If empty, create it:
 
 ```bash
-nook create task --title "Yolo run $DAY" --type chore --description - <<'EOF'
+nook issues create --title "Yolo run $DAY" --type chore --description - <<'EOF'
 ## What this is
 
 The overnight merge ledger. `/nook-yolo` appends one comment per pass: what it
@@ -95,7 +95,7 @@ column) whose PR is **merged**:
 
 - `nook issues move KEY completed` — the card lands in Done.
 - `nook issues prune-worktree KEY` if one is recorded.
-- `nook comment KEY "Reconciled: PR <url> is merged; card moved to Done."`
+- `nook issues comment KEY "Reconciled: PR <url> is merged; card moved to Done."`
 
 This is granted autonomy, not a judgment call: the merge is already real, so the
 board is what catches up.
@@ -107,7 +107,7 @@ List open PRs and work them **oldest first**, except that a PR whose ticket
 is not obvious, record it:
 
 ```bash
-nook comment <LEDGER> "Decision: queued MAIN-41 before MAIN-43 — 41 blocks 43 on the board."
+nook issues comment <LEDGER> "Decision: queued MAIN-41 before MAIN-43 — 41 blocks 43 on the board."
 ```
 
 ### Eligibility — all eleven, re-verified immediately before the merge
@@ -151,7 +151,7 @@ One path outside that list — including a comment-only or whitespace-only chang
 to a source file — is a skip. Record the exception when taken:
 
 ```bash
-nook comment KEY "Queued past verdict <verdictSHA> → <headRefOid>: drift is docs-only (README.md, docs/foo.md)."
+nook issues comment KEY "Queued past verdict <verdictSHA> → <headRefOid>: drift is docs-only (README.md, docs/foo.md)."
 ```
 
 ### What the queue did with a PR it was given
@@ -229,7 +229,7 @@ and of nothing else.
 
 Immediately after, same pass:
 
-- `nook comment KEY "Queued: <pr url> (yolo run $DAY)."` — **queued**, never
+- `nook issues comment KEY "Queued: <pr url> (yolo run $DAY)."` — **queued**, never
   "merged".
 - **Do not move the card, do not prune the worktree, do not claim a merge.** The
   card moves when the PR really merges, and `merge_reconcile` in the control
@@ -281,7 +281,7 @@ Every pass appends one comment to the ledger, whether or not it merged anything.
 The ledger **is** the morning report — there is no separate summary:
 
 ```bash
-nook comment <LEDGER> "Pass <HH:MM> — queued: MAIN-41 (#41), MAIN-42 (#42). Skipped: MAIN-43 (#43, required check \`rust\` failed), MAIN-44 (#44, awaiting review), MAIN-45 (#45, ejected from the merge queue: <the forge's reason>). Nothing else eligible."
+nook issues comment <LEDGER> "Pass <HH:MM> — queued: MAIN-41 (#41), MAIN-42 (#42). Skipped: MAIN-43 (#43, required check \`rust\` failed), MAIN-44 (#44, awaiting review), MAIN-45 (#45, ejected from the merge queue: <the forge's reason>). Nothing else eligible."
 ```
 
 Name every skip **with its cause**. A ledger line saying "skipped 3" is a line

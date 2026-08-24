@@ -1,7 +1,7 @@
 ---
 name: nook-investigate
 description: "Investigate the support report one NookOS card was filed from, READ-ONLY: read the sealed original, reproduce and explain the fault, and record findings plus a draft reply on the email chain. Writes no code, opens no PR, and never promotes the card. Designed for directed investigate runs."
-version: 1.1.0
+version: 1.2.0
 author: NookOS
 license: MIT
 platforms: [linux, macos]
@@ -39,7 +39,7 @@ the environment. If a step seems to need one, the step is not this run's.
 ## 1. The card and the message
 
 ```bash
-nook task <KEY>           # the quoted report as the board holds it
+nook issues get <KEY>           # the quoted report as the board holds it
 nook emails read          # the sealed original, decrypted, for THIS run
 ```
 

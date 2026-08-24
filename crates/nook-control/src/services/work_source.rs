@@ -233,9 +233,9 @@ pub struct BuildWork<'a> {
 /// The pick contract as code (MAIN-458 AC-1a / NG-1): `agent-ready` is the
 /// human approval gate and the converger NEVER reads a card without it;
 /// `blocked`, `needs-human-review`, assigned, still-blocked, backlog, done and
-/// epic cards are excluded exactly as `nook tasks`' server-side filters exclude
-/// them (MAIN-80, MAIN-464) — the filtering is the query's, not re-implemented
-/// here, which is what stops the two drifting.
+/// epic cards are excluded exactly as `nook issues list`'s server-side filters
+/// exclude them (MAIN-80, MAIN-464) — the filtering is the query's, not
+/// re-implemented here, which is what stops the two drifting.
 ///
 /// `needs-human-review` is MAIN-386 AC-4's stop, and it belongs beside
 /// `blocked` rather than in the ladder: by the time the label is on, the ladder

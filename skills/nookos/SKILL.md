@@ -1,7 +1,7 @@
 ---
 name: nookos
 description: "Run and drive coding agents on OTHER machines with `nook` — no ssh, no tmux. Start a Claude/Codex/bash session anywhere in the fleet, type into it, read its answer, and teach every agent in the fleet a skill at once."
-version: 1.8.0
+version: 1.9.0
 author: NookOS
 license: MIT
 platforms: [linux, macos]
@@ -289,7 +289,7 @@ without being told what to do.
 **Find work.** One filter, one query:
 
 ```bash
-nook tasks --label agent-ready --assignee none --unblocked
+nook issues list --label agent-ready --assignee none --unblocked
 ```
 
 ```
@@ -311,7 +311,7 @@ approval.
 description:
 
 ```bash
-nook task NOOK-42
+nook issues get NOOK-42
 ```
 
 If it prints an **Attachments** section, the card carries files — on the ticket
@@ -348,7 +348,7 @@ while `attachments` and `download` answer either credential.
 both win:
 
 ```bash
-nook claim NOOK-42 --column-type started
+nook issues claim NOOK-42 --column-type started
 ```
 
 ```
@@ -356,15 +356,15 @@ nook claim NOOK-42 --column-type started
 ```
 
 That is **not an error**. Someone else got there first; go back to
-`nook tasks` and take the next one.
+`nook issues list` and take the next one.
 
 **Report what you found.** Comments are where reasoning belongs — a blocking
 question, a review verdict, why an approach was abandoned:
 
 ```bash
-nook comment NOOK-42 'Blocked: the fixture DB has no migrations. Should I add one?'
-nook label NOOK-42 blocked
-nook label NOOK-42 blocked --remove
+nook issues comment NOOK-42 'Blocked: the fixture DB has no migrations. Should I add one?'
+nook issues label NOOK-42 blocked
+nook issues label NOOK-42 blocked --remove
 ```
 
 Column names are for people; **column types are for you**: `backlog`,

@@ -66,8 +66,8 @@ pub async fn fetch(client: &Client, task: &str) -> Result<Vec<Value>> {
     Ok(resp.as_array().cloned().unwrap_or_default())
 }
 
-/// The block `nook task` prints and `nook issues attachments` prints, spelled
-/// once so the two can never disagree about a size or an id.
+/// The block `nook issues get` prints and `nook issues attachments` prints,
+/// spelled once so the two can never disagree about a size or an id.
 ///
 /// Each row is named by its ADDRESS — `MAIN-42/shot.png`, the card followed by
 /// the filename — because that is what the next command takes, so what a person

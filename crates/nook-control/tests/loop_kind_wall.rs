@@ -1,6 +1,6 @@
 //! The build-loop wall on the task-claim route (MAIN-142 AC-4).
 //!
-//! A build that runs as a person or an agent typing `nook claim` inside a
+//! A build that runs as a person or an agent typing `nook issues claim` inside a
 //! session never becomes a job, so the executor wall cannot catch it (the
 //! `build` job KIND has its own wall — `kind_wall_refusal`, tested in
 //! executor_selection). So here the wall is applied at the claim, against the

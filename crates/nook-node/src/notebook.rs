@@ -220,8 +220,8 @@ fn note_id(note: &Value) -> Result<String> {
 
 /// `--content -` is stdin, anything else is the value verbatim (AC-5).
 ///
-/// The convention `nook set-description` follows (MAIN-470 AC-1), and for the
-/// same reason: a lone `-` stored literally is how a ticket's contract once
+/// The convention `nook issues set-description` follows (MAIN-470 AC-1), and
+/// for the same reason: a lone `-` stored literally is how a ticket's contract once
 /// became the one-character string `-`.
 fn content_arg(value: &str, stdin: impl FnOnce() -> std::io::Result<String>) -> Result<String> {
     if value == "-" {

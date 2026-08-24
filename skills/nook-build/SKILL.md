@@ -1,7 +1,7 @@
 ---
 name: nook-build
 description: "Build the one NookOS card a run is directed at, end to end: read the contract, implement it in a branch, verify, open a PR, and report the outcome. Judgment only — the control plane picks, claims, moves cards and records. Designed for directed build runs; never merges."
-version: 2.6.0
+version: 2.7.0
 author: NookOS
 license: MIT
 platforms: [linux, macos]
@@ -41,7 +41,7 @@ and raises a fresh one after the hold. A broken environment is not `nothing`.
 ## 1. Your card
 
 ```bash
-nook task "$NOOK_BUILD_TASK"
+nook issues get "$NOOK_BUILD_TASK"
 ```
 
 That returns the whole issue: description, labels, comments, blockers.
@@ -50,8 +50,8 @@ Implement only its acceptance criteria. Non-goals are binding. Compare every
 ruling in a comment amends the contract. No unrelated changes and no
 opportunistic refactors.
 
-**A card can carry files, and they are part of the brief.** When `nook task`
-prints an Attachments section, a document, a screenshot or a schema was hung on
+**A card can carry files, and they are part of the brief.** When
+`nook issues get` prints an Attachments section, a document, a screenshot or a schema was hung on
 the ticket or on one of its comments — it is contract, not decoration, and
 implementing without reading it is implementing from an incomplete brief. Fetch
 what the description depends on and nothing else:
@@ -79,8 +79,8 @@ If the card already records a PR, this run is a repair, not a rebuild — §2.
 
 ## 2. Repair — when the card already records a PR
 
-A card whose `nook task` output shows a **`pr:` line** is not new work: a PR
-exists, and this run exists to REPAIR it. The control plane raises these runs
+A card whose `nook issues get` output shows a **`pr:` line** is not new work: a
+PR exists, and this run exists to REPAIR it. The control plane raises these runs
 when the PR carries `loop-changes-requested` (a reviewer's verdict, or the
 hygiene pass routing a rebase here — for a conflict, or for an ejection from
 the merge queue).

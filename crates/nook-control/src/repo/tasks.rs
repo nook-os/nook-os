@@ -157,7 +157,7 @@ pub struct PickParams {
     pub visibility: Vec<String>,
     /// The node asking. A card DISPATCHED to a machine is that machine's to
     /// take; an undispatched card is anybody's. `None` disables the clause, so
-    /// a human's `nook tasks` still sees the whole board.
+    /// a human's `nook issues list` still sees the whole board.
     pub node: Option<Uuid>,
 }
 

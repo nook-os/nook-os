@@ -1,7 +1,7 @@
 ---
 name: nook-spec
 description: "Interview the user about a raw idea until confident, then file a build-ready issue on the NookOS board. Use when asked to run the loop's spec interview, draft a queue-ready issue, or plan a feature. A human answers — live at the terminal, or asynchronously when run as a detached loop job; never fully unattended."
-version: 1.4.0
+version: 1.5.0
 author: NookOS
 license: MIT
 platforms: [linux, macos]
@@ -24,7 +24,7 @@ decisions.
 
 ```bash
 nook whoami          # must report a user token, not a node token
-nook tasks --json    # proves the board is reachable
+nook issues list --json    # proves the board is reachable
 ```
 
 If `whoami` fails or reports a node token, stop and tell the user to mint a
@@ -248,13 +248,13 @@ empty (you are not in a workspace session), say so in the draft and file
 unscoped only if the user confirms — an unscoped ticket needs a workspace set on
 the board before any loop will pick it up.
 
-Create it with **`nook create task`**. It resolves the board itself (the first
+Create it with **`nook issues create`**. It resolves the board itself (the first
 by default; `--board KEY` to pick another) and inherits the session's workspace,
 so there are no UUIDs to hand-resolve. The drafted markdown is the description —
 feed it on stdin with `--description -`:
 
 ```bash
-nook create task --title "<the issue title>" --description - <<'EOF'
+nook issues create --title "<the issue title>" --description - <<'EOF'
 ## Problem
 …the whole drafted markdown…
 EOF
@@ -263,12 +263,12 @@ EOF
 It prints the created `key` (e.g. `NOOK-42`) and `url`; later skills use that key
 rather than guessing it. A rejected value (an unknown type, a non-epic parent, a
 blank title) exits non-zero with the server's own message. Confirm with
-`nook task NOOK-42`.
+`nook issues get NOOK-42`.
 
 **A filed ticket lands in the backlog** (Triage — the board's first column), and
 the loop cannot pick from the backlog: it stays a human refinement space until
-someone sends it to the board (MAIN-80). So `nook tasks` (the default pick) will
-NOT show a ticket you just filed — list your backlog with `nook tasks --backlog`.
+someone sends it to the board (MAIN-80). So `nook issues list` (the default pick) will
+NOT show a ticket you just filed — list your backlog with `nook issues list --backlog`.
 A ticket is only buildable once a human moves it out of Triage AND applies
 `agent-ready`.
 
@@ -287,13 +287,13 @@ classification and can override it before you file.
 
 If this issue depends on another, record it so the builder skips it until the
 blocker is done. **Direction matters and is the opposite of what reads
-naturally:** in `nook relate <BLOCKER> blocks <DEPENDENT>`, the first argument is
+naturally:** in `nook issues relate <BLOCKER> blocks <DEPENDENT>`, the first argument is
 the BLOCKER and the second is what it holds up. Keys or uuids both work, and the
 command reports whether the dependent is now blocked so you can confirm the
 direction landed:
 
 ```bash
-nook relate MAIN-4 blocks MAIN-5   # MAIN-4 blocks MAIN-5
+nook issues relate MAIN-4 blocks MAIN-5   # MAIN-4 blocks MAIN-5
 ```
 
 Kinds `relates` and `duplicates` are also accepted.
@@ -301,12 +301,12 @@ Kinds `relates` and `duplicates` are also accepted.
 ## Epics
 
 An **epic** (`--type epic`) is a tracker that other tickets hang off. To file a
-ticket under one, pass `--parent <epic key or uuid>` to `nook create task` — the
+ticket under one, pass `--parent <epic key or uuid>` to `nook issues create` — the
 parent must be a `type='epic'` task **on the same board**, and an epic itself
 never has a parent (no nesting):
 
 ```bash
-nook create task --title "…" --type task --parent NOOK-7 --description - <<'EOF'
+nook issues create --title "…" --type task --parent NOOK-7 --description - <<'EOF'
 …
 EOF
 ```
@@ -314,7 +314,7 @@ EOF
 When you spec a **chain** off an epic — decomposing it into the small buildable
 issues the epic tracks — set `--parent` on **every** child so the whole chain is
 listable and the epic shows its progress. List an epic's tickets any time with
-`nook tasks --parent NOOK-7 --backlog` (a uuid or key), and `nook task NOOK-7`
+`nook issues list --parent NOOK-7 --backlog` (a uuid or key), and `nook issues get NOOK-7`
 shows a Children section directly. Detach later with `nook issues set-parent
 NOOK-42 none`, or re-file under another epic with `nook issues set-parent
 NOOK-42 NOOK-7`.
@@ -326,6 +326,6 @@ final read — that label is the approval gate between "idea" and "an agent
 builds it".
 
 > **Currently enforceable only by you.** The MCP door refuses `agent-ready`;
-> the REST door behind `nook label` does **not**. You are technically able to
+> the REST door behind `nook issues label` does **not**. You are technically able to
 > apply it. Do not: applying it means approving your own work.
 

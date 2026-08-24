@@ -339,9 +339,9 @@ pub async fn claim(
 ) -> ApiResult<Json<TaskItem>> {
     let claimant = req.assignee_user_id.unwrap_or(auth.user_id);
     // AC-4 (MAIN-142): the build loop, as it runs TODAY, is a human-or-agent
-    // typing `nook claim` inside a session — there is no `build` job kind yet
-    // for the executor wall to catch. So the wall is applied here, against the
-    // node the claiming session actually runs on.
+    // typing `nook issues claim` inside a session — there is no `build` job
+    // kind yet for the executor wall to catch. So the wall is applied here,
+    // against the node the claiming session actually runs on.
     //
     // A claim with NO session context is out of this check's reach and is left
     // exactly as it was: the control plane cannot tell where it came from, and

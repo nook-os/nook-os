@@ -1,7 +1,7 @@
 ---
 name: nook-epic-runner
 description: "Merge-manage one named epic: consume the PRs and verdicts the build/review loops produce, merge what their evidence clears, and close the epic with a follow-up issue when everything is in. Runs NO builds and NO reviews itself — it fully depends on the loops running outside it. The loop's only merge authority; stops for humans on anything meaningful."
-version: 1.4.0
+version: 1.5.0
 author: NookOS
 license: MIT
 platforms: [linux, macos]
@@ -67,10 +67,10 @@ the reason.
 
 ## 1. Survey the epic and announce the run
 
-Read the whole epic (`nook task NOOK-7 --json`) and list its children:
+Read the whole epic (`nook issues get NOOK-7 --json`) and list its children:
 
 ```bash
-nook tasks --parent NOOK-7 --backlog --json
+nook issues list --parent NOOK-7 --backlog --json
 ```
 
 Classify every child:
@@ -89,7 +89,7 @@ Classify every child:
 On the first pass of a run, comment the plan on the epic:
 
 ```bash
-nook comment NOOK-7 "Epic run started: N queued for the loops (KEY…), M in flight, K waiting on a human, J done. The build/review loops produce the work; this run merges what their evidence clears. Stop conditions armed: security, scope conflict, missing CI, human-review flags."
+nook issues comment NOOK-7 "Epic run started: N queued for the loops (KEY…), M in flight, K waiting on a human, J done. The build/review loops produce the work; this run merges what their evidence clears. Stop conditions armed: security, scope conflict, missing CI, human-review flags."
 ```
 
 ## 2. The pass — consume loop output, merge what's cleared
@@ -138,7 +138,7 @@ a situation matches a stop condition. Order choices that aren't obvious get
 recorded:
 
 ```bash
-nook comment NOOK-7 "Decision (low-risk): merging KEY-A before KEY-B — A is B's blocker on the board."
+nook issues comment NOOK-7 "Decision (low-risk): merging KEY-A before KEY-B — A is B's blocker on the board."
 ```
 
 **Stall watch.** If the same PR has accumulated must-fix verdicts at three or
@@ -209,7 +209,7 @@ or ejects it — long after this pass has ended. The runner never sees which.
 
 So, immediately after, same pass:
 
-- `nook comment KEY "Queued: <pr url> (epic run NOOK-7)."` — **queued**, never
+- `nook issues comment KEY "Queued: <pr url> (epic run NOOK-7)."` — **queued**, never
   "merged".
 - **Do not move the card, do not prune the worktree, do not claim a merge.**
   The card moves when the PR really merges, and `merge_reconcile` in the
@@ -243,7 +243,7 @@ On stop: comment the exact situation and the decision needed on the epic (and
 the PR, when one is involved), then notify and end:
 
 ```bash
-nook comment NOOK-7 "Epic run STOPPED on KEY: [SECURITY] <exact finding from the verdict>. Decision needed: <the question, with options>. Nothing further was merged."
+nook issues comment NOOK-7 "Epic run STOPPED on KEY: [SECURITY] <exact finding from the verdict>. Decision needed: <the question, with options>. Nothing further was merged."
 nook notify "Epic run NOOK-7 stopped — human needed" \
   --body "<one-line reason>. See the epic comment." \
   --level warning --link "<epic url>"
@@ -275,7 +275,7 @@ and the default branch holds every merge:
    improvements observed across the epic's PRs. File ONE ticket:
 
    ```bash
-   nook create task \
+   nook issues create \
      --title "Follow-ups from NOOK-7: deferred work, tech debt, improvements" \
      --type chore \
      --workspace "<the epic's workspace id>" \
@@ -286,7 +286,7 @@ and the default branch holds every merge:
    - [ ] <source: KEY/PR — the item, why deferred>
    …
    EOF
-   nook relate NOOK-7 relates <NEW-KEY>
+   nook issues relate NOOK-7 relates <NEW-KEY>
    ```
 
    It lands in the backlog, is **never** labeled `agent-ready`, and names its
