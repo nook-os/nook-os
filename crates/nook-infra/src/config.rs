@@ -714,13 +714,17 @@ impl Config {
         let Some(issuer) = self.oidc_issuer_url.as_deref() else {
             return OidcSetup::Absent;
         };
-        let missing: Vec<&'static str> = [
-            ("OIDC_CLIENT_ID", self.oidc_client_id.is_some()),
-            ("OIDC_REDIRECT_URL", self.oidc_redirect_url.is_some()),
-        ]
-        .into_iter()
-        .filter_map(|(name, present)| (!present).then_some(name))
-        .collect();
+        // OIDC_CLIENT_ID is deliberately NOT required (MAIN-651): an instance
+        // with none registers its own at an IdP that implements RFC 7591, so an
+        // issuer and a redirect really are a complete configuration. Whether
+        // that registration is possible needs the discovery document, which is a
+        // network round-trip and cannot be decided here -- an IdP that will not
+        // issue a public client leaves OIDC degraded, with the reason logged,
+        // exactly as an unreachable one does.
+        let missing: Vec<&'static str> = [("OIDC_REDIRECT_URL", self.oidc_redirect_url.is_some())]
+            .into_iter()
+            .filter_map(|(name, present)| (!present).then_some(name))
+            .collect();
         if missing.is_empty() {
             OidcSetup::Configured { issuer }
         } else {
@@ -1012,17 +1016,25 @@ mod oidc_setup_tests {
             }
         );
         assert_eq!(
-            cfg(Some("https://idp.example"), None, Some("https://app/cb")).oidc_setup(),
-            OidcSetup::Partial {
-                issuer: "https://idp.example",
-                missing: vec!["OIDC_CLIENT_ID"],
-            }
-        );
-        assert_eq!(
             cfg(Some("https://idp.example"), None, None).oidc_setup(),
             OidcSetup::Partial {
                 issuer: "https://idp.example",
-                missing: vec!["OIDC_CLIENT_ID", "OIDC_REDIRECT_URL"],
+                missing: vec!["OIDC_REDIRECT_URL"],
+            }
+        );
+    }
+
+    /// MAIN-651: a missing client id is no longer half a configuration. An
+    /// issuer and a redirect are complete, because an instance with no
+    /// `OIDC_CLIENT_ID` registers one for itself (RFC 7591) at discovery.
+    /// Reporting this as Partial would name a variable the operator is right
+    /// not to have set.
+    #[test]
+    fn an_issuer_and_a_redirect_are_complete_without_a_client_id() {
+        assert_eq!(
+            cfg(Some("https://idp.example"), None, Some("https://app/cb")).oidc_setup(),
+            OidcSetup::Configured {
+                issuer: "https://idp.example"
             }
         );
     }

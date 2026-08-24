@@ -104,7 +104,7 @@ async fn serve(db: nook_db::DbPool, cfg: Config) -> Result<()> {
     // boots without the IdP reachable (dev-login still works).
     let oidc = match cfg.oidc_setup() {
         OidcSetup::Configured { issuer } => {
-            match nook_control::auth::OidcContext::discover(issuer).await {
+            match nook_control::auth::OidcContext::discover(issuer, &cfg, &db).await {
                 Ok(ctx) => {
                     tracing::info!(issuer, "OIDC discovery complete");
                     Some(ctx)

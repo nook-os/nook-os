@@ -42,8 +42,10 @@ pub async fn exchange(
         .cfg
         .oidc_device_client_id
         .clone()
-        .or_else(|| state.cfg.oidc_client_id.clone())
-        .ok_or_else(|| ApiError::BadRequest("OIDC is not configured".into()))?;
+        // Falling back to the resolved client rather than the configured one:
+        // with no OIDC_CLIENT_ID set, the instance registered its own (MAIN-651)
+        // and that id is the audience a token would carry.
+        .unwrap_or_else(|| oidc.client_id.clone());
 
     let client = CoreClient::from_provider_metadata(
         oidc.metadata.clone(),

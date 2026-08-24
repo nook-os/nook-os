@@ -183,7 +183,9 @@ secretKeys:
   sessionSecret: SESSION_SECRET
   # -- Secret key holding the vault key (64 hex chars). Env: SECRETS_KEY. "" to omit.
   secretsKey: ""
-  # -- Secret key holding the OIDC client secret. Env: OIDC_CLIENT_SECRET. "" to omit.
+  # -- Secret key holding the OIDC client secret. Env: OIDC_CLIENT_SECRET. "" to
+  #    omit — and omitting is right for a registered or otherwise public client,
+  #    which PKCE authenticates instead of a secret (MAIN-651).
   oidcClientSecret: ""
   # -- Secret key holding the FLEET's GitHub token (MAIN-407), read by the
   #    control plane to size review loops to a repo's open PRs (MAIN-448).
@@ -232,7 +234,13 @@ config:
   oidc:
     # -- OIDC_ISSUER_URL of your identity provider.
     issuerUrl: ""
-    # -- OIDC_CLIENT_ID (the confidential client).
+    # -- OIDC_CLIENT_ID. OPTIONAL: leave it empty and the control plane
+    #    registers a public client for itself at the IdP (RFC 7591) and
+    #    remembers it, so an issuer and a redirect are a complete configuration
+    #    (MAIN-651). Set it to use a client you created yourself — doing so wins
+    #    outright and no registration is attempted. An IdP that offers neither a
+    #    registration_endpoint nor public clients needs this set, and says so in
+    #    the log.
     clientId: ""
     # -- OIDC_REDIRECT_URL (usually <publicBaseUrl>/api/v1/auth/callback).
     redirectUrl: ""
