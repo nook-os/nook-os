@@ -240,6 +240,14 @@ pub struct Outcome {
     pub secret_command: String,
     pub helm_command: String,
     pub backed_up: bool,
+    /// The steps `--agent` needs and the chart cannot do for you: create the
+    /// listener's TLS Secret, then fill in its public address once the
+    /// LoadBalancer has one (MAIN-650).
+    ///
+    /// Empty when the agent listener is off. A field rather than a `println!`
+    /// in `init` so a test can assert the hand-off actually says this — its
+    /// absence is what made a fresh install mount a Secret nobody had created.
+    pub agent_steps: Vec<String>,
 }
 
 /// CLI entry point: open a terminal if there is one, do the work, print the
@@ -260,7 +268,13 @@ pub fn init(opts: InitOptions) -> Result<()> {
     println!();
     println!("{}", indent(&out.secret_command));
     println!();
-    println!("2. Install (or upgrade) the control plane:");
+    let mut n = 2;
+    for step in &out.agent_steps {
+        println!("{n}. {step}");
+        println!();
+        n += 1;
+    }
+    println!("{n}. Install (or upgrade) the control plane:");
     println!();
     println!("{}", indent(&out.helm_command));
     println!();
@@ -914,6 +928,14 @@ pub fn run(opts: InitOptions, tty: Option<Tty>, discover: &Discover) -> Result<O
         DEFAULT_NAMESPACE.into(),
     )?;
 
+    // Before the values below take ownership of these: the hand-off has to say
+    // what `--agent` still needs, and it cannot read them once they have moved.
+    let agent_steps = agent_steps_for(
+        agent_tls_secret.as_deref(),
+        agent_public_url.as_deref(),
+        &namespace,
+    );
+
     let values = Values {
         existing_secret,
         public_base_url,
@@ -979,7 +1001,66 @@ pub fn run(opts: InitOptions, tty: Option<Tty>, discover: &Discover) -> Result<O
         secret_command,
         helm_command,
         backed_up,
+        agent_steps,
     })
+}
+
+/// What `--agent` still needs from a person, in order (MAIN-650).
+///
+/// The chart references `agent.tlsSecret` and mounts it; nothing creates it, and
+/// the hand-off used to say nothing at all — so an install that followed the
+/// printed steps exactly produced a pod mounting a Secret that did not exist.
+///
+/// `publicUrl` is the other half: it is baked into join tokens, so it must be
+/// set BEFORE install, and it is the LoadBalancer's address, which does not
+/// exist UNTIL after install. That ordering cannot be designed away here, so it
+/// is stated instead.
+fn agent_steps_for(
+    tls_secret: Option<&str>,
+    public_url: Option<&str>,
+    namespace: &str,
+) -> Vec<String> {
+    let Some(secret) = tls_secret.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Vec::new();
+    };
+
+    let mut steps = vec![[
+        "Create the agent listener's TLS Secret — the chart MOUNTS it and does",
+        "   not create it, so an install without this mounts a Secret that does",
+        "   not exist:",
+        "",
+        "     openssl req -x509 -newkey rsa:2048 -nodes -days 365 \\",
+        "       -keyout agent.key -out agent.crt -subj \"/CN=nook-agent\"",
+        &format!("     kubectl create secret tls {secret} -n {namespace} \\"),
+        "       --cert=agent.crt --key=agent.key",
+    ]
+    .join("\n")];
+
+    // A public address that does not start with a digit is a name or a
+    // placeholder, not an address the LoadBalancer handed out.
+    let unresolved = public_url
+        .map(str::trim)
+        .is_none_or(|u| u.is_empty() || !u.starts_with(|c: char| c.is_ascii_digit()));
+    if unresolved {
+        steps.push(
+            [
+                "Fill in the agent's public address AFTER installing. It is baked",
+                "   into join tokens so it cannot stay blank, and it is the",
+                "   LoadBalancer's address, which does not exist until the Service",
+                "   is created:",
+                "",
+                &format!(
+                    "     kubectl -n {namespace} get svc -l app.kubernetes.io/component=agent \\"
+                ),
+                "       -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}'",
+                "",
+                "   Then re-run this command with --agent-url <that-ip>:8081 and",
+                "   `helm upgrade` using the regenerated values.",
+            ]
+            .join("\n"),
+        );
+    }
+    steps
 }
 
 fn values_path(nook_dir: &Path, release: &str) -> PathBuf {
@@ -1624,6 +1705,38 @@ fn scalar(text: &str, key: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// MAIN-650: an install that followed the printed steps exactly produced a
+    /// pod mounting a Secret nobody had created, because the hand-off never
+    /// mentioned it. The steps are asserted here rather than eyeballed — their
+    /// ABSENCE was the whole defect.
+    #[test]
+    fn the_agent_handoff_says_what_the_chart_cannot_do_for_you() {
+        let steps =
+            super::agent_steps_for(Some("nook-agent-tls"), Some("PLACEHOLDER:8081"), "nook");
+        let all = steps.join("\n");
+
+        // The Secret the chart mounts and does not create.
+        assert!(
+            all.contains("kubectl create secret tls nook-agent-tls -n nook"),
+            "{all}"
+        );
+        assert!(all.contains("openssl req -x509"), "{all}");
+
+        // The ordering: the address is the LoadBalancer's, so it cannot be known
+        // before the Service exists, yet it is baked into join tokens.
+        assert!(all.contains("AFTER installing"), "{all}");
+        assert!(all.contains("--agent-url"), "{all}");
+
+        // A real address means the second step is done; only the Secret remains.
+        let settled =
+            super::agent_steps_for(Some("nook-agent-tls"), Some("152.42.155.192:8081"), "nook");
+        assert_eq!(settled.len(), 1, "{settled:?}");
+
+        // The listener is off: the hand-off says nothing about it at all.
+        assert!(super::agent_steps_for(None, None, "nook").is_empty());
+        assert!(super::agent_steps_for(Some("  "), None, "nook").is_empty());
+    }
     use super::*;
 
     fn base_opts(dir: &Path) -> InitOptions {
