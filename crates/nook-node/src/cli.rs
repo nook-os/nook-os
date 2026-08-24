@@ -1259,6 +1259,12 @@ fn columns(resource: &str, first: &Value) -> Vec<&'static str> {
             // machine, and it was previously answerable only by ssh-ing to it
             // and reading its unit file (MAIN-508).
             "capacity",
+            // Capacity says how MANY loop jobs fit; this says whether the node
+            // accepts any KIND of them (MAIN-647). A node declaring none is
+            // online, uncordoned, roomy and idle, and reads on this line as a
+            // machine with nothing to do rather than one that would refuse
+            // everything offered to it.
+            "loops",
             // "why did MY tenant's work not land on MY machine" is the third
             // (MAIN-576): a node that has withdrawn its cross-tenant consent is
             // online, uncordoned and idle, and every other column agrees.
@@ -1345,6 +1351,12 @@ fn cell(row: &Value, key: &str) -> String {
     }
     if key == "cordon" {
         return cordon_cell(row.get("cordon"));
+    }
+    // Nor is `loops`: it is `capabilities.loop_kinds` read as the difference
+    // between a node with nothing to do and a node that would take nothing
+    // (MAIN-647).
+    if key == "loops" {
+        return loops_cell(row.pointer("/capabilities/loop_kinds"));
     }
     // Nor is `sandbox`: it is `capabilities.sandbox` read as the one thing an
     // operator does about it (MAIN-611 AC-9). `-` is a node whose agent
@@ -1474,6 +1486,27 @@ fn disk_cell(v: Option<&Value>) -> String {
     )
 }
 
+/// Which loop stages a node accepts, as one cell (MAIN-647 AC-5).
+///
+/// `NONE` in capitals rather than the `-` an empty array renders as everywhere
+/// else on this table, and that is the entire point: `-` says "nothing to
+/// report", which is what a node declaring no loop kinds looked like on every
+/// other column of its row. This one says it accepts nothing.
+///
+/// The kinds are spelled out rather than counted, because "which" is the next
+/// question — a node taking only `spec` and a node taking `build` are not
+/// interchangeable, and a count cannot tell them apart.
+fn loops_cell(v: Option<&Value>) -> String {
+    let kinds: Vec<&str> = v
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    if kinds.is_empty() {
+        return "NONE".into();
+    }
+    kinds.join(",")
+}
+
 /// A node's cordon as one narrow cell (MAIN-505): what it is waiting for and
 /// how many runs are left, with `!` when the wait is past its deadline.
 ///
@@ -1588,6 +1621,109 @@ fn render_value(key: &str, v: &Value) -> String {
             .collect::<Vec<_>>()
             .join(","),
         v => v.to_string(),
+    }
+}
+
+/// `nook nodes readiness [name]` — every prerequisite a node needs before it
+/// can claim work, and the command that fixes each unmet one (MAIN-647).
+///
+/// Two sources, one assembly. Named, it reads the capability report the control
+/// plane already stores, so a machine nobody can shell into is still diagnosable
+/// (AC-2); unnamed, it probes this machine, which is the only way to see a fact
+/// that has not reached a Register yet.
+pub async fn node_readiness(name: Option<&str>, json: bool) -> Result<()> {
+    let (label, caps) = match name {
+        Some(want) => {
+            let client = Client::from_config()?;
+            let rows = client
+                .get("/api/v1/nodes")
+                .await?
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            let row = filter_rows(rows, "nodes", Some(want))
+                .into_iter()
+                .next()
+                .with_context(|| format!("no node named {want}"))?;
+            let caps: nook_types::Capabilities =
+                serde_json::from_value(row.get("capabilities").cloned().unwrap_or(Value::Null))
+                    .with_context(|| format!("{want} has not reported its capabilities yet"))?;
+            (want.to_string(), caps)
+        }
+        None => {
+            let caps = crate::capabilities::detect();
+            (caps.hostname.clone(), caps)
+        }
+    };
+
+    let gates = crate::readiness::assess(&caps);
+    let (verdict, summary) = crate::readiness::summary(&gates);
+    if json {
+        let out: Vec<Value> = gates
+            .iter()
+            .map(|g| {
+                serde_json::json!({
+                    "gate": g.name,
+                    "verdict": verdict_word(g.verdict),
+                    "detail": g.detail,
+                    "remedy": g.remedy,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "node": label,
+                // "would this node claim loop work" — NOT "is every gate
+                // answered". A machine nothing supervises still claims work,
+                // right up to the self-update that ends it.
+                "ready": !crate::readiness::blocked(&gates),
+                "verdict": verdict_word(verdict),
+                "summary": summary,
+                "gates": out,
+            }))?
+        );
+        return Ok(());
+    }
+
+    println!("{}", crate::style::bold(&format!("Readiness: {label}")));
+    let width = gates.iter().map(|g| g.name.len()).max().unwrap_or(0);
+    for g in &gates {
+        println!(
+            "{} {:width$}  {}",
+            paint(g.verdict, g.verdict.mark()),
+            g.name,
+            g.detail
+        );
+        // Indented under the gate it belongs to, rather than gathered into a
+        // "next steps" block at the end: the whole point is that a line saying
+        // what is wrong and the line saying what to run are one thing.
+        if let Some(remedy) = &g.remedy {
+            println!(
+                "  {:width$}  {}",
+                "",
+                crate::style::dim(&format!("→ {remedy}"))
+            );
+        }
+    }
+    println!();
+    println!("{}", paint(verdict, summary));
+    Ok(())
+}
+
+fn verdict_word(v: crate::readiness::Verdict) -> &'static str {
+    match v {
+        crate::readiness::Verdict::Ok => "ok",
+        crate::readiness::Verdict::Warn => "warn",
+        crate::readiness::Verdict::Fail => "fail",
+    }
+}
+
+fn paint(v: crate::readiness::Verdict, text: &str) -> String {
+    match v {
+        crate::readiness::Verdict::Ok => crate::style::ok_c(text),
+        crate::readiness::Verdict::Warn => crate::style::accent(text),
+        crate::readiness::Verdict::Fail => crate::style::err(text),
     }
 }
 
@@ -4521,6 +4657,27 @@ mod tests {
         // one — the dispatcher does not gate it, and this must not imply it.
         let silent = serde_json::json!({ "resources": { "cpu_percent": 4.0 } });
         assert_eq!(super::cell(&silent, "disk"), "-");
+    }
+
+    /// MAIN-647 AC-5: the listing tells "takes no loop work" apart from "has
+    /// nothing to do". Both were an idle-looking row before this.
+    #[test]
+    fn the_loops_column_says_which_node_would_refuse_everything() {
+        let node = |kinds: serde_json::Value| serde_json::json!({ "capabilities": { "loop_kinds": kinds } });
+        assert_eq!(
+            super::cell(&node(serde_json::json!(["spec", "review"])), "loops"),
+            "spec,review"
+        );
+
+        // The distinction the card is about. `-` is what an empty array renders
+        // as everywhere else on this table and reads as "nothing to report",
+        // which is exactly the misreading that let a dead node look healthy.
+        assert_eq!(super::cell(&node(serde_json::json!([])), "loops"), "NONE");
+
+        // An agent too old to report the field is in the same position as one
+        // reporting an empty list: it accepts nothing either way.
+        let silent = serde_json::json!({ "capabilities": { "cpus": 8 } });
+        assert_eq!(super::cell(&silent, "loops"), "NONE");
     }
 
     #[test]

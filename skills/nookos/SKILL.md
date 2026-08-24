@@ -1,7 +1,7 @@
 ---
 name: nookos
 description: "Run and drive coding agents on OTHER machines with `nook` — no ssh, no tmux. Start a Claude/Codex/bash session anywhere in the fleet, type into it, read its answer, and teach every agent in the fleet a skill at once."
-version: 1.9.0
+version: 1.10.0
 author: NookOS
 license: MIT
 platforms: [linux, macos]
@@ -94,6 +94,19 @@ deploy check               claude   exited    2026-07-21T01:40:14.616156Z
 node's `capabilities.runtimes` — e.g. `azul` has `["claude","codex","bash"]`
 while `crimson` has `["hermes","bash"]`. Ask a node for a runtime it doesn't
 have and the session fails immediately rather than mysteriously.
+
+**`online` does not mean "can work".** A node with no loop kinds declared, no
+runtime signed in, or no job sandbox claims nothing at all and still shows
+`online` — the `LOOPS` column reads `NONE` for a machine that would refuse
+everything, distinct from one that is merely idle. For the whole answer:
+
+```bash
+nook nodes readiness           # this machine, gate by gate
+nook nodes readiness azul      # any node, read from the control plane
+```
+
+Each unmet line names the command that fixes it. You do not need a shell on the
+machine for the second form.
 
 ---
 

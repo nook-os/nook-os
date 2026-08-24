@@ -11578,6 +11578,13 @@
             ],
             "description": "This node's SSH public key (generated locally; the private half never\nleaves the machine). Add it as a deploy key to clone private repos."
           },
+          "supervision": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What will restart this agent if it exits — `systemd-user`,\n`systemd-system`, `launchd`, `supervisord`, `docker` — or `None` when\nnothing will (MAIN-647).\n\nReported rather than kept in the node's own `node.toml`, because that is\nthe difference between a readiness answer an operator can get and one\nthat needs a shell on the machine. `None` is the state this ticket was\nfiled about: `nook update` replaces the binary and exits for a\nsupervisor that is not there, so the node goes dark permanently."
+          },
           "tmux": {
             "type": "boolean"
           }

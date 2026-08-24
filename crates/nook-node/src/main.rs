@@ -18,6 +18,7 @@ mod loop_job;
 mod notebook;
 mod pinning;
 mod ports;
+mod readiness;
 mod resources;
 mod runtime_auth;
 mod sandbox;
@@ -67,6 +68,10 @@ enum Command {
         /// SHA-256 of the control plane's certificate, from the join token.
         #[arg(long)]
         fingerprint: Option<String>,
+        /// How the agent stays running, instead of being asked: systemd-user,
+        /// systemd-system, launchd, supervisord, docker, none.
+        #[arg(long)]
+        service: Option<String>,
     },
     /// Install the NookOS skill so your agents can drive the fleet themselves.
     #[command(subcommand)]
@@ -182,6 +187,17 @@ enum Command {
     /// new noun group, per docs/cli-style.md — the top level stays frozen.
     #[command(subcommand)]
     Ports(PortsCommand),
+    /// The machines themselves: whether one is actually able to do any work
+    /// (MAIN-647).
+    ///
+    ///     nook nodes readiness            this machine, gate by gate
+    ///     nook nodes readiness azul       any node, read from the control plane
+    ///
+    /// `nook get nodes` says a machine is online; this says whether being
+    /// online means anything. A new noun group, per docs/cli-style.md — the top
+    /// level stays frozen.
+    #[command(subcommand)]
+    Nodes(NodesCommand),
     /// Board cards, by key — the verbs a skill used to reach for `curl` to
     /// perform (MAIN-138), the files hung on them (MAIN-610), and the eight
     /// flat board verbs MAIN-644 buried here.
@@ -261,6 +277,14 @@ enum Command {
         /// SSH private key for git operations (defaults to a generated key)
         #[arg(long)]
         ssh_key: Option<String>,
+        /// Install a supervisor for the agent: systemd-user, systemd-system,
+        /// launchd, supervisord, docker, none.
+        ///
+        /// Without it, nothing restarts this agent and the join says so
+        /// (MAIN-647) — a self-update would then take the machine dark for
+        /// good.
+        #[arg(long)]
+        service: Option<String>,
         /// TOML file with the same fields (server, token, name,
         /// workspace_roots, ssh_key_path); "-" reads stdin. Flags win.
         #[arg(long)]
@@ -526,6 +550,11 @@ struct JoinSpec {
     #[serde(default)]
     workspace_roots: Vec<String>,
     ssh_key_path: Option<String>,
+    /// The supervisor to install, so a provisioning file can carry it too
+    /// (MAIN-647) — a machine that is described in a config file is exactly the
+    /// one nobody will go back and supervise by hand.
+    #[serde(default)]
+    service: Option<String>,
 }
 
 fn ok(line: &str) {
@@ -576,6 +605,7 @@ async fn main() -> Result<()> {
             token,
             name,
             fingerprint,
+            service,
         } => {
             wizard::node::setup(wizard::node::SetupArgs {
                 server,
@@ -583,6 +613,7 @@ async fn main() -> Result<()> {
                 token,
                 name,
                 fingerprint,
+                service,
             })
             .await
         }
@@ -822,6 +853,9 @@ async fn main() -> Result<()> {
             browsable,
             json,
         }) => ports::list(workspace.as_deref(), browsable, json).await,
+        Command::Nodes(NodesCommand::Readiness { name, json }) => {
+            cli::node_readiness(name.as_deref(), json).await
+        }
         Command::Attachments(AttachmentsCommand::List { task, json }) => {
             attachments::deprecated("list");
             attachments::list(&task, json).await
@@ -888,6 +922,7 @@ async fn main() -> Result<()> {
             name,
             workspace_roots,
             ssh_key,
+            service,
             config,
         } => {
             // Config file (or stdin) supplies defaults; flags win.
@@ -919,7 +954,17 @@ async fn main() -> Result<()> {
             if ssh_key.is_some() {
                 spec.ssh_key_path = ssh_key;
             }
-            join(spec).await
+            if service.is_some() {
+                spec.service = service;
+            }
+            // Rejected BEFORE the join, not after: a typo that surfaced only
+            // once the machine was registered would leave it joined and
+            // unsupervised, which is the exact state this ticket is about.
+            let supervision = match spec.service.as_deref() {
+                Some(v) => Supervision::Install(wizard::service::Service::from_flag(v)?),
+                None => Supervision::Warn,
+            };
+            join(spec, supervision).await
         }
         Command::Enroll {
             ref token,
@@ -1785,6 +1830,23 @@ enum AttachmentsCommand {
 }
 
 #[derive(Subcommand)]
+enum NodesCommand {
+    /// Every prerequisite a node needs before it can claim work, with the
+    /// command that fixes each unmet one.
+    ///
+    /// Without a name this reads THIS machine, probing it directly. With one it
+    /// reads the control plane's stored capability report for that node, so a
+    /// machine that has gone dark is still diagnosable — which is exactly the
+    /// machine you need to diagnose.
+    Readiness {
+        /// The node, by name. Defaults to this machine.
+        name: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum PortsCommand {
     /// What this workspace declared, with the port each variable holds here.
     ///
@@ -2444,18 +2506,42 @@ fn target_platform() -> Result<(&'static str, &'static str)> {
 /// The pre-mTLS path, kept only as a fallback for a control plane that has no
 /// `/nodes/enroll`. Not reachable from a current install otherwise.
 pub(crate) async fn join_legacy(server: &str, token: &str, name: &str) -> Result<()> {
-    join(JoinSpec {
-        server: Some(server.to_string()),
-        server_fingerprint: None,
-        token: Some(token.to_string()),
-        name: Some(name.to_string()),
-        workspace_roots: Vec::new(),
-        ssh_key_path: None,
-    })
+    join(
+        JoinSpec {
+            server: Some(server.to_string()),
+            server_fingerprint: None,
+            token: Some(token.to_string()),
+            name: Some(name.to_string()),
+            workspace_roots: Vec::new(),
+            ssh_key_path: None,
+            service: None,
+        },
+        // This fallback runs from inside `nook setup`, which installs the
+        // supervisor itself once this returns. Installing here too would write the
+        // unit twice and warn about a machine that is about to be supervised.
+        Supervision::CallerHandles,
+    )
     .await
 }
 
-async fn join(spec: JoinSpec) -> Result<()> {
+/// What `join` should do about keeping the agent running (MAIN-647).
+enum Supervision {
+    /// `--service <kind>`: install it, record it, and say so.
+    ///
+    /// `--service none` lands here too, and so is NOT warned about. That is
+    /// deliberate: "I supervise this myself" and "I did not think about it"
+    /// reach the same end state by different roads, and only the second one is
+    /// worth interrupting. The readiness checklist still says so either way.
+    Install(wizard::service::Service),
+    /// A bare `nook join`. Nothing is installed — but if nothing else
+    /// supervises this machine either, the join warns by name rather than
+    /// leaving it to be discovered on the day of a self-update.
+    Warn,
+    /// The caller installs one immediately after this returns (`nook setup`).
+    CallerHandles,
+}
+
+async fn join(spec: JoinSpec, supervision: Supervision) -> Result<()> {
     let server = spec
         .server
         .context("server is required (--server, config file, or `nook setup`)")?
@@ -2588,7 +2674,44 @@ async fn join(spec: JoinSpec) -> Result<()> {
         }
     );
     println!();
-    println!("Start the agent with: nook run");
+    // Installed AFTER the probe above, deliberately: enabling the unit starts
+    // `nook run`, and doing that first would have the agent's own connection
+    // and the probe's racing each other on this node's identity.
+    match supervision {
+        Supervision::Install(svc) => {
+            let exec = std::env::current_exe()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "nook".into());
+            // Recorded BEFORE the install, because enabling the unit starts
+            // `nook run` and that process reads node.toml as it registers — a
+            // config written afterwards would have the first capability report
+            // say the machine is unsupervised. Reverted on failure so the file
+            // never claims a supervisor that was not installed.
+            let mut cfg = NodeConfig::load()?;
+            let previous = cfg.service.clone();
+            cfg.service = svc.config_value().map(str::to_string);
+            cfg.save()?;
+            if let Err(e) = wizard::service::install(&mut wizard::service::Stdout, svc, &exec) {
+                cfg.service = previous;
+                // The install error is what the operator needs; a failing
+                // revert must not replace it with its own.
+                let _ = cfg.save();
+                return Err(e);
+            }
+        }
+        Supervision::Warn => {
+            if let Some(warning) = readiness::supervision_warning(
+                selfupdate::supervision(&NodeConfig::load()?).as_deref(),
+                &caps.platform,
+            ) {
+                eprintln!();
+                eprintln!("{}", style::err(&format!("⚠ {warning}")));
+            }
+            println!();
+            println!("Start the agent with: nook run");
+        }
+        Supervision::CallerHandles => {}
+    }
     Ok(())
 }
 

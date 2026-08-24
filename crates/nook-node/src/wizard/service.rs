@@ -28,6 +28,32 @@ pub enum Service {
     None,
 }
 
+/// Where [`install`] narrates.
+///
+/// The wizard writes to the terminal it opened; the automation path (MAIN-647)
+/// has no terminal at all and writes to stdout. Installing a unit is the same
+/// operation either way, so it is the OUTPUT that varies here rather than a
+/// second copy of the installer.
+pub trait Narrator {
+    fn line(&mut self, s: &str);
+}
+
+impl Narrator for Tty {
+    fn line(&mut self, s: &str) {
+        self.say(s)
+    }
+}
+
+/// The non-interactive narrator: `nook join --service …`, a provisioning script,
+/// a Dockerfile.
+pub struct Stdout;
+
+impl Narrator for Stdout {
+    fn line(&mut self, s: &str) {
+        println!("{s}");
+    }
+}
+
 fn have(cmd: &str) -> bool {
     std::process::Command::new("sh")
         .arg("-c")
@@ -112,17 +138,50 @@ impl Service {
             Service::None => None,
         }
     }
+
+    /// The `--service` flag's value (MAIN-647): the supervisor named up front
+    /// instead of chosen at a prompt, so an automated provision produces a
+    /// supervised node.
+    ///
+    /// Deliberately the SAME spellings [`Self::config_value`] stores, so what
+    /// `nook nodes readiness` prints back is what you would type — rather than
+    /// a second vocabulary to learn for the flag.
+    pub fn from_flag(v: &str) -> Result<Self> {
+        Ok(match v.trim().to_ascii_lowercase().as_str() {
+            "systemd-user" => Service::UserSystemd,
+            "systemd-system" => Service::SystemSystemd,
+            "launchd" => Service::Launchd,
+            "supervisord" => Service::Supervisord,
+            "docker" => Service::Docker,
+            "none" => Service::None,
+            other => bail!(
+                "unknown --service {other:?} — expected one of {}",
+                FLAG_VALUES.join(", ")
+            ),
+        })
+    }
 }
 
+/// What `--service` accepts, named once so the flag's help and its parser
+/// cannot disagree.
+pub const FLAG_VALUES: &[&str] = &[
+    "systemd-user",
+    "systemd-system",
+    "launchd",
+    "supervisord",
+    "docker",
+    "none",
+];
+
 /// Write, enable and start the unit.
-pub fn install(t: &mut Tty, service: Service, exec: &str) -> Result<()> {
+pub fn install(t: &mut dyn Narrator, service: Service, exec: &str) -> Result<()> {
     let home = std::env::var("HOME").context("HOME is not set")?;
     let user = whoami();
 
     match service {
         Service::None => {
-            t.say("");
-            t.say(&format!("  Start the agent with:  {exec} run"));
+            t.line("");
+            t.line(&format!("  Start the agent with:  {exec} run"));
             Ok(())
         }
 
@@ -131,7 +190,7 @@ pub fn install(t: &mut Tty, service: Service, exec: &str) -> Result<()> {
             std::fs::create_dir_all(&dir)?;
             let path = format!("{dir}/nook-node.service");
             std::fs::write(&path, node_unit(true, exec, &home, &user))?;
-            t.say(&format!("✓ {path}"));
+            t.line(&format!("✓ {path}"));
 
             run(&["systemctl", "--user", "daemon-reload"])?;
             run(&["systemctl", "--user", "enable", "--now", "nook-node"])?;
@@ -140,13 +199,13 @@ pub fn install(t: &mut Tty, service: Service, exec: &str) -> Result<()> {
             // agent with it — which on a headless box means the node is online
             // exactly as long as someone has an ssh session open.
             if run(&["loginctl", "enable-linger", &user]).is_err() {
-                t.say("  Note: could not enable lingering. The agent will stop when you log out.");
-                t.say(&format!(
+                t.line("  Note: could not enable lingering. The agent will stop when you log out.");
+                t.line(&format!(
                     "        Fix with: sudo loginctl enable-linger {user}"
                 ));
             }
-            t.say("✓ systemd user service enabled");
-            t.say("  Logs:  journalctl --user -u nook-node -f");
+            t.line("✓ systemd user service enabled");
+            t.line("  Logs:  journalctl --user -u nook-node -f");
             Ok(())
         }
 
@@ -154,7 +213,7 @@ pub fn install(t: &mut Tty, service: Service, exec: &str) -> Result<()> {
             let unit = node_unit(false, exec, &home, &user);
             let tmp = std::env::temp_dir().join("nook-node.service");
             std::fs::write(&tmp, unit)?;
-            t.say("Writing /etc/systemd/system/nook-node.service (sudo)");
+            t.line("Writing /etc/systemd/system/nook-node.service (sudo)");
             run(&[
                 "sudo",
                 "install",
@@ -165,8 +224,8 @@ pub fn install(t: &mut Tty, service: Service, exec: &str) -> Result<()> {
             let _ = std::fs::remove_file(&tmp);
             run(&["sudo", "systemctl", "daemon-reload"])?;
             run(&["sudo", "systemctl", "enable", "--now", "nook-node"])?;
-            t.say("✓ systemd system service enabled");
-            t.say("  Logs:  sudo journalctl -u nook-node -f");
+            t.line("✓ systemd system service enabled");
+            t.line("  Logs:  sudo journalctl -u nook-node -f");
             Ok(())
         }
 
@@ -176,18 +235,18 @@ pub fn install(t: &mut Tty, service: Service, exec: &str) -> Result<()> {
             std::fs::create_dir_all(&dir)?;
             let path = format!("{dir}/{label}.plist");
             std::fs::write(&path, node_launchd_plist(exec, &home, label))?;
-            t.say(&format!("✓ {path}"));
+            t.line(&format!("✓ {path}"));
 
             // Replace any previous copy first: `load` on an already-loaded
             // label fails, and a re-run of setup is an ordinary thing to do.
             let _ = run(&["launchctl", "unload", &path]);
             run(&["launchctl", "load", "-w", &path])?;
 
-            t.say("✓ launchd agent loaded");
-            t.say(&format!(
+            t.line("✓ launchd agent loaded");
+            t.line(&format!(
                 "  Logs:  tail -f {home}/Library/Logs/nook-node.log"
             ));
-            t.say(&format!("  Stop:  launchctl unload {path}"));
+            t.line(&format!("  Stop:  launchctl unload {path}"));
             Ok(())
         }
 
@@ -202,7 +261,7 @@ pub fn install(t: &mut Tty, service: Service, exec: &str) -> Result<()> {
             if std::path::Path::new(conf_dir).is_dir() {
                 let tmp = std::env::temp_dir().join("nook-node.conf");
                 std::fs::write(&tmp, &conf)?;
-                t.say(&format!("Writing {conf_dir}/nook-node.conf (sudo)"));
+                t.line(&format!("Writing {conf_dir}/nook-node.conf (sudo)"));
                 run(&[
                     "sudo",
                     "install",
@@ -214,19 +273,19 @@ pub fn install(t: &mut Tty, service: Service, exec: &str) -> Result<()> {
                 // `reread` picks up the new file; `update` starts what changed.
                 run(&["sudo", "supervisorctl", "reread"])?;
                 run(&["sudo", "supervisorctl", "update"])?;
-                t.say("✓ supervisord program installed and started");
-                t.say("  Logs:  sudo supervisorctl tail -f nook-node");
-                t.say("  Stop:  sudo supervisorctl stop nook-node");
+                t.line("✓ supervisord program installed and started");
+                t.line("  Logs:  sudo supervisorctl tail -f nook-node");
+                t.line("  Stop:  sudo supervisorctl stop nook-node");
             } else {
-                t.say("");
-                t.say(&format!(
+                t.line("");
+                t.line(&format!(
                     "  supervisord is installed but {conf_dir} was not found."
                 ));
-                t.say("  Add this to your supervisord include directory, then run");
-                t.say("  `supervisorctl reread && supervisorctl update`:");
-                t.say("");
+                t.line("  Add this to your supervisord include directory, then run");
+                t.line("  `supervisorctl reread && supervisorctl update`:");
+                t.line("");
                 for line in conf.lines() {
-                    t.say(&format!("    {line}"));
+                    t.line(&format!("    {line}"));
                 }
             }
             Ok(())
@@ -237,11 +296,11 @@ pub fn install(t: &mut Tty, service: Service, exec: &str) -> Result<()> {
                 bail!("docker is not installed");
             }
             let version = format!("v{}", env!("CARGO_PKG_VERSION"));
-            t.say("");
-            t.say("  A containerised node can only use tooling inside the container.");
-            t.say("  Run it with:");
-            t.say("");
-            t.say(&format!(
+            t.line("");
+            t.line("  A containerised node can only use tooling inside the container.");
+            t.line("  Run it with:");
+            t.line("");
+            t.line(&format!(
                 "    docker run -d --name nook-node --restart unless-stopped \\\n\
                  \x20     -v ~/.config/nook:/root/.config/nook \\\n\
                  \x20     -v ~/workspace:/root/workspace \\\n\
@@ -275,4 +334,43 @@ fn run(args: &[&str]) -> Result<()> {
         bail!("{} exited {}", args.join(" "), status);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Service, FLAG_VALUES};
+
+    /// `--service` and `node.toml` speak one vocabulary (MAIN-647). If they
+    /// drifted, `nook nodes readiness` would print a supervisor name that the
+    /// flag fixing it refuses.
+    #[test]
+    fn every_flag_value_round_trips_through_the_config_spelling() {
+        for v in FLAG_VALUES {
+            let svc = Service::from_flag(v).unwrap_or_else(|e| panic!("{v}: {e}"));
+            let stored = svc.config_value().unwrap_or("none");
+            assert_eq!(&stored, v, "{v} stored as {stored}");
+        }
+    }
+
+    /// A typo must not silently pick a supervisor. On the automation path the
+    /// only two honest answers are "installed the one you named" and "refused";
+    /// a near-miss install is a machine supervised by something nobody chose.
+    #[test]
+    fn an_unknown_supervisor_is_refused_by_name() {
+        let err = Service::from_flag("systemdd").expect_err("unknown");
+        let msg = err.to_string();
+        assert!(msg.contains("systemdd"), "names the typo: {msg}");
+        assert!(
+            msg.contains("systemd-user"),
+            "lists what was expected: {msg}"
+        );
+    }
+
+    #[test]
+    fn case_and_surrounding_space_do_not_matter() {
+        assert_eq!(
+            Service::from_flag(" Systemd-User ").unwrap(),
+            Service::UserSystemd
+        );
+    }
 }
