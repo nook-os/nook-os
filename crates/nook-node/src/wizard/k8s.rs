@@ -123,6 +123,12 @@ pub struct InitOptions {
 pub enum DiscoveryProbe {
     Reachable {
         device_authorization_endpoint: Option<String>,
+        /// Whether the IdP will register a client for us: it advertises a
+        /// `registration_endpoint` AND offers public clients (MAIN-651). Both
+        /// halves are required — a registration endpoint that only issues
+        /// confidential clients cannot help, because the control plane refuses
+        /// a registration that comes back with a secret.
+        registers_clients: bool,
     },
     Unreachable,
 }
@@ -422,10 +428,15 @@ pub fn run(opts: InitOptions, tty: Option<Tty>, discover: &Discover) -> Result<O
 
         // Verify discovery. Reachability only (NG-3); a miss warns and proceeds.
         let discovery = discover(&issuer_url);
+        let mut registers_clients = false;
         let advertises_device = match &discovery {
             DiscoveryProbe::Reachable {
                 device_authorization_endpoint,
-            } => device_authorization_endpoint.is_some(),
+                registers_clients: registers,
+            } => {
+                registers_clients = *registers;
+                device_authorization_endpoint.is_some()
+            }
             DiscoveryProbe::Unreachable => {
                 warn(
                     &mut tty,
@@ -438,20 +449,47 @@ pub fn run(opts: InitOptions, tty: Option<Tty>, discover: &Discover) -> Result<O
             }
         };
 
-        let client_id = resolve_required(
-            &mut tty,
-            "OIDC client ID (OIDC_CLIENT_ID)",
-            "--oidc-client-id",
-            opts.oidc_client_id.clone(),
-            existing.oidc_client_id.clone(),
-        )?;
-        // Secret: printed only (NG-4). Interactively always collected (AC-3); a
-        // secret-less non-interactive run wires the key and leaves the operator to
-        // put the value in the Secret themselves.
-        oidc_client_secret = match &mut tty {
-            Some(t) => Some(t.text("OIDC client secret (OIDC_CLIENT_SECRET)", None)?),
-            None => some_trimmed(opts.oidc_client_secret.clone().unwrap_or_default()),
+        // An IdP that registers clients makes this OPTIONAL: left blank, the
+        // control plane registers a public client for itself at boot and
+        // remembers it (MAIN-651). Required only where that cannot happen --
+        // asking for an id the operator would have to go and create is exactly
+        // the hand-work this install path is trying to delete.
+        let client_id = if registers_clients {
+            let given = resolve(
+                &mut tty,
+                "OIDC client ID (OIDC_CLIENT_ID) — blank to register one automatically",
+                opts.oidc_client_id.clone(),
+                existing.oidc_client_id.clone(),
+                String::new(),
+            )?;
+            let given = given.trim().to_string();
+            if given.is_empty() {
+                note(
+                    &mut tty,
+                    "no client ID given — the control plane will register a public client                      at this IdP on first boot and remember it (RFC 7591).",
+                );
+            }
+            given
+        } else {
+            resolve_required(
+                &mut tty,
+                "OIDC client ID (OIDC_CLIENT_ID)",
+                "--oidc-client-id",
+                opts.oidc_client_id.clone(),
+                existing.oidc_client_id.clone(),
+            )?
         };
+        // Secret: printed only (NG-4). Interactively collected (AC-3); a
+        // secret-less non-interactive run wires the key and leaves the operator to
+        // put the value in the Secret themselves. Skipped entirely when the client
+        // is to be registered: a registered client is PUBLIC and has no secret, so
+        // prompting for one would ask for something that will never exist.
+        if !client_id.is_empty() {
+            oidc_client_secret = match &mut tty {
+                Some(t) => Some(t.text("OIDC client secret (OIDC_CLIENT_SECRET)", None)?),
+                None => some_trimmed(opts.oidc_client_secret.clone().unwrap_or_default()),
+            };
+        }
         // Scopes: prompted only on the Advanced path; Recommended keeps the default.
         let scopes = if advanced {
             resolve(
@@ -474,13 +512,30 @@ pub fn run(opts: InitOptions, tty: Option<Tty>, discover: &Discover) -> Result<O
 
         // Device login: always the (public) device client id; a manual
         // authorization endpoint only when discovery does not advertise one (AC-3).
-        let device_client_id = resolve_required(
-            &mut tty,
-            "OIDC device (public) client ID (OIDC_DEVICE_CLIENT_ID)",
-            "--oidc-device-client-id",
-            opts.oidc_device_client_id.clone(),
-            existing.oidc_device_client_id.clone(),
-        )?;
+        // Optional on the same condition as the client ID above (MAIN-651): the
+        // control plane falls back to whichever client it resolved when none is
+        // named, and a registered client is already public, which is the only
+        // property the device grant needs of it. Where nothing will be
+        // registered there is nothing to fall back to, so it stays required.
+        let device_client_id = if registers_clients {
+            resolve(
+                &mut tty,
+                "OIDC device client ID (OIDC_DEVICE_CLIENT_ID) — blank to reuse the main client",
+                opts.oidc_device_client_id.clone(),
+                existing.oidc_device_client_id.clone(),
+                String::new(),
+            )?
+            .trim()
+            .to_string()
+        } else {
+            resolve_required(
+                &mut tty,
+                "OIDC device (public) client ID (OIDC_DEVICE_CLIENT_ID)",
+                "--oidc-device-client-id",
+                opts.oidc_device_client_id.clone(),
+                existing.oidc_device_client_id.clone(),
+            )?
+        };
         if !advertises_device {
             let endpoint = resolve_required(
                 &mut tty,
@@ -1208,6 +1263,15 @@ fn confirm(tty: &mut Option<Tty>, question: &str, seed: bool) -> Result<bool> {
 
 /// Print a warning to the terminal if there is one, else to stderr — so a
 /// discovery miss is visible whether or not a person is watching (AC-3).
+/// Say something that is not a problem. `warn`'s twin, kept separate so a
+/// deliberate choice does not print with a warning's siren.
+fn note(tty: &mut Option<Tty>, msg: &str) {
+    match tty {
+        Some(t) => t.say(&format!("• {msg}")),
+        None => eprintln!("note: {msg}"),
+    }
+}
+
 fn warn(tty: &mut Option<Tty>, msg: &str) {
     match tty {
         Some(t) => t.say(&format!("⚠ {msg}")),
@@ -1272,22 +1336,43 @@ fn real_discovery(issuer: &str) -> DiscoveryProbe {
                 return None;
             }
             let doc: serde_json::Value = resp.json().await.ok()?;
-            Some(
+            Some((
                 doc.get("device_authorization_endpoint")
                     .and_then(|v| v.as_str())
                     .map(str::to_string),
-            )
+                registers_clients(&doc),
+            ))
         })
     })
     .join()
     .ok()
     .flatten();
     match fetched {
-        Some(device_authorization_endpoint) => DiscoveryProbe::Reachable {
+        Some((device_authorization_endpoint, registers_clients)) => DiscoveryProbe::Reachable {
             device_authorization_endpoint,
+            registers_clients,
         },
         None => DiscoveryProbe::Unreachable,
     }
+}
+
+/// Read a discovery document for the two things RFC 7591 registration needs.
+///
+/// Absence of `token_endpoint_auth_methods_supported` is NOT permission: RFC
+/// 8414 §2 says an omitted field means `client_secret_basic`, so a provider
+/// that says nothing is saying "confidential". Reading silence as consent here
+/// would offer to register against an IdP that then hands back a secret, and the
+/// control plane refuses those.
+fn registers_clients(doc: &serde_json::Value) -> bool {
+    let has_endpoint = doc
+        .get("registration_endpoint")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.trim().is_empty());
+    let public_ok = doc
+        .get("token_endpoint_auth_methods_supported")
+        .and_then(|v| v.as_array())
+        .is_some_and(|m| m.iter().any(|v| v.as_str() == Some("none")));
+    has_endpoint && public_ok
 }
 
 fn have(cmd: &str) -> bool {
@@ -1336,10 +1421,17 @@ fn render_values(v: &Values, m: &Meta) -> String {
     if let Some(o) = &v.oidc {
         s.push_str("  oidc:\n");
         s.push_str(&format!("    issuerUrl: {}\n", o.issuer_url));
-        s.push_str(&format!("    clientId: {}\n", o.client_id));
+        // Omitted rather than written empty when the client is to be registered
+        // (MAIN-651): a bare `clientId:` is YAML null, and the chart's own
+        // default is the empty string. Saying nothing leaves the default alone.
+        if !o.client_id.is_empty() {
+            s.push_str(&format!("    clientId: {}\n", o.client_id));
+        }
         s.push_str(&format!("    redirectUrl: {}\n", o.redirect_url));
         s.push_str(&format!("    scopes: \"{}\"\n", o.scopes));
-        s.push_str(&format!("    deviceClientId: {}\n", o.device_client_id));
+        if !o.device_client_id.is_empty() {
+            s.push_str(&format!("    deviceClientId: {}\n", o.device_client_id));
+        }
     }
     if let Some(m) = &v.mail {
         s.push_str("  mail:\n");
@@ -2129,10 +2221,23 @@ mod tests {
     // ── the MAIN-63 branches (non-interactive; per AC-1 the flag paths
     //    reproduce the interactive results) ──────────────────────────────────
 
-    /// A discovery probe that advertises a device endpoint (or not).
+    /// A discovery probe that advertises a device endpoint (or not), from an IdP
+    /// that does not register clients — the shape most of these tests want.
     fn probe_advertising(advertised: bool) -> impl Fn(&str) -> DiscoveryProbe {
         move |_: &str| DiscoveryProbe::Reachable {
             device_authorization_endpoint: advertised.then(|| "https://id.example/device".into()),
+            registers_clients: false,
+        }
+    }
+
+    /// An IdP that will register a public client for us (MAIN-651). It
+    /// advertises a device endpoint too, which is not incidental: a provider
+    /// modern enough to implement RFC 7591 publishes RFC 8628 as well, and a
+    /// fixture without one would test a combination that does not occur.
+    fn probe_registering() -> impl Fn(&str) -> DiscoveryProbe {
+        |_: &str| DiscoveryProbe::Reachable {
+            device_authorization_endpoint: Some("https://id.example/device".into()),
+            registers_clients: true,
         }
     }
 
@@ -2422,6 +2527,86 @@ mod tests {
         assert!(!out.secret_command.contains("OIDC_CLIENT_SECRET")); // no value this run
                                                                      // …but the wiring survives, so the operator's existing Secret still works.
         assert!(text.contains("  oidcClientSecret: OIDC_CLIENT_SECRET"));
+    }
+
+    /// MAIN-651: an IdP that registers clients makes the client ID optional, so
+    /// the install path stops asking for something the operator would have to go
+    /// and create by hand.
+    #[test]
+    fn a_registering_idp_makes_the_client_id_optional() {
+        let dir = tmp();
+        let out = run(
+            InitOptions {
+                host: Some("nook.example.com".into()),
+                oidc: true,
+                oidc_issuer: Some("https://id.example".into()),
+                ..base_opts(&dir)
+            },
+            None,
+            &probe_registering(),
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&out.path).unwrap();
+
+        // The OIDC block is written, and the id is left for the boot-time
+        // registration to supply -- omitted, not an empty scalar (which is null).
+        assert!(text.contains("issuerUrl: https://id.example"), "{text}");
+        // Neither id is written: both are left for the boot-time registration,
+        // and both are OMITTED rather than empty scalars (which are YAML null).
+        assert!(!text.contains("clientId:"), "{text}");
+        assert!(!text.contains("deviceClientId:"), "{text}");
+        // A registered client is public, so no secret key is wired for it.
+        assert!(
+            !out.secret_command.contains("OIDC_CLIENT_SECRET"),
+            "{}",
+            out.secret_command
+        );
+    }
+
+    /// The other half of the same rule: where the IdP will NOT register, the id
+    /// is still required and the error names the flag. Silence about a client
+    /// that cannot be obtained is how OIDC ends up degraded after a clean run.
+    #[test]
+    fn an_idp_that_does_not_register_still_requires_the_client_id() {
+        let dir = tmp();
+        let err = run(
+            InitOptions {
+                host: Some("nook.example.com".into()),
+                oidc: true,
+                oidc_issuer: Some("https://id.example".into()),
+                ..base_opts(&dir)
+            },
+            None,
+            &probe_advertising(false),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("--oidc-client-id"), "{err}");
+    }
+
+    /// Both halves are required before registration is offered. RFC 8414 §2
+    /// makes an omitted `token_endpoint_auth_methods_supported` mean
+    /// `client_secret_basic`, so silence is confidential, not permissive.
+    #[test]
+    fn registration_needs_an_endpoint_and_a_public_client() {
+        let both = serde_json::json!({
+            "registration_endpoint": "https://id.example/reg",
+            "token_endpoint_auth_methods_supported": ["client_secret_post", "none"],
+        });
+        assert!(super::registers_clients(&both));
+
+        let confidential_only = serde_json::json!({
+            "registration_endpoint": "https://id.example/reg",
+            "token_endpoint_auth_methods_supported": ["client_secret_basic"],
+        });
+        assert!(!super::registers_clients(&confidential_only));
+
+        // Endpoint, but the field omitted entirely: NOT permission.
+        let silent = serde_json::json!({"registration_endpoint": "https://id.example/reg"});
+        assert!(!super::registers_clients(&silent));
+
+        // Public clients, but nowhere to register.
+        let no_endpoint = serde_json::json!({"token_endpoint_auth_methods_supported": ["none"]});
+        assert!(!super::registers_clients(&no_endpoint));
     }
 
     #[test]
