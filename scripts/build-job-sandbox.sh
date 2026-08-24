@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
-# Build the image every loop-job agent runs inside (MAIN-611).
+# Build the image every loop-job agent runs inside (MAIN-611) — the DEVELOPMENT
+# path, not the install path.
 #
-# A host node with no such image reports `sandbox: unavailable` and CLAIMS NO
-# LOOP WORK — deliberately, because the alternative is an agent driven by
-# untrusted input running as your OS user. So this is the one install step a
-# machine that runs builds has to do.
+# INSTALLING A NODE NEEDS NOTHING FROM HERE. Since MAIN-643 the release workflow
+# publishes `ghcr.io/nook-os/nook-job-sandbox` at every version, an agent's
+# default image is the tag matching its OWN version, and a node with no such
+# image pulls it. Run this when you are CHANGING the sandbox and want to try the
+# change before it is released — an image built here is yours, so point the node
+# at it explicitly with `NOOK_SANDBOX_IMAGE`, which is never auto-pulled or
+# overridden.
 #
 #   ./scripts/build-job-sandbox.sh                 # extends nook-operator-node:latest
 #   BASE_IMAGE=ghcr.io/.../operator-node:v1 ./scripts/build-job-sandbox.sh
@@ -33,5 +37,7 @@ docker build \
 
 echo
 echo "Built $TAG."
-echo "Point the node at it with NOOK_SANDBOX_IMAGE=$TAG if that is not the default,"
-echo "then check it took with: nook get nodes"
+echo "This is NOT the node's default — that is the published image at the agent's own"
+echo "version, which a node pulls for itself. To run jobs in this one instead:"
+echo "  NOOK_SANDBOX_IMAGE=$TAG"
+echo "and check it took with: nook get nodes"

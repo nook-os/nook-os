@@ -2195,17 +2195,17 @@ fn start_sandbox(
     references: &[nook_types::WorkspaceRef],
 ) -> Result<Option<crate::sandbox::Sandbox>, String> {
     use crate::sandbox;
-    match sandbox::probe() {
-        nook_types::SandboxCapability::Exempt { .. } => return Ok(None),
-        nook_types::SandboxCapability::Unavailable { detail } => {
-            return Err(format!(
-                "this node cannot confine a loop-job agent, so it will not run one: \
-                 {detail}. Until it can, the agent would run as {} with that user's \
-                 whole home directory, credentials and LAN.",
-                cfg.node_name
-            ))
-        }
-        nook_types::SandboxCapability::Ready { .. } => {}
+    let capability = sandbox::probe();
+    if let nook_types::SandboxCapability::Exempt { .. } = capability {
+        return Ok(None);
+    }
+    if let Some(detail) = capability.refusal() {
+        return Err(format!(
+            "this node cannot confine a loop-job agent, so it will not run one: \
+             {detail}. Until it can, the agent would run as {} with that user's \
+             whole home directory, credentials and LAN.",
+            cfg.node_name
+        ));
     }
     let server = cfg.server.clone();
     let mut add_hosts = Vec::new();

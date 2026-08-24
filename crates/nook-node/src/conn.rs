@@ -319,9 +319,20 @@ pub async fn connect_once(cfg: &NodeConfig, min_free_disk: u64) -> Result<()> {
     });
 
     // Register: idempotent full resync on every connect.
+    let capabilities = capabilities::detect();
+    // A node that connects while it is still fetching its job sandbox image
+    // registers as `pulling` (MAIN-643 AC-4) — and capabilities travel on
+    // Register and nowhere else, so it would keep saying `pulling` until it
+    // next reconnected, which may be days. The heartbeat below watches for the
+    // pull to settle and registers once more, so the queued build work starts
+    // on the next dispatch poll with nothing restarted.
+    let warming = matches!(
+        capabilities.sandbox,
+        Some(nook_types::SandboxCapability::Pulling { .. })
+    );
     ctl_tx
         .send(NodeToControl::Register {
-            capabilities: Box::new(capabilities::detect()),
+            capabilities: Box::new(capabilities),
             live_tmux_sessions: tmux::list_nook_sessions(),
         })
         .await
@@ -485,10 +496,43 @@ pub async fn connect_once(cfg: &NodeConfig, min_free_disk: u64) -> Result<()> {
     let heartbeat = tokio::spawn(async move {
         let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
         let mut sampler = crate::resources::Sampler::new(min_free_disk);
+        let mut warming = warming;
         loop {
             interval.tick().await;
             let load = serde_json::to_value(sampler.sample()).unwrap_or_default();
             if hb_tx.send(NodeToControl::Heartbeat { load }).await.is_err() {
+                break;
+            }
+            // Only while the sandbox is warming, so the ordinary heartbeat
+            // stays what it was: `detect()` shells out to Docker and every
+            // other runtime on the box, which is not a per-15-seconds cost.
+            if !warming {
+                continue;
+            }
+            let Ok(capabilities) = tokio::task::spawn_blocking(capabilities::detect).await else {
+                break;
+            };
+            if matches!(
+                capabilities.sandbox,
+                Some(nook_types::SandboxCapability::Pulling { .. })
+            ) {
+                continue;
+            }
+            // Settled either way — pulled, or refused with the reason (AC-6).
+            // Both are worth saying once; neither is worth saying again.
+            //
+            // `CapabilitiesChanged`, never a second `Register`: Register is a
+            // destructive full resync whose session sweep is safe only because
+            // it arrives once, at connect. Sent again here it would expire a
+            // session still in `starting` and kill its tmux.
+            warming = false;
+            if hb_tx
+                .send(NodeToControl::CapabilitiesChanged {
+                    capabilities: Box::new(capabilities),
+                })
+                .await
+                .is_err()
+            {
                 break;
             }
         }
@@ -2135,5 +2179,42 @@ mod tests {
             panic!("a dead port is reported, not waited on");
         };
         assert!(message.contains(&port.to_string()), "{message}");
+    }
+}
+
+/// `Register` is a destructive full resync, and its safety rests on ARRIVING
+/// ONCE (MAIN-643).
+///
+/// The control plane's Register handler expires every session whose tmux name
+/// it cannot find, and a session still `starting` has no tmux name yet — its
+/// `tmux_session` is written when `SessionStarted` lands. That is harmless at
+/// connect, when no session start can be in flight, and destroys a starting
+/// session at any other moment: the orphan sweep below the expiry then finds
+/// the node's live tmux with no live row and kills it. Sending a second
+/// Register from the heartbeat to re-report one changed capability did exactly
+/// that, and took a CI session down with it.
+#[cfg(test)]
+mod register_is_sent_once {
+    use std::fs;
+
+    #[test]
+    fn only_the_connect_path_registers() {
+        let path = format!("{}/src/conn.rs", env!("CARGO_MANIFEST_DIR"));
+        let src = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let src = src.split("\n#[cfg(test)]").next().unwrap_or_default();
+
+        let sends = src.matches("NodeToControl::Register").count();
+        assert_eq!(
+            sends, 1,
+            "conn.rs sends Register {sends} times. It is an idempotent full resync \
+             whose session reconciliation is only safe at connect — anything else \
+             that needs to update a field while connected wants a message for that \
+             field, as CapabilitiesChanged and CordonChanged are."
+        );
+        assert!(
+            src.contains("NodeToControl::CapabilitiesChanged"),
+            "the settled sandbox capability is no longer re-reported at all — a node \
+             that finishes pulling would keep saying `pulling` until it reconnected"
+        );
     }
 }

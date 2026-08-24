@@ -79,6 +79,24 @@ pub enum NodeToControl {
         /// control plane can reconcile session state after restarts.
         live_tmux_sessions: Vec<String>,
     },
+    /// A capability that changed WHILE connected, and nothing else (MAIN-643).
+    ///
+    /// [`NodeToControl::Register`] would carry this too, and must not be used
+    /// for it: Register is a destructive full resync that also reconciles tmux
+    /// state, and its session sweep is only safe BECAUSE it arrives exactly
+    /// once, at connect, when no session start can be in flight. Sending a
+    /// second one mid-connection expires a session still in `starting` — its
+    /// `tmux_session` is `NULL` until `SessionStarted` lands — and the orphan
+    /// sweep then kills the tmux it belongs to.
+    ///
+    /// So this says the one thing it means. Same division as
+    /// [`NodeToControl::CordonChanged`], for the same reason: a field that can
+    /// change under a live connection needs a message that changes that field.
+    CapabilitiesChanged {
+        /// Boxed for [`NodeToControl::Register`]'s reason — this enum's
+        /// variants are all as large as its largest.
+        capabilities: Box<Capabilities>,
+    },
     Heartbeat {
         load: serde_json::Value,
     },
