@@ -16,7 +16,7 @@
 # before starting, and removes the cluster on exit unless --keep is given.
 #
 #   scripts/k8s-e2e.sh              build images from source, run cycle, tear down
-#   scripts/k8s-e2e.sh --pull       use PUBLISHED images (no in-job compile) — CI default
+#   scripts/k8s-e2e.sh --pull       published control-plane + web built here — CI default
 #   scripts/k8s-e2e.sh --pull-tag T published tag to pull (default: latest)
 #   scripts/k8s-e2e.sh --keep       leave the cluster up for debugging
 #   scripts/k8s-e2e.sh --no-build   reuse images already tagged + loaded
@@ -33,11 +33,20 @@ IMG_REPO=nook.local
 PF_PORT=18080
 CHART=charts/nook-control
 KEEP=0
-# How the app images get into kind: build (from source), pull (published), or
-# reuse (already loaded). Building the control-plane image is a full Rust
-# release compile — on a small CI runner it starves the kind node and the
-# in-cluster Postgres cannot become Ready, so CI pulls published images instead
-# (AC-4 explicitly allows "the images the release pipeline publishes").
+# How the app images get into kind: build (from source), pull (published control
+# plane, web from source), or reuse (already loaded). Building the CONTROL-PLANE
+# image is a full Rust release compile -- on a small CI runner it starves the
+# kind node and the in-cluster Postgres cannot become Ready, so `pull` takes the
+# published one (AC-4 explicitly allows "the images the release pipeline
+# publishes").
+#
+# The WEB image is built even under `pull`, and that is the whole point of the
+# mode (MAIN-654). It is a node build and an nginx copy -- seconds, not the
+# thing that starved anything -- and pulling it made a chart change that is
+# COUPLED to its image untestable: the chart under test is this branch's while
+# the image is the last release's, so moving nginx's port failed here for as
+# long as the chart was right and the image had not shipped yet. Pairing a new
+# chart with an old image proves only that they were once in step.
 MODE=build
 PULL_CONTROL=${PULL_CONTROL:-ghcr.io/nook-os/nook-control}
 PULL_WEB=${PULL_WEB:-ghcr.io/nook-os/nook-web}
@@ -140,11 +149,10 @@ prepare_source() {
       docker build -t "$IMG_REPO/nook-web:e2e-1" -f deploy/docker/web-prod.Dockerfile .
       ;;
     pull)
-      log "pulling published images ($PULL_TAG) — no in-job compile"
+      log "pulling the published control plane ($PULL_TAG); building web from source"
       docker pull "$PULL_CONTROL:$PULL_TAG"
-      docker pull "$PULL_WEB:$PULL_TAG"
       docker tag "$PULL_CONTROL:$PULL_TAG" "$IMG_REPO/nook-control:e2e-1"
-      docker tag "$PULL_WEB:$PULL_TAG" "$IMG_REPO/nook-web:e2e-1"
+      docker build -t "$IMG_REPO/nook-web:e2e-1" -f deploy/docker/web-prod.Dockerfile .
       ;;
     reuse)
       log "reusing already-loaded images"
