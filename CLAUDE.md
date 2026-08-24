@@ -51,11 +51,26 @@ hygiene now, not a shared-DB workaround.)
 
 ## CLI shape — the top level is frozen (MAIN-157)
 
-New `nook` commands land as `nook <plural-noun> <verb>`; the thirty existing flat
-verbs are grandfathered and only shrink. Read `docs/cli-style.md` before adding
-one — it also carries the skills-sweep rule (a renamed verb must update
-`skills/` in the SAME ticket). `cli_surface` in `crates/nook-node/src/main.rs`
-enforces it.
+New `nook` commands land as `nook <plural-noun> <verb>`; the flat verbs left at
+the top level are grandfathered and only shrink — thirty when MAIN-157 froze
+them, **twenty-two** since MAIN-644. Read `docs/cli-style.md` before adding one
+— it also carries the skills-sweep rule (a renamed verb must update `skills/`
+in the SAME ticket). `cli_surface` in `crates/nook-node/src/main.rs` enforces
+it.
+
+**The board verbs are `nook issues <verb>` (MAIN-644).** `list`, `get`,
+`create`, `comment`, `label`, `claim`, `relate` and `set-description` joined the
+eight already there; the flat spellings are **gone, not aliased** (owner ruling,
+2026-08-19), each exiting non-zero naming its replacement. `nook get tasks` is
+untouched — the kubectl-style `get` surface is a separate idea.
+
+**Releasing one of these is ORDERED: the binary first, the skills second.** A
+node on the old binary handed new skill text runs `nook issues list` and gets
+clap's "unrecognized subcommand"; a node on the new binary holding old text runs
+`nook tasks` and gets the refusal above. Both are broken, so ship the CLI, let
+the nodes self-update, and `nook teach` only once they have — the window is one
+self-update, and it is the window `docs/cli-style.md`'s sweep rule exists to
+keep short.
 
 ## Comments — the exception, not the default
 

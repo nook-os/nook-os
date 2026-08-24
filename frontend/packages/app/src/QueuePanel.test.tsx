@@ -156,8 +156,8 @@ describe("<QueuePanel> — the queries each section sends", () => {
     mount();
     await waitFor(() => expect(sectionQuery("on-deck")).toBeTruthy());
     const q = sectionQuery("on-deck")!;
-    // The same four filters `nook tasks --label agent-ready --not-label blocked
-    // --assignee none --unblocked` sends. Anything more or less and the panel
+    // The same four filters `nook issues list --label agent-ready --not-label
+    // blocked --assignee none --unblocked` sends. Anything more or less and the panel
     // stops being a preview of what the next agent takes.
     expect(q.label).toEqual(["agent-ready"]);
     expect(q.not_label).toEqual(["blocked"]);

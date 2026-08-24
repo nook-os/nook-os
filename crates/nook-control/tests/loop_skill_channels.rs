@@ -64,19 +64,22 @@ fn interview_skills_route_job_mode_through_durable_interactions() {
 #[test]
 fn interview_skill_versions_were_bumped() {
     assert!(
-        skill("nook-spec").contains("version: 1.4.0"),
+        skill("nook-spec").contains("version: 1.5.0"),
         "nook-spec version must be bumped when its body changes — move this pin \
-         with the bump (1.3.0 was MAIN-138; 1.4.0 is MAIN-569's AC↔NG cross-check)"
+         with the bump (1.4.0 was MAIN-569's AC↔NG cross-check; 1.5.0 is \
+         MAIN-644's `nook issues` sweep)"
     );
     assert!(
-        skill("nook-epic").contains("version: 2.5.0"),
+        skill("nook-epic").contains("version: 2.6.0"),
         "nook-epic version must be bumped when its body changes — move this pin \
-         with the bump (2.4.0 was the job-mode input channel; 2.5.0 is MAIN-569)"
+         with the bump (2.5.0 was MAIN-569; 2.6.0 is MAIN-644's `nook issues` \
+         sweep)"
     );
     assert!(
-        skill("nook-review").contains("version: 1.7.0"),
+        skill("nook-review").contains("version: 1.8.0"),
         "nook-review version must be bumped when its body changes — move this pin \
-         with the bump (1.7.0 is MAIN-569's card-internal scope conflict)"
+         with the bump (1.7.0 was MAIN-569's card-internal scope conflict; 1.8.0 \
+         is MAIN-644's `nook issues` sweep)"
     );
 }
 
@@ -304,8 +307,8 @@ fn build_skill_is_directed_and_judgment_only() {
     // 1.x flow: the pick query, the claim verb, and the hand-driven column
     // move payload.
     for banned in [
-        "nook tasks --label agent-ready",
-        "nook claim",
+        "nook issues list --label agent-ready",
+        "nook issues claim",
         "--column-type started",
         "\"column\":",
     ] {
@@ -315,7 +318,7 @@ fn build_skill_is_directed_and_judgment_only() {
         );
     }
     assert!(
-        skill("nook-build").contains("version: 2.6.0"),
+        skill("nook-build").contains("version: 2.7.0"),
         "nook-build's version must be bumped with every change to its text"
     );
 }

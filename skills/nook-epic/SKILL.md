@@ -1,7 +1,7 @@
 ---
 name: nook-epic
 description: "Walk opted-in NookOS epics and draft the next sub-ticket, grounded in the epic's own (free-form) body plus the current code. Attended by default: asks the human when it needs discovery, and shows the finished draft for a go-ahead before filing. Unattended (files without a read, escalates via comments) only when /loop passes the `unattended` flag. One ticket per pass."
-version: 2.5.0
+version: 2.6.0
 author: NookOS
 license: MIT
 platforms: [linux, macos]
@@ -90,7 +90,7 @@ may infer) and §5 (ask inline · ask durably · comment).
 
 ```bash
 nook whoami          # must show a WORKSPACE — that is the confinement
-nook tasks --json    # proves the board is reachable
+nook issues list --json    # proves the board is reachable
 ```
 
 If `whoami` fails or reports **no workspace**, end the pass and tell the user to
@@ -100,7 +100,7 @@ to that session's tenant and workspace, so it reaches ONE repo where a user
 token reaches the whole tenant. Unconfined is what disqualifies a run, not the
 kind of credential.
 
-You are confined to your workspace: `nook tasks` scopes to the session's
+You are confined to your workspace: `nook issues list` scopes to the session's
 workspace, so you only ever see and touch this repo's epics. If `nook workspace
 current` prints nothing you are not in a workspace session — end the pass.
 
@@ -109,7 +109,7 @@ current` prints nothing you are not in a workspace session — end the pass.
 Scan only epics whose owner has opted in, in the order work should be taken:
 
 ```bash
-nook tasks --type epic --label auto-spec --not-label spec-blocked --backlog --json
+nook issues list --type epic --label auto-spec --not-label spec-blocked --backlog --json
 ```
 
 Each flag is load-bearing:
@@ -136,7 +136,7 @@ the work still to come. The body is **free-form**: prose, an architecture note, 
 loose bullet list, a numbered plan — take it as written.
 
 ```bash
-nook task NOOK-7 --json     # .description is the body; .workspace_id, .priority too
+nook issues get NOOK-7 --json     # .description is the body; .workspace_id, .priority too
 ```
 
 **What is already filed comes from the board, not the body.** The body is the
@@ -144,7 +144,7 @@ human's document; you never rely on markers inside it to know state. List the
 epic's real children:
 
 ```bash
-nook tasks --parent NOOK-7 --backlog --json   # every existing sub-ticket of this epic
+nook issues list --parent NOOK-7 --backlog --json   # every existing sub-ticket of this epic
 ```
 
 The **next ticket** is the next unit of work the body describes that is **not yet
@@ -152,8 +152,8 @@ one of those children** and whose prerequisites have **landed** — a prerequisi
 is landed when its ticket is in a completed/canceled column, not merely filed:
 
 ```bash
-nook tasks --parent NOOK-7 --column-type completed --backlog --json
-nook tasks --parent NOOK-7 --column-type canceled  --backlog --json
+nook issues list --parent NOOK-7 --column-type completed --backlog --json
+nook issues list --parent NOOK-7 --column-type canceled  --backlog --json
 ```
 
 **Never spec against unmerged work.** Each ticket is specced against *merged
@@ -301,7 +301,7 @@ epic, into the backlog, inheriting the epic's workspace and priority (the backlo
 is the default column — do not pass `--column-type`):
 
 ```bash
-nook create task \
+nook issues create \
   --title "<the sub-ticket title>" \
   --type task \
   --parent NOOK-7 \
@@ -317,14 +317,14 @@ It prints the new `key`. If the ticket depends on a real filed ticket, record it
 so the builder waits:
 
 ```bash
-nook relate MAIN-42 blocks NOOK-42   # <BLOCKER> blocks <DEPENDENT>
+nook issues relate MAIN-42 blocks NOOK-42   # <BLOCKER> blocks <DEPENDENT>
 ```
 
 Then leave a trail on the epic — a comment, **not** an edit to the body (the body
 is the human's free-form document; do not annotate it):
 
 ```bash
-nook comment NOOK-7 "Filed NOOK-42 — <the sub-ticket>, the next unit after <what it followed>."
+nook issues comment NOOK-7 "Filed NOOK-42 — <the sub-ticket>, the next unit after <what it followed>."
 ```
 
 **Never apply `agent-ready`** — a human promotes it from the backlog after a
@@ -351,8 +351,8 @@ No one to ask. Comment the exact question on the epic, block it, and push it
 through the notification fan-out:
 
 ```bash
-nook comment NOOK-7 "Next sub-ticket under-specified: the body describes a 'catalog gate' but not whether an uncatalogued kind is an error or a silent no-op. Decide, then I can spec it. (Blocking auto-spec.)"
-nook label NOOK-7 spec-blocked
+nook issues comment NOOK-7 "Next sub-ticket under-specified: the body describes a 'catalog gate' but not whether an uncatalogued kind is an error or a silent no-op. Decide, then I can spec it. (Blocking auto-spec.)"
+nook issues label NOOK-7 spec-blocked
 nook notify "Epic NOOK-7 needs a decision" \
   --body "Auto-spec is blocked — see the comment." \
   --level warning --link "<the epic's url>"
@@ -362,7 +362,7 @@ State the exact decision and the options. The human answers by **editing the epi
 body** and **removing `spec-blocked`**; the epic then reappears in §1's scan. End
 the pass.
 
-`nook label` attaches an **existing** label and 404s on an unknown name, so
+`nook issues label` attaches an **existing** label and 404s on an unknown name, so
 `spec-blocked` must be one of the board's labels — create it once, like `blocked`
 for the builder. A 404 on the add is the missing label, not a missing task.
 
@@ -372,8 +372,8 @@ When the body describes no further unfiled work **and** every child is in a
 completed/canceled column, the epic's queue is done:
 
 ```bash
-nook comment NOOK-7 "Every sub-ticket the epic describes is filed and landed — the auto-spec queue for this epic is complete."
-nook label NOOK-7 --remove auto-spec
+nook issues comment NOOK-7 "Every sub-ticket the epic describes is filed and landed — the auto-spec queue for this epic is complete."
+nook issues label NOOK-7 --remove auto-spec
 nook notify "Epic NOOK-7 complete" --body "All sub-tickets filed and landed." --level success --link "<the epic's url>"
 ```
 

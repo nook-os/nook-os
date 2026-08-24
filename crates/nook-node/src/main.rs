@@ -91,130 +91,6 @@ enum Command {
     },
     /// Remove a taught skill from the control plane and from every machine.
     Unteach { name: String },
-    /// List board tasks with the same filter an agent's pick step uses.
-    ///
-    /// `nook tasks --label agent-ready --assignee none --unblocked` is exactly
-    /// what the loop asks for, so you can see what it will take next.
-    Tasks {
-        #[arg(long)]
-        board: Option<String>,
-        /// Require this label (repeatable).
-        #[arg(long = "label")]
-        labels: Vec<String>,
-        /// Exclude this label (repeatable).
-        #[arg(long = "not-label")]
-        not_labels: Vec<String>,
-        /// A user id, or `none` for unclaimed work.
-        #[arg(long)]
-        assignee: Option<String>,
-        /// backlog | unstarted | started | completed | canceled
-        #[arg(long = "column-type")]
-        column_type: Option<String>,
-        /// Issue type to include (repeatable): task|bug|epic|story|chore.
-        /// `--type epic` lists epics, which are excluded by default.
-        #[arg(long = "type")]
-        types: Vec<String>,
-        /// An epic's children (key or uuid): the tasks filed under it, including
-        /// backlog ones.
-        #[arg(long)]
-        parent: Option<String>,
-        /// Hide anything with an unresolved blocker.
-        #[arg(long)]
-        unblocked: bool,
-        /// Narrow to work THIS machine should take: cards dispatched to it, plus
-        /// everything undispatched. What a builder looping on a node wants —
-        /// dispatch then means "this one is yours" instead of setting a field
-        /// nothing read. Off by default, so a human's `nook tasks` still shows
-        /// the whole board even on a machine that is also a node.
-        #[arg(long = "this-node")]
-        this_node: bool,
-        /// Only this workspace (uuid or name). Defaults to the workspace of the
-        /// session you are in, so an agent's pick stays inside its own repo.
-        #[arg(long)]
-        workspace: Option<String>,
-        /// Ignore the session's workspace and list across the whole tenant.
-        #[arg(long = "all-workspaces")]
-        all_workspaces: bool,
-        /// Include tasks in the backlog (Triage). Excluded by default: the
-        /// backlog is a human refinement space the loop never draws from, and
-        /// epics are excluded too — both are enforced server-side.
-        #[arg(long)]
-        backlog: bool,
-        /// Include finished cards (Done, Canceled). Excluded by default, so a
-        /// card left labelled `agent-ready` after it merged is not offered as
-        /// work — also enforced server-side.
-        #[arg(long)]
-        done: bool,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Read one whole issue: body, labels, comments, blockers.
-    Task {
-        /// Human key (NOOK-42) or id.
-        key: String,
-        #[arg(long)]
-        json: bool,
-        /// List the description bodies past replaces overwrote (newest first)
-        /// — the undo for a clobbered description.
-        #[arg(long)]
-        revisions: bool,
-    },
-    /// Comment on a task.
-    Comment {
-        key: String,
-        /// Also RESTART the card: clear every escalation label (`blocked`,
-        /// `spec-blocked`, `needs-human-review`), put `agent-ready` back on,
-        /// and let the build loop pick it up again. The body is the ruling
-        /// that released it, and is required.
-        #[arg(long)]
-        unblock: bool,
-        /// Also rule CHANGES REQUESTED on this card's pull request: post the
-        /// body there as well, replace its verdict label with
-        /// `loop-changes-requested`, hold the review loop off that head, and
-        /// send the builder back to repair it. The body is the ruling, and is
-        /// required; a lone `-` reads it from stdin. Needs an open PR.
-        #[arg(long)]
-        request_changes: bool,
-        /// The comment body (markdown).
-        body: Vec<String>,
-    },
-    /// Safely replace a task's description. Reads the current version and writes
-    /// with an optimistic-concurrency guard, retrying on a concurrent edit — so
-    /// it never silently loses your change. Read the body first with `nook task`.
-    SetDescription {
-        key: String,
-        /// The new description (markdown). A lone `-` reads it from stdin,
-        /// for multi-line bodies.
-        description: Vec<String>,
-        /// Replace a long description with a tiny body anyway — without this,
-        /// shrinking a >200-char description below 20 chars is refused as
-        /// probable payload loss.
-        #[arg(long)]
-        force: bool,
-    },
-    /// Add or remove a label.
-    Label {
-        key: String,
-        name: String,
-        #[arg(long)]
-        remove: bool,
-    },
-    /// Create board objects (currently: a task).
-    #[command(subcommand)]
-    Create(CreateCommand),
-    /// Relate two tasks: `nook relate <BLOCKER> blocks <DEPENDENT>`.
-    ///
-    /// Posts the relation on the BLOCKER. Kinds: blocks | relates | duplicates.
-    /// Keys or uuids both work. After a `blocks`, it reports whether the
-    /// dependent is now blocked.
-    Relate {
-        /// The blocking task (key or uuid).
-        blocker: String,
-        /// blocks | relates | duplicates
-        kind: String,
-        /// The dependent task (key or uuid).
-        dependent: String,
-    },
     /// Wire an agent's finish hook so it notifies the fleet when it is done.
     #[command(subcommand)]
     Hooks(HooksCommand),
@@ -307,17 +183,18 @@ enum Command {
     #[command(subcommand)]
     Ports(PortsCommand),
     /// Board cards, by key — the verbs a skill used to reach for `curl` to
-    /// perform (MAIN-138), and the files hung on them (MAIN-610).
+    /// perform (MAIN-138), the files hung on them (MAIN-610), and the eight
+    /// flat board verbs MAIN-644 buried here.
     ///
+    ///     nook issues list --label agent-ready  the board, filtered
+    ///     nook issues get MAIN-42               one whole card
+    ///     nook issues create --title "…"        file a new one
+    ///     nook issues comment MAIN-42 "…"       say something on it
     ///     nook issues attach MAIN-42 shot.png   put a file on the card
-    ///     nook issues attachments MAIN-42       what the card carries
-    ///     nook issues download MAIN-42/shot.png pull the one you want
-    ///     nook issues detach MAIN-42/shot.png   take it off again
     ///
     /// The CLI is the surface skills are meant to drive the board through: one
     /// tested client, fewer tokens, and no hand-built request body to get
-    /// wrong. A new noun group, per docs/cli-style.md — the top level stays
-    /// frozen and none of the flat task verbs move.
+    /// wrong.
     #[command(subcommand)]
     Issues(IssuesCommand),
     /// Epic-runner passes (MAIN-144): the loop's merge authority, one
@@ -366,18 +243,6 @@ enum Command {
     /// Report the agent's state for this session (running|waiting|idle). A
     /// no-op outside a nook session; called by the Claude Code hooks.
     AgentState { state: String },
-    /// Claim a task so nobody else takes it.
-    Claim {
-        key: String,
-        /// Move it here at the same time, e.g. `started`.
-        #[arg(long = "column-type")]
-        column_type: Option<String>,
-        /// Claim even if the task belongs to a different workspace than this
-        /// session's. Off by default: the guard is what keeps an agent from
-        /// building another repo's ticket.
-        #[arg(long = "any-workspace")]
-        any_workspace: bool,
-    },
     /// Register this machine non-interactively (flags and/or a config file —
     /// the automation path; humans usually want `nook setup`).
     Join {
@@ -584,6 +449,71 @@ enum Command {
     },
 }
 
+/// The flat board verbs MAIN-644 buried under `issues`, and what each became.
+///
+/// Removed, not aliased — ruled deliberately (owner, 2026-08-19): the debt
+/// leaves in that ticket or it never leaves, and a hidden alias is the shape
+/// that never leaves. So what survives the removal is one sentence, printed
+/// before clap ever sees the argv: an agent handed *"unrecognized subcommand
+/// 'tasks'"* has to go and find the new name, and a fleet still running skill
+/// text nobody has re-taught would fail with nothing to act on.
+mod retired {
+    /// `(the word to intercept, how it used to be spelled, what it is now)`.
+    ///
+    /// `create` is the whole group, not a leaf: it only ever held `create
+    /// task`, so burying that verb takes the group with it.
+    const MOVED: &[(&str, &str, &str)] = &[
+        ("claim", "nook claim", "nook issues claim"),
+        ("comment", "nook comment", "nook issues comment"),
+        ("create", "nook create task", "nook issues create"),
+        ("label", "nook label", "nook issues label"),
+        ("relate", "nook relate", "nook issues relate"),
+        (
+            "set-description",
+            "nook set-description",
+            "nook issues set-description",
+        ),
+        ("task", "nook task", "nook issues get"),
+        ("tasks", "nook tasks", "nook issues list"),
+    ];
+
+    /// The refusal for the first argument, or `None` when it names something
+    /// still on the surface — which is every argument clap should handle.
+    pub fn refusal(first: Option<&str>) -> Option<String> {
+        let (_, was, now) = MOVED.iter().find(|(word, ..)| Some(*word) == first)?;
+        Some(format!(
+            "error: `{was}` was removed — it is `{now}` now (MAIN-644).\n\n\
+             Every flag, argument and exit code carries over unchanged, so the same\n\
+             invocation works under the new spelling. See `{now} --help`.\n"
+        ))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// AC-2: never a bare "unrecognized subcommand". Each removed spelling
+        /// names the one that replaced it.
+        #[test]
+        fn every_removed_verb_names_its_replacement() {
+            for (word, was, now) in MOVED {
+                let msg = refusal(Some(word)).unwrap_or_else(|| panic!("`{was}` must be refused"));
+                assert!(msg.contains(now), "`{was}` must name `{now}`: {msg}");
+            }
+        }
+
+        /// The surviving spellings are not swept up by it — `issues` above all,
+        /// which is where the eight went.
+        #[test]
+        fn a_live_verb_is_left_to_clap() {
+            for word in ["issues", "get", "notify", "start", "status", "--help"] {
+                assert_eq!(refusal(Some(word)), None, "{word} is still a real command");
+            }
+            assert_eq!(refusal(None), None);
+        }
+    }
+}
+
 /// Everything `join` needs, assembled from flags, a config file, or prompts.
 #[derive(Debug, Default, serde::Deserialize)]
 struct JoinSpec {
@@ -604,6 +534,14 @@ fn ok(line: &str) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Before clap, because clap's answer to a name it does not know is a list
+    // of the ones it does — which is the moment a retired board verb has to
+    // say where it went (MAIN-644).
+    if let Some(msg) = retired::refusal(std::env::args().nth(1).as_deref()) {
+        eprint!("{msg}");
+        std::process::exit(2);
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
@@ -654,95 +592,10 @@ async fn main() -> Result<()> {
         Command::Teach { path, name } => cli::teach(&path, name.as_deref()).await,
         Command::Taught { json } => cli::taught(json).await,
         Command::Unteach { name } => cli::unteach(&name).await,
-        Command::Tasks {
-            board,
-            labels,
-            not_labels,
-            assignee,
-            column_type,
-            types,
-            parent,
-            unblocked,
-            this_node,
-            workspace,
-            all_workspaces,
-            backlog,
-            done,
-            json,
-        } => {
-            cli::tasks(
-                board.as_deref(),
-                &labels,
-                &not_labels,
-                assignee.as_deref(),
-                column_type.as_deref(),
-                &types,
-                parent.as_deref(),
-                unblocked,
-                this_node,
-                workspace.as_deref(),
-                all_workspaces,
-                backlog,
-                done,
-                json,
-            )
-            .await
-        }
-        Command::Create(CreateCommand::Task {
-            title,
-            board,
-            description,
-            column_type,
-            priority,
-            labels,
-            type_,
-            parent,
-            workspace,
-        }) => {
-            cli::create_task(cli::CreateTask {
-                title,
-                board,
-                description,
-                column_type,
-                priority,
-                labels,
-                type_,
-                parent,
-                workspace,
-            })
-            .await
-        }
-        Command::Relate {
-            blocker,
-            kind,
-            dependent,
-        } => cli::relate(&blocker, &kind, &dependent).await,
-        Command::Task {
-            key,
-            json,
-            revisions,
-        } => cli::task(&key, json, revisions).await,
-        Command::Comment {
-            key,
-            unblock,
-            request_changes,
-            body,
-        } => cli::comment(&key, &body, unblock, request_changes).await,
-        Command::SetDescription {
-            key,
-            description,
-            force,
-        } => cli::set_description(&key, &description, force).await,
-        Command::Label { key, name, remove } => cli::label(&key, &name, remove).await,
         Command::Workspace(WorkspaceCommand::Current { json }) => {
             cli::workspace_current(json).await
         }
         Command::AgentState { state } => cli::agent_state(&state).await,
-        Command::Claim {
-            key,
-            column_type,
-            any_workspace,
-        } => cli::claim(&key, column_type.as_deref(), any_workspace).await,
         Command::Context(ContextCommand::List) => contexts::list(),
         Command::Context(ContextCommand::Current) => contexts::current(),
         Command::Context(ContextCommand::Save { name, server }) => contexts::save(&name, server),
@@ -799,6 +652,93 @@ async fn main() -> Result<()> {
         Command::Epics(EpicsCommand::Run { epic, seed }) => {
             cli::epics_run(&epic, seed.as_deref()).await
         }
+        Command::Issues(IssuesCommand::List {
+            board,
+            labels,
+            not_labels,
+            assignee,
+            column_type,
+            types,
+            parent,
+            unblocked,
+            this_node,
+            workspace,
+            all_workspaces,
+            backlog,
+            done,
+            json,
+        }) => {
+            cli::tasks(
+                board.as_deref(),
+                &labels,
+                &not_labels,
+                assignee.as_deref(),
+                column_type.as_deref(),
+                &types,
+                parent.as_deref(),
+                unblocked,
+                this_node,
+                workspace.as_deref(),
+                all_workspaces,
+                backlog,
+                done,
+                json,
+            )
+            .await
+        }
+        Command::Issues(IssuesCommand::Get {
+            key,
+            json,
+            revisions,
+        }) => cli::task(&key, json, revisions).await,
+        Command::Issues(IssuesCommand::Create {
+            title,
+            board,
+            description,
+            column_type,
+            priority,
+            labels,
+            type_,
+            parent,
+            workspace,
+        }) => {
+            cli::create_task(cli::CreateTask {
+                title,
+                board,
+                description,
+                column_type,
+                priority,
+                labels,
+                type_,
+                parent,
+                workspace,
+            })
+            .await
+        }
+        Command::Issues(IssuesCommand::Comment {
+            key,
+            unblock,
+            request_changes,
+            body,
+        }) => cli::comment(&key, &body, unblock, request_changes).await,
+        Command::Issues(IssuesCommand::Label { key, name, remove }) => {
+            cli::label(&key, &name, remove).await
+        }
+        Command::Issues(IssuesCommand::Claim {
+            key,
+            column_type,
+            any_workspace,
+        }) => cli::claim(&key, column_type.as_deref(), any_workspace).await,
+        Command::Issues(IssuesCommand::Relate {
+            blocker,
+            kind,
+            dependent,
+        }) => cli::relate(&blocker, &kind, &dependent).await,
+        Command::Issues(IssuesCommand::SetDescription {
+            key,
+            description,
+            force,
+        }) => cli::set_description(&key, &description, force).await,
         Command::Issues(IssuesCommand::Move { key, state, column }) => {
             cli::issues_move(&key, state.as_deref(), column.as_deref()).await
         }
@@ -1347,6 +1287,171 @@ enum EpicsCommand {
 /// key is what an agent is handed.
 #[derive(clap::Subcommand)]
 enum IssuesCommand {
+    /// List board cards with the same filter an agent's pick step uses.
+    ///
+    /// `nook issues list --label agent-ready --assignee none --unblocked` is
+    /// exactly what the loop asks for, so you can see what it will take next.
+    List {
+        #[arg(long)]
+        board: Option<String>,
+        /// Require this label (repeatable).
+        #[arg(long = "label")]
+        labels: Vec<String>,
+        /// Exclude this label (repeatable).
+        #[arg(long = "not-label")]
+        not_labels: Vec<String>,
+        /// A user id, or `none` for unclaimed work.
+        #[arg(long)]
+        assignee: Option<String>,
+        /// backlog | unstarted | started | completed | canceled
+        #[arg(long = "column-type")]
+        column_type: Option<String>,
+        /// Issue type to include (repeatable): task|bug|epic|story|chore.
+        /// `--type epic` lists epics, which are excluded by default.
+        #[arg(long = "type")]
+        types: Vec<String>,
+        /// An epic's children (key or uuid): the tasks filed under it, including
+        /// backlog ones.
+        #[arg(long)]
+        parent: Option<String>,
+        /// Hide anything with an unresolved blocker.
+        #[arg(long)]
+        unblocked: bool,
+        /// Narrow to work THIS machine should take: cards dispatched to it, plus
+        /// everything undispatched. What a builder looping on a node wants —
+        /// dispatch then means "this one is yours" instead of setting a field
+        /// nothing read. Off by default, so a human's `nook issues list` still
+        /// shows the whole board even on a machine that is also a node.
+        #[arg(long = "this-node")]
+        this_node: bool,
+        /// Only this workspace (uuid or name). Defaults to the workspace of the
+        /// session you are in, so an agent's pick stays inside its own repo.
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Ignore the session's workspace and list across the whole tenant.
+        #[arg(long = "all-workspaces")]
+        all_workspaces: bool,
+        /// Include tasks in the backlog (Triage). Excluded by default: the
+        /// backlog is a human refinement space the loop never draws from, and
+        /// epics are excluded too — both are enforced server-side.
+        #[arg(long)]
+        backlog: bool,
+        /// Include finished cards (Done, Canceled). Excluded by default, so a
+        /// card left labelled `agent-ready` after it merged is not offered as
+        /// work — also enforced server-side.
+        #[arg(long)]
+        done: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read one whole issue: body, labels, comments, blockers.
+    Get {
+        /// Human key (NOOK-42) or id.
+        key: String,
+        #[arg(long)]
+        json: bool,
+        /// List the description bodies past replaces overwrote (newest first)
+        /// — the undo for a clobbered description.
+        #[arg(long)]
+        revisions: bool,
+    },
+    /// File a new card on the board. Prints the created key and url; exits
+    /// non-zero with the server's message on a rejected value.
+    Create {
+        /// The title (required).
+        #[arg(long)]
+        title: String,
+        /// Board key or uuid. Defaults to the first board.
+        #[arg(long)]
+        board: Option<String>,
+        /// Markdown body. `-` reads stdin, for multi-line bodies.
+        #[arg(long)]
+        description: Option<String>,
+        /// backlog | unstarted | started | completed | canceled. Default: backlog.
+        #[arg(long = "column-type")]
+        column_type: Option<String>,
+        /// 0 none, 1 urgent, 2 high, 3 medium, 4 low.
+        #[arg(long)]
+        priority: Option<i32>,
+        /// Attach a label by name (repeatable), created for the tenant if new.
+        #[arg(long = "label")]
+        labels: Vec<String>,
+        /// task | bug | epic | story | chore. Default: task.
+        #[arg(long = "type")]
+        type_: Option<String>,
+        /// File under an epic (key or uuid) on the same board.
+        #[arg(long)]
+        parent: Option<String>,
+        /// Workspace (uuid or name). Defaults to the session's workspace.
+        #[arg(long)]
+        workspace: Option<String>,
+    },
+    /// Comment on a card.
+    Comment {
+        key: String,
+        /// Also RESTART the card: clear every escalation label (`blocked`,
+        /// `spec-blocked`, `needs-human-review`), put `agent-ready` back on,
+        /// and let the build loop pick it up again. The body is the ruling
+        /// that released it, and is required.
+        #[arg(long)]
+        unblock: bool,
+        /// Also rule CHANGES REQUESTED on this card's pull request: post the
+        /// body there as well, replace its verdict label with
+        /// `loop-changes-requested`, hold the review loop off that head, and
+        /// send the builder back to repair it. The body is the ruling, and is
+        /// required; a lone `-` reads it from stdin. Needs an open PR.
+        #[arg(long)]
+        request_changes: bool,
+        /// The comment body (markdown).
+        body: Vec<String>,
+    },
+    /// Add or remove a label.
+    Label {
+        key: String,
+        name: String,
+        #[arg(long)]
+        remove: bool,
+    },
+    /// Claim a card so nobody else takes it.
+    Claim {
+        key: String,
+        /// Move it here at the same time, e.g. `started`.
+        #[arg(long = "column-type")]
+        column_type: Option<String>,
+        /// Claim even if the task belongs to a different workspace than this
+        /// session's. Off by default: the guard is what keeps an agent from
+        /// building another repo's ticket.
+        #[arg(long = "any-workspace")]
+        any_workspace: bool,
+    },
+    /// Relate two cards: `nook issues relate <BLOCKER> blocks <DEPENDENT>`.
+    ///
+    /// Posts the relation on the BLOCKER. Kinds: blocks | relates | duplicates.
+    /// Keys or uuids both work. After a `blocks`, it reports whether the
+    /// dependent is now blocked.
+    Relate {
+        /// The blocking task (key or uuid).
+        blocker: String,
+        /// blocks | relates | duplicates
+        kind: String,
+        /// The dependent task (key or uuid).
+        dependent: String,
+    },
+    /// Safely replace a card's description. Reads the current version and writes
+    /// with an optimistic-concurrency guard, retrying on a concurrent edit — so
+    /// it never silently loses your change. Read the body first with
+    /// `nook issues get`.
+    SetDescription {
+        key: String,
+        /// The new description (markdown). A lone `-` reads it from stdin,
+        /// for multi-line bodies.
+        description: Vec<String>,
+        /// Replace a long description with a tiny body anyway — without this,
+        /// shrinking a >200-char description below 20 chars is refused as
+        /// probable payload loss.
+        #[arg(long)]
+        force: bool,
+    },
     /// Move a card to the column that means <state> on its own board.
     ///
     /// The type form — `nook issues move MAIN-42 started` — is the one to
@@ -1967,41 +2072,6 @@ enum WorkspaceCommand {
     Current {
         #[arg(long)]
         json: bool,
-    },
-}
-
-#[derive(Subcommand)]
-enum CreateCommand {
-    /// File a new task on the board. Prints the created key and url; exits
-    /// non-zero with the server's message on a rejected value.
-    Task {
-        /// The title (required).
-        #[arg(long)]
-        title: String,
-        /// Board key or uuid. Defaults to the first board.
-        #[arg(long)]
-        board: Option<String>,
-        /// Markdown body. `-` reads stdin, for multi-line bodies.
-        #[arg(long)]
-        description: Option<String>,
-        /// backlog | unstarted | started | completed | canceled. Default: backlog.
-        #[arg(long = "column-type")]
-        column_type: Option<String>,
-        /// 0 none, 1 urgent, 2 high, 3 medium, 4 low.
-        #[arg(long)]
-        priority: Option<i32>,
-        /// Attach a label by name (repeatable), created for the tenant if new.
-        #[arg(long = "label")]
-        labels: Vec<String>,
-        /// task | bug | epic | story | chore. Default: task.
-        #[arg(long = "type")]
-        type_: Option<String>,
-        /// File under an epic (key or uuid) on the same board.
-        #[arg(long)]
-        parent: Option<String>,
-        /// Workspace (uuid or name). Defaults to the session's workspace.
-        #[arg(long)]
-        workspace: Option<String>,
     },
 }
 
@@ -2665,29 +2735,22 @@ mod cli_surface {
     /// high-water mark to erode.
     const FROZEN_LEAVES: &[&str] = &[
         "agent-state",
-        "claim",
-        "comment",
         "delete",
         "enroll",
         "exec",
         "get",
         "import",
         "join",
-        "label",
         "login",
         "logout",
         "notify",
         "read",
-        "relate",
         "renew",
         "run",
         "send",
-        "set-description",
         "setup",
         "start",
         "status",
-        "task",
-        "tasks",
         "taught",
         "teach",
         "unteach",
@@ -2902,6 +2965,392 @@ mod cli_surface {
         );
     }
 
+    /// MAIN-644 AC-3/AC-4: the eight flat board verbs are `issues` verbs now,
+    /// and the eight that were already there are untouched beside them.
+    #[test]
+    fn the_board_verbs_live_under_issues() {
+        let (leaves, groups) = surface();
+        assert!(
+            !groups.contains(&"create".to_string()),
+            "`create` only ever held `create task`; it goes with it: {groups:?}"
+        );
+
+        let cmd = Cli::command();
+        let issues = cmd
+            .get_subcommands()
+            .find(|s| s.get_name() == "issues")
+            .expect("the issues group");
+        let verbs: Vec<&str> = issues.get_subcommands().map(|s| s.get_name()).collect();
+
+        let moved = [
+            "list",
+            "get",
+            "create",
+            "comment",
+            "label",
+            "claim",
+            "relate",
+            "set-description",
+        ];
+        let already_there = [
+            "move",
+            "release",
+            "prune-worktree",
+            "set-parent",
+            "attach",
+            "attachments",
+            "download",
+            "detach",
+        ];
+        for v in moved.iter().chain(&already_there) {
+            assert!(verbs.contains(v), "nook issues {v} is missing: {verbs:?}");
+        }
+        assert_eq!(verbs.len(), 16, "issues holds exactly sixteen: {verbs:?}");
+
+        for old in [
+            "tasks",
+            "task",
+            "create",
+            "comment",
+            "label",
+            "claim",
+            "relate",
+            "set-description",
+        ] {
+            assert!(
+                !leaves.contains(&old.to_string()),
+                "`nook {old}` is retired; it must not be back on the top level"
+            );
+        }
+    }
+
+    /// AC-1: the move carried every flag and argument, so an old invocation is
+    /// the new one with its first word replaced.
+    ///
+    /// The definitions moved verbatim, which is exactly why this is worth
+    /// pinning: a flag dropped in the move would compile, run, and fail only
+    /// on the machine that passed it.
+    #[test]
+    fn every_moved_verb_takes_its_old_arguments() {
+        let issues = |argv: &[&str]| match Cli::try_parse_from(argv)
+            .unwrap_or_else(|e| panic!("{argv:?} must parse: {e}"))
+            .command
+        {
+            Command::Issues(c) => c,
+            _ => panic!("{argv:?} must land under issues"),
+        };
+
+        // `nook tasks` — every filter the pick step and the loops send.
+        let IssuesCommand::List {
+            board,
+            labels,
+            not_labels,
+            assignee,
+            column_type,
+            types,
+            parent,
+            unblocked,
+            this_node,
+            workspace,
+            all_workspaces,
+            backlog,
+            done,
+            json,
+        } = issues(&[
+            "nook",
+            "issues",
+            "list",
+            "--board",
+            "MAIN",
+            "--label",
+            "agent-ready",
+            "--not-label",
+            "blocked",
+            "--assignee",
+            "none",
+            "--column-type",
+            "unstarted",
+            "--type",
+            "bug",
+            "--parent",
+            "NOOK-7",
+            "--unblocked",
+            "--this-node",
+            "--workspace",
+            "nook-os",
+            "--all-workspaces",
+            "--backlog",
+            "--done",
+            "--json",
+        ])
+        else {
+            panic!("expected issues list")
+        };
+        assert_eq!(board.as_deref(), Some("MAIN"));
+        assert_eq!(labels, ["agent-ready"]);
+        assert_eq!(not_labels, ["blocked"]);
+        assert_eq!(assignee.as_deref(), Some("none"));
+        assert_eq!(column_type.as_deref(), Some("unstarted"));
+        assert_eq!(types, ["bug"]);
+        assert_eq!(parent.as_deref(), Some("NOOK-7"));
+        assert_eq!(workspace.as_deref(), Some("nook-os"));
+        assert!(unblocked && this_node && all_workspaces && backlog && done && json);
+
+        // `nook task MAIN-42`
+        let IssuesCommand::Get {
+            key,
+            json,
+            revisions,
+        } = issues(&["nook", "issues", "get", "MAIN-42", "--json", "--revisions"])
+        else {
+            panic!("expected issues get")
+        };
+        assert_eq!(key, "MAIN-42");
+        assert!(json && revisions);
+
+        // `nook create task`
+        let IssuesCommand::Create {
+            title,
+            board,
+            description,
+            column_type,
+            priority,
+            labels,
+            type_,
+            parent,
+            workspace,
+        } = issues(&[
+            "nook",
+            "issues",
+            "create",
+            "--title",
+            "A card",
+            "--board",
+            "MAIN",
+            "--description",
+            "body",
+            "--column-type",
+            "backlog",
+            "--priority",
+            "2",
+            "--label",
+            "agent-ready",
+            "--type",
+            "chore",
+            "--parent",
+            "NOOK-7",
+            "--workspace",
+            "nook-os",
+        ])
+        else {
+            panic!("expected issues create")
+        };
+        assert_eq!(title, "A card");
+        assert_eq!(board.as_deref(), Some("MAIN"));
+        assert_eq!(description.as_deref(), Some("body"));
+        assert_eq!(column_type.as_deref(), Some("backlog"));
+        assert_eq!(priority, Some(2));
+        assert_eq!(labels, ["agent-ready"]);
+        assert_eq!(type_.as_deref(), Some("chore"));
+        assert_eq!(parent.as_deref(), Some("NOOK-7"));
+        assert_eq!(workspace.as_deref(), Some("nook-os"));
+
+        // `nook comment MAIN-42 …`
+        let IssuesCommand::Comment {
+            key,
+            unblock,
+            request_changes,
+            body,
+        } = issues(&[
+            "nook",
+            "issues",
+            "comment",
+            "MAIN-42",
+            "--unblock",
+            "--request-changes",
+            "the",
+            "ruling",
+        ])
+        else {
+            panic!("expected issues comment")
+        };
+        assert_eq!(key, "MAIN-42");
+        assert_eq!(body, ["the", "ruling"]);
+        assert!(unblock && request_changes);
+
+        // `nook label MAIN-42 blocked --remove`
+        let IssuesCommand::Label { key, name, remove } =
+            issues(&["nook", "issues", "label", "MAIN-42", "blocked", "--remove"])
+        else {
+            panic!("expected issues label")
+        };
+        assert_eq!(
+            (key.as_str(), name.as_str(), remove),
+            ("MAIN-42", "blocked", true)
+        );
+
+        // `nook claim MAIN-42 --column-type started`
+        let IssuesCommand::Claim {
+            key,
+            column_type,
+            any_workspace,
+        } = issues(&[
+            "nook",
+            "issues",
+            "claim",
+            "MAIN-42",
+            "--column-type",
+            "started",
+            "--any-workspace",
+        ])
+        else {
+            panic!("expected issues claim")
+        };
+        assert_eq!(key, "MAIN-42");
+        assert_eq!(column_type.as_deref(), Some("started"));
+        assert!(any_workspace);
+
+        // `nook relate MAIN-4 blocks MAIN-5`
+        let IssuesCommand::Relate {
+            blocker,
+            kind,
+            dependent,
+        } = issues(&["nook", "issues", "relate", "MAIN-4", "blocks", "MAIN-5"])
+        else {
+            panic!("expected issues relate")
+        };
+        assert_eq!(
+            (blocker.as_str(), kind.as_str(), dependent.as_str()),
+            ("MAIN-4", "blocks", "MAIN-5")
+        );
+
+        // `nook set-description MAIN-42 … --force`
+        let IssuesCommand::SetDescription {
+            key,
+            description,
+            force,
+        } = issues(&[
+            "nook",
+            "issues",
+            "set-description",
+            "MAIN-42",
+            "a",
+            "new",
+            "body",
+            "--force",
+        ])
+        else {
+            panic!("expected issues set-description")
+        };
+        assert_eq!(key, "MAIN-42");
+        assert_eq!(description, ["a", "new", "body"]);
+        assert!(force);
+    }
+
+    /// AC-8: the two cross-cutting conventions survived the move.
+    ///
+    /// A lone `-` is content-shaped, so clap could swallow it as a flag and the
+    /// stdin path would go dark without anything failing to compile; the
+    /// reading itself is `cli::set_description_body`'s own test.
+    #[test]
+    fn the_moved_verbs_keep_json_and_the_stdin_dash() {
+        let parse = |argv: &[&str]| {
+            Cli::try_parse_from(argv)
+                .unwrap_or_else(|e| panic!("{argv:?} must parse: {e}"))
+                .command
+        };
+
+        for argv in [
+            ["nook", "issues", "list", "--json"].as_slice(),
+            ["nook", "issues", "get", "MAIN-42", "--json"].as_slice(),
+        ] {
+            match parse(argv) {
+                Command::Issues(IssuesCommand::List { json, .. })
+                | Command::Issues(IssuesCommand::Get { json, .. }) => {
+                    assert!(json, "{argv:?} must set --json")
+                }
+                _ => panic!("{argv:?} must land under issues"),
+            }
+        }
+
+        let Command::Issues(IssuesCommand::SetDescription { description, .. }) =
+            parse(&["nook", "issues", "set-description", "MAIN-42", "-"])
+        else {
+            panic!("expected issues set-description")
+        };
+        assert_eq!(description, ["-"], "a lone `-` reaches the body unchanged");
+
+        let Command::Issues(IssuesCommand::Create { description, .. }) = parse(&[
+            "nook",
+            "issues",
+            "create",
+            "--title",
+            "A card",
+            "--description",
+            "-",
+        ]) else {
+            panic!("expected issues create")
+        };
+        assert_eq!(description.as_deref(), Some("-"));
+    }
+
+    /// AC-5: the sweep of `skills/` cannot silently rot.
+    ///
+    /// `every_verb_a_skill_teaches_exists` catches most of it, but not all:
+    /// `create` is gone as a group while `nook issues create` is very much a
+    /// verb, so a stale `nook create task` would pass a check that only asks
+    /// whether the first word is known. This asks the narrower question.
+    #[test]
+    fn no_skill_teaches_a_retired_board_verb() {
+        let retired = [
+            "tasks",
+            "task",
+            "create",
+            "comment",
+            "label",
+            "claim",
+            "relate",
+            "set-description",
+        ];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills");
+        let mut stale: Vec<String> = Vec::new();
+        for entry in walkdir::WalkDir::new(&root)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name() == "SKILL.md")
+        {
+            let text = std::fs::read_to_string(entry.path()).expect("a readable skill");
+            for (n, line) in text.lines().enumerate() {
+                for word in first_words_after_nook(line) {
+                    if retired.contains(&word.as_str()) {
+                        stale.push(format!("{}:{}: nook {word}", entry.path().display(), n + 1));
+                    }
+                }
+            }
+        }
+        assert!(
+            stale.is_empty(),
+            "\nSkills still teach board verbs MAIN-644 removed:\n  {}\n\n\
+             They are `nook issues list|get|create|comment|label|claim|relate|set-description`\n\
+             now. Update every hit, bump each touched skill's `version:`, and say in the PR\n\
+             that `nook teach` must be re-run.\n",
+            stale.join("\n  ")
+        );
+    }
+
+    /// Every word following `nook ` on a line, wherever it appears — prose,
+    /// inline code or a fenced block. Deliberately wider than `verbs_taught`,
+    /// which only reads command POSITION: a retired verb is worth catching in
+    /// a sentence too, because the sentence is what teaches it.
+    fn first_words_after_nook(line: &str) -> Vec<String> {
+        line.match_indices("nook ")
+            .filter_map(|(i, _)| line[i + 5..].split_whitespace().next())
+            .map(|w| w.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-'))
+            .filter(|w| !w.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
     /// The verbs a skill's text tells somebody to run.
     fn verbs_taught(text: &str) -> Vec<String> {
         let mut out = Vec::new();
@@ -2910,7 +3359,7 @@ mod cli_surface {
             if let Some(rest) = trimmed.strip_prefix("nook ") {
                 push_verb(rest, &mut out);
             }
-            // Inline code: `nook task <KEY>` in the middle of a sentence.
+            // Inline code: `nook issues get <KEY>` in the middle of a sentence.
             for chunk in line.split('`').skip(1).step_by(2) {
                 if let Some(rest) = chunk.trim_start().strip_prefix("nook ") {
                     push_verb(rest, &mut out);

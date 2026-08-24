@@ -12,8 +12,8 @@ use crate::config::NodeConfig;
 /// The tenant a command should act in when nothing on the command line says.
 ///
 /// `NOOK_TENANT_ID` is set INSIDE a workspace session, by whoever started it,
-/// so an agent running there is already scoped: `nook create task` resolves one
-/// board instead of asking which. It is per-session and disappears with the
+/// so an agent running there is already scoped: `nook issues create` resolves
+/// one board instead of asking which. It is per-session and disappears with the
 /// session, which is what makes it safe — it is not a mode anybody has to
 /// remember they are in, and there is no stale global default to get wrong.
 ///
@@ -2372,7 +2372,7 @@ pub async fn unteach(name: &str) -> Result<()> {
 
 // ── the board ───────────────────────────────────────────────────────────────
 
-/// `nook tasks` — the pick query from a terminal.
+/// `nook issues list` — the pick query from a terminal.
 ///
 /// The same filter an agent uses, so a human can see exactly what the loop
 /// will take next rather than inferring it from a board.
@@ -2425,7 +2425,7 @@ pub async fn current_session_scope(client: &Client) -> Result<SessionScope> {
     // treated as one. Unconfined is the permissive state, so failing open here
     // hands a builder the run of every repo in the tenant — which is exactly
     // what happened: a session in one tenant, a token homed in another, a 404,
-    // and `nook tasks` cheerfully returned another workspace's cards.
+    // and `nook issues list` cheerfully returned another workspace's cards.
     //
     // Cross-tenant placement makes this ORDINARY, not exotic: the workspace's
     // tenant and the node's differ routinely, and a `/sessions/{id}` read is
@@ -2587,11 +2587,11 @@ async fn resolve_board(client: &Client, needle: Option<&str>) -> Result<String> 
                         .is_some_and(|k| k.eq_ignore_ascii_case(n))
             })
             .and_then(|b| b.get("id").and_then(Value::as_str).map(str::to_string))
-            .with_context(|| format!("no board '{n}' — try `nook tasks` or omit --board")),
+            .with_context(|| format!("no board '{n}' — try `nook issues list` or omit --board")),
     }
 }
 
-/// The flags for `nook create task`, one field per flag (mirrors `main.rs`).
+/// The flags for `nook issues create`, one field per flag (mirrors `main.rs`).
 pub struct CreateTask {
     pub title: String,
     pub board: Option<String>,
@@ -2641,7 +2641,7 @@ fn build_create_body(
     Value::Object(body)
 }
 
-/// `nook create task --title …` — file a task on the board (MAIN-89 AC-3).
+/// `nook issues create --title …` — file a task on the board (MAIN-89 AC-3).
 ///
 /// The server owns every validation (a bad type, a non-epic parent, a blank
 /// title); `Client::post` surfaces its message and this exits non-zero on a 4xx.
@@ -2661,7 +2661,8 @@ pub async fn create_task(opts: CreateTask) -> Result<()> {
     };
 
     // Workspace: an explicit flag wins; otherwise inherit the session's, like
-    // `nook tasks` — so a filer inside a repo files against that repo by default.
+    // `nook issues list` — so a filer inside a repo files against that repo by
+    // default.
     let workspace_id = match opts.workspace.as_deref() {
         Some(w) => Some(resolve_workspace(&client, w).await?),
         None => current_session_scope(&client)
@@ -2686,7 +2687,7 @@ pub async fn create_task(opts: CreateTask) -> Result<()> {
     Ok(())
 }
 
-/// `nook relate <BLOCKER> <kind> <DEPENDENT>` (MAIN-89 AC-4).
+/// `nook issues relate <BLOCKER> <kind> <DEPENDENT>` (MAIN-89 AC-4).
 ///
 /// The relation is posted on the BLOCKER. `to_task` on the endpoint is a uuid,
 /// so a dependent given as a key is resolved first. After a `blocks`, the
@@ -2808,7 +2809,7 @@ fn build_tasks_query(
 }
 
 // One parameter per CLI flag by design — this is the dispatch seam for
-// `nook tasks`, and a struct would just move the same list one hop away.
+// `nook issues list`, and a struct would just move the same list one hop away.
 #[allow(clippy::too_many_arguments)]
 pub async fn tasks(
     board: Option<&str>,
@@ -2927,7 +2928,7 @@ pub async fn tasks(
     Ok(())
 }
 
-/// `nook task <key>` — one whole issue, the way an agent reads it.
+/// `nook issues get <key>` — one whole issue, the way an agent reads it.
 pub async fn task(key: &str, json: bool, revisions: bool) -> Result<()> {
     let client = Client::from_config()?;
     if revisions {
@@ -3086,7 +3087,7 @@ fn render_references(refs: &[Value]) -> Vec<String> {
     lines
 }
 
-/// `nook task <key> --revisions` — the description bodies past replaces
+/// `nook issues get <key> --revisions` — the description bodies past replaces
 /// overwrote, newest first (MAIN-470 AC-3). This is the undo for a clobbered
 /// description: read the body here, put it back with `set-description -`.
 async fn task_revisions(client: &Client, key: &str, json: bool) -> Result<()> {
@@ -3120,8 +3121,8 @@ async fn task_revisions(client: &Client, key: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// `nook comment <key> [--unblock] [--request-changes] <body>` — where the
-/// reasoning goes, and where a ruling that restarts a stopped card (MAIN-584
+/// `nook issues comment <key> [--unblock] [--request-changes] <body>` — where
+/// the reasoning goes, and where a ruling that restarts a stopped card (MAIN-584
 /// AC-9) or rejects its pull request (MAIN-591 AC-9) goes with it.
 pub async fn comment(
     key: &str,
@@ -3130,8 +3131,9 @@ pub async fn comment(
     request_changes: bool,
 ) -> Result<()> {
     // Only for a change request, which is the shape that carries a written
-    // ruling and is routinely piped in. An ordinary `nook comment X -` still
-    // means the one-character comment it always did (AC-9's second sentence).
+    // ruling and is routinely piped in. An ordinary `nook issues comment X -`
+    // still means the one-character comment it always did (AC-9's second
+    // sentence).
     let body = if request_changes {
         set_description_body(argv, || std::io::read_to_string(std::io::stdin()))?
     } else {
@@ -3179,7 +3181,7 @@ fn comment_body(body: &str, unblock: bool, request_changes: bool) -> serde_json:
 
 /// The argv body of `set-description`, honouring the Unix stdin convention
 /// (MAIN-470 AC-1): a lone `-` means "read stdin" and is never content —
-/// `nook create task --description -` already reads it that way, and storing
+/// `nook issues create --description -` already reads it that way, and storing
 /// the dash literally is exactly how a ticket's contract became the
 /// one-character string `-`. Anything else is the joined argv, verbatim.
 fn set_description_body(
@@ -3205,7 +3207,8 @@ fn tiny_replacement_refusal(current_len: usize, new_len: usize, force: bool) -> 
     })
 }
 
-/// `nook set-description <key> <body>` — replace a task's description safely.
+/// `nook issues set-description <key> <body>` — replace a task's description
+/// safely.
 ///
 /// Read the current version, PATCH with the optimistic-concurrency guard, and
 /// on a 409 (someone else edited it meanwhile) re-read and retry a bounded
@@ -3271,7 +3274,7 @@ pub async fn set_description(key: &str, argv: &[String], force: bool) -> Result<
     bail!("{key}: the body kept changing under concurrent edits — read it again and retry");
 }
 
-/// `nook label <key> <name> [--remove]`.
+/// `nook issues label <key> <name> [--remove]`.
 pub async fn label(key: &str, name: &str, remove: bool) -> Result<()> {
     let client = Client::from_config()?;
     let path = format!("/api/v1/tasks/{key}/labels/{name}");
@@ -3285,7 +3288,7 @@ pub async fn label(key: &str, name: &str, remove: bool) -> Result<()> {
     Ok(())
 }
 
-/// `nook claim <key>` — take the work.
+/// `nook issues claim <key>` — take the work.
 pub async fn claim(key: &str, column_type: Option<&str>, any_workspace: bool) -> Result<()> {
     let client = Client::from_config()?;
 
@@ -3920,7 +3923,7 @@ mod claim_guard_tests {
     }
 
     /// Outside a workspace session there is nothing to confine to, so a human
-    /// running `nook claim` by hand is never blocked.
+    /// running `nook issues claim` by hand is never blocked.
     #[test]
     fn no_session_workspace_never_blocks() {
         assert!(!claim_blocked(None, Some(OTHER), false));
@@ -3928,7 +3931,7 @@ mod claim_guard_tests {
     }
 }
 
-/// `nook task <KEY>`'s References section (MAIN-632 AC-3).
+/// `nook issues get <KEY>`'s References section (MAIN-632 AC-3).
 #[cfg(test)]
 mod task_reference_tests {
     use super::render_references;
@@ -4168,7 +4171,7 @@ mod task_verb_tests {
     #[test]
     fn tasks_query_omits_unset_filters() {
         // No workspace, no type, no parent → none of those keys appear, so a
-        // bare `nook tasks` hits `/api/v1/tasks` with nothing extra.
+        // bare `nook issues list` hits `/api/v1/tasks` with nothing extra.
         let q = build_tasks_query(
             None,
             None,

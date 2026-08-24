@@ -1,9 +1,10 @@
 # CLI style: the top level is frozen (MAIN-157)
 
-`nook`'s top level holds **thirty flat verbs**. It got there one feature at a
-time — each ticket reasonably adding one command, none of them wrong on its own,
-and nobody ever seeing the total. `nook get sessions` and `nook interactions
-ask` show the shape it should have had.
+`nook`'s top level held **thirty flat verbs** when this was written, and holds
+**twenty-two** now. It got there one feature at a time — each ticket reasonably
+adding one command, none of them wrong on its own, and nobody ever seeing the
+total. `nook get sessions` and `nook interactions ask` show the shape it should
+have had.
 
 This document is the convention, and
 `crates/nook-node/src/main.rs`'s `cli_surface` test is its enforcement.
@@ -15,7 +16,7 @@ This document is the convention, and
 ```
 nook issues move MAIN-42 review           ✅  noun, then verb
 nook interactions ask "…"                 ✅
-nook move-issue MAIN-42 review            ❌  a thirty-first flat verb
+nook move-issue MAIN-42 review            ❌  one more flat verb
 ```
 
 Adding a top-level flat verb is prohibited. Adding a **noun group** is not —
@@ -52,10 +53,18 @@ through untouched. The freeze is on leaves, never on groups.
     card's comments — so a group of its own was a prefix, not a resource, and
     its four verbs are `nook issues attach|attachments|download|detach` now.
     Note what it did NOT cost: the freeze is on flat leaves, never on groups,
-    so moving a group's verbs under another group adds no thirty-first verb.
+    so moving a group's verbs under another group adds no flat verb.
     A retired group stays as a **hidden alias for one release**, printing the
     replacement, because a fleet is running the old spelling in skill text
     nobody has re-taught yet.
+  - **The alias half of that precedent was NOT followed by MAIN-644**, which
+    buried the eight flat board verbs here — `nook issues list|get|create|
+    comment|label|claim|relate|set-description`. Owner ruling, 2026-08-19: the
+    debt leaves in that ticket or it never leaves, and a hidden alias is the
+    shape that never leaves. What the removal keeps from the precedent is the
+    sentence: each retired spelling exits non-zero naming its replacement, so
+    a fleet on old skill text fails with something to act on rather than with
+    clap's list of the names it does know.
 
 ### Naming the thing a verb acts on
 
@@ -75,19 +84,25 @@ should follow, because a skill written against one CLI verb should not have to
 learn a second dialect for the next:
 
 - **`--content -` reads stdin**, and a lone `-` is never content itself
-  (`nook set-description`, MAIN-470 AC-1).
+  (`nook issues set-description`, MAIN-470 AC-1).
 - **`--json` on every verb** emits the API shape unchanged, and human-readable
   output is what you get without it.
 
-## The grandfathered thirty
+## The grandfathered list — thirty, now twenty-two
 
-The existing flat verbs are frozen where they are, pending **MAIN-139**, which
+The remaining flat verbs are frozen where they are, pending **MAIN-139**, which
 buries them under nouns one at a time. They are not an example to follow — they
 are the debt this rule exists to stop growing.
 
 The ratchet, in one line: **additions refused, removals welcome.** The frozen
 list in `cli_surface` only ever shrinks; every line deleted from it is MAIN-139
 making progress. It is a high-water mark, not a target.
+
+**MAIN-644 is the first pass, and the worked example of one.** Seven flat verbs
+left the list — `claim`, `comment`, `label`, `relate`, `set-description`,
+`task`, `tasks` — and the `create` group went with `create task`, its only
+child. That is the shape a pass takes: one resource at a time, every verb of it,
+no aliases and no half-move.
 
 ## The skills sweep — same ticket, never a follow-up
 
@@ -106,9 +121,8 @@ ticket**:
 Never as a follow-up card. The window between the rename landing and the sweep
 landing is exactly the window in which the fleet is broken.
 
-For scale: the loop skills reference `nook tasks` and `nook comment` sixteen
-times each, `nook start` and `nook notify` ten each. A rename is never a
-one-line change.
+For scale: MAIN-644 moved eight board verbs and the sweep was 54 references
+across eight skills. A rename is never a one-line change.
 
 ## Amending the freeze
 

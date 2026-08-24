@@ -345,7 +345,7 @@ pub fn new_session(
     // `None` for an ad-hoc terminal, which is in no workspace.
     workspace_id: Option<&str>,
     // Which tenant this session's workspace belongs to, exported as
-    // `NOOK_TENANT_ID`. It is what makes `nook create task` inside a session
+    // `NOOK_TENANT_ID`. It is what makes `nook issues create` inside a session
     // unambiguous without a flag: the session already knows which org it is in,
     // so an agent never has to be told, and never has to guess.
     tenant_id: Option<&str>,

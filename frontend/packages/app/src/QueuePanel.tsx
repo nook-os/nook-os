@@ -144,8 +144,8 @@ export function QueuePanel() {
     }
   };
 
-  // EXACTLY the builder's pick (AC-2). The same four filters `nook tasks` sends,
-  // in the same order the server returns them — backlog and epics are already
+  // EXACTLY the builder's pick (AC-2). The same four filters `nook issues list`
+  // sends, in the same order the server returns them — backlog and epics are already
   // excluded server-side, so this list is what the next agent takes, not an
   // approximation of it.
   const onDeck = useTasks(
