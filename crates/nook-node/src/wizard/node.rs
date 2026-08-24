@@ -19,6 +19,9 @@ pub struct SetupArgs {
     pub token: Option<String>,
     pub name: Option<String>,
     pub fingerprint: Option<String>,
+    /// The supervisor, named up front instead of chosen at the prompt
+    /// (MAIN-647).
+    pub service: Option<String>,
 }
 
 pub async fn setup(args: SetupArgs) -> Result<()> {
@@ -148,13 +151,31 @@ pub async fn setup(args: SetupArgs) -> Result<()> {
     let exec = std::env::current_exe()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "nook".into());
-    let svc = service::choose(&mut t)?;
-    service::install(&mut t, svc, &exec)?;
-
-    // Remembered so the agent knows whether anything would restart it.
+    // Named on the command line, the prompt is skipped — that is the whole of
+    // AC-4 here, because `install()` already does the work either way.
+    let svc = match args.service.as_deref() {
+        Some(v) => service::Service::from_flag(v)?,
+        None => service::choose(&mut t)?,
+    };
+    // Remembered BEFORE the install, and in that order for the same reason
+    // `join` uses it: enabling the unit starts `nook run`, and that process
+    // reads node.toml as it registers. A config written afterwards races the
+    // agent, and losing the race is not self-correcting — capabilities travel
+    // on Register and nowhere else, so the node would report `supervision:
+    // None` until it next reconnects, and `nook nodes readiness` would tell the
+    // operator to run the command they have just run. Reverted on failure so
+    // the file never claims a supervisor that was not installed.
     let mut cfg = NodeConfig::load()?;
+    let previous = cfg.service.clone();
     cfg.service = svc.config_value().map(str::to_string);
     cfg.save()?;
+    if let Err(e) = service::install(&mut t, svc, &exec) {
+        cfg.service = previous;
+        // The install error is what the operator needs; a failing revert must
+        // not replace it with its own.
+        let _ = cfg.save();
+        return Err(e);
+    }
 
     // ---- offer the skill
     t.say("");

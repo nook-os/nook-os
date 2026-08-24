@@ -5077,6 +5077,18 @@ export interface components {
              *     leaves the machine). Add it as a deploy key to clone private repos.
              */
             ssh_public_key?: string | null;
+            /**
+             * @description What will restart this agent if it exits — `systemd-user`,
+             *     `systemd-system`, `launchd`, `supervisord`, `docker` — or `None` when
+             *     nothing will (MAIN-647).
+             *
+             *     Reported rather than kept in the node's own `node.toml`, because that is
+             *     the difference between a readiness answer an operator can get and one
+             *     that needs a shell on the machine. `None` is the state this ticket was
+             *     filed about: `nook update` replaces the binary and exits for a
+             *     supervisor that is not there, so the node goes dark permanently.
+             */
+            supervision?: string | null;
             tmux: boolean;
         };
         /** @description What the signed-in caller may do, so a UI can hide what it cannot offer. */

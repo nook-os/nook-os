@@ -51,6 +51,36 @@ fn supervised_with(cfg: &NodeConfig, supervisor_detected: bool) -> bool {
     supervisor_detected
 }
 
+/// What will restart this agent if it exits, for the capability report
+/// (MAIN-647) — or `None` when nothing will.
+///
+/// A different question from [`refusal`]'s, and the difference is `docker`: a
+/// container IS restarted by its runtime, so it never goes dark, it simply
+/// cannot self-update. Reporting it as unsupervised would send an operator
+/// looking for a unit file on a machine that needs none.
+pub fn supervision(cfg: &NodeConfig) -> Option<String> {
+    supervision_with(
+        cfg,
+        supervisor_detected(),
+        crate::sandbox::containerised().is_some(),
+    )
+}
+
+fn supervision_with(cfg: &NodeConfig, systemd: bool, containerised: bool) -> Option<String> {
+    if let Some(named) = cfg.service.as_deref() {
+        return Some(named.to_string());
+    }
+    // The pre-`service` install above: really supervised, silent about it.
+    if systemd {
+        return Some("systemd (detected)".to_string());
+    }
+    // Every containerised node in this fleet joins from its entrypoint and
+    // records no `service`, yet its runtime restarts it — so reading that
+    // silence as "unsupervised" would print a warning about a machine that is
+    // fine, on every stack boot, which is how a warning stops being read.
+    containerised.then(|| "container (detected)".to_string())
+}
+
 /// Did a service manager start this process?
 ///
 /// Asked of the runtime rather than of config, because config can be stale and
@@ -166,6 +196,35 @@ mod tests {
         }
     }
 
+    /// MAIN-647: what the node REPORTS about being kept running, which is a
+    /// different question from whether it may self-update.
+    #[test]
+    fn the_reported_supervisor_is_the_configured_one_when_there_is_one() {
+        for s in ["systemd-user", "launchd", "supervisord", "docker"] {
+            assert_eq!(
+                supervision_with(&cfg(Some(s)), NO_SUPERVISOR, false).as_deref(),
+                Some(s)
+            );
+        }
+    }
+
+    /// The state this whole card is about: nothing named, nothing detected.
+    #[test]
+    fn nothing_supervising_reports_nothing() {
+        assert_eq!(supervision_with(&cfg(None), NO_SUPERVISOR, false), None);
+    }
+
+    /// The two silent-but-supervised installs. Reporting either as unsupervised
+    /// would warn about a machine that is fine — on every dev stack boot, for
+    /// the container case — which is how a warning stops being read.
+    #[test]
+    fn a_silent_but_supervised_install_is_still_reported() {
+        assert!(supervision_with(&cfg(None), DETECTED, false).is_some());
+        assert!(supervision_with(&cfg(None), NO_SUPERVISOR, true).is_some());
+    }
+
+    /// `docker` is the one answer self-update must not second-guess, and it
+    /// keeps that meaning: reporting a supervisor does not make it updatable.
     #[test]
     fn a_container_is_told_to_update_its_image() {
         let why = refusal_with(&cfg(Some("docker")), NO_SUPERVISOR).expect("must refuse");

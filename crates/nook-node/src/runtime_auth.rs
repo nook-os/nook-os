@@ -132,6 +132,21 @@ pub fn login_args(runtime: &str) -> Option<&'static str> {
         .map(|a| a.login)
 }
 
+/// The runtimes that have a login at all — which is the same set as "an AGENT
+/// rather than a shell" (MAIN-647), because a shell has nothing to sign in to.
+///
+/// Read off the adapter table rather than written out a second time, so a
+/// fourth runtime joins the readiness answer and the probe together.
+pub fn authable_runtimes() -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = Vec::new();
+    for a in ADAPTERS {
+        if !out.contains(&a.runtime) {
+            out.push(a.runtime);
+        }
+    }
+    out
+}
+
 /// Where a delivered credential for `runtime` would land, or `None` when this
 /// node has no rule for it.
 ///

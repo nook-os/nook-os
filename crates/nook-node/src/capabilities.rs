@@ -113,6 +113,13 @@ pub fn detect() -> Capabilities {
         // all, so a wrong answer here is a node that quietly stops working or
         // one that quietly runs an agent on the owner's home directory.
         sandbox: Some(crate::sandbox::probe()),
+        // Whether anything would start this agent again (MAIN-647). Reported
+        // so readiness is answerable from the control plane rather than only
+        // from a shell on the machine — an unsupervised node is exactly the
+        // one nobody can reach once a self-update has taken it dark.
+        supervision: crate::config::NodeConfig::load()
+            .ok()
+            .and_then(|c| crate::selfupdate::supervision(&c)),
     }
 }
 

@@ -90,6 +90,12 @@ curl -fsSL https://<your-nook-host>/install.sh | sh -s -- --token nook_join_…
 
 Nodes connect **outbound** over WebSocket — no inbound SSH, no public ports, nothing to expose. The node reports its own capabilities (CPU, GPU, docker, tmux, git, installed runtimes like `claude`) and discovers git repositories under its workspace roots. Workspaces — not machines — are the unit you think in; one workspace can exist on many nodes.
 
+### Joining is not the same as being able to work
+
+A machine can join, report `online`, and claim nothing forever — no loop kinds declared, no runtime signed in, no supervisor to restart it. **`nook nodes readiness`** is the checklist: every prerequisite, what is wrong with it, and the command that fixes it. It reads this machine by default, or any node by name from the control plane, so a box you cannot reach is still diagnosable.
+
+**[docs/node-setup.md](docs/node-setup.md) is the whole path from a bare machine to a node that claims work**, in order, including the one step that is irreducibly manual (the runtime device login). Provision non-interactively with `nook join --service systemd-user …`; a bare `nook join` warns, loudly, that nothing will restart the agent — which matters because `nook update` replaces the binary and exits.
+
 ### The job sandbox is pulled, not built
 
 A loop agent's instructions are untrusted input, so every loop job runs inside its own container — and a node that cannot start one **claims no build work at all**. That image is published with every release, and the default is the tag matching the node agent's own version, so a node pulls it for itself the first time it needs one. There is no install step: `nook get nodes` shows the `SANDBOX` column going `pulling` → `yes`, and queued jobs start without a restart.

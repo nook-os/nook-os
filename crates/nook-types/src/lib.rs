@@ -593,6 +593,17 @@ pub struct Capabilities {
     /// the failure the sandbox exists to remove.
     #[serde(default)]
     pub sandbox: Option<SandboxCapability>,
+    /// What will restart this agent if it exits — `systemd-user`,
+    /// `systemd-system`, `launchd`, `supervisord`, `docker` — or `None` when
+    /// nothing will (MAIN-647).
+    ///
+    /// Reported rather than kept in the node's own `node.toml`, because that is
+    /// the difference between a readiness answer an operator can get and one
+    /// that needs a shell on the machine. `None` is the state this ticket was
+    /// filed about: `nook update` replaces the binary and exits for a
+    /// supervisor that is not there, so the node goes dark permanently.
+    #[serde(default)]
+    pub supervision: Option<String>,
 }
 
 /// Can this node run a loop-job agent inside a per-job container (MAIN-611)?
