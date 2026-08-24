@@ -16,6 +16,8 @@ export * from "./theme";
 export * from "./TerminalView";
 export * from "./RuntimePicker";
 export * from "./Markdown";
+export * from "./MentionMenu";
+export * from "./mentions";
 export * from "./Select";
 export * from "./TypeSelect";
 export * from "./useAnchoredMenu";

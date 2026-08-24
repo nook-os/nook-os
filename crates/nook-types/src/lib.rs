@@ -2853,6 +2853,19 @@ pub struct WorkspaceRef {
     pub path: Option<String>,
 }
 
+/// A workspace an `@` in the description editor can be completed to (MAIN-633).
+///
+/// Deliberately not a [`WorkspaceRef`]: that is a reference a card HAS, carrying
+/// the remote and the executor path a run needs. This is a row in a menu, so it
+/// carries the two things the menu shows and the one thing it inserts, and a
+/// picker cannot become a way to read a workspace's remotes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
+pub struct WorkspaceMention {
+    pub workspace_id: WorkspaceId,
+    pub name: String,
+    pub slug: String,
+}
+
 /// One whole issue: what the loop reads before it starts work.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct TaskDetail {

@@ -3652,6 +3652,42 @@ textarea.env-area.blurred {
 .cm-md-task { color: var(--nook-fg-dim); }
 .cm-md-task.done { color: var(--nook-accent); }
 
+/* The `@` workspace picker (MAIN-633). Portalled to <body> at `position:
+   fixed` for the same reason `.sel-menu` is — the description editor sits
+   inside two `overflow: auto` panels — but anchored to the caret's coordinates
+   rather than to a trigger's rect, so there is no `width` to inherit. */
+.mention-menu {
+  z-index: 500;
+  min-width: 200px;
+  max-width: 340px;
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 3px;
+  background: var(--nook-bg-panel);
+  border: 1px solid var(--nook-border-bright);
+  border-radius: var(--nook-radius);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+}
+
+.mention-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 6px;
+  border-radius: 3px;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.mention-row.on { background: var(--nook-bg-raised); }
+.mention-empty { cursor: default; }
+.mention-slug { color: var(--nook-accent); flex: none; }
+.mention-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* A resolved `@slug` in a rendered description. Tinted rather than underlined
+   so a body naming three repos does not read as a bibliography. */
+.md a.mention-link { color: var(--nook-accent); text-decoration: none; }
+.md a.mention-link:hover { text-decoration: underline; }
+
 .md-preview { padding: 6px 8px; overflow-y: auto; }
 
 .md-actions {

@@ -8776,6 +8776,42 @@
         }
       }
     },
+    "/api/v1/workspaces/mentionable": {
+      "get": {
+        "tags": [
+          "crate::routes::workspaces"
+        ],
+        "summary": "The tenant's workspaces an `@` can be completed to (MAIN-633 AC-4).",
+        "description": "Tenant-scoped by [`AuthCtx`] alone, like every other workspace read — which\nis also what makes a cross-tenant slug simply absent from the menu (NG-3),\nthe same answer MAIN-632's resolution gives the description that names one.",
+        "operationId": "mentionable_workspaces",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "The letters typed after `@`. Absent or empty lists the first\n[`MENTION_LIMIT`] workspaces, which is what a bare `@` shows.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/WorkspaceMention"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/workspaces/{id}": {
       "get": {
         "tags": [
@@ -21587,6 +21623,26 @@
           "worktree": {
             "type": "boolean",
             "description": "This checkout is a linked git worktree of the workspace's primary repo."
+          }
+        }
+      },
+      "WorkspaceMention": {
+        "type": "object",
+        "description": "A workspace an `@` in the description editor can be completed to (MAIN-633).\n\nDeliberately not a [`WorkspaceRef`]: that is a reference a card HAS, carrying\nthe remote and the executor path a run needs. This is a row in a menu, so it\ncarries the two things the menu shows and the one thing it inserts, and a\npicker cannot become a way to read a workspace's remotes.",
+        "required": [
+          "workspace_id",
+          "name",
+          "slug"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "workspace_id": {
+            "$ref": "#/components/schemas/WorkspaceId"
           }
         }
       },

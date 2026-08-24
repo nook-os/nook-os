@@ -29,6 +29,44 @@ pub async fn list(
     ))
 }
 
+/// How many rows the `@` menu is ever offered.
+///
+/// A menu, not a listing: past about a screenful nobody reads on, and the
+/// answer to "my repo is not in the list" is to type another letter — which is
+/// the interaction the endpoint is for. The paged collection above is where a
+/// caller goes to walk every workspace.
+const MENTION_LIMIT: i64 = 10;
+
+#[derive(serde::Deserialize, utoipa::IntoParams)]
+pub struct MentionQuery {
+    /// The letters typed after `@`. Absent or empty lists the first
+    /// [`MENTION_LIMIT`] workspaces, which is what a bare `@` shows.
+    #[serde(default)]
+    pub q: String,
+}
+
+/// The tenant's workspaces an `@` can be completed to (MAIN-633 AC-4).
+///
+/// Tenant-scoped by [`AuthCtx`] alone, like every other workspace read — which
+/// is also what makes a cross-tenant slug simply absent from the menu (NG-3),
+/// the same answer MAIN-632's resolution gives the description that names one.
+#[utoipa::path(get, path = "/api/v1/workspaces/mentionable",
+    operation_id = "mentionable_workspaces",
+    params(MentionQuery),
+    responses((status = 200, body = Vec<WorkspaceMention>)))]
+pub async fn mentionable(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Query(q): Query<MentionQuery>,
+) -> ApiResult<Json<Vec<WorkspaceMention>>> {
+    Ok(Json(
+        state
+            .workspaces
+            .mentionable(auth.tenant_id, q.q.trim(), MENTION_LIMIT)
+            .await?,
+    ))
+}
+
 #[utoipa::path(get, path = "/api/v1/workspaces/{id}",
     operation_id = "get_workspace",
     params(("id" = String, Path,)),

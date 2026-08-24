@@ -109,6 +109,23 @@ pub enum KeyMatch {
 /// contract (see `nook_db::paging`).
 pub const WORKSPACE_SORTS: &[(&str, &str)] = &[("name", "name"), ("created", "id")];
 
+/// `prefix` as a lower-cased LIKE pattern that matches it and nothing cleverer.
+///
+/// A slug may contain `_`, and `_` is LIKE's single-character wildcard: without
+/// this, `@my_` offers every workspace whose fourth character is anything at
+/// all. The escape character is a backslash, which the query names explicitly.
+fn like_prefix(prefix: &str) -> String {
+    let mut out = String::with_capacity(prefix.len() + 1);
+    for c in prefix.to_lowercase().chars() {
+        if matches!(c, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('%');
+    out
+}
+
 #[async_trait]
 pub trait WorkspaceRepository: Send + Sync {
     // ── the workspaces table ────────────────────────────────────────────────
@@ -493,6 +510,20 @@ pub trait WorkspaceRepository: Send + Sync {
     /// (MAIN-76) — names and nothing else, so a widened projection here
     /// cannot become a leak of branches or paths.
     async fn names_in_tenant(&self, tenant: TenantId, limit: i64) -> ApiResult<Vec<String>>;
+
+    /// The tenant's workspaces whose slug or name STARTS WITH `prefix` — the
+    /// rows the description editor's `@` menu offers (MAIN-633 AC-4).
+    ///
+    /// A prefix and not a substring: the caller has typed the opening letters
+    /// of a slug, and a substring match puts `nook-web` under `@e`. Alphabetical
+    /// by slug so the same keystrokes always list the same rows in the same
+    /// order, and capped by the caller because a menu is a menu.
+    async fn mentionable(
+        &self,
+        tenant: TenantId,
+        prefix: &str,
+        limit: i64,
+    ) -> ApiResult<Vec<WorkspaceMention>>;
 
     /// Any node holding a checkout of this workspace — where a feedback
     /// session gets started when there is no live one (MAIN-256).
@@ -1528,6 +1559,29 @@ impl WorkspaceRepository for DbWorkspaceRepository {
             )
             .await?;
         Ok(rows.into_iter().map(|(n,)| n).collect())
+    }
+
+    async fn mentionable(
+        &self,
+        tenant: TenantId,
+        prefix: &str,
+        limit: i64,
+    ) -> ApiResult<Vec<WorkspaceMention>> {
+        // `LOWER(name)` rather than `ILIKE`, which SQLite does not speak; slugs
+        // are already lower case, so only the name needs folding. The `ESCAPE`
+        // clause is what keeps a slug's own `_` a literal underscore instead of
+        // LIKE's any-character wildcard — Postgres assumes a backslash, SQLite
+        // assumes nothing, so saying it is the only spelling both agree on.
+        Ok(self
+            .db
+            .query_all(
+                "SELECT id AS workspace_id, name, slug FROM workspaces
+                  WHERE tenant_id = $1
+                    AND (slug LIKE $2 ESCAPE '\\' OR LOWER(name) LIKE $2 ESCAPE '\\')
+                  ORDER BY slug LIMIT $3",
+                params![tenant, like_prefix(prefix), limit],
+            )
+            .await?)
     }
 
     async fn any_checkout_node(&self, workspace: WorkspaceId) -> ApiResult<Option<NodeId>> {
@@ -2942,6 +2996,30 @@ impl WorkspaceRepository for FakeWorkspaceRepository {
         names.sort();
         names.truncate(limit.max(0) as usize);
         Ok(names)
+    }
+
+    async fn mentionable(
+        &self,
+        tenant: TenantId,
+        prefix: &str,
+        limit: i64,
+    ) -> ApiResult<Vec<WorkspaceMention>> {
+        let needle = prefix.to_lowercase();
+        let st = self.inner.lock().unwrap();
+        let mut rows: Vec<WorkspaceMention> = st
+            .workspaces
+            .iter()
+            .filter(|w| w.tenant_id == tenant)
+            .filter(|w| w.slug.starts_with(&needle) || w.name.to_lowercase().starts_with(&needle))
+            .map(|w| WorkspaceMention {
+                workspace_id: w.id,
+                name: w.name.clone(),
+                slug: w.slug.clone(),
+            })
+            .collect();
+        rows.sort_by(|a, b| a.slug.cmp(&b.slug));
+        rows.truncate(limit.max(0) as usize);
+        Ok(rows)
     }
 
     async fn any_checkout_node(&self, workspace: WorkspaceId) -> ApiResult<Option<NodeId>> {

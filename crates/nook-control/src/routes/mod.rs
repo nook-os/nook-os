@@ -148,6 +148,9 @@ pub fn build_router(state: AppState) -> Router {
             "/workspaces",
             get(workspaces::list).post(workspaces::create),
         )
+        // Before `/workspaces/{id}`, and a literal that cannot be a UUID: the
+        // `@` menu asks about the tenant, not about one workspace.
+        .route("/workspaces/mentionable", get(workspaces::mentionable))
         .route(
             "/workspaces/{id}",
             get(workspaces::get_one)

@@ -43,6 +43,7 @@ import { WorkspacePicker } from "./WorkspacePicker";
 import { toggleTaskCheckbox } from "./taskCheckbox";
 import { TaskInteractions } from "./Interactions";
 import { LoopPanel } from "./LoopPanel";
+import { mentionLinks, workspaceMentions } from "./workspaceMentions";
 
 /** The "no workspace" option's value. `Select` needs a string, and an empty
  *  one cannot collide with a uuid. */
@@ -570,6 +571,8 @@ export function TaskDetail({
               onEditingChange={setEditing}
               onSave={saveDescription}
               onToggle={toggleCheckbox}
+              mentions={workspaceMentions}
+              mentionLinks={mentionLinks(data?.workspace_refs)}
               placeholder="No description yet — double-click to write the acceptance criteria."
             />
           </div>

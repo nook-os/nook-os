@@ -52,6 +52,10 @@ export type CreateLoopJobRequest = Schemas["CreateLoopJobRequest"];
 // run's transcript has, for a session rather than a run.
 export type SessionMessage = Schemas["SessionMessage"];
 export type TaskDetail = Schemas["TaskDetail"];
+// A workspace a card's description names with `@slug` (MAIN-632), and a row of
+// the menu that completes one (MAIN-633).
+export type WorkspaceRef = Schemas["WorkspaceRef"];
+export type WorkspaceMention = Schemas["WorkspaceMention"];
 export type TaskLabel = Schemas["Label"];
 export type TaskComment = Schemas["TaskComment"];
 // Files on a ticket or one of its comments (MAIN-533). The bytes live in the

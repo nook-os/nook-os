@@ -3777,6 +3777,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/mentionable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The tenant's workspaces an `@` can be completed to (MAIN-633 AC-4).
+         * @description Tenant-scoped by [`AuthCtx`] alone, like every other workspace read — which
+         *     is also what makes a cross-tenant slug simply absent from the menu (NG-3),
+         *     the same answer MAIN-632's resolution gives the description that names one.
+         */
+        get: operations["mentionable_workspaces"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{id}": {
         parameters: {
             query?: never;
@@ -10157,6 +10179,19 @@ export interface components {
             path: string;
             /** @description This checkout is a linked git worktree of the workspace's primary repo. */
             worktree?: boolean;
+        };
+        /**
+         * @description A workspace an `@` in the description editor can be completed to (MAIN-633).
+         *
+         *     Deliberately not a [`WorkspaceRef`]: that is a reference a card HAS, carrying
+         *     the remote and the executor path a run needs. This is a row in a menu, so it
+         *     carries the two things the menu shows and the one thing it inserts, and a
+         *     picker cannot become a way to read a workspace's remotes.
+         */
+        WorkspaceMention: {
+            name: string;
+            slug: string;
+            workspace_id: components["schemas"]["WorkspaceId"];
         };
         /**
          * @description A workspace a card's description names with `@slug` (MAIN-632).
@@ -17209,6 +17244,31 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Workspace"];
+                };
+            };
+        };
+    };
+    mentionable_workspaces: {
+        parameters: {
+            query?: {
+                /**
+                 * @description The letters typed after `@`. Absent or empty lists the first
+                 *     [`MENTION_LIMIT`] workspaces, which is what a bare `@` shows.
+                 */
+                q?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceMention"][];
                 };
             };
         };

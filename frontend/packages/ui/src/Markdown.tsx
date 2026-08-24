@@ -36,6 +36,21 @@ import {
   standardKeymap,
 } from "@codemirror/commands";
 import { livePreview } from "./markdownPreview";
+import { MentionAnchor, MentionMenu, MentionOption } from "./MentionMenu";
+import {
+  applyMention,
+  MentionLink,
+  MentionTrigger,
+  mentionTrigger,
+  remarkMentions,
+} from "./mentions";
+
+/** Where the `@` picker's rows come from (MAIN-633). Injected rather than
+ *  fetched here: this package renders markdown, and which endpoint answers
+ *  "which workspaces can I mention" is the app's business. */
+export interface MentionSource {
+  search: (query: string) => Promise<MentionOption[]>;
+}
 
 /** Which editing surface the markdown editor shows. `live` renders markdown
  *  inline (Obsidian-style); `source` is the raw CodeMirror text. Persisted so a
@@ -102,6 +117,7 @@ export function Markdown({
   src,
   onToggle,
   breaks = false,
+  mentions,
 }: {
   src: string;
   /** When present, rendered task-list checkboxes become clickable and call this
@@ -116,14 +132,22 @@ export function Markdown({
    *  down a line, and collapsing that into one run of prose renders their
    *  message wrong. */
   breaks?: boolean;
+  /** The `@slug`s in `src` that RESOLVED to a workspace, and where each one
+   *  goes (MAIN-633 AC-5). A slug absent from this list stays plain text — the
+   *  reader must be able to tell a reference from a typo, and a link to nowhere
+   *  says the opposite. */
+  mentions?: MentionLink[];
 }) {
   // Reset each render; react-markdown renders the inputs in document order, so
   // the Nth `input` is the Nth checkbox in source — the index `onToggle` gets.
   let checkboxIndex = 0;
+  const remark = breaks ? [remarkGfm, remarkBreaks] : [remarkGfm];
   return (
     <div className="md">
       <ReactMarkdown
-        remarkPlugins={breaks ? [remarkGfm, remarkBreaks] : [remarkGfm]}
+        remarkPlugins={
+          mentions?.length ? [...remark, remarkMentions(mentions)] : remark
+        }
         // Order matters: parse the raw HTML first, THEN sanitise what parsing
         // produced. Reversed, the sanitiser runs over a tree that does not yet
         // contain the HTML it exists to check.
@@ -131,11 +155,19 @@ export function Markdown({
         components={{
           // Links leave the app, so they open in a new tab and drop the
           // referrer — a task body can contain a link somebody else wrote.
-          a: ({ children, href }) => (
-            <a href={href} target="_blank" rel="noreferrer noopener">
-              {children}
-            </a>
-          ),
+          //
+          // Unless they don't: a RELATIVE href is this app, and the mention
+          // links MAIN-633 renders are all of that form. Sending `/workspaces/…`
+          // to a second tab, with no referrer to drop and no third party to
+          // hide it from, is the rule misapplied rather than obeyed.
+          a: ({ children, href }) =>
+            href && /^[a-z][a-z0-9+.-]*:/i.test(href) ? (
+              <a href={href} target="_blank" rel="noreferrer noopener">
+                {children}
+              </a>
+            ) : (
+              <a href={href}>{children}</a>
+            ),
           // Wrapped so a wide table scrolls inside the panel instead of
           // stretching it and pushing the board off screen.
           table: ({ children }) => (
@@ -279,6 +311,7 @@ export function MarkdownEditor({
   placeholder,
   minHeight = 220,
   autoFocus = true,
+  mentions,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -287,6 +320,9 @@ export function MarkdownEditor({
   placeholder?: string;
   minHeight?: number;
   autoFocus?: boolean;
+  /** Typing `@` offers these (MAIN-633). Absent, `@` is an ordinary
+   *  character — which is what every other editor in the app wants. */
+  mentions?: MentionSource;
 }) {
   const [mode, setMode] = useState<MarkdownMode>(loadMarkdownMode);
   const boxRef = useRef<HTMLDivElement>(null);
@@ -304,6 +340,140 @@ export function MarkdownEditor({
   onChangeRef.current = onChange;
   onSaveRef.current = onSave;
   onCancelRef.current = onCancel;
+
+  // ── the `@` picker (MAIN-633) ─────────────────────────────────────────────
+  //
+  // State is mirrored into refs because the keymap and the update listener are
+  // built ONCE, with the editor, and would otherwise close over the first
+  // render's values forever. Same reason as the callback refs above.
+  const [menu, setMenu] = useState<{
+    trigger: MentionTrigger;
+    anchor: MentionAnchor;
+  } | null>(null);
+  const [options, setOptions] = useState<MentionOption[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [active, setActive] = useState(0);
+
+  const mentionsRef = useRef(mentions);
+  const menuRef = useRef(menu);
+  const optionsRef = useRef(options);
+  const activeRef = useRef(active);
+  mentionsRef.current = mentions;
+  menuRef.current = menu;
+  optionsRef.current = options;
+  activeRef.current = active;
+  /** The `@` offset Escape closed the menu over, so it stays closed while the
+   *  caret is still in that token (AC-2) — a menu that sprang back on the next
+   *  keystroke would make Escape look broken. */
+  const dismissedRef = useRef<number | null>(null);
+  /** Bumped per search, so a slow answer for `@n` cannot land after `@nook`. */
+  const searchRef = useRef(0);
+
+  const closeMenu = () => {
+    searchRef.current++;
+    menuRef.current = null;
+    optionsRef.current = [];
+    setMenu(null);
+    setOptions([]);
+    setLoading(false);
+  };
+
+  const runSearch = (source: MentionSource, query: string) => {
+    const seq = ++searchRef.current;
+    setLoading(true);
+    Promise.resolve(source.search(query))
+      .then((rows) => {
+        if (seq !== searchRef.current) return;
+        optionsRef.current = rows;
+        activeRef.current = 0;
+        setOptions(rows);
+        setActive(0);
+        setLoading(false);
+      })
+      .catch(() => {
+        if (seq !== searchRef.current) return;
+        // An empty menu says "nothing matches", which is the honest reading of
+        // a failed lookup too: the caller cannot offer a completion either way.
+        optionsRef.current = [];
+        setOptions([]);
+        setLoading(false);
+      });
+  };
+
+  /** Where the menu hangs: under the `@` itself, so it reads as belonging to
+   *  the word being typed. `coordsAtPos` needs layout, so under a test renderer
+   *  it answers nothing and the editor's own box is the fallback. */
+  const anchorFor = (view: EditorView, pos: number): MentionAnchor => {
+    try {
+      const at = view.coordsAtPos(pos);
+      if (at) return { left: at.left, top: at.bottom + 4 };
+    } catch {
+      // no layout — fall through
+    }
+    const box = view.dom.getBoundingClientRect();
+    return { left: box.left, top: box.bottom + 4 };
+  };
+
+  /** Recomputed on every doc or selection change: the caret's position IS the
+   *  menu's open/closed state, so there is no flag to leave stale. */
+  const syncMentions = (view: EditorView) => {
+    const source = mentionsRef.current;
+    if (!source) return;
+    const sel = view.state.selection.main;
+    const trigger = sel.empty
+      ? mentionTrigger(view.state.doc.toString(), sel.head)
+      : null;
+    if (!trigger) {
+      dismissedRef.current = null;
+      if (menuRef.current) closeMenu();
+      return;
+    }
+    if (dismissedRef.current === trigger.from) return;
+    const open = menuRef.current;
+    const next = { trigger, anchor: anchorFor(view, trigger.from) };
+    menuRef.current = next;
+    setMenu(next);
+    if (open?.trigger.from === trigger.from && open.trigger.query === trigger.query) {
+      return;
+    }
+    runSearch(source, trigger.query);
+  };
+
+  const insertMention = (view: EditorView, trigger: MentionTrigger, slug: string) => {
+    const edit = applyMention(view.state.doc.toString(), trigger, slug);
+    dismissedRef.current = null;
+    closeMenu();
+    // Dispatching also focuses, which is what puts the caret back in the prose
+    // the person was writing (AC-3).
+    dispatchEdit(view, edit);
+  };
+
+  // The three keys the menu owns. Each returns false when it is closed, so the
+  // editor's own Enter/Escape bindings are untouched by this feature existing.
+  const moveMention = (delta: number): boolean => {
+    const count = optionsRef.current.length;
+    if (!menuRef.current || !count) return false;
+    const next = (activeRef.current + delta + count) % count;
+    activeRef.current = next;
+    setActive(next);
+    return true;
+  };
+
+  const pickMention = (view: EditorView): boolean => {
+    const open = menuRef.current;
+    const option = optionsRef.current[activeRef.current];
+    if (!open || !option) return false;
+    insertMention(view, open.trigger, option.slug);
+    return true;
+  };
+
+  const dismissMention = (): boolean => {
+    const open = menuRef.current;
+    if (!open) return false;
+    dismissedRef.current = open.trigger.from;
+    closeMenu();
+    return true;
+  };
 
   const surround = (before: string, after?: string) => {
     if (viewRef.current) surroundView(viewRef.current, before, after);
@@ -345,6 +515,12 @@ export function MarkdownEditor({
           // Prec.highest so the shortcuts below win over the standard bindings.
           Prec.highest(
             keymap.of([
+              // First in the array, so the open menu answers arrows, Enter and
+              // Escape before the editor does — and only while it is open.
+              { key: "ArrowDown", run: () => moveMention(1) },
+              { key: "ArrowUp", run: () => moveMention(-1) },
+              { key: "Enter", run: pickMention },
+              { key: "Escape", run: dismissMention },
               { key: "Mod-b", run: (v) => surroundView(v, "**") },
               { key: "Mod-i", run: (v) => surroundView(v, "_") },
               { key: "Mod-e", run: (v) => surroundView(v, "`") },
@@ -367,6 +543,7 @@ export function MarkdownEditor({
           previewRef.current.of(loadMarkdownMode() === "live" ? livePreview() : []),
           EditorView.updateListener.of((u) => {
             if (u.docChanged) onChangeRef.current(u.state.doc.toString());
+            if (u.docChanged || u.selectionSet) syncMentions(u.view);
           }),
           theme,
         ],
@@ -457,6 +634,20 @@ export function MarkdownEditor({
         className={`md-source md-mode-${mode}`}
         style={{ minHeight }}
       />
+
+      {mentions && menu && (
+        <MentionMenu
+          options={options}
+          loading={loading}
+          query={menu.trigger.query}
+          active={active}
+          anchor={menu.anchor}
+          onPick={(option) => {
+            const view = viewRef.current;
+            if (view) insertMention(view, menu.trigger, option.slug);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -482,6 +673,8 @@ export function EditableMarkdown({
   editing: controlledEditing,
   onEditingChange,
   onToggle,
+  mentions,
+  mentionLinks,
 }: {
   value: string;
   onSave: (next: string) => Promise<void> | void;
@@ -492,6 +685,10 @@ export function EditableMarkdown({
   onEditingChange?: (editing: boolean) => void;
   /** Optional: make rendered checkboxes clickable in the display view (MAIN-36). */
   onToggle?: (index: number) => void;
+  /** Optional: complete `@` while editing (MAIN-633 AC-1). */
+  mentions?: MentionSource;
+  /** Optional: link the `@slug`s that resolved, while displaying (AC-5). */
+  mentionLinks?: MentionLink[];
 }) {
   const [uncontrolled, setUncontrolled] = useState(false);
   const editing = controlledEditing ?? uncontrolled;
@@ -530,7 +727,7 @@ export function EditableMarkdown({
         title="double-click to edit"
       >
         {value.trim() ? (
-          <Markdown src={value} onToggle={onToggle} />
+          <Markdown src={value} onToggle={onToggle} mentions={mentionLinks} />
         ) : (
           <span className="md-placeholder">{placeholder}</span>
         )}
@@ -549,6 +746,7 @@ export function EditableMarkdown({
           setEditing(false);
         }}
         minHeight={minHeight}
+        mentions={mentions}
       />
       <div className="md-actions">
         <span className="faint small" style={{ marginRight: "auto" }}>
