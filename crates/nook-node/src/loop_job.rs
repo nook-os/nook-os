@@ -146,6 +146,12 @@ fn note(out: &Sender<NodeToControl>, job_id: &str, content: impl Into<String>) {
     });
 }
 
+fn drain_notes(out: &Sender<NodeToControl>, job_id: &str, notes: &mut Vec<String>) {
+    for content in notes.drain(..) {
+        note(out, job_id, content);
+    }
+}
+
 fn finished(out: &Sender<NodeToControl>, job_id: &str, ok: bool, message: impl Into<String>) {
     let _ = out.blocking_send(NodeToControl::JobFinished {
         job_id: job_id.to_string(),
@@ -354,6 +360,7 @@ fn existing_mirror_in(
     repo_url: &str,
     ssh_key: Option<&str>,
     own_worktree: &Path,
+    notes: &mut Vec<String>,
 ) -> Result<PathBuf, String> {
     let cache = base.join(format!("{}.git", repo_slug(repo_url)));
     if !cache.join("HEAD").exists() {
@@ -362,7 +369,7 @@ fn existing_mirror_in(
             cache.display()
         ));
     }
-    adopt_mirror(&cache, repo_url, ssh_key, own_worktree)?;
+    adopt_mirror(&cache, repo_url, ssh_key, own_worktree, notes)?;
     Ok(cache)
 }
 
@@ -371,12 +378,13 @@ fn ensure_mirror_in(
     repo_url: &str,
     ssh_key: Option<&str>,
     own_worktree: &Path,
+    notes: &mut Vec<String>,
 ) -> Result<PathBuf, String> {
     let cache = base.join(format!("{}.git", repo_slug(repo_url)));
     if cache.join("HEAD").exists() {
         // The fetch needs the key too: a mirror that cloned once still pulls
         // from the same private remote on every later job.
-        adopt_mirror(&cache, repo_url, ssh_key, own_worktree)?;
+        adopt_mirror(&cache, repo_url, ssh_key, own_worktree, notes)?;
     } else {
         std::fs::create_dir_all(base)
             .map_err(|e| format!("cannot create {}: {e}", base.display()))?;
@@ -405,32 +413,222 @@ fn adopt_mirror(
     repo_url: &str,
     ssh_key: Option<&str>,
     own_worktree: &Path,
+    notes: &mut Vec<String>,
 ) -> Result<(), String> {
-    reconcile_mirror_remote(cache, repo_url)?;
+    reconcile_mirror_remote(cache, repo_url, notes)?;
     fetch_mirror(cache, ssh_key, own_worktree)
         .map_err(|e| explain_fetch_failure(cache, repo_url, e))
 }
 
 /// Set the mirror's `origin` to the job's URL when the two name different
-/// remotes. Never a re-clone: the objects a mirror holds are this repo's
-/// objects whichever URL reached them.
-fn reconcile_mirror_remote(cache: &Path, repo_url: &str) -> Result<(), String> {
-    let current = crate::gitops::run_git(&["remote", "get-url", "origin"], Some(cache), None)?;
-    if normalized_remote(&current) == normalized_remote(repo_url) {
-        return Ok(());
+/// remotes, then clear anything that would rewrite it back. Never a re-clone:
+/// the objects a mirror holds are this repo's objects whichever URL reached
+/// them.
+///
+/// **The stored value is the one compared, never `git remote get-url`**
+/// (MAIN-646). That command reports the url AFTER `insteadOf` rewriting, so on
+/// a mirror carrying such a rule this read back HTTPS however correct the
+/// stored ssh remote was: the comparison found a difference, `set-url` wrote
+/// the ssh form, and reading it again still said HTTPS. That is why the same
+/// mirror was "repaired" by hand three times and misdiagnosed as an agent
+/// clobbering the config.
+fn reconcile_mirror_remote(
+    cache: &Path,
+    repo_url: &str,
+    notes: &mut Vec<String>,
+) -> Result<(), String> {
+    let stored = stored_remote(cache)?;
+    let effective = if normalized_remote(&stored) == normalized_remote(repo_url) {
+        stored
+    } else {
+        crate::gitops::run_git(
+            &["remote", "set-url", "origin", repo_url],
+            Some(cache),
+            None,
+        )?;
+        tracing::info!(
+            mirror = %cache.display(),
+            from = %stored,
+            to = %repo_url,
+            "repointed a clone-cache mirror at the workspace's current remote"
+        );
+        repo_url.to_string()
+    };
+    clear_redirecting_rewrites(cache, &effective, notes)
+}
+
+/// The remote as the config STORES it, before any `insteadOf` rewriting.
+///
+/// Named in the error because `git config` says nothing at all when the key is
+/// absent — where `git remote get-url` used to name the missing remote itself.
+fn stored_remote(cache: &Path) -> Result<String, String> {
+    crate::gitops::run_git(&["config", "--get", "remote.origin.url"], Some(cache), None)
+        .map_err(|e| format!("cannot read remote.origin.url in {}: {e}", cache.display()))
+}
+
+/// One `url.<base>.insteadOf = <prefix>` rule: git replaces `prefix` with
+/// `base` in any URL that starts with it, and applies the LONGEST matching
+/// prefix only.
+struct RewriteRule {
+    /// As git spells it back — `url.<base>.insteadof` — so it can be unset and
+    /// named to a person by the same string.
+    key: String,
+    base: String,
+    prefix: String,
+}
+
+impl RewriteRule {
+    fn rewrite(&self, url: &str) -> Option<String> {
+        url.strip_prefix(&self.prefix)
+            .map(|rest| format!("{}{rest}", self.base))
     }
-    crate::gitops::run_git(
-        &["remote", "set-url", "origin", repo_url],
-        Some(cache),
-        None,
-    )?;
-    tracing::info!(
-        mirror = %cache.display(),
-        from = %current,
-        to = %repo_url,
-        "repointed a clone-cache mirror at the workspace's current remote"
-    );
+
+    /// Which rule git will actually use for `url`: the longest matching prefix
+    /// wins, and nothing is applied after it.
+    ///
+    /// **Earliest on a tie**, which is why the index is part of the key.
+    /// git's `alias_url` compares `longest->len < candidate.len`, strictly, so
+    /// an equal-length prefix never displaces the rule already chosen — while
+    /// `max_by_key` alone returns the LAST of equal maxima. Taking the later
+    /// rule is wrong in both directions it can be wrong: where the earlier one
+    /// redirects, it is judged harmless and left in place, so the fetch still
+    /// goes over HTTPS and MAIN-646 survives its own fix; where the earlier one
+    /// is the harmless respelling, a rule git never applies is deleted, which
+    /// is the mutation AC-3 and NG-3 exist to prevent.
+    fn effective(rules: &[Self], url: &str) -> Option<usize> {
+        rules
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| url.starts_with(&r.prefix))
+            .max_by_key(|(i, r)| (r.prefix.len(), std::cmp::Reverse(*i)))
+            .map(|(i, _)| i)
+    }
+}
+
+/// Every `insteadOf` rule the mirror's config carries, in the given scope.
+///
+/// `--null` because a rule's value is an arbitrary URL prefix: with git's
+/// default output a key and its value are separated by a space, which a value
+/// may contain. Records are `key\nvalue\0`.
+///
+/// An absent match makes `git config` exit 1, which `run_git` reports as an
+/// error — indistinguishable here from a real one, and both mean the same
+/// thing to this caller: no rule to worry about. A config the process cannot
+/// read at all has already failed the `remote.origin.url` read above.
+fn rewrite_rules(cache: &Path, scope: &[&str]) -> Vec<RewriteRule> {
+    let mut args = vec!["config"];
+    args.extend_from_slice(scope);
+    args.extend(["--null", "--get-regexp", r"^url\..*\.insteadof$"]);
+    let Ok(out) = crate::gitops::run_git(&args, Some(cache), None) else {
+        return Vec::new();
+    };
+    out.split('\0')
+        .filter(|record| !record.is_empty())
+        .filter_map(|record| {
+            let (key, prefix) = record.split_once('\n')?;
+            let base = key
+                .strip_prefix("url.")?
+                .strip_suffix(".insteadof")?
+                .to_string();
+            Some(RewriteRule {
+                key: key.to_string(),
+                base,
+                prefix: prefix.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Drop the rules in the mirror's OWN config that would send `remote`
+/// somewhere else (MAIN-646).
+///
+/// `gh` writes `url.https://github.com/.insteadOf git@github.com:` when it
+/// authenticates over HTTPS in a repo, and a linked worktree shares the
+/// mirror's config — so one `gh` call by one build agent redirects every later
+/// fetch for every card on that repo, past a deploy key that is then
+/// irrelevant. This runs before every fetch rather than once because `gh` will
+/// write it again (AC-5).
+///
+/// A rule is only dropped when it actually redirects: the URL it produces has
+/// to name a DIFFERENT remote than the one the workspace chose, so
+/// `git@github.com:` → `ssh://git@github.com/` (the same place, spelled the
+/// other way) survives, as does any rule whose prefix this remote does not
+/// match. Longest-prefix-first and looping, because removing the rule in force
+/// exposes the next one.
+///
+/// `--local` on both halves: a rule inherited from the operator's own global
+/// config is not nook's to delete (NG-3). One that is in force and not ours
+/// makes the fetch fail, and `explain_fetch_failure` names it.
+fn clear_redirecting_rewrites(
+    cache: &Path,
+    remote: &str,
+    notes: &mut Vec<String>,
+) -> Result<(), String> {
+    // Shrinking a list read ONCE, rather than re-reading after each removal:
+    // that bounds the loop by the number of rules whatever git's exit status
+    // says. Re-reading would hang forever on a `--unset-all` that matched
+    // nothing and still reported success.
+    let mut rules = rewrite_rules(cache, &["--local"]);
+    while let Some(i) = RewriteRule::effective(&rules, remote) {
+        let Some(rewritten) = rules[i].rewrite(remote) else {
+            return Ok(());
+        };
+        if normalized_remote(&rewritten) == normalized_remote(remote) {
+            return Ok(());
+        }
+        let rule = rules.remove(i);
+        crate::gitops::run_git(
+            &[
+                "config",
+                "--local",
+                "--unset-all",
+                &rule.key,
+                &exact_value_pattern(&rule.prefix),
+            ],
+            Some(cache),
+            None,
+        )
+        .map_err(|e| {
+            format!(
+                "cannot remove the git rewrite rule {} = {} from {}: {e}",
+                rule.key,
+                rule.prefix,
+                cache.display()
+            )
+        })?;
+        // `--unset-all` drops EVERY value matching the anchored pattern, so a
+        // key holding the same value twice (`git config --add`, which appends
+        // where a plain set replaces) is fully cleared by that one call. The
+        // list has to follow it: asking again for a value already gone exits 5
+        // with an empty stderr, which would fail a job on a mirror whose config
+        // this pass had just made correct.
+        rules.retain(|r| r.key != rule.key || r.prefix != rule.prefix);
+        notes.push(format!(
+            "removed the git rewrite rule {} = {} from the clone cache at {}: it sent this \
+             workspace's remote {remote} to {rewritten}, past the credential pinned to the \
+             remote the workspace chose",
+            rule.key,
+            rule.prefix,
+            cache.display()
+        ));
+    }
     Ok(())
+}
+
+/// `git config --unset-all` matches its value argument as a POSIX extended
+/// regex, so a literal has to be escaped and anchored — `git@github.com:`
+/// unescaped is a pattern whose dots match any character.
+fn exact_value_pattern(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('^');
+    for ch in value.chars() {
+        if r"\^$.[]|()*+?{}".contains(ch) {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out.push('$');
+    out
 }
 
 /// A remote URL reduced to the place it names, so the spellings of one remote
@@ -476,20 +674,38 @@ fn strip_git_suffix(path: &str) -> &str {
 }
 
 /// Name both remotes when a fetch dies for want of a credential (MAIN-629
-/// AC-4). git's own message says only what it could not read; which remote it
-/// was reading, and which one this job expected, is what tells a stale mirror
-/// apart from a genuinely missing credential — and when the two agree, that is
-/// the reader learning the URL is not the fault.
+/// AC-4), and any rewrite rule still standing between them (MAIN-646 AC-6).
+///
+/// git's own message says only what it could not read; which remote it was
+/// reading, and which one this job expected, is what tells a stale mirror apart
+/// from a genuinely missing credential — and when the two agree, that is the
+/// reader learning the URL is not the fault. Two agreeing URLs and a failing
+/// fetch is exactly the shape MAIN-646 wore, so the rule clause is what stops
+/// that reading from being a dead end: a rule left here is one `--local` could
+/// not remove, which means it is the operator's own global or system config.
+///
+/// The STORED remote, matching what reconciliation compares — the rewritten
+/// value is reported separately, as the rule's doing, rather than passed off as
+/// what the config says.
 fn explain_fetch_failure(cache: &Path, repo_url: &str, err: String) -> String {
     if !is_credential_failure(&err) {
         return err;
     }
-    let mirror = crate::gitops::run_git(&["remote", "get-url", "origin"], Some(cache), None)
-        .unwrap_or_else(|_| "<unreadable>".to_string());
-    format!(
-        "{err} — the mirror at {} fetches origin {mirror}; this job carries {repo_url}",
+    let stored = stored_remote(cache).unwrap_or_else(|_| "<unreadable>".to_string());
+    let mut said = format!(
+        "{err} — the mirror at {} stores origin {stored}; this job carries {repo_url}",
         cache.display()
-    )
+    );
+    let rules = rewrite_rules(cache, &[]);
+    if let Some(rule) = RewriteRule::effective(&rules, &stored).map(|i| &rules[i]) {
+        if let Some(rewritten) = rule.rewrite(&stored) {
+            said.push_str(&format!(
+                "; the rewrite rule {} = {} is in force, so git fetched {rewritten}",
+                rule.key, rule.prefix
+            ));
+        }
+    }
+    said
 }
 
 fn is_credential_failure(err: &str) -> bool {
@@ -1831,19 +2047,38 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
     } else {
         None
     };
+    // Collected rather than emitted inline because the mirror functions run
+    // below the sender: a rewrite rule removed on the way to a fetch that then
+    // failed is exactly when the reader needs the line, so they are drained on
+    // the error paths too.
+    let mut mirror_notes: Vec<String> = Vec::new();
     let cache = if may_create_cache(&kind) {
-        match ensure_mirror_in(&base, &repo_url, ssh_key.as_deref(), &own_worktree) {
+        match ensure_mirror_in(
+            &base,
+            &repo_url,
+            ssh_key.as_deref(),
+            &own_worktree,
+            &mut mirror_notes,
+        ) {
             Ok(c) => c,
             Err(e) => {
+                drain_notes(&out, &job_id, &mut mirror_notes);
                 finished(&out, &job_id, false, format!("clone cache failed: {e}"));
                 unregister(&dirname, &job_id);
                 return;
             }
         }
     } else {
-        match existing_mirror_in(&base, &repo_url, ssh_key.as_deref(), &own_worktree) {
+        match existing_mirror_in(
+            &base,
+            &repo_url,
+            ssh_key.as_deref(),
+            &own_worktree,
+            &mut mirror_notes,
+        ) {
             Ok(c) => c,
             Err(e) => {
+                drain_notes(&out, &job_id, &mut mirror_notes);
                 // Names the workspace AND the node, because the reader of this
                 // message is deciding WHERE to place the job next, and "no
                 // checkout" without either is unactionable (AC-3).
@@ -1863,6 +2098,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
             }
         }
     };
+    drain_notes(&out, &job_id, &mut mirror_notes);
     // A BUILD worktree OUTLIVES its run (MAIN-480 AC-1), so an existing one is
     // this card's own working state, not a crash leftover to clear. Every other
     // kind keeps the old behaviour exactly: the path is stable but the tree is
@@ -3527,8 +3763,14 @@ mod tests {
         let wt_base = tmp.join("worktrees");
         let dirname = build_dirname("ws-1", key);
         let own = wt_base.join(&dirname);
-        let cache = ensure_mirror_in(&tmp.join("cache"), &remote.to_string_lossy(), None, &own)
-            .expect("mirror clone");
+        let cache = ensure_mirror_in(
+            &tmp.join("cache"),
+            &remote.to_string_lossy(),
+            None,
+            &own,
+            &mut Vec::new(),
+        )
+        .expect("mirror clone");
         let wt = add_job_worktree_in(&wt_base, &cache, "main", &dirname, true).expect("worktree");
         // What the skill does: its own branch, a commit, and a push if the pass
         // got that far.
@@ -3711,6 +3953,7 @@ mod tests {
             &remote.to_string_lossy(),
             None,
             &tmp.join("worktrees/none"),
+            &mut Vec::new(),
         )
         .expect("mirror clone");
         assert_eq!(default_branch_name(&cache).as_deref(), Some("main"));
@@ -4644,6 +4887,7 @@ mod tests {
             "git@example.test:acme/api.git",
             None,
             &empty.join("worktrees").join("review-x-pr1"),
+            &mut Vec::new(),
         )
         .expect_err("an absent mirror must not be created");
         assert!(err.contains("no clone cache"), "{err}");
@@ -4734,8 +4978,14 @@ mod tests {
         let repo_url = remote.to_string_lossy().to_string();
 
         // A local path needs no key — the `None` arm this fix deliberately kept.
-        let cache =
-            ensure_mirror_in(&base, &repo_url, None, &wt_base.join("none")).expect("mirror clone");
+        let cache = ensure_mirror_in(
+            &base,
+            &repo_url,
+            None,
+            &wt_base.join("none"),
+            &mut Vec::new(),
+        )
+        .expect("mirror clone");
         assert!(cache.join("HEAD").exists(), "mirror has a HEAD");
 
         let w1 =
@@ -4854,6 +5104,7 @@ mod tests {
             &remote.to_string_lossy(),
             None,
             &wt_base.join("none"),
+            &mut Vec::new(),
         )
         .expect("mirror clone");
 
@@ -4888,8 +5139,14 @@ mod tests {
         scratch_remote(&remote);
         let wt_base = tmp.join("worktrees");
         let own = wt_base.join(review_dirname("ws-1", 9));
-        let cache = ensure_mirror_in(&tmp.join("cache"), &remote.to_string_lossy(), None, &own)
-            .expect("mirror clone");
+        let cache = ensure_mirror_in(
+            &tmp.join("cache"),
+            &remote.to_string_lossy(),
+            None,
+            &own,
+            &mut Vec::new(),
+        )
+        .expect("mirror clone");
 
         // The pre-detach shape: the branch checked out BY NAME at the stable path.
         let wedge =
@@ -4977,12 +5234,13 @@ mod tests {
             .join("worktrees")
             .join(build_dirname("ws-1", "MAIN-629"));
 
-        let cache = ensure_mirror_in(&base, &old.to_string_lossy(), None, &own).expect("mirror");
+        let cache = ensure_mirror_in(&base, &old.to_string_lossy(), None, &own, &mut Vec::new())
+            .expect("mirror");
         git_in(&cache, &["cat-file", "-e", &legacy]);
         // A re-clone would build a new directory; this file could not survive it.
         std::fs::write(cache.join("nook-same-mirror"), "").unwrap();
 
-        let again = ensure_mirror_in(&base, &new.to_string_lossy(), None, &own)
+        let again = ensure_mirror_in(&base, &new.to_string_lossy(), None, &own, &mut Vec::new())
             .expect("the moved remote must fetch, not die on the old URL");
 
         assert_eq!(again, cache, "the same mirror serves both spellings");
@@ -5016,7 +5274,8 @@ mod tests {
         let tmp =
             std::env::temp_dir().join(format!("nook-629-ssh-{}", uuid::Uuid::now_v7().simple()));
         let cache = mirror_with_origin(&tmp, "https://github.com/acme/api.git");
-        reconcile_mirror_remote(&cache, "git@github.com:acme/api.git").expect("reconcile");
+        reconcile_mirror_remote(&cache, "git@github.com:acme/api.git", &mut Vec::new())
+            .expect("reconcile");
         assert_eq!(
             git_in(&cache, &["remote", "get-url", "origin"]),
             "git@github.com:acme/api.git"
@@ -5031,6 +5290,403 @@ mod tests {
         git_in(&cache, &["init", "-q", "--bare"]);
         git_in(&cache, &["remote", "add", "origin", url]);
         cache
+    }
+
+    /// The rule `gh` leaves behind when it authenticates over HTTPS in a repo.
+    fn add_rewrite(cache: &Path, base: &str, prefix: &str) {
+        git_in(cache, &["config", &format!("url.{base}.insteadOf"), prefix]);
+    }
+
+    /// Every `url.*.insteadOf` the mirror's own config still carries, as
+    /// `base -> prefix`. Read hermetically, so the developer's global config
+    /// cannot put a rule in an assertion about the mirror's.
+    fn rules_left(cache: &Path) -> Vec<String> {
+        let out = hermetic_git()
+            .args(["config", "--local", "--get-regexp", r"^url\..*\.insteadof$"])
+            .current_dir(cache)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect()
+    }
+
+    /// MAIN-646 AC-1: the comparison reads the STORED remote, never the one
+    /// `git remote get-url` reports.
+    ///
+    /// The two spellings here are one remote, so nothing should be written.
+    /// Under the resolved read they were not: the rule reported HTTPS, the
+    /// mirror looked moved, and `set-url` replaced the stored words with the
+    /// job's — a spurious repoint that then read back as HTTPS again, which is
+    /// how this was misdiagnosed three times as an agent clobbering the config.
+    #[test]
+    fn a_rewritten_remote_is_not_mistaken_for_a_moved_one() {
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let tmp =
+            std::env::temp_dir().join(format!("nook-646-raw-{}", uuid::Uuid::now_v7().simple()));
+        let cache = mirror_with_origin(&tmp, "git@github.com:acme/api");
+        add_rewrite(&cache, "https://github.com/", "git@github.com:");
+        assert_eq!(
+            git_in(&cache, &["remote", "get-url", "origin"]),
+            "https://github.com/acme/api",
+            "the fixture must actually reproduce the rewrite"
+        );
+
+        reconcile_mirror_remote(&cache, "git@github.com:acme/api.git", &mut Vec::new())
+            .expect("reconcile");
+
+        assert_eq!(
+            git_in(&cache, &["config", "--get", "remote.origin.url"]),
+            "git@github.com:acme/api",
+            "the stored remote already named this repo — a repoint would have replaced its words"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// AC-2 and AC-4: the rule `gh` writes is removed before the fetch, and the
+    /// run says so rather than silently mutating a config a person may have set.
+    #[test]
+    fn a_rewrite_rule_that_redirects_the_remote_is_removed_and_reported() {
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let tmp =
+            std::env::temp_dir().join(format!("nook-646-drop-{}", uuid::Uuid::now_v7().simple()));
+        let cache = mirror_with_origin(&tmp, "git@github.com:acme/api.git");
+        add_rewrite(&cache, "https://github.com/", "git@github.com:");
+
+        let mut notes = Vec::new();
+        reconcile_mirror_remote(&cache, "git@github.com:acme/api.git", &mut notes)
+            .expect("reconcile");
+
+        assert!(
+            rules_left(&cache).is_empty(),
+            "AC-2: the redirecting rule must be gone: {:?}",
+            rules_left(&cache)
+        );
+        assert_eq!(
+            git_in(&cache, &["remote", "get-url", "origin"]),
+            "git@github.com:acme/api.git",
+            "AC-2: and the effective URL is the ssh form the workspace chose"
+        );
+        let said = notes.join("\n");
+        assert!(
+            said.contains("url.https://github.com/.insteadof")
+                && said.contains("git@github.com:")
+                && said.contains("https://github.com/acme/api.git"),
+            "AC-4: the transcript must name the rule and where it was sending the fetch: {said}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// AC-3: only a rule that actually redirects THIS mirror's remote is
+    /// touched. An operator's corporate mirror, a rule for another host, and a
+    /// rule that merely respells the same remote all survive.
+    #[test]
+    fn only_a_rule_redirecting_this_remote_is_removed() {
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        struct Case {
+            what: &'static str,
+            stored: &'static str,
+            /// `(base, prefix)` — the two halves of `url.<base>.insteadOf`.
+            rules: &'static [(&'static str, &'static str)],
+            survivors: usize,
+        }
+        let cases = [
+            Case {
+                what: "gh's rule against the ssh remote it redirects",
+                stored: "git@github.com:acme/api.git",
+                rules: &[("https://github.com/", "git@github.com:")],
+                survivors: 0,
+            },
+            Case {
+                what: "a corporate mirror for another host",
+                stored: "git@github.com:acme/api.git",
+                rules: &[("git@git.corp.example:", "https://git.corp.example/")],
+                survivors: 1,
+            },
+            Case {
+                what: "the same rewrite aimed at a repo this mirror is not",
+                stored: "git@github.com:acme/api.git",
+                rules: &[("https://github.com/", "git@gitlab.com:")],
+                survivors: 1,
+            },
+            Case {
+                what: "a respelling of the same remote is not a redirect",
+                stored: "git@github.com:acme/api.git",
+                rules: &[("ssh://git@github.com/", "git@github.com:")],
+                survivors: 1,
+            },
+            Case {
+                what: "the corporate mirror survives alongside gh's",
+                stored: "git@github.com:acme/api.git",
+                rules: &[
+                    ("https://github.com/", "git@github.com:"),
+                    ("git@git.corp.example:", "https://git.corp.example/"),
+                ],
+                survivors: 1,
+            },
+            Case {
+                // git applies the longest matching prefix and no other, so the
+                // shorter redirecting rule is not in force and is not ours to
+                // delete.
+                what: "a longer harmless prefix shadows a shorter redirecting one",
+                stored: "git@github.com:acme/api.git",
+                rules: &[
+                    ("https://github.com/", "git@github.com:"),
+                    ("ssh://git@github.com/acme/", "git@github.com:acme/"),
+                ],
+                survivors: 2,
+            },
+            Case {
+                // Equal-length prefixes: git keeps the one it saw FIRST, so
+                // the redirecting rule is the one in force and the one to go.
+                // Reading the tie the other way leaves it in place — the mirror
+                // still fetches over HTTPS, and MAIN-646 survives its own fix.
+                what: "an equal-length tie is broken the way git breaks it",
+                stored: "git@github.com:acme/api.git",
+                rules: &[
+                    ("https://github.com/", "git@github.com:"),
+                    ("ssh://git@github.com/", "git@github.com:"),
+                ],
+                survivors: 1,
+            },
+            Case {
+                // The same tie, file order reversed: now the harmless rule is
+                // the one git applies, and the redirecting one it never reaches
+                // is not ours to delete.
+                what: "and the same tie in the other file order touches nothing",
+                stored: "git@github.com:acme/api.git",
+                rules: &[
+                    ("ssh://git@github.com/", "git@github.com:"),
+                    ("https://github.com/", "git@github.com:"),
+                ],
+                survivors: 2,
+            },
+        ];
+        let tmp =
+            std::env::temp_dir().join(format!("nook-646-only-{}", uuid::Uuid::now_v7().simple()));
+        for (i, c) in cases.iter().enumerate() {
+            let cache = mirror_with_origin(&tmp.join(i.to_string()), c.stored);
+            for (base, prefix) in c.rules {
+                add_rewrite(&cache, base, prefix);
+            }
+            reconcile_mirror_remote(&cache, c.stored, &mut Vec::new()).expect("reconcile");
+            assert_eq!(
+                rules_left(&cache).len(),
+                c.survivors,
+                "{}: {:?}",
+                c.what,
+                rules_left(&cache)
+            );
+            // The invariant every case shares, and the one the job depends on:
+            // whatever git resolves afterwards has to be the remote the
+            // workspace chose. Asserted through git itself rather than through
+            // this module's model of it, so a wrong model fails here.
+            assert_eq!(
+                normalized_remote(&git_in(&cache, &["remote", "get-url", "origin"])),
+                normalized_remote(c.stored),
+                "{}: git must still resolve origin to the workspace's remote",
+                c.what
+            );
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// AC-5: `gh` writes the rule again the next time it authenticates, so
+    /// reconciliation runs before EVERY fetch. Two rounds with the rule
+    /// reintroduced between them, each asserting the fetch reached the remote
+    /// the workspace named — which it cannot have done through the rule, whose
+    /// target does not exist.
+    #[test]
+    fn a_reintroduced_rewrite_rule_is_removed_again_before_the_next_fetch() {
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let tmp =
+            std::env::temp_dir().join(format!("nook-646-again-{}", uuid::Uuid::now_v7().simple()));
+        let remote = tmp.join("acme").join("api");
+        scratch_remote(&remote);
+        let url = remote.to_string_lossy().to_string();
+        let base = tmp.join("cache");
+        let own = base.join("worktrees").join("none");
+        let cache = ensure_mirror_in(&base, &url, None, &own, &mut Vec::new()).expect("mirror");
+        let nowhere = tmp.join("nowhere").to_string_lossy().to_string();
+
+        for round in 0..2 {
+            std::fs::write(remote.join(format!("round{round}.txt")), "moved on\n").unwrap();
+            commit_all(&remote, &format!("round {round}"));
+
+            add_rewrite(&cache, &nowhere, &url);
+            assert_eq!(
+                git_in(&cache, &["remote", "get-url", "origin"]),
+                nowhere,
+                "round {round}: the fixture must actually reproduce the rewrite"
+            );
+
+            let mut notes = Vec::new();
+            ensure_mirror_in(&base, &url, None, &own, &mut notes)
+                .unwrap_or_else(|e| panic!("round {round} must still fetch: {e}"));
+
+            assert!(
+                rules_left(&cache).is_empty(),
+                "round {round}: the rule must be gone again"
+            );
+            assert_eq!(
+                git_in(&cache, &["rev-parse", "refs/heads/main"]),
+                git_in(&remote, &["rev-parse", "refs/heads/main"]),
+                "round {round}: the fetch went to the remote the workspace named"
+            );
+            assert_eq!(notes.len(), 1, "round {round}: and said so once");
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// AC-6: MAIN-629's message is what made this findable, so it keeps both
+    /// URLs — and now names the rule standing between them, which is the clause
+    /// that stops "the two URLs agree" from being a dead end.
+    #[test]
+    fn a_credential_failure_names_the_rewrite_rule_in_force() {
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let tmp =
+            std::env::temp_dir().join(format!("nook-646-said-{}", uuid::Uuid::now_v7().simple()));
+        let cache = mirror_with_origin(&tmp, "git@github.com:acme/api.git");
+        add_rewrite(&cache, "https://github.com/", "git@github.com:");
+
+        // The one test here that cannot go through `hermetic_git`: AC-6's whole
+        // point is naming a rule `--local` could NOT remove, so
+        // `explain_fetch_failure` reads every scope on purpose. A developer
+        // whose own global config rewrites this remote with a longer prefix
+        // would see their rule named — a true message about a different config,
+        // not a defect. Skipped rather than pinned, because pinning means
+        // repointing `GIT_CONFIG_GLOBAL` process-wide, which is exactly the
+        // cross-test race `hermetic_git` was written to end.
+        let mut ambient = rewrite_rules(&cache, &["--global"]);
+        ambient.extend(rewrite_rules(&cache, &["--system"]));
+        if RewriteRule::effective(&ambient, "git@github.com:acme/api.git").is_some() {
+            eprintln!("skipping: this machine's own git config rewrites git@github.com:");
+            let _ = std::fs::remove_dir_all(&tmp);
+            return;
+        }
+
+        let said = explain_fetch_failure(
+            &cache,
+            "git@github.com:acme/api.git",
+            "fatal: could not read Username for 'https://github.com': No such device or address"
+                .to_string(),
+        );
+
+        assert!(
+            said.contains("git@github.com:acme/api.git"),
+            "the stored remote and the job's URL, which are the same here: {said}"
+        );
+        assert!(
+            said.contains("url.https://github.com/.insteadof")
+                && said.contains("https://github.com/acme/api.git"),
+            "and the rule, with where it sends the fetch: {said}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A key holding the same value twice is cleared by ONE `--unset-all`, so
+    /// the list it was read from has to drop both entries at once.
+    ///
+    /// Asking git again for a value already gone exits 5 with an empty stderr,
+    /// which `run_git` turns into `Err("")` — a job failing with a bare
+    /// `clone cache failed: ` on a mirror this very pass had just made correct,
+    /// and a strike spent on a condition that no longer exists.
+    #[test]
+    fn a_duplicated_rule_value_is_removed_once_and_does_not_fail_the_job() {
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let tmp =
+            std::env::temp_dir().join(format!("nook-646-dup-{}", uuid::Uuid::now_v7().simple()));
+        let cache = mirror_with_origin(&tmp, "git@github.com:acme/api.git");
+        // `--add`, not the plain set `add_rewrite` uses: a set REPLACES, which
+        // is why this state needs asking for.
+        for _ in 0..2 {
+            git_in(
+                &cache,
+                &[
+                    "config",
+                    "--add",
+                    "url.https://github.com/.insteadOf",
+                    "git@github.com:",
+                ],
+            );
+        }
+        assert_eq!(rules_left(&cache).len(), 2, "the fixture must hold both");
+
+        let mut notes = Vec::new();
+        reconcile_mirror_remote(&cache, "git@github.com:acme/api.git", &mut notes)
+            .expect("a duplicated value must not fail the job");
+
+        assert!(rules_left(&cache).is_empty(), "both values are gone");
+        assert_eq!(notes.len(), 1, "and one removal is one line: {notes:?}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// AC-7: a public repo on HTTPS is untouched. `gh`'s rule rewrites the ssh
+    /// spelling, which such a workspace does not use, so there is nothing to
+    /// remove and nothing to repoint — the fetch keeps working exactly as it
+    /// did, over whichever protocol it was already using.
+    #[test]
+    fn a_public_https_workspace_keeps_its_config() {
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let tmp =
+            std::env::temp_dir().join(format!("nook-646-pub-{}", uuid::Uuid::now_v7().simple()));
+        let cache = mirror_with_origin(&tmp, "https://github.com/acme/api.git");
+        add_rewrite(&cache, "https://github.com/", "git@github.com:");
+
+        let mut notes = Vec::new();
+        reconcile_mirror_remote(&cache, "https://github.com/acme/api.git", &mut notes)
+            .expect("reconcile");
+
+        assert_eq!(
+            rules_left(&cache).len(),
+            1,
+            "the rule does not touch this remote, so it is not ours to remove"
+        );
+        assert_eq!(
+            git_in(&cache, &["config", "--get", "remote.origin.url"]),
+            "https://github.com/acme/api.git",
+            "and nothing was repointed"
+        );
+        assert!(notes.is_empty(), "nor anything to say: {notes:?}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A value is matched as a regex by `git config --unset-all`, and an
+    /// unescaped `git@github.com:` is a pattern whose dots match any character
+    /// — so the escaping is what keeps the removal to the rule it named.
+    #[test]
+    fn a_value_pattern_matches_only_its_own_literal() {
+        assert_eq!(
+            exact_value_pattern("git@github.com:"),
+            r"^git@github\.com:$"
+        );
+        assert_eq!(
+            exact_value_pattern("https://git.corp/a+b?/"),
+            r"^https://git\.corp/a\+b\?/$"
+        );
     }
 
     /// AC-3: a spelling change is not a move. Each pair would fetch from the
@@ -5065,7 +5721,7 @@ mod tests {
             std::env::temp_dir().join(format!("nook-629-same-{}", uuid::Uuid::now_v7().simple()));
         for (i, (pinned, carried)) in equivalent.iter().enumerate() {
             let cache = mirror_with_origin(&tmp.join(i.to_string()), pinned);
-            reconcile_mirror_remote(&cache, carried).expect("reconcile");
+            reconcile_mirror_remote(&cache, carried, &mut Vec::new()).expect("reconcile");
             assert_eq!(
                 git_in(&cache, &["remote", "get-url", "origin"]),
                 *pinned,
@@ -5139,9 +5795,10 @@ mod tests {
         let (old, new, _) = two_remotes_of_one_repo(&tmp);
         let base = tmp.join("cache");
         let own = tmp.join("worktrees").join(review_dirname("ws-1", 7));
-        ensure_mirror_in(&base, &old.to_string_lossy(), None, &own).expect("mirror");
+        ensure_mirror_in(&base, &old.to_string_lossy(), None, &own, &mut Vec::new())
+            .expect("mirror");
 
-        let cache = existing_mirror_in(&base, &new.to_string_lossy(), None, &own)
+        let cache = existing_mirror_in(&base, &new.to_string_lossy(), None, &own, &mut Vec::new())
             .expect("the review run adopts the mirror at the moved URL");
         assert_eq!(
             git_in(&cache, &["remote", "get-url", "origin"]),
