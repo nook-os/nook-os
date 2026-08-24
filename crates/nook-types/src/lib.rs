@@ -597,12 +597,14 @@ pub struct Capabilities {
 
 /// Can this node run a loop-job agent inside a per-job container (MAIN-611)?
 ///
-/// Internally tagged like [`QueuedReason`], and three states rather than a
-/// bool because the third one is the interesting one: a CONTAINERISED node is
-/// not merely "sandbox missing". It has no Docker to nest, cannot run a build
-/// at all, and confining it is explicitly out of scope (MAIN-611 NG-5) — so it
-/// keeps claiming the spec/review/decompose work it already does, while a HOST
-/// node with no sandbox stops claiming anything.
+/// Internally tagged like [`QueuedReason`], and four states rather than a
+/// bool because the ones past "yes" are the interesting ones. A CONTAINERISED
+/// node is not merely "sandbox missing": it has no Docker to nest, cannot run a
+/// build at all, and confining it is explicitly out of scope (MAIN-611 NG-5) —
+/// so it keeps claiming the spec/review/decompose work it already does, while a
+/// HOST node with no sandbox stops claiming anything. And a node PULLING the
+/// image is minutes from working, which is a different thing to say than a node
+/// that never will (MAIN-643 AC-4).
 ///
 /// Every variant carries the sentence an operator acts on, because the whole
 /// reason this reaches the wire is that "why is nothing building on azul" must
@@ -617,6 +619,13 @@ pub enum SandboxCapability {
         /// re-pull when an operator wants a newer toolchain.
         image: String,
     },
+    /// The image is not here yet and this node is fetching it (MAIN-643 AC-3).
+    /// Not placeable — NG-4's fail-closed rule is unchanged — but temporary,
+    /// and said differently so a warming node is not read as a broken one.
+    Pulling {
+        /// The image being pulled.
+        image: String,
+    },
     /// This node is itself a container (NG-5). Nothing to nest and nothing to
     /// confine here; it never runs builds.
     Exempt {
@@ -629,23 +638,90 @@ pub enum SandboxCapability {
         /// What is missing, in the operator's terms — no Docker daemon, image
         /// not pulled, `iptables` absent from the image.
         detail: String,
+        /// The same thing in a word, for the fleet-wide `SANDBOX` column
+        /// (MAIN-643 AC-6). Defaulted rather than required so a report from an
+        /// agent that predates it still parses — a node whose sandbox report
+        /// fails to deserialize is refused work.
+        #[serde(default)]
+        reason: SandboxUnavailable,
     },
+}
+
+/// Why a host node has no job sandbox (MAIN-643 AC-6), in the one word a
+/// fleet-wide column has room for.
+///
+/// A bare `NO` sent every operator to a shell on the box to find out which of
+/// these it was, and the three registry cases want three different actions:
+/// wait for a release, add a credential, look at the network.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxUnavailable {
+    /// Docker itself did not answer.
+    NoDocker,
+    /// The registry has no such image at this tag — the release that should
+    /// carry it has not published it.
+    NotPublished,
+    /// The registry refused for want of a credential this node does not have.
+    NoCredentials,
+    /// The pull failed some other way: network, disk, daemon.
+    PullRefused,
+    /// An operator named the image themselves with `NOOK_SANDBOX_IMAGE` and it
+    /// is not on this node. Never pulled automatically (MAIN-643 AC-5).
+    NotPresent,
+    /// A report from an agent that predates this field, or a failure none of
+    /// the above describes.
+    #[default]
+    Unknown,
+}
+
+impl SandboxUnavailable {
+    /// The one-word rendering the `SANDBOX` column shows (MAIN-643 AC-6).
+    pub fn label(&self) -> &'static str {
+        match self {
+            SandboxUnavailable::NoDocker => "no docker",
+            SandboxUnavailable::NotPublished => "not published",
+            SandboxUnavailable::NoCredentials => "no credentials",
+            SandboxUnavailable::PullRefused => "pull refused",
+            SandboxUnavailable::NotPresent => "image absent",
+            SandboxUnavailable::Unknown => "unknown",
+        }
+    }
 }
 
 impl SandboxCapability {
     /// Would a loop-job agent on this node be confined, or is confinement
-    /// deliberately not this node's job? Both are placeable; `Unavailable` is
-    /// not.
+    /// deliberately not this node's job? Both are placeable; the two states
+    /// with no usable image are not.
     pub fn may_run_loop_work(&self) -> bool {
-        !matches!(self, SandboxCapability::Unavailable { .. })
+        matches!(
+            self,
+            SandboxCapability::Ready { .. } | SandboxCapability::Exempt { .. }
+        )
+    }
+
+    /// Why a loop job may not run here, phrased for the person reading the
+    /// job's queued reason — or `None` when it may.
+    ///
+    /// One function rather than a `match` per caller, so a new non-placeable
+    /// variant cannot be waved through by somebody else's wildcard arm.
+    pub fn refusal(&self) -> Option<String> {
+        match self {
+            SandboxCapability::Ready { .. } | SandboxCapability::Exempt { .. } => None,
+            SandboxCapability::Pulling { image } => Some(format!(
+                "it is still pulling its job sandbox image {image}; work resumes on its own \
+                 once the pull finishes"
+            )),
+            SandboxCapability::Unavailable { detail, .. } => Some(detail.clone()),
+        }
     }
 
     /// One cell for `nook get nodes` and the Nodes page.
     pub fn summary(&self) -> String {
         match self {
             SandboxCapability::Ready { image } => format!("ready ({image})"),
+            SandboxCapability::Pulling { image } => format!("pulling ({image})"),
             SandboxCapability::Exempt { .. } => "exempt (containerised)".into(),
-            SandboxCapability::Unavailable { detail } => format!("no ({detail})"),
+            SandboxCapability::Unavailable { detail, .. } => format!("no ({detail})"),
         }
     }
 }

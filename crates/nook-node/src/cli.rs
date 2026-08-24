@@ -1413,6 +1413,11 @@ fn capacity_cell(v: Option<&Value>) -> String {
 /// scanning a fleet needs to see which machine is refusing work, and the full
 /// sentence — which names the image to build or the daemon to start — is one
 /// `--json` away.
+///
+/// A refusal names its REASON in a word (MAIN-643 AC-6). A bare `NO` sent
+/// everyone to a shell on the box to learn which of "no release published it",
+/// "the registry wants a credential" and "the network refused" it was — three
+/// different actions, and the middle one is the operator's own to take.
 fn sandbox_cell(v: Option<&Value>) -> String {
     let Some(c) = v.filter(|v| !v.is_null()) else {
         return "-".into();
@@ -1422,8 +1427,17 @@ fn sandbox_cell(v: Option<&Value>) -> String {
             Some(image) => format!("yes ({image})"),
             None => "yes".into(),
         },
+        Some("pulling") => "pulling".into(),
         Some("exempt") => "n/a (container)".into(),
-        Some("unavailable") => "NO".into(),
+        Some("unavailable") => {
+            let reason = c
+                .get("reason")
+                .and_then(|r| {
+                    serde_json::from_value::<nook_types::SandboxUnavailable>(r.clone()).ok()
+                })
+                .unwrap_or_default();
+            format!("NO ({})", reason.label())
+        }
         _ => "-".into(),
     }
 }
@@ -5474,5 +5488,49 @@ mod upload_wire {
             fallback.contains("502") && fallback.contains("bad gateway"),
             "{fallback}"
         );
+    }
+}
+
+/// The `SANDBOX` column (MAIN-643 AC-6). A refusal that does not say WHY sends
+/// every operator to a shell on the box to find out, which is the trip this
+/// column exists to save.
+#[cfg(test)]
+mod sandbox_column {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn every_failure_renders_the_reason_it_needs() {
+        for (reason, want) in [
+            ("no_docker", "NO (no docker)"),
+            ("not_published", "NO (not published)"),
+            ("no_credentials", "NO (no credentials)"),
+            ("pull_refused", "NO (pull refused)"),
+            ("not_present", "NO (image absent)"),
+        ] {
+            let v = json!({"state": "unavailable", "detail": "…", "reason": reason});
+            assert_eq!(sandbox_cell(Some(&v)), want);
+        }
+    }
+
+    /// A report from an agent that predates the field still renders — as a
+    /// refusal, because that is what it said, with the reason unknown.
+    #[test]
+    fn an_older_report_without_a_reason_still_refuses() {
+        let v = json!({"state": "unavailable", "detail": "no image"});
+        assert_eq!(sandbox_cell(Some(&v)), "NO (unknown)");
+    }
+
+    /// AC-4 reaches the column too: a node three minutes into a pull is not
+    /// rendered as one somebody has to go and fix.
+    #[test]
+    fn a_warming_node_is_not_rendered_as_a_broken_one() {
+        let pulling =
+            json!({"state": "pulling", "image": "ghcr.io/nook-os/nook-job-sandbox:1.2.3"});
+        assert_eq!(sandbox_cell(Some(&pulling)), "pulling");
+
+        let ready = json!({"state": "ready", "image": "img (unprivileged)"});
+        assert_eq!(sandbox_cell(Some(&ready)), "yes (img (unprivileged))");
+        assert_eq!(sandbox_cell(None), "-");
     }
 }

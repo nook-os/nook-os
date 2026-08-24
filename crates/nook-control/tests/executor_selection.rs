@@ -524,6 +524,38 @@ async fn a_node_that_cannot_sandbox_takes_no_work_and_the_job_waits() {
     bed.teardown().await;
 }
 
+/// MAIN-643 AC-3/AC-4. A node still PULLING its sandbox image is refused, and
+/// says so in its own terms — a state added after the gate was written must not
+/// be waved through by a wildcard arm on the way past.
+#[tokio::test]
+async fn a_node_still_pulling_its_sandbox_takes_no_work_either() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, tenant, _user, person, job) = setup(&bed).await;
+    let mut caps = caps_declaring(&["spec"], false);
+    caps["sandbox"] = json!({
+        "state": "pulling",
+        "image": "ghcr.io/nook-os/nook-job-sandbox:9.9.9"
+    });
+    node(&bed, tenant, Some(person), "online", caps).await;
+
+    let placed = jobs::select_executor(&state, tenant, job)
+        .await
+        .expect("select");
+    assert_eq!(
+        placed.state, "queued",
+        "a warming node holds the job; it never fails it"
+    );
+    let reason = placed.queued_reason.clone().unwrap_or_default();
+    assert!(
+        reason.contains("pulling") && reason.contains("9.9.9"),
+        "the wait says it is temporary and names the image: {reason}"
+    );
+
+    bed.teardown().await;
+}
+
 /// A node that reports NOTHING is refused too (MAIN-611 AC-8). Silence is an
 /// agent from before the sandbox shipped, not evidence that it confines
 /// anything — and reading silence as consent is how a fail-closed gate becomes

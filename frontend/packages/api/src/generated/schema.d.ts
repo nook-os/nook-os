@@ -8310,12 +8310,14 @@ export interface components {
         /**
          * @description Can this node run a loop-job agent inside a per-job container (MAIN-611)?
          *
-         *     Internally tagged like [`QueuedReason`], and three states rather than a
-         *     bool because the third one is the interesting one: a CONTAINERISED node is
-         *     not merely "sandbox missing". It has no Docker to nest, cannot run a build
-         *     at all, and confining it is explicitly out of scope (MAIN-611 NG-5) — so it
-         *     keeps claiming the spec/review/decompose work it already does, while a HOST
-         *     node with no sandbox stops claiming anything.
+         *     Internally tagged like [`QueuedReason`], and four states rather than a
+         *     bool because the ones past "yes" are the interesting ones. A CONTAINERISED
+         *     node is not merely "sandbox missing": it has no Docker to nest, cannot run a
+         *     build at all, and confining it is explicitly out of scope (MAIN-611 NG-5) —
+         *     so it keeps claiming the spec/review/decompose work it already does, while a
+         *     HOST node with no sandbox stops claiming anything. And a node PULLING the
+         *     image is minutes from working, which is a different thing to say than a node
+         *     that never will (MAIN-643 AC-4).
          *
          *     Every variant carries the sentence an operator acts on, because the whole
          *     reason this reaches the wire is that "why is nothing building on azul" must
@@ -8330,6 +8332,11 @@ export interface components {
             /** @enum {string} */
             state: "ready";
         } | {
+            /** @description The image being pulled. */
+            image: string;
+            /** @enum {string} */
+            state: "pulling";
+        } | {
             /** @description How the node concluded it is containerised. */
             detail: string;
             /** @enum {string} */
@@ -8340,9 +8347,26 @@ export interface components {
              *     not pulled, `iptables` absent from the image.
              */
             detail: string;
+            /**
+             * @description The same thing in a word, for the fleet-wide `SANDBOX` column
+             *     (MAIN-643 AC-6). Defaulted rather than required so a report from an
+             *     agent that predates it still parses — a node whose sandbox report
+             *     fails to deserialize is refused work.
+             */
+            reason?: components["schemas"]["SandboxUnavailable"];
             /** @enum {string} */
             state: "unavailable";
         };
+        /**
+         * @description Why a host node has no job sandbox (MAIN-643 AC-6), in the one word a
+         *     fleet-wide column has room for.
+         *
+         *     A bare `NO` sent every operator to a shell on the box to find out which of
+         *     these it was, and the three registry cases want three different actions:
+         *     wait for a release, add a credential, look at the network.
+         * @enum {string}
+         */
+        SandboxUnavailable: "no_docker" | "not_published" | "no_credentials" | "pull_refused" | "not_present" | "unknown";
         /** @description The node the resource-aware scheduler chose for "Auto" placement. */
         ScheduledNode: {
             node_id: components["schemas"]["NodeId"];

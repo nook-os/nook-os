@@ -254,11 +254,27 @@ fake remote on a node that never reports. The dogfood workspace is the opposite
   the shape `tmux.rs:838` set) fails the build if a future edit launches a job
   agent outside the wrap. **The host's Docker socket is never mounted** — a
   container holding it can `docker run -v /:/host` and undo everything else.
-- **This is one install step on a machine that builds:**
-  `./scripts/build-job-sandbox.sh`, **then restart the node agent** — the
-  capability is probed at CONNECT, not on heartbeat, so a node that was
-  reporting `unavailable` keeps reporting it (and keeps queueing its jobs)
-  until it reconnects. **A host node with no image claims no loop
+- **The image is PUBLISHED and PULLED, not installed by hand (MAIN-643).** The
+  release workflow pushes `ghcr.io/nook-os/nook-job-sandbox` beside every other
+  image, and a node's default is the tag matching its OWN
+  `CARGO_PKG_VERSION` — so a self-updated agent and the box it runs jobs in
+  cannot drift, which they silently did while the default was a local `latest`
+  somebody built once. A node that finds the image absent **pulls it once**, in
+  the background, reporting `pulling` meanwhile: a machine warming up for a few
+  minutes is a different sentence from one that will never work, and the
+  heartbeat re-registers when the pull settles so the queued jobs start with
+  nothing restarted. A failure names which kind it was in the `SANDBOX` column
+  — `not published`, `no credentials`, `pull refused` — rather than a bare `NO`.
+  - **`NOOK_SANDBOX_IMAGE` is never auto-pulled and never overridden.** An
+    operator naming their own image owns it; absent, the node says `image
+    absent` rather than reaching for a registry on their behalf.
+  - **`./scripts/build-job-sandbox.sh` is the DEVELOPMENT path**, for changing
+    the sandbox before a release. It still works, and what it builds is reached
+    with `NOOK_SANDBOX_IMAGE`; it is not an install step.
+  - **A capability change still only travels on Register**, so anything OTHER
+    than the pull settling — starting Docker, pulling an image by hand — needs
+    the node agent to reconnect before the control plane hears about it.
+- **A host node with no image claims no loop
   work** — it reports `sandbox: unavailable` and every job for it stays `queued`
   under `QueuedReason::SandboxUnavailable`, never `failed`, so a node-side
   shortage does not spend a card's strike budget. `nook get nodes` has a

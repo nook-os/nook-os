@@ -17905,6 +17905,26 @@
           },
           {
             "type": "object",
+            "description": "The image is not here yet and this node is fetching it (MAIN-643 AC-3).\nNot placeable — NG-4's fail-closed rule is unchanged — but temporary,\nand said differently so a warming node is not read as a broken one.",
+            "required": [
+              "image",
+              "state"
+            ],
+            "properties": {
+              "image": {
+                "type": "string",
+                "description": "The image being pulled."
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "pulling"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
             "description": "This node is itself a container (NG-5). Nothing to nest and nothing to\nconfine here; it never runs builds.",
             "required": [
               "detail",
@@ -17935,6 +17955,10 @@
                 "type": "string",
                 "description": "What is missing, in the operator's terms — no Docker daemon, image\nnot pulled, `iptables` absent from the image."
               },
+              "reason": {
+                "$ref": "#/components/schemas/SandboxUnavailable",
+                "description": "The same thing in a word, for the fleet-wide `SANDBOX` column\n(MAIN-643 AC-6). Defaulted rather than required so a report from an\nagent that predates it still parses — a node whose sandbox report\nfails to deserialize is refused work."
+              },
               "state": {
                 "type": "string",
                 "enum": [
@@ -17944,7 +17968,19 @@
             }
           }
         ],
-        "description": "Can this node run a loop-job agent inside a per-job container (MAIN-611)?\n\nInternally tagged like [`QueuedReason`], and three states rather than a\nbool because the third one is the interesting one: a CONTAINERISED node is\nnot merely \"sandbox missing\". It has no Docker to nest, cannot run a build\nat all, and confining it is explicitly out of scope (MAIN-611 NG-5) — so it\nkeeps claiming the spec/review/decompose work it already does, while a HOST\nnode with no sandbox stops claiming anything.\n\nEvery variant carries the sentence an operator acts on, because the whole\nreason this reaches the wire is that \"why is nothing building on azul\" must\nbe answerable without a shell on azul."
+        "description": "Can this node run a loop-job agent inside a per-job container (MAIN-611)?\n\nInternally tagged like [`QueuedReason`], and four states rather than a\nbool because the ones past \"yes\" are the interesting ones. A CONTAINERISED\nnode is not merely \"sandbox missing\": it has no Docker to nest, cannot run a\nbuild at all, and confining it is explicitly out of scope (MAIN-611 NG-5) —\nso it keeps claiming the spec/review/decompose work it already does, while a\nHOST node with no sandbox stops claiming anything. And a node PULLING the\nimage is minutes from working, which is a different thing to say than a node\nthat never will (MAIN-643 AC-4).\n\nEvery variant carries the sentence an operator acts on, because the whole\nreason this reaches the wire is that \"why is nothing building on azul\" must\nbe answerable without a shell on azul."
+      },
+      "SandboxUnavailable": {
+        "type": "string",
+        "description": "Why a host node has no job sandbox (MAIN-643 AC-6), in the one word a\nfleet-wide column has room for.\n\nA bare `NO` sent every operator to a shell on the box to find out which of\nthese it was, and the three registry cases want three different actions:\nwait for a release, add a credential, look at the network.",
+        "enum": [
+          "no_docker",
+          "not_published",
+          "no_credentials",
+          "pull_refused",
+          "not_present",
+          "unknown"
+        ]
       },
       "ScheduledNode": {
         "type": "object",

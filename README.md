@@ -90,6 +90,17 @@ curl -fsSL https://<your-nook-host>/install.sh | sh -s -- --token nook_join_…
 
 Nodes connect **outbound** over WebSocket — no inbound SSH, no public ports, nothing to expose. The node reports its own capabilities (CPU, GPU, docker, tmux, git, installed runtimes like `claude`) and discovers git repositories under its workspace roots. Workspaces — not machines — are the unit you think in; one workspace can exist on many nodes.
 
+### The job sandbox is pulled, not built
+
+A loop agent's instructions are untrusted input, so every loop job runs inside its own container — and a node that cannot start one **claims no build work at all**. That image is published with every release, and the default is the tag matching the node agent's own version, so a node pulls it for itself the first time it needs one. There is no install step: `nook get nodes` shows the `SANDBOX` column going `pulling` → `yes`, and queued jobs start without a restart.
+
+Two things worth knowing:
+
+- **`NOOK_SANDBOX_IMAGE` is yours.** An image you name is never pulled automatically and never overridden — that is the air-gapped and bring-your-own-toolchain path. Absent it, the node reports `NO (image absent)` rather than reaching for a registry behind your back.
+- **`./scripts/build-job-sandbox.sh` is the DEVELOPMENT path**, for changing the sandbox and trying it before a release. Point a node at what it builds with `NOOK_SANDBOX_IMAGE`; it is not what an install uses.
+
+A node that cannot get the image says which kind of cannot it is — `NO (not published)`, `NO (no credentials)`, `NO (pull refused)` — in the same column.
+
 ## Reach a port on any machine (tunnels)
 
 A dev server on a node is on that node's loopback. `nook tunnel` publishes it at

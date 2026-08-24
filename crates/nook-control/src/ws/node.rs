@@ -309,6 +309,7 @@ fn message_kind(m: &NodeToControl) -> &'static str {
         NodeToControl::GitStatusResult { .. } => "git_status_result",
         NodeToControl::OpResult { .. } => "op_result",
         NodeToControl::Register { .. } => "register",
+        NodeToControl::CapabilitiesChanged { .. } => "capabilities_changed",
         NodeToControl::SessionStarted { .. } => "session_started",
         NodeToControl::SessionExited { .. } => "session_exited",
         NodeToControl::JobTranscript { .. } => "job_transcript",
@@ -1065,6 +1066,36 @@ async fn handle_message(
         // Whether this node is taking new loop work (MAIN-505). Asserted on
         // every connect, so the clear arrives the same way the raise does and a
         // cordon cannot outlive the process that raised it.
+        NodeToControl::CapabilitiesChanged { capabilities } => {
+            // The capabilities write from `Register` and NOTHING else from it.
+            // Reconciling tmux state here would sweep sessions that are still
+            // starting — see the variant's own doc comment, and the invariant
+            // stated in the Register arm above.
+            if let Err(e) = state
+                .nodes
+                .record_capabilities(
+                    node_id,
+                    crate::repo::nodes::ReportedCapabilities {
+                        capabilities: serde_json::to_value(&capabilities)?,
+                        hostname: capabilities.hostname.clone(),
+                        platform: capabilities.platform.clone(),
+                    },
+                )
+                .await
+            {
+                tracing::warn!(node = %name, error = ?e, "could not record this node's changed capabilities");
+            }
+            // The "refetch this node" nudge, exactly as `CordonChanged` below
+            // uses it: the node stays online, one of its columns moved.
+            state.registry.publish(
+                tenant,
+                UiEvent::NodeStatus {
+                    node_id,
+                    name: name.to_string(),
+                    status: "online".into(),
+                },
+            );
+        }
         NodeToControl::CordonChanged { cordon } => {
             if let Some(c) = &cordon {
                 tracing::warn!(node = %name, reason = %c.reason, jobs = c.jobs_in_flight, "node cordoned");

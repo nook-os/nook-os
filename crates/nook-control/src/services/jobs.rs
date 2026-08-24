@@ -2558,12 +2558,10 @@ fn sandbox_refusal(capabilities: &serde_json::Value) -> Option<String> {
         );
     };
     match serde_json::from_value::<nook_types::SandboxCapability>(raw.clone()) {
-        Ok(s) if s.may_run_loop_work() => None,
-        Ok(nook_types::SandboxCapability::Unavailable { detail }) => Some(detail),
-        // Every remaining variant is one `may_run_loop_work` already accepted;
-        // this arm exists so a NEW variant is a compile error there and a
-        // permissive default here, in that order.
-        Ok(_) => None,
+        // The sentence comes from the type, not from a `match` here: a new
+        // non-placeable state (MAIN-643 added `Pulling`) must not be waved
+        // through by a wildcard arm in this file.
+        Ok(s) => s.refusal(),
         // Unreadable is refused, not waved through: a report we cannot parse is
         // not a report that the node confines anything.
         Err(e) => Some(format!("its sandbox report could not be read ({e})")),

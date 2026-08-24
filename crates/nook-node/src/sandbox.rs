@@ -22,13 +22,14 @@ use std::net::{IpAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
-use nook_types::SandboxCapability;
+use nook_types::{SandboxCapability, SandboxUnavailable};
 
-/// The image a job container is started from. Built by
-/// `deploy/docker/job-sandbox.Dockerfile`: the operator node's toolchain plus a
-/// nested Docker daemon. Override with `NOOK_SANDBOX_IMAGE`.
-pub const DEFAULT_IMAGE: &str = "nook-job-sandbox:latest";
+/// Where the published job sandbox image lives. Built by
+/// `deploy/docker/job-sandbox.Dockerfile` and pushed by the release workflow
+/// beside every other image (MAIN-643 AC-1).
+pub const IMAGE_REPO: &str = "ghcr.io/nook-os/nook-job-sandbox";
 
 /// The stand-in an allow entry uses for "the machine this container runs on",
 /// resolved inside the container because only it knows its own gateway. The
@@ -1514,17 +1515,220 @@ pub fn containerised() -> Option<String> {
     None
 }
 
+/// The image a job container is started from when nothing names one: the
+/// PUBLISHED image at this agent's OWN version (MAIN-643 AC-2).
+///
+/// Derived from `CARGO_PKG_VERSION` rather than being a floating tag, because
+/// the two used to drift silently and the drift is invisible: a `latest` built
+/// by hand on some earlier afternoon carried an older `nook` than the agent
+/// running it, and `nook builds outcome` — a run's last act — is what that
+/// older binary executes. Version-matched by construction, an agent and the box
+/// it runs jobs in cannot disagree unless an operator says so.
+pub fn default_image() -> String {
+    format!("{IMAGE_REPO}:{}", env!("CARGO_PKG_VERSION"))
+}
+
+/// The image an operator NAMED with `NOOK_SANDBOX_IMAGE`, if any.
+///
+/// Kept apart from [`image`] because "which image" and "who chose it" are
+/// different questions, and the second one decides whether this node may pull
+/// (AC-5).
+pub fn configured_image() -> Option<String> {
+    match std::env::var("NOOK_SANDBOX_IMAGE") {
+        Ok(v) if !v.trim().is_empty() => Some(v.trim().to_string()),
+        _ => None,
+    }
+}
+
 /// The image this node starts job containers from.
 pub fn image() -> String {
-    match std::env::var("NOOK_SANDBOX_IMAGE") {
-        Ok(v) if !v.trim().is_empty() => v.trim().to_string(),
-        _ => DEFAULT_IMAGE.to_string(),
-    }
+    configured_image().unwrap_or_else(default_image)
 }
 
 /// The isolation mode this node is configured for.
 pub fn isolation() -> Isolation {
     Isolation::parse(&std::env::var("NOOK_SANDBOX_ISOLATION").unwrap_or_default())
+}
+
+/// How far this process has got with the one automatic pull (AC-3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PullState {
+    /// Nothing pulled yet — the next probe that finds the image missing starts
+    /// one.
+    Untried,
+    /// A pull is in flight on a thread of its own.
+    Running,
+    /// A pull ran and reported success. Ordinarily the image is present at the
+    /// next probe, which re-arms this to [`PullState::Untried`] — so an image
+    /// later removed under a long-lived node is fetched again.
+    ///
+    /// It is a distinct state rather than that re-arm happening here because
+    /// of the case where it is NOT present: a pull that says it worked and
+    /// leaves no image would otherwise be pulled again every heartbeat,
+    /// forever. Re-arming only on a probe that SAW the image is what bounds it.
+    Succeeded,
+    /// A pull ran and failed. Not retried in this process: a node whose pull
+    /// was refused reports why and waits for an operator or a restart, rather
+    /// than hammering a registry every heartbeat.
+    Failed {
+        reason: SandboxUnavailable,
+        detail: String,
+    },
+}
+
+static PULL: Mutex<PullState> = Mutex::new(PullState::Untried);
+
+/// Everything [`probe`] observed, so that the decision made from it is a pure
+/// function — the shape [`run_args`] and [`egress_script`] already use, and for
+/// the same reason: a decision table you can only exercise by having Docker,
+/// a registry and a missing image is one nobody re-checks.
+pub struct Observed<'a> {
+    /// How this node concluded it is itself a container, if it did.
+    pub containerised: Option<String>,
+    /// The daemon's complaint, when it did not answer at all.
+    pub docker_error: Option<String>,
+    pub image: &'a str,
+    pub image_present: bool,
+    /// `NOOK_SANDBOX_IMAGE` named this image, so the operator owns it (AC-5).
+    pub image_configured: bool,
+    pub pull: &'a PullState,
+    pub isolation: Isolation,
+}
+
+/// What to report, and whether to start the one automatic pull.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Decision {
+    pub capability: SandboxCapability,
+    pub start_pull: bool,
+}
+
+/// The decision table behind [`probe`] (AC-3, AC-4, AC-5, AC-6).
+pub fn decide(obs: &Observed<'_>) -> Decision {
+    let settled = |capability| Decision {
+        capability,
+        start_pull: false,
+    };
+    if let Some(detail) = obs.containerised.clone() {
+        return settled(SandboxCapability::Exempt { detail });
+    }
+    if let Some(e) = &obs.docker_error {
+        return settled(SandboxCapability::Unavailable {
+            detail: format!("no Docker daemon on this node ({e})"),
+            reason: SandboxUnavailable::NoDocker,
+        });
+    }
+    if obs.image_present {
+        return settled(SandboxCapability::Ready {
+            image: format!("{} ({})", obs.image, obs.isolation.as_str()),
+        });
+    }
+    // An operator who named an image owns it (AC-5). Pulling it would be this
+    // node guessing that a private tag it cannot see is meant to come from a
+    // registry, and an air-gapped install (NG-5) is exactly the case where the
+    // guess is wrong and the error message about it is the whole answer.
+    if obs.image_configured {
+        return settled(SandboxCapability::Unavailable {
+            detail: format!(
+                "NOOK_SANDBOX_IMAGE names {}, which is not on this node — an image you \
+                 name is never pulled automatically, so build or pull it yourself, or \
+                 unset the variable to use the published {}",
+                obs.image,
+                default_image()
+            ),
+            reason: SandboxUnavailable::NotPresent,
+        });
+    }
+    match obs.pull {
+        PullState::Untried => Decision {
+            capability: SandboxCapability::Pulling {
+                image: obs.image.to_string(),
+            },
+            start_pull: true,
+        },
+        PullState::Running => settled(SandboxCapability::Pulling {
+            image: obs.image.to_string(),
+        }),
+        // The pull said it worked and the image is still not here. Reported
+        // rather than pulled again: a loop with no ceiling is worse than a
+        // node saying plainly that its Docker is not behaving.
+        PullState::Succeeded => settled(SandboxCapability::Unavailable {
+            detail: format!(
+                "pulling {} reported success but the image is still not on this node — \
+                 check this machine's Docker",
+                obs.image
+            ),
+            reason: SandboxUnavailable::Unknown,
+        }),
+        PullState::Failed { reason, detail } => settled(SandboxCapability::Unavailable {
+            detail: detail.clone(),
+            reason: *reason,
+        }),
+    }
+}
+
+/// Which of AC-6's reasons a failed `docker pull` was.
+///
+/// The registry's own wording is the only signal there is — Docker reports a
+/// pull failure as one stderr line and no code — so this reads it, most
+/// specific first: a "manifest unknown" is unambiguous, while "denied" alone
+/// covers both a private image and one that does not exist and is therefore
+/// the weaker match.
+pub fn classify_pull_failure(image: &str, err: &str) -> (SandboxUnavailable, String) {
+    let low = err.to_ascii_lowercase();
+    if low.contains("manifest unknown") || low.contains("not found") {
+        (
+            SandboxUnavailable::NotPublished,
+            format!(
+                "{image} is not published — the release carrying this agent version did \
+                 not publish a job sandbox image ({err})"
+            ),
+        )
+    } else if low.contains("unauthorized")
+        || low.contains("authentication required")
+        || low.contains("denied")
+    {
+        (
+            SandboxUnavailable::NoCredentials,
+            format!(
+                "the registry refused {image} for want of a credential — `docker login \
+                 ghcr.io` on this node ({err})"
+            ),
+        )
+    } else {
+        (
+            SandboxUnavailable::PullRefused,
+            format!("pulling {image} failed ({err})"),
+        )
+    }
+}
+
+/// Start the one automatic pull, on a thread of its own.
+///
+/// A pull of this image is minutes long and [`probe`] runs on every heartbeat,
+/// so doing it inline would stall the node's whole report — which is why AC-4
+/// wants a state to report meanwhile rather than a blocking call.
+fn start_pull(image: String) {
+    let mut state = PULL.lock().unwrap_or_else(|e| e.into_inner());
+    if !matches!(*state, PullState::Untried) {
+        return;
+    }
+    *state = PullState::Running;
+    drop(state);
+    std::thread::spawn(move || {
+        tracing::info!(%image, "pulling the job sandbox image");
+        let outcome = match docker(&["pull", &image]) {
+            Ok(_) => {
+                tracing::info!(%image, "pulled the job sandbox image; this node can take build work");
+                PullState::Succeeded
+            }
+            Err(e) => {
+                let (reason, detail) = classify_pull_failure(&image, &e);
+                tracing::warn!(%image, %detail, "could not pull the job sandbox image");
+                PullState::Failed { reason, detail }
+            }
+        };
+        *PULL.lock().unwrap_or_else(|e| e.into_inner()) = outcome;
+    });
 }
 
 /// What this node reports on heartbeat (AC-9), and what the dispatcher's
@@ -1533,26 +1737,38 @@ pub fn isolation() -> Isolation {
 /// Probed rather than assumed, and probed the way every other capability here
 /// is: ask the tool, do not read a config file and hope.
 pub fn probe() -> SandboxCapability {
+    // Asked before anything else, and answered without spawning Docker: a
+    // containerised node has none to ask.
     if let Some(detail) = containerised() {
         return SandboxCapability::Exempt { detail };
     }
     let image = image();
-    if let Err(e) = docker(&["version", "--format", "{{.Server.Version}}"]) {
-        return SandboxCapability::Unavailable {
-            detail: format!("no Docker daemon on this node ({e})"),
-        };
+    let docker_error = docker(&["version", "--format", "{{.Server.Version}}"]).err();
+    let image_present = docker_error.is_none() && docker(&["image", "inspect", &image]).is_ok();
+    let pull = {
+        let mut state = PULL.lock().unwrap_or_else(|e| e.into_inner());
+        // Re-armed here rather than in the pulling thread, so that a pull which
+        // claimed success without producing an image cannot re-arm itself into
+        // an unbounded retry. Seeing the image is the evidence; the pull's own
+        // exit code is not.
+        if image_present {
+            *state = PullState::Untried;
+        }
+        state.clone()
+    };
+    let decision = decide(&Observed {
+        containerised: None,
+        docker_error,
+        image: &image,
+        image_present,
+        image_configured: configured_image().is_some(),
+        pull: &pull,
+        isolation: isolation(),
+    });
+    if decision.start_pull {
+        start_pull(image);
     }
-    if docker(&["image", "inspect", &image]).is_err() {
-        return SandboxCapability::Unavailable {
-            detail: format!(
-                "the job sandbox image {image} is not present — build it with \
-                 deploy/docker/job-sandbox.Dockerfile or set NOOK_SANDBOX_IMAGE"
-            ),
-        };
-    }
-    SandboxCapability::Ready {
-        image: format!("{image} ({})", isolation().as_str()),
-    }
+    decision.capability
 }
 
 /// A control-plane URL's host and port. One parser, because the allow list and
@@ -3255,6 +3471,216 @@ mod tests {
         ] {
             assert_eq!(bind_conflict_port(err), None, "{err}");
             assert_eq!(describe_bind_conflict(err, PS), None, "{err}");
+        }
+    }
+}
+
+/// The image a node reaches for, and what it does when that image is absent
+/// (MAIN-643). Pure functions throughout: no Docker, no registry.
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+
+    fn observed<'a>(image: &'a str, pull: &'a PullState) -> Observed<'a> {
+        Observed {
+            containerised: None,
+            docker_error: None,
+            image,
+            image_present: false,
+            image_configured: false,
+            pull,
+            isolation: Isolation::Unprivileged,
+        }
+    }
+
+    /// AC-2: the default is the PUBLISHED image at this agent's own version,
+    /// so a self-updated agent and its box cannot drift apart.
+    #[test]
+    fn the_default_image_is_this_agents_own_version() {
+        assert_eq!(
+            default_image(),
+            format!(
+                "ghcr.io/nook-os/nook-job-sandbox:{}",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+        // Not a floating tag, which is the whole bug: `latest` was built once
+        // by hand and carried an older `nook` than the agent running it.
+        assert!(!default_image().ends_with(":latest"));
+    }
+
+    /// AC-3, first row: the image is absent, so a pull is started rather than
+    /// the node declaring defeat.
+    #[test]
+    fn an_absent_image_is_pulled_before_anything_is_declared() {
+        let d = decide(&observed(
+            "ghcr.io/nook-os/nook-job-sandbox:1.2.3",
+            &PullState::Untried,
+        ));
+        assert!(d.start_pull);
+        assert_eq!(
+            d.capability,
+            SandboxCapability::Pulling {
+                image: "ghcr.io/nook-os/nook-job-sandbox:1.2.3".into()
+            }
+        );
+    }
+
+    /// AC-3, second row: the pull landed, so the next probe sees the image and
+    /// the node is Ready.
+    #[test]
+    fn a_pull_that_succeeded_leaves_the_node_ready() {
+        let mut obs = observed("nook-job-sandbox:1.2.3", &PullState::Untried);
+        obs.image_present = true;
+        let d = decide(&obs);
+        assert!(!d.start_pull);
+        assert_eq!(
+            d.capability,
+            SandboxCapability::Ready {
+                image: "nook-job-sandbox:1.2.3 (unprivileged)".into()
+            }
+        );
+    }
+
+    /// AC-3, third row: a pull that failed is where `Unavailable` comes from —
+    /// and it is not retried, so nothing hammers the registry per heartbeat.
+    #[test]
+    fn a_pull_that_failed_is_unavailable_and_not_retried() {
+        let pull = PullState::Failed {
+            reason: SandboxUnavailable::NotPublished,
+            detail: "nothing published it".into(),
+        };
+        let d = decide(&observed("nook-job-sandbox:1.2.3", &pull));
+        assert!(!d.start_pull);
+        assert_eq!(
+            d.capability,
+            SandboxCapability::Unavailable {
+                detail: "nothing published it".into(),
+                reason: SandboxUnavailable::NotPublished,
+            }
+        );
+    }
+
+    /// A pull that reports success and leaves no image is reported, not pulled
+    /// again — the retry loop it would otherwise sit in has no ceiling, and a
+    /// node quietly hammering a registry every 15s is worse than one saying its
+    /// Docker is misbehaving.
+    #[test]
+    fn a_pull_that_produced_no_image_is_not_pulled_again() {
+        let d = decide(&observed("nook-job-sandbox:1.2.3", &PullState::Succeeded));
+        assert!(!d.start_pull);
+        let SandboxCapability::Unavailable { detail, .. } = d.capability else {
+            panic!("a pull that produced nothing leaves the node Unavailable");
+        };
+        assert!(detail.contains("nook-job-sandbox:1.2.3"), "{detail}");
+        assert!(detail.contains("still not on this node"), "{detail}");
+    }
+
+    /// ...and the ordinary path still re-arms, so an image removed under a
+    /// long-lived node is fetched again rather than latching Unavailable.
+    #[test]
+    fn a_pull_that_produced_the_image_leaves_it_ready() {
+        let mut obs = observed("nook-job-sandbox:1.2.3", &PullState::Succeeded);
+        obs.image_present = true;
+        let d = decide(&obs);
+        assert!(!d.start_pull);
+        assert!(matches!(d.capability, SandboxCapability::Ready { .. }));
+    }
+
+    /// AC-4: warming up and broken are DIFFERENT values, not one string. A node
+    /// three minutes into a pull must not read as one an operator has to fix.
+    #[test]
+    fn pulling_is_a_different_state_from_failed() {
+        let pulling = decide(&observed("i", &PullState::Running)).capability;
+        let failed = decide(&observed(
+            "i",
+            &PullState::Failed {
+                reason: SandboxUnavailable::PullRefused,
+                detail: "connection reset".into(),
+            },
+        ))
+        .capability;
+        assert!(matches!(pulling, SandboxCapability::Pulling { .. }));
+        assert!(matches!(failed, SandboxCapability::Unavailable { .. }));
+        assert_ne!(pulling, failed);
+        // Both refuse work — NG-4's fail-closed rule is untouched — but they
+        // say different things about how long that lasts.
+        assert!(!pulling.may_run_loop_work());
+        assert!(!failed.may_run_loop_work());
+        assert_ne!(pulling.refusal(), failed.refusal());
+    }
+
+    /// AC-5: an image an operator NAMED is theirs. Never pulled, never
+    /// replaced by the published default.
+    #[test]
+    fn a_configured_image_is_never_pulled() {
+        let mut obs = observed("registry.internal/our-sandbox:pinned", &PullState::Untried);
+        obs.image_configured = true;
+        let d = decide(&obs);
+        assert!(
+            !d.start_pull,
+            "an operator's own image was pulled behind their back"
+        );
+        let SandboxCapability::Unavailable { detail, reason } = d.capability else {
+            panic!("a named image that is absent is Unavailable");
+        };
+        assert_eq!(reason, SandboxUnavailable::NotPresent);
+        assert!(detail.contains("registry.internal/our-sandbox:pinned"));
+        assert!(detail.contains("NOOK_SANDBOX_IMAGE"));
+    }
+
+    /// The states that never reach the image at all.
+    #[test]
+    fn a_containerised_node_and_a_dead_daemon_short_circuit() {
+        let mut obs = observed("i", &PullState::Untried);
+        obs.containerised = Some("/.dockerenv is present".into());
+        let d = decide(&obs);
+        assert!(!d.start_pull);
+        assert!(matches!(d.capability, SandboxCapability::Exempt { .. }));
+
+        let mut obs = observed("i", &PullState::Untried);
+        obs.docker_error = Some("Cannot connect to the Docker daemon".into());
+        let d = decide(&obs);
+        assert!(!d.start_pull, "a node with no daemon tried to pull with it");
+        assert!(matches!(
+            d.capability,
+            SandboxCapability::Unavailable {
+                reason: SandboxUnavailable::NoDocker,
+                ..
+            }
+        ));
+    }
+
+    /// AC-6: each way a pull can fail maps to the reason an operator acts on.
+    #[test]
+    fn every_pull_failure_names_the_action_it_needs() {
+        let cases = [
+            (
+                "manifest unknown: manifest unknown",
+                SandboxUnavailable::NotPublished,
+            ),
+            (
+                "manifest for ghcr.io/nook-os/nook-job-sandbox:0.6.13 not found",
+                SandboxUnavailable::NotPublished,
+            ),
+            (
+                "Head \"https://ghcr.io/v2/...\": unauthorized",
+                SandboxUnavailable::NoCredentials,
+            ),
+            (
+                "denied: requested access to the resource is denied",
+                SandboxUnavailable::NoCredentials,
+            ),
+            (
+                "dial tcp: lookup ghcr.io: no such host",
+                SandboxUnavailable::PullRefused,
+            ),
+            ("", SandboxUnavailable::PullRefused),
+        ];
+        for (err, want) in cases {
+            let (got, detail) = classify_pull_failure("the-image", err);
+            assert_eq!(got, want, "{err}");
+            assert!(detail.contains("the-image"), "{err} lost the image name");
         }
     }
 }
