@@ -2,36 +2,46 @@
 # MAIN-270 (epic AC-6): the SQLite leg's verdict, and the thing that makes the
 # allow-list shrink.
 #
-# The suite does not pass on SQLite yet — every failure is owned by an upstream
-# card (see scripts/sqlite-ci-allowlist.txt). None is a legitimately
-# Postgres-specific test, so "exclude the Postgres-specific ones" was never a
-# mechanism that could describe this. What CAN be described is the boundary:
-# this much passes on SQLite today, that much does not, and the second set only
-# ever gets smaller.
+# The suite does not pass on SQLite yet, and the tests that do not pass are each
+# owned by an upstream card. None is a legitimately Postgres-specific test, so
+# "exclude the Postgres-specific ones" was never a mechanism that could describe
+# this. What CAN be described is the boundary: these tests pass on SQLite today,
+# those do not, and the second set only ever gets smaller.
 #
-# So the leg is REQUIRED FROM DAY ONE over the covered set. `cargo test` exits
-# non-zero on the SQLite leg by design — the excluded tests are expected to
-# fail — which is exactly why the workflow ignores cargo's exit code and asks
-# this script instead. Two questions, one run:
+# So the leg is REQUIRED FROM DAY ONE over the covered set. The runner exits
+# non-zero on the SQLite leg by design — the excluded tests are expected to fail
+# — which is exactly why the workflow ignores its exit code and asks this script
+# instead. Two questions, one run:
 #
 #   1. did every COVERED test pass?      a failure here is a real regression
 #   2. did every EXCLUDED test fail?     a pass here means the list is stale
 #
 # (2) is what stops the list widening by neglect. Without it an upstream card
-# could fix something, forget the allow-list line, and the exemption would
-# outlive its reason — the leg would then be quietly protecting less than its
-# line count claims.
+# could fix a test, forget the allow-list line, and the exemption would outlive
+# its reason — the leg would then be quietly protecting less than its line count
+# claims.
 #
-# IDENTITY IS A TEST NOW, NOT A BINARY (MAIN-657). It used to be the deps
-# basename, i.e. the file under `tests/` — which worked only while nook-control
-# had 171 of them. That crate now builds ONE integration-test binary (`it`), so
-# a whole-binary verdict there would answer "did anything in the crate fail",
-# which is not a question worth asking: three pending failures would exclude
-# 1160 tests and the leg would protect almost nothing.
+# TEST-KEYED, NOT BINARY-KEYED (MAIN-656). The lists used to name whole test
+# BINARIES, because `cargo test` reports one pass/fail line per binary and a
+# per-test verdict had to be scraped out of prose. nextest reports per test, so
+# an exemption is now exactly as wide as the failure it describes: `job_reaper`
+# excluded nine tests to excuse six, and the three that passed were excluded
+# from the leg for free. A key is `<binary-id>::<test-name>` — nextest's own
+# two-part identity, joined.
 #
-# This reads a captured `cargo test --workspace --no-fail-fast` log rather than
-# running cargo itself, so the workflow keeps one run and this stays a pure
-# function of its output (and the self-test can feed it synthetic logs).
+# AN ENTRY NAMES A SCOPE, not necessarily one test (MAIN-657). nook-control
+# builds ONE integration binary (`it`), so `nook-control::it` alone would excuse
+# every test in the crate; but a module inside it — `nook-control::it::
+# multi_instance` — is an honest grain for a whole-file exemption, and staying
+# per-test where the failures are per-test is what keeps the leg wide. So an
+# entry covers itself plus everything under `::`, and the finest grain that
+# describes the failure is the right one.
+#
+# IT READS nextest's JUNIT REPORT, not a scraped log. The report is nextest's
+# own machine-readable output: .config/nextest.toml's `sqlite` profile writes
+# it, and both CI and `./test.sh rust --sqlite` run that profile, which is what
+# makes the two give the same verdict. A scraped log could be broken by a colour
+# escape or a line-wrap — and was, on this guard's first CI run.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -58,160 +68,80 @@ ENGINE_ONLY="${SQLITE_CI_ENGINE_ONLY:-scripts/sqlite-ci-engine-specific.txt}"
 
 usage() {
   cat >&2 <<'MSG'
-usage: check-sqlite-ci.sh <cargo-test-log>          verdict for the SQLite leg
-       check-sqlite-ci.sh --list <cargo-test-log>   what FAILED (to seed the allow-list)
+usage: check-sqlite-ci.sh <junit.xml>          verdict for the SQLite leg
+       check-sqlite-ci.sh --list <junit.xml>   tests that FAILED (to seed the allow-list)
+
+The report is nextest's JUnit output, written by .config/nextest.toml's
+`sqlite` profile to <target>/nextest/sqlite/junit.xml.
 MSG
   exit 2
 }
 
 mode="check"
 if [ "${1:-}" = "--list" ]; then mode="list"; shift; fi
-LOG="${1:-}"
-[ -n "$LOG" ] || usage
-[ -f "$LOG" ] || { echo "✗ no such log: $LOG" >&2; exit 2; }
+REPORT="${1:-}"
+[ -n "$REPORT" ] || usage
+[ -f "$REPORT" ] || { echo "✗ no such nextest report: $REPORT" >&2; exit 2; }
 
-TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
-
-# Outcomes, as `kind<TAB>name<TAB>status`, in two kinds:
+# Per-test outcome, as `binary-id::test-name<TAB>ok|FAILED|skipped`.
 #
-#   N   every test BINARY the run reached. Only the emptiness and duplicate-name
-#       checks read these; they are not what an allow-list entry names.
-#   I   an IDENTITY an entry may name, with its verdict: `ok`, `FAILED`, or
-#       `ignored`. A binary that reported individual tests contributes those
-#       (`<binary>::<test path>`) and NOT itself — otherwise `it` would show up
-#       as a failing identity nobody can sensibly exclude, since three pending
-#       failures out of 1160 tests still fail the binary.
+# `RS="<"` makes every XML element its own record, so the parse does not depend
+# on how the writer indented or wrapped anything — and cannot be confused by the
+# failure bodies, which carry a test's captured output with every `<` escaped.
 #
-#       A binary that printed NO `test result:` line contributes itself as well,
-#       and that is the crash case: 500 passing tests followed by an abort would
-#       otherwise leave no failing identity at all and read as green. Excusing a
-#       crash therefore takes a binary-scope entry, which is the honest grain
-#       for it — nobody can say which test the process died in.
-#
-# The binary half of the name survives because it is still what makes an
-# identity unique across the workspace: two crates may both have a `roundtrip`
-# unit test.
-#
-# A crate with both a lib and a binary emits TWO unittest targets whose deps
-# names are IDENTICAL (`nook_control` for `src/lib.rs` and again for
-# `src/main.rs`), so the name alone is not an identity. Unit-test targets are
-# therefore suffixed with their source: `nook_control:lib`, `nook_control:main`.
-# This was not a hypothetical — the first real run of this script reported
-# nook_control and nook_worker as duplicate names.
-#
-# Doc-test blocks emit their own `test result:` line and must NOT be attributed
-# to the binary above them, so `Doc-tests` clears the current target. It also
-# means doc-test `test … ok` lines are dropped, which is correct: they are not
-# engine-dependent and nothing excludes them.
-#
-# A binary that dies before printing a result (a panic in a fixture, an abort)
-# has no `test result:` line at all. That is recorded as FAILED rather than
-# skipped — a crash is the one outcome that must never read as "covered and
-# fine".
-#
-# CI sets CARGO_TERM_COLOR=always, so every line arrives wrapped in ANSI escapes
-# and an anchored `^ *Running` never matches. That is not hypothetical: it is how
-# this first ran in CI — the guard reported "no test binaries found" and failed
-# the leg. It failing loudly is the only reason it was not silently decorative,
-# which is exactly why "found nothing" is an error here and not an empty pass.
-# Escapes are stripped before anything is matched, so the parse does not depend
-# on whether the caller had a TTY.
-#
-# The `$0`/`$1` inside the awk program are awk's fields, not shell parameters.
-# shellcheck disable=SC2016
+# A `<testcase>` with a `<failure>` or `<error>` child FAILED; one that
+# self-closes passed. nextest runs a process per test, so a test that panics,
+# aborts or times out is a failure of that test alone — the whole "a binary died
+# before printing a result" class the log parser had to reason about does not
+# arise.
 outcomes() {
-  awk '
-    function close_binary() {
-      if (cur == "") return
-      if (!reported[cur]) { bins[++nb] = cur; status[cur] = "FAILED"; crashed[cur] = 1 }
-      cur = ""
+  awk -v RS='<' '
+    function attr(rec, key,   s) {
+      s = rec
+      if (s !~ "[[:space:]]" key "=\"") return ""
+      sub(".*[[:space:]]" key "=\"", "", s)
+      sub("\".*", "", s)
+      return s
     }
-
-    { gsub(/\033\[[0-9;]*[a-zA-Z]/, "") }
-
-    /^[[:space:]]*Running / {
-      close_binary()
-      # .../deps/<name>-<hash>[.exe])
-      line = $0
-      sub(/.*\/deps\//, "", line)
-      sub(/-[0-9a-f]+(\.exe)?\)?[[:space:]]*$/, "", line)
-      cur = line
-      # `Running unittests src/lib.rs (...)` — disambiguate a crate lib target
-      # from that same crate binary target, which share a deps name.
-      if ($0 ~ /Running[[:space:]]+unittests[[:space:]]/) {
-        src = $0
-        sub(/.*Running[[:space:]]+unittests[[:space:]]+/, "", src)
-        sub(/[[:space:]]*\(.*$/, "", src)          # drop the (path) tail
-        sub(/.*\//, "", src); sub(/\.rs$/, "", src) # src/lib.rs -> lib
-        if (src != "") cur = cur ":" src
-      }
+    /^testsuite[[:space:]]/ { suite = attr($0, "name"); next }
+    /^testcase[[:space:]]/ {
+      name = attr($0, "name")
+      # `classname` is the binary id too, and is present even when the report
+      # nests differently. Prefer it; fall back to the enclosing suite.
+      bin = attr($0, "classname"); if (bin == "") bin = suite
+      cur = bin "::" name
+      status = "ok"
+      # `<testcase … />` — no children, so the verdict is already final.
+      if ($0 ~ /\/>[[:space:]]*$/) { print cur "\t" status; cur = ""; }
       next
     }
-    /^[[:space:]]*Doc-tests / { close_binary(); next }
-
-    # `test <path> ... ok` / `... FAILED` / `... ignored[, reason]`. The
-    # `test result:` summary is excluded by the `\.\.\.` this requires, and
-    # `test <name> has been running for over 60 seconds` by the same.
-    /^test .* \.\.\. / {
-      if (cur == "") next
-      rest = $0
-      sub(/^test[[:space:]]+/, "", rest)
-      name = rest; sub(/[[:space:]]+\.\.\.[[:space:]]+.*$/, "", name)
-      verdict = rest; sub(/^.*[[:space:]]\.\.\.[[:space:]]+/, "", verdict)
-      if (verdict ~ /^ok/)           v = "ok"
-      else if (verdict ~ /^ignored/) v = "ignored"
-      else                           v = "FAILED"
-      ids[++ni] = cur "::" name; idstatus[ni] = v
-      hastests[cur] = 1
-      next
-    }
-
-    /^test result: / {
-      if (cur == "") next
-      bins[++nb] = cur
-      status[cur] = ($0 ~ /^test result: ok\./) ? "ok" : "FAILED"
-      reported[cur] = 1
-      cur = ""
-      next
-    }
-
-    END {
-      close_binary()
-      for (i = 1; i <= nb; i++) {
-        b = bins[i]
-        print "N\t" b "\t" status[b]
-        if (!hastests[b] || crashed[b]) print "I\t" b "\t" status[b]
-      }
-      for (i = 1; i <= ni; i++) print "I\t" ids[i] "\t" idstatus[i]
-    }
-  ' "$LOG"
+    /^failure/ || /^error/ { if (cur != "") status = "FAILED"; next }
+    /^skipped/             { if (cur != "") status = "skipped"; next }
+    /^\/testcase/          { if (cur != "") { print cur "\t" status; cur = "" } next }
+  ' "$REPORT"
 }
 
 ALL="$(outcomes)"
-BINARIES="$(printf '%s\n' "$ALL" | awk -F'\t' '$1 == "N" { print $2 }')"
-[ -n "$BINARIES" ] || {
-  echo "✗ no test binaries found in $LOG — the run did not get as far as testing." >&2
+[ -n "$ALL" ] || {
+  echo "✗ no tests found in $REPORT — the run did not get as far as testing." >&2
   echo "  A leg that tested nothing must not report success." >&2
   exit 1
 }
 
-# Ambiguous identity would silently merge two binaries' verdicts, so it is a
-# hard error rather than a note. Names are unique across the workspace today;
-# this is what keeps that true if someone adds tests/foo.rs to a second crate.
-dupes="$(printf '%s\n' "$BINARIES" | sort | uniq -d || true)"
+# Ambiguous identity would silently merge two tests' verdicts, so it is a hard
+# error rather than a note.
+dupes="$(printf '%s\n' "$ALL" | cut -f1 | sort | uniq -d || true)"
 if [ -n "$dupes" ]; then
-  echo "✗ two test binaries share a name — every identity under one would be ambiguous:" >&2
+  echo "✗ two tests share a key — the allow-list cannot name one without the other:" >&2
   printf '%s\n' "$dupes" | sed 's/^/    /' >&2
-  echo "  Rename one of the test targets. Binary names prefix every identity here." >&2
+  echo "  Rename one of them. '<binary-id>::<test-name>' is this list's only identity." >&2
   exit 1
 fi
 
-printf '%s\n' "$ALL" | awk -F'\t' '$1 == "I" { print $2 "\t" $3 }' > "$TMP/ids"
-awk -F'\t' '$2 == "FAILED" { print $1 }' "$TMP/ids" | sort > "$TMP/failed"
+FAILED="$(printf '%s\n' "$ALL" | awk -F'\t' '$2 == "FAILED" { print $1 }' | sort)"
 
 if [ "$mode" = "list" ]; then
-  cat "$TMP/failed"
+  printf '%s\n' "$FAILED"
   exit 0
 fi
 
@@ -220,19 +150,19 @@ fi
   exit 1
 }
 
-# Entries are `identity` or `identity  # reason (CARD)`; blanks and full-line
-# comments ignored.
+# Entries are `test` or `test  # reason (CARD)`; blanks and full-line comments
+# ignored.
 strip() { sed -e 's/#.*//' -e 's/[[:space:]]*$//' "$1" | grep -v '^$' || true; }
 pending="$(strip "$ALLOWLIST")"
 engine_only=""
 [ -f "$ENGINE_ONLY" ] && engine_only="$(strip "$ENGINE_ONLY")"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+printf '%s\n' "$ALL" > "$TMP/ids"
 printf '%s\n%s\n' "$pending" "$engine_only" | grep -v '^$' > "$TMP/excluded" || true
 
-# An entry names a SCOPE, and covers every identity at or under it: a single
-# test (`it::job_reaper::a_thing`), the module it lives in (`it::multi_instance`),
-# or a whole binary (`nook_db:lib`). The binary form is what every entry used to
-# be, so nothing about the old lines changed meaning — this only adds the two
-# finer grains that MAIN-657 made necessary.
+# Which entry covers which test, as `entry<TAB>test<TAB>verdict`. An entry
+# covers a test it names outright and every test beneath it under `::`.
 #
 # shellcheck disable=SC2016
 awk -F'\t' -v ents="$TMP/excluded" '
@@ -243,17 +173,17 @@ awk -F'\t' -v ents="$TMP/excluded" '
 
 fail=0
 
-# (1) Something COVERED failed. This is the leg doing its job: a SQLite-only
+# (1) A covered test failed. This is the leg doing its job: a SQLite-only
 # regression in territory we claim to cover.
 regressions="$(
   awk -F'\t' -v cov="$TMP/coverage" '
     BEGIN { while ((getline l < cov) > 0) { split(l, f, "\t"); excused[f[2]] = 1 } }
     $0 != "" && !excused[$0]
-  ' "$TMP/failed"
+  ' <<< "$FAILED"
 )"
 
 if [ -n "$regressions" ]; then
-  echo "✗ SQLite regression — these are covered by the SQLite leg and failed:" >&2
+  echo "✗ SQLite regression — these tests are covered by the SQLite leg and failed:" >&2
   printf '%s\n' "$regressions" | sed 's/^/    /' >&2
   cat >&2 <<'MSG'
 
@@ -272,8 +202,8 @@ fi
 
 # (2) An excluded entry no longer excuses anything. Without this the list never
 # shrinks. Two shapes: everything it covers now PASSES, or it covers nothing at
-# all (a renamed or deleted test). An entry covering only `ignored` tests is
-# neither — the run rendered no verdict on it, so neither should this.
+# all (a renamed or deleted test). An entry covering only SKIPPED tests is
+# neither — the run rendered no verdict on it, so neither does this.
 stale="$(
   awk -F'\t' '
     { seen[$1] = 1; if ($3 == "FAILED") failed[$1] = 1; if ($3 == "ok") passed[$1] = 1 }

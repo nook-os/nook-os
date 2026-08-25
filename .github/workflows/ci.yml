@@ -9,8 +9,20 @@ name: CI
 # WHICH JOBS ANSWER WHICH EVENT, and why:
 #
 #   job              push  pull_request  merge_group   why
+#   build             y         y             y        the two required legs
+#                                                      cannot run without its
+#                                                      archive, so it answers
+#                                                      every event they do
 #   rust (postgres)   y         y             y        required context
 #   rust (sqlite)     y         y             y        required context
+#   lint              y         y             y        NOT required yet, and
+#                                                      has no `if` anyway —
+#                                                      MAIN-656 makes it
+#                                                      required right after
+#                                                      merge, and the rule
+#                                                      below is exactly why the
+#                                                      `if` must not be there
+#                                                      when that happens
 #   chart-e2e         y         y             y        required context (see
 #                                                      its own note: the queue
 #                                                      build takes the fast
@@ -49,6 +61,155 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # ONE compile per CI run (MAIN-656). Nothing in this workspace is
+  # engine-specific at BUILD time — no crate has a `build.rs`, there are no
+  # `sqlx::query!` compile-time macros, and `DATABASE_URL` is read purely at
+  # runtime — so the two engine legs below used to build byte-identical test
+  # binaries on two different runners, with clippy compiling the workspace a
+  # third time in front of one of them. This job builds them once; the legs
+  # only run them.
+  #
+  # It answers every event the legs do, `merge_group` included. A `build` that
+  # skipped on a queue build would leave two REQUIRED contexts with nothing to
+  # run, which is the failure this workflow's header exists to prevent.
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      # Declared identically on both legs. A binary built here is executed
+      # there, so a build input that differed between the two would mean the
+      # archive is not the thing under test.
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
+    steps:
+      - uses: actions/checkout@v4
+      # LLD (MAIN-578). Linking, not compiling, is what made the old
+      # `Test (postgres)` step the entire CI wall clock. The 147 nook-control
+      # test binaries it was originally weighed against are one binary since
+      # MAIN-657; the workspace still links ~30 more, so it still earns its 5s.
+      #
+      # Installed and applied in CI ONLY, via RUSTFLAGS rather than a checked-in
+      # `.cargo/config.toml`: a config file would demand every developer and
+      # every container have lld installed or their build breaks, which is a
+      # steep price for a CI problem.
+      - name: Fast linker
+        run: sudo apt-get update && sudo apt-get install -y lld
+      - uses: dtolnay/rust-toolchain@stable
+      # PINNED, and pinned to the same version deploy/docker/dev-rust.Dockerfile
+      # installs. AC-6's promise is that `./test.sh` gives the verdict CI gives
+      # rather than a similar one, and two independently-floating copies of the
+      # runner make that a coincidence instead of a fact.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.143
+      - uses: Swatinem/rust-cache@v2
+      # `nook` is the one binary the suite needs that this build does not
+      # produce: cargo builds a package's bins for that package's own
+      # integration tests, and nook-node has none. `.config/nextest.toml`'s
+      # `archive.include` puts it in the archive; this is what makes it exist to
+      # include, and `on-missing = "error"` there is what fails the build rather
+      # than the leg if this step ever goes away.
+      - name: Build the node binary the desktop suite drives
+        run: cargo build -p nook-node --bin nook --profile ci
+      # `--cargo-profile ci` is the symbol-free build (see Cargo.toml): these
+      # binaries have to travel between three jobs, and the `dev` profile's
+      # symbols make that 5.2 GB of upload and download to render frames CI has
+      # never printed.
+      - name: Archive the test binaries
+        run: |
+          cargo nextest archive --workspace --cargo-profile ci \
+            --archive-file nextest-archive.tar.zst
+          ls -l nextest-archive.tar.zst
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nextest-archive
+          path: nextest-archive.tar.zst
+          # Already zstd. Asking the uploader to compress it again spends
+          # minutes to save nothing.
+          compression-level: 0
+          # An empty upload would turn "the build silently produced nothing"
+          # into two legs failing on a missing archive, one job too late.
+          if-no-files-found: error
+          # Nothing reads it after the run it was built for.
+          retention-days: 1
+
+  # Everything engine-independent, off the required legs' critical path
+  # (MAIN-656). These steps used to sit on `rust (postgres)` behind
+  # `if: matrix.engine == 'postgres'`, so clippy's own full compile ran in
+  # front of the Postgres tests — on a required context, for checks that need
+  # no database and differ in no way between engines.
+  #
+  # NO job-level `if:`, deliberately. This becomes a REQUIRED context right
+  # after MAIN-656 merges (clippy stops gating the moment it leaves
+  # `rust (postgres)`), and per the header above a required job that skips on
+  # `merge_group` never reports and the queue waits on it forever. The `if`
+  # that looks like an obvious saving here is the thing that would break it.
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fast linker
+        run: sudo apt-get update && sudo apt-get install -y lld
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        # `-D warnings`, matching `./test.sh`'s gate exactly. Without it a
+        # warning merged clean and then broke every local run until someone
+        # hunted it down — which is how main came to be red on three of them.
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      # The source guards, and their self-tests. Pure shell + awk over the tree:
+      # no Docker, well under a second, and nothing else was running them —
+      # `check-sqlx-signatures.sh` had been RED on main unnoticed because it
+      # lives only in `./test.sh lint`, where `actionlint` exits first in any
+      # environment that cannot pull its image (MAIN-345 AC-5).
+      - name: Source guards
+        run: |
+          ./scripts/check-case-collisions.sh
+          ./scripts/check-case-collisions.test.sh
+          ./scripts/check-inline-sql.sh
+          ./scripts/check-inline-sql.test.sh
+          ./scripts/check-sqlx-signatures.sh
+          ./scripts/check-sqlx-signatures.test.sh
+          # MAIN-354. A cast nested inside a seam call is valid Postgres, so no
+          # amount of RUNNING the Postgres suite can see the defect — only
+          # reading the source can. Catching it here is a whole engine-run
+          # earlier than the SQLite leg, and for a test still on the exclusion
+          # list it is the only place it is caught at all.
+          ./scripts/check-nested-dialect.sh
+          ./scripts/check-nested-dialect.test.sh
+          # MAIN-604. Not a source guard but the same shape — a shell script
+          # whose self-test needs nothing but bash, and whose subject (the RC
+          # workflow's image report) is otherwise exercised only by a release.
+          ./scripts/publish-image-report.test.sh
+          # MAIN-656. Same shape again, and it earns the line: this card
+          # rewrote the guard's whole parser, and that guard is now the SQLite
+          # leg's SOLE verdict. Leaving its self-test only in `./test.sh lint`
+          # is the exact placement the note above blames for
+          # `check-sqlx-signatures.sh` sitting red on main unnoticed.
+          ./scripts/check-sqlite-ci.test.sh
+          # `check-dialect-dispatch.sh` is deliberately absent, and so is its
+          # self-test. Both are RED on main today — an unlisted offender in
+          # repo/read_model.rs plus three stale entries — and the self-test's
+          # first assertion is "green on the tree as committed", so it fails
+          # for the same reason. Nobody noticed for exactly the reason MAIN-345
+          # existed: nothing ran them. Adding either would break CI for a
+          # defect that is not this card's, so they wait for their own.
+      # nextest runs one process per test and never runs doctests — rustdoc
+      # compiles and runs those, which is a different tool. They used to ride
+      # along inside `cargo test --workspace` on the Postgres leg, so they land
+      # here rather than quietly disappearing when that leg stopped compiling.
+      # Every fence in this tree is `ignore` or `text` today, so this is a
+      # compile of the workspace's libs and zero executed tests; it is here to
+      # keep that true.
+      - name: Doc tests
+        run: cargo test --doc --workspace
+
   # Two engines, one suite (MAIN-270, epic AC-6). "Works on SQLite" is a claim
   # until CI runs it, so the suite runs twice — Postgres and SQLite — as matrix
   # legs, in parallel: wall-clock is the slower leg, not the sum.
@@ -56,23 +217,39 @@ jobs:
   # POSTGRES IS THE DEFAULT ENGINE and runs the whole suite, exactly as before.
   #
   # THE SQLITE LEG IS REQUIRED, NOT ADVISORY, but it does not yet cover
-  # everything: 197 of 940 tests still fail on SQLite, every one owned by an
-  # upstream card (bed.pool → MAIN-268, dialect → MAIN-289, plus MAIN-293/294/295).
-  # Those binaries are named in scripts/sqlite-ci-allowlist.txt with the card
-  # each waits on, and scripts/check-sqlite-ci.sh enforces the boundary in BOTH
-  # directions: a covered binary that fails reddens the leg, and an EXCLUDED
-  # binary that starts passing also reddens it, so the list can only shrink.
-  # When the last line is deleted the SQLite leg covers the full suite and epic
-  # AC-6 is met in full — the list is the remaining work, in order.
+  # everything: a handful of tests still fail on SQLite, every one owned by an
+  # upstream card. Those TESTS are named in scripts/sqlite-ci-allowlist.txt with
+  # the card each waits on, and scripts/check-sqlite-ci.sh enforces the boundary
+  # in BOTH directions: a covered test that fails reddens the leg, and an
+  # EXCLUDED test that starts passing also reddens it, so the list can only
+  # shrink. When the last line is deleted the SQLite leg covers the full suite
+  # and epic AC-6 is met in full — the list is the remaining work, in order.
   #
   # RUNNING EACH LOCALLY (the dev stack is docker-first — see CLAUDE.md):
   #   Postgres (the default):  ./test.sh rust
   #   SQLite:                  ./test.sh rust --sqlite
   # `./test.sh rust --sqlite` runs the same suite on a SQLite bed and applies
   # this same guard, so it gives the same verdict CI does.
+  #
+  # NEITHER LEG COMPILES ANYTHING (MAIN-656). Both download `build`'s archive
+  # and execute it, and the "Nothing was compiled here" step below fails the leg
+  # if a `Compiling` line ever appears — an assertion rather than an intention,
+  # because a silent fallback to compiling would restore the cost this change
+  # removed without changing a single result.
   rust:
+    needs: build
+    # `always()`, not the default (MAIN-656 AC-3). These are REQUIRED contexts:
+    # if `build` fails, a leg left to inherit `skipped` never reports at all,
+    # and a merge queue waits on it until it ejects the PR. So both legs run
+    # regardless, find no archive, and fail BY NAME — on `merge_group` exactly
+    # as on `pull_request`.
+    if: always()
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 25, not the 20 this had while it compiled. A leg's time is now mostly
+    # transfer and unpack, which is bounded by the runner's disk rather than by
+    # anything in this repo — and a required context hitting a timeout is a
+    # worse outcome than a ceiling nobody reaches.
+    timeout-minutes: 25
     strategy:
       # Both legs always report. Cancelling the sibling on first failure would
       # mean a Postgres failure hides whether SQLite also broke, which is the
@@ -123,75 +300,41 @@ jobs:
         image: softwaremill/elasticmq-native:1.6.11
         ports: ["9324:9324"]
     env:
-      # See the "Fast linker" step. An env var so it reaches every cargo
-      # invocation in the job, and so `rust-cache` keys on it — a linker change
-      # is a build-input change and the cache should know.
+      # The SAME value `build` declares. Nothing here compiles — the step below
+      # fails the leg if anything does — but a build input that differed between
+      # the job that produced a binary and the job that runs it would mean the
+      # archive was not the thing under test. lld itself is deliberately NOT
+      # installed here: with no linking to do it is a minute of apt for nothing,
+      # and a fallback compile failing loudly on a missing linker is a better
+      # outcome than one succeeding quietly.
       RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
       DATABASE_URL: ${{ matrix.database_url }}
       NOOK_REQUIRE_DB: "1"
       NOOK_TEST_REDIS_URL: redis://localhost:6379
       NOOK_TEST_SQS_ENDPOINT: http://localhost:9324
     steps:
+      # The checkout is for scripts/check-sqlite-ci.sh and its lists, not for
+      # source: the tests themselves are compiled already.
       - uses: actions/checkout@v4
-      # LLD (MAIN-578). Linking, not compiling, is what makes `Test (postgres)`
-      # 10m31s of a 13m job, and that job is the entire CI wall clock: a
-      # `merge_group` build runs only three jobs and still takes 11m, because
-      # everything it drops is ≤2m and parallel. The 147 nook-control test
-      # binaries this was originally weighed against are one binary since
-      # MAIN-657; the workspace still links ~30 more, so it still earns its 5s.
-      #
-      # Installed and applied in CI ONLY, via RUSTFLAGS rather than a checked-in
-      # `.cargo/config.toml`: a config file would demand every developer and
-      # every container have lld installed or their build breaks, which is a
-      # steep price for a CI problem.
-      - name: Fast linker
-        run: sudo apt-get update && sudo apt-get install -y lld
       - uses: dtolnay/rust-toolchain@stable
+      # The version `build` pinned, for the reason stated there.
+      - uses: taiki-e/install-action@v2
         with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      # Engine-independent, so they run once rather than in both legs.
-      - name: Format
-        if: matrix.engine == 'postgres'
-        run: cargo fmt --all --check
-      - name: Clippy
-        if: matrix.engine == 'postgres'
-        # `-D warnings`, matching `./test.sh`'s gate exactly. Without it a
-        # warning merged clean and then broke every local run until someone
-        # hunted it down — which is how main came to be red on three of them.
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      # The source guards, and their self-tests. Pure shell + awk over the tree:
-      # no Docker, well under a second, and nothing else was running them —
-      # `check-sqlx-signatures.sh` had been RED on main unnoticed because it
-      # lives only in `./test.sh lint`, where `actionlint` exits first in any
-      # environment that cannot pull its image (MAIN-345 AC-5).
-      - name: Source guards
-        if: matrix.engine == 'postgres'
+          tool: cargo-nextest@0.9.143
+      # `continue-on-error`, so that a `build` that failed reaches the named
+      # error below rather than this action's own "artifact not found". Under
+      # `if: always()` this leg runs on exactly that path.
+      - name: Fetch the test archive
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: nextest-archive
+      - name: The test archive must be here
         run: |
-          ./scripts/check-case-collisions.sh
-          ./scripts/check-case-collisions.test.sh
-          ./scripts/check-inline-sql.sh
-          ./scripts/check-inline-sql.test.sh
-          ./scripts/check-sqlx-signatures.sh
-          ./scripts/check-sqlx-signatures.test.sh
-          # MAIN-354. On the POSTGRES leg deliberately: a cast nested inside a
-          # seam call is valid Postgres, so that leg cannot see the defect by
-          # running — only by reading the source. Catching it here is a whole
-          # engine-run earlier than the SQLite leg, and for a binary still on
-          # the exclusion list it is the only place it is caught at all.
-          ./scripts/check-nested-dialect.sh
-          ./scripts/check-nested-dialect.test.sh
-          # MAIN-604. Not a source guard but the same shape — a shell script
-          # whose self-test needs nothing but bash, and whose subject (the RC
-          # workflow's image report) is otherwise exercised only by a release.
-          ./scripts/publish-image-report.test.sh
-          # `check-dialect-dispatch.sh` is deliberately absent, and so is its
-          # self-test. Both are RED on main today — an unlisted offender in
-          # repo/read_model.rs plus three stale entries — and the self-test's
-          # first assertion is "green on the tree as committed", so it fails
-          # for the same reason. Nobody noticed for exactly the reason this
-          # card exists: nothing ran them. Adding either would break CI for a
-          # defect that is not this card's, so they wait for their own.
+          if [ ! -f nextest-archive.tar.zst ]; then
+            echo "::error::the 'build' job produced no nextest-archive.tar.zst, so this leg has nothing to run. Fix 'build' — this leg reports a failure rather than a skip on purpose, so a required context always reports."
+            exit 1
+          fi
       - name: Wait for ElasticMQ
         run: |
           for _ in $(seq 1 30); do
@@ -201,24 +344,70 @@ jobs:
             sleep 1
           done
           echo "ElasticMQ did not become ready" >&2; exit 1
+      # `--extract-to .` is NOT cosmetic, and a temporary directory is not an
+      # equivalent choice. Several tests reach for a sibling binary through
+      # `env!("CARGO_BIN_EXE_nook-control")`, which the compiler bakes in as an
+      # ABSOLUTE path — `<workspace>/target/ci/nook-control`. Every job in a
+      # workflow checks out at the same path, so extracting here puts those
+      # binaries exactly where the build job left them and the constant
+      # resolves; extracting anywhere else leaves seven tests pointing at a file
+      # that does not exist. `--extract-overwrite` because the checkout is
+      # already here.
+      #
+      # --no-fail-fast: nextest stops at the FIRST failing test by default, where
+      # `cargo test` at least finished the binary it was in. A red run should
+      # show everything that is red, not the first thing.
       - name: Test (postgres)
         if: matrix.engine == 'postgres'
-        run: cargo test --workspace
-      # cargo's exit code is deliberately ignored here and the verdict delegated
-      # to the guard: on SQLite the excluded binaries are EXPECTED to fail, so a
-      # non-zero cargo is the normal case and says nothing on its own. The guard
-      # answers the two questions that matter — did anything covered break, and
-      # has anything excluded started passing.
+        run: |
+          set -o pipefail
+          cargo nextest run --archive-file nextest-archive.tar.zst \
+            --workspace-remap . --extract-to . --extract-overwrite \
+            --no-fail-fast 2>&1 | tee nextest-run.log
+      # nextest's exit code is deliberately ignored here and the verdict
+      # delegated to the guard: on SQLite the excluded tests are EXPECTED to
+      # fail, so a non-zero run is the normal case and says nothing on its own.
+      # The guard answers the two questions that matter — did anything covered
+      # break, and has anything excluded started passing.
       #
-      # --no-fail-fast so every binary reports; without it cargo stops at the
-      # first failing one and the allow-list could only ever describe a prefix
-      # of the suite.
+      # The `sqlite` profile (.config/nextest.toml) is what writes the JUnit
+      # report the guard reads, and it is the same profile
+      # `./test.sh rust --sqlite` runs — which is what makes the two give one
+      # verdict rather than two similar ones.
       - name: Test (sqlite)
         if: matrix.engine == 'sqlite'
         run: |
           set -o pipefail
-          cargo test --workspace --no-fail-fast 2>&1 | tee sqlite-run.log || true
-          ./scripts/check-sqlite-ci.sh sqlite-run.log
+          cargo nextest run --archive-file nextest-archive.tar.zst \
+            --workspace-remap . --extract-to . --extract-overwrite \
+            --profile sqlite 2>&1 | tee nextest-run.log || true
+          # Located rather than hardcoded: the store directory hangs off
+          # whichever target dir nextest used, and running from an archive that
+          # is the extracted one — a detail of nextest's, not a promise to us.
+          report="$(find . -path '*/nextest/sqlite/junit.xml' -print -quit)"
+          if [ -z "$report" ]; then
+            echo "::error::the sqlite profile wrote no JUnit report — the run did not get as far as testing"
+            exit 1
+          fi
+          ./scripts/check-sqlite-ci.sh "$report"
+      # An ASSERTION, not an intention (MAIN-656). If a leg ever falls back to
+      # compiling — a stale flag, an archive that did not match, a future step
+      # that reaches for cargo — it silently costs back everything this change
+      # saved while every result stays identical, so nothing else would notice.
+      # `always()` so a leg that failed its tests still reports this.
+      - name: Nothing was compiled here
+        if: always()
+        run: |
+          if [ ! -f nextest-run.log ]; then
+            echo "no run log — this leg never got as far as running tests; see the failure above."
+            exit 0
+          fi
+          if sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' nextest-run.log \
+             | grep -qE '^[[:space:]]*Compiling '; then
+            echo "::error::this leg compiled workspace crates instead of running the build job's archive"
+            exit 1
+          fi
+          echo "no Compiling lines — the archive was executed, not rebuilt"
 
   # A workflow with a bad expression does not fail a job — it fails to parse,
   # so nothing runs and the error only appears when someone pushes a tag and

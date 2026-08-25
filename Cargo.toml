@@ -140,5 +140,22 @@ mailparse = "0.16"
 debug = "line-tables-only"
 split-debuginfo = "unpacked"
 
+# What CI builds its one archive with (MAIN-656). The test binaries are now
+# built in one job and EXECUTED in two others, which means they travel as a
+# workflow artifact — and 202 binaries each statically linking the whole crate
+# graph made that artifact 5.2 GB. Moving 5.2 GB three times costs more than the
+# duplicate compile this change removed, so the copy that travels carries no
+# symbols: measured 230 MB → 92 MB per binary, and the linker writes 18 GB
+# instead of 46 GB on the way there.
+#
+# It costs nothing that CI prints today. A panic's message and `file:line` come
+# from data the compiler embeds, not from the symbol table, and CI has never set
+# RUST_BACKTRACE — so the frames this drops were never rendered. `./test.sh`
+# and every local run are untouched: they keep `dev`, symbols and all.
+[profile.ci]
+inherits = "dev"
+debug = 0
+strip = "symbols"
+
 [profile.release]
 lto = "thin"

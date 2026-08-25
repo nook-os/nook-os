@@ -122,6 +122,14 @@ run_lint() {
   rust cargo clippy --workspace --all-targets -- -D warnings || die "clippy"
   pass "clippy clean"
 
+  # nextest never runs doctests — rustdoc compiles and runs those, which is a
+  # different tool — so they moved here when `rust` moved to nextest (MAIN-656),
+  # matching CI's `lint` job. Without this line they would simply have stopped
+  # running, which is the quietest way to lose a check.
+  say "cargo test --doc"
+  rust cargo test --doc --workspace || die "doc tests"
+  pass "doc tests passed"
+
   say "shellcheck"
   lint_in koalaman/shellcheck:stable install/install.sh deploy/enable-agent-mtls.sh test.sh \
     charts/nook-control/ci/validate.sh scripts/k8s-e2e.sh scripts/dev-db-heal.sh \
@@ -215,15 +223,53 @@ run_lint() {
   pass_if_ran "workflows lint clean"
 }
 
+# Both engines run through nextest (MAIN-656), which is what CI runs, so the
+# two cannot give different verdicts for want of a different runner. The dev
+# container ships it (deploy/docker/dev-rust.Dockerfile); on --host it is the
+# developer's own toolchain, so name the install rather than letting cargo
+# report "no such subcommand" from somewhere in the middle of a docker exec.
+require_nextest() {
+  if [ "$HOST" = "1" ]; then
+    command -v cargo-nextest >/dev/null 2>&1 && return 0
+    die "cargo-nextest is not installed — 'cargo install cargo-nextest --locked' (or a prebuilt binary: https://nexte.st/docs/installation/pre-built-binaries/)"
+  fi
+  # The stack is checked HERE, ahead of the probe, and the order is the whole
+  # point. The probe below has to redirect `rust` to /dev/null — a container
+  # without nextest answers with a wall of cargo output — and that redirection
+  # also swallows `rust`'s own "the dev stack is not running" message, while its
+  # `die` still exits the script: `./test.sh rust` with the stack down printed
+  # NOTHING and exited 1. A probe can only ever answer the question it is able
+  # to ask.
+  container_ready || die "the dev stack is not running — 'docker compose up -d', or use ./test.sh --host"
+  # A container built before MAIN-656 has cargo-watch and no nextest, and the
+  # bind-mounted source gives no hint that the IMAGE is what is behind.
+  rust cargo nextest --version >/dev/null 2>&1 && return 0
+  die "the control-plane container has no cargo-nextest — it predates MAIN-656; 'docker compose build control-plane' picks it up"
+}
+
 run_rust() {
-  say "cargo test${1:+ (filter: $1)}"
-  rust cargo test --workspace ${1:+"$1"} || die "tests"
+  require_nextest
+  say "cargo nextest run${1:+ (filter: $1)}"
+  # --no-fail-fast, exactly as CI's Postgres leg passes it. Without it nextest
+  # stops at the first failing test, so reproducing a red leg locally would show
+  # one failure where CI showed all of them.
+  rust cargo nextest run --workspace --no-fail-fast ${1:+"$1"} || die "tests"
   pass "tests passed"
+}
+
+# Where the `sqlite` profile wrote its JUnit report. The store directory is
+# <target-dir>/nextest/<profile>, and the target dir is not the same in the
+# container (a shared cargo volume) as on the host — so ask cargo instead of
+# hardcoding a guess that is wrong on one of the two paths.
+sqlite_report_path() {
+  rust cargo metadata --format-version 1 --no-deps 2>/dev/null \
+    | grep -o '"target_directory":"[^"]*"' | cut -d'"' -f4 \
+    | sed 's|$|/nextest/sqlite/junit.xml|'
 }
 
 # The SQLite leg, same verdict CI gives (MAIN-270).
 #
-# `cargo test` exits non-zero here BY DESIGN — the binaries named in
+# nextest exits non-zero here BY DESIGN — the tests named in
 # scripts/sqlite-ci-allowlist.txt are expected to fail until their upstream card
 # lands — so the exit code is ignored and the guard decides. It answers both
 # halves: did anything COVERED break, and has anything EXCLUDED started passing
@@ -232,19 +278,26 @@ run_rust() {
 # DATABASE_URL only has to name the engine: every bed creates its own private
 # file and drops it, so this path is never actually opened.
 run_rust_sqlite() {
-  local log
-  log="$(mktemp)"
-  say "cargo test on sqlite:// (non-zero exit is expected — the guard decides)"
+  require_nextest
+  local remote report
+  remote="$(sqlite_report_path)"
+  [ -n "$remote" ] || die "could not read cargo's target directory — is the dev stack running?"
+  report="$(mktemp)"
+  say "cargo nextest run on sqlite:// (non-zero exit is expected — the guard decides)"
   if [ "$HOST" = "1" ]; then
     DATABASE_URL="sqlite:///tmp/nook-local-ci.db" NOOK_REQUIRE_DB=1 \
-      cargo test --workspace --no-fail-fast 2>&1 | tee "$log" || true
+      cargo nextest run --workspace --profile sqlite || true
+    cp "$remote" "$report" 2>/dev/null || true
   else
-    container_ready || die "the dev stack is not running — 'docker compose up -d', or use ./test.sh --host"
     docker compose exec -T -e NOOK_REQUIRE_DB=1 -e DATABASE_URL="sqlite:///tmp/nook-local-ci.db" \
-      control-plane cargo test --workspace --no-fail-fast 2>&1 | tee "$log" || true
+      control-plane cargo nextest run --workspace --profile sqlite || true
+    docker compose exec -T control-plane cat "$remote" > "$report" 2>/dev/null || true
   fi
-  ./scripts/check-sqlite-ci.sh "$log" || { rm -f "$log"; die "sqlite leg"; }
-  rm -f "$log"
+  # A run that never reached testing writes no report, and a leg that tested
+  # nothing must not reach the guard looking like an empty pass.
+  [ -s "$report" ] || { rm -f "$report"; die "no JUnit report at $remote — the run did not get as far as testing"; }
+  ./scripts/check-sqlite-ci.sh "$report" || { rm -f "$report"; die "sqlite leg"; }
+  rm -f "$report"
   pass "sqlite leg passed"
 }
 

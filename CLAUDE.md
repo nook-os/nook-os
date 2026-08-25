@@ -32,6 +32,23 @@ Rust runs **inside the control-plane container** by default: it already holds
 `DATABASE_URL`, reaches Postgres by service name, and shares the cargo target
 volume with cargo-watch, so it is both correctly configured and already warm.
 
+**The runner is `cargo nextest`, not `cargo test` (MAIN-656).** It is in the dev
+image beside cargo-watch, so nothing to install; `./test.sh --host` names the
+install command if your own toolchain lacks it. Two consequences worth knowing:
+nextest runs **one process per test**, so a test that aborts takes only itself
+down and `TestBed`'s in-process template cache is per test rather than per
+binary (the template is named by schema fingerprint, so the second process
+finds the first one's rather than rebuilding it); and nextest **never runs
+doctests** — rustdoc does, which is why `cargo test --doc` moved into
+`./test.sh lint` and CI's `lint` job.
+
+**CI compiles the workspace ONCE.** A `build` job runs `cargo nextest archive`
+and uploads the archive; `rust (postgres)` and `rust (sqlite)` download that one
+archive and only execute it, and each fails if a `Compiling` line ever appears
+in its log. So a change that makes the *build* engine-dependent — a `build.rs`,
+a `sqlx::query!` compile-time macro, anything reading `DATABASE_URL` at compile
+time — breaks the shape CI depends on, not just a job.
+
 `NOOK_REQUIRE_DB=1` is set for you. Without it, every test needing Postgres
 returns early and the suite reports success having executed almost nothing.
 

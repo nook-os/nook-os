@@ -6,6 +6,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev curl git tmux bash procps openssh-client \
     && rm -rf /var/lib/apt/lists/*
 RUN cargo install cargo-watch --locked
+# `./test.sh rust` runs through nextest, in here, and CI runs the same suite the
+# same way (MAIN-656) — so the runner has to be in the image or the default dev
+# path breaks. The prebuilt binary rather than `cargo install`: it is seconds
+# instead of minutes, and this is the tool that decides whether the tests can
+# run at all. PINNED, and to the version ci.yml pins — "the same verdict CI
+# gives" is a coincidence if the two ends float independently. Bump both.
+RUN curl -fsSL https://get.nexte.st/0.9.143/linux \
+      | tar zxf - -C "$CARGO_HOME/bin" \
+    && cargo nextest --version
 
 # Usable by whatever UID compose runs this as (MAIN-537 AC-1). The services in
 # this stack write into a bind-mounted checkout, so they run as the HOST user —
