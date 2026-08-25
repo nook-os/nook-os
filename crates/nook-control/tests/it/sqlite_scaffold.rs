@@ -19,7 +19,7 @@ use sqlx::{Row, SqlitePool};
 /// SQLite has no schemas, so one file is one namespace and one
 /// `_sqlx_migrations`, and two migrators writing it collide. Chat's `chat_*`
 /// tables therefore live here and chat runs no migrator on SQLite at all.
-const CONTROL: &str = include_str!("../migrations_sqlite/0001_init.sql");
+const CONTROL: &str = include_str!("../../migrations_sqlite/0001_init.sql");
 
 /// Strip `--` comments, so a semicolon inside prose cannot look like the end of
 /// a statement. (It can: a hand-correction note in the file says "…is faithful;

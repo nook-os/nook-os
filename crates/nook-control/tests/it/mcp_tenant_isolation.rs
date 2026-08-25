@@ -770,7 +770,7 @@ async fn a_notebook_is_invisible_to_another_person() {
 /// tools somebody remembered to write one for.
 #[test]
 fn the_mcp_backend_never_resolves_a_tenant_from_the_instance() {
-    let src = include_str!("../src/mcp_backend.rs");
+    let src = include_str!("../../src/mcp_backend.rs");
     // The module doc explains the ban and has to be able to name them.
     let code: String = src
         .lines()

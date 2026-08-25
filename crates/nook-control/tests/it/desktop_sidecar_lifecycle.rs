@@ -19,8 +19,6 @@
 //! so a `sh` stands in for it. What matters is only that it is a real parent
 //! that dies without warning, which SIGKILL on the shim gives us.
 
-#![cfg(unix)]
-
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};

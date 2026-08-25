@@ -1,5 +1,10 @@
 # Tests that are deliberately Postgres-only (MAIN-270, AC-2).
 #
+# A line names a SCOPE — a test, the module it lives in, or a whole binary — and
+# covers everything under it (MAIN-657, see the allow-list's header for why the
+# grain had to get finer). Both entries here are whole suites and stay whole
+# suites: every test under each one is Postgres-only for the same reason.
+#
 # These are NOT pending work and are never deleted, which is why they live apart
 # from scripts/sqlite-ci-allowlist.txt: that file is a work-list that shrinks to
 # empty, and an entry that can never be removed would make it look like it never
@@ -21,6 +26,8 @@ nook_db:lib  # dialect.rs `pg_*` tests execute the POSTGRES arm against a real P
 # A polling substitute was considered and explicitly REFUSED: building
 # distributed coordination on a single-file database is the wrong trade.
 #
-# Staleness still applies, and means something specific here — if this binary
-# ever PASSES on SQLite, the classification above is what was wrong.
-multi_instance  # ws/bus.rs publishes with `pg_notify` and subscribes with `PgListener`; SQLite has no cross-process notification channel and, being single-instance, needs none
+# Staleness still applies, and means something specific here — if any test in
+# this suite ever PASSES on SQLite, the classification above is what was wrong.
+# All three of them fail today (measured 2026-08-25), so the module scope hides
+# nothing that a per-test list would have shown.
+it::multi_instance  # ws/bus.rs publishes with `pg_notify` and subscribes with `PgListener`; SQLite has no cross-process notification channel and, being single-instance, needs none

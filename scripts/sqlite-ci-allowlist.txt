@@ -1,10 +1,24 @@
-# Test binaries that do NOT yet pass on SQLite (MAIN-270, epic AC-6).
+# Tests that do NOT yet pass on SQLite (MAIN-270, epic AC-6).
 #
 # This file is the SQLite leg's remaining work, in one place. Everything NOT
 # named here is COVERED: it passes on SQLite today and a failure fails the
-# build. scripts/check-sqlite-ci.sh enforces both directions — a covered binary
-# that breaks reddens CI, and a binary listed here that starts PASSING also
+# build. scripts/check-sqlite-ci.sh enforces both directions — a covered test
+# that breaks reddens CI, and a test listed here that starts PASSING also
 # reddens CI, so the list can only ever shrink.
+#
+# WHAT A LINE NAMES CHANGED ON 2026-08-25 (MAIN-657). It used to be a test
+# BINARY, which while nook-control had 171 of them was the same thing as a
+# file. That crate builds ONE binary now (`it`), so a line naming it would
+# excuse 1160 tests to excuse ten. A line therefore names a SCOPE at whatever
+# grain is honest — a single test (`it::job_reaper::a_stalled_job_is_reaped`),
+# the module it lives in (`it::multi_instance`), or a whole binary
+# (`nook_db:lib`) — and covers that identity plus everything under `::`. The
+# binary form is exactly what every line used to be, so nothing that was
+# already here changed meaning.
+#
+# THE CONVERSION MADE THE LEG STRICTER, not looser: the three files below each
+# had tests that ALREADY PASSED on SQLite, and excluding the file excused those
+# too. They are covered now, and a regression in one reddens CI.
 #
 # WHEN YOUR CARD LANDS, DELETE ITS LINES. That deletion is what grows the leg's
 # coverage; the guard will tell you if you forget, and will not let you add a
@@ -39,8 +53,14 @@
 # Measured on two full runs of `cargo test --workspace --no-fail-fast` under
 # sqlite://, which produced identical failure sets — nothing here is flaky.
 #
-# 169 test binaries: 164 COVERED, 3 pending below, 2 deliberately Postgres-only —
+# 2369 COVERED tests, 10 entries pending below, 2 deliberately Postgres-only —
 # the numbers check-sqlite-ci.sh itself reports, not arithmetic on this file.
+# (Read off the leg's own verdict by MAIN-657, which changed the UNIT: the line
+# it replaces was `169 test binaries: 164 COVERED, 3 pending, 2 Postgres-only`.
+# The two are not comparable and no arithmetic connects them — 164 covered
+# binaries and 2369 covered tests are the same suite counted differently, and
+# the leg genuinely covers more than it did, because the 11 passing tests inside
+# the three suites below are no longer excused along with their file.)
 # (Read off the leg's own verdict by MAIN-548, which deleted
 # `dispatch_ownership`. It said 168/162/4/2 before, and arithmetic on that
 # line would have given 168/163/3/2 — wrong on both totals, because a
@@ -175,9 +195,29 @@
 #             answering honestly on SQLite and needs a gate, not a ruling.
 #             Neither half needed the ruling this card was raised for, which is
 #             why it is a separate owner rather than a third bullet here.
-job_reaper                 # MEASURED (MAIN-545, 2026-08-12, after its three fixtures were converted): `near "j": syntax error` — production `repo/jobs.rs:1367` is `UPDATE loop_jobs j … FROM nodes n`, and its `RETURNING n.last_seen_at` names the joined table SQLite cannot return from. 3 passed, 6 failed (MAIN-564)
-migrate_dev_tolerance      # MEASURED (MAIN-545, 2026-08-12, after the bytea literals were bound and the two schema/psql tests gated; re-measured unchanged by MAIN-549, 2026-08-13): `VersionMissing(38)` and an empty orphan list — the Postgres MIGRATOR driven at a SQLite bed, and `orphan_versions` returning empty there BY DESIGN. It needs the same FIX as squash_restamp, not the same ruling. 3 passed, 3 failed (MAIN-566)
-reconcile_tombstones       # MEASURED (MAIN-547, 2026-08-13): the production `path != ALL($2)` half is FIXED and its three assertions pass; the one remaining failure is the fixture `now() - ($8::bigint * interval '1 second')` at :246. That cause is MAIN-545's class but MAIN-545 NG-2 disowns this binary, so the fixture half has no card yet — this line waits on one (MAIN-547)
+# ── job_reaper: 6 of its 13, re-run for the conversion 2026-08-25 ──
+#
+# The MEASURED line below says `3 passed, 6 failed` and is kept as written. The
+# file held nine tests when it was measured and holds thirteen now: six still
+# fail — the six named under it — and the four that arrived since came in
+# COVERED, which is precisely what naming tests instead of a file buys.
+# MEASURED (MAIN-545, 2026-08-12, after its three fixtures were converted): `near "j": syntax error` — production `repo/jobs.rs:1367` is `UPDATE loop_jobs j … FROM nodes n`, and its `RETURNING n.last_seen_at` names the joined table SQLite cannot return from. 3 passed, 6 failed (MAIN-564)
+it::job_reaper::a_claimed_or_running_job_on_a_dead_executor_is_reaped  # (MAIN-564)
+it::job_reaper::a_job_whose_executor_was_seen_recently_is_untouched  # (MAIN-564)
+it::job_reaper::a_paused_job_is_never_reaped  # (MAIN-564)
+it::job_reaper::a_reaped_job_can_be_re_run  # (MAIN-564)
+it::job_reaper::a_run_orphaned_by_an_agent_restart_does_not_stay_running_forever  # (MAIN-564)
+it::job_reaper::the_reap_is_atomic_and_loses_a_live_transition_cleanly  # (MAIN-564)
+
+# ── migrate_dev_tolerance: 3 of its 6 ──
+# MEASURED (MAIN-545, 2026-08-12, after the bytea literals were bound and the two schema/psql tests gated; re-measured unchanged by MAIN-549, 2026-08-13): `VersionMissing(38)` and an empty orphan list — the Postgres MIGRATOR driven at a SQLite bed, and `orphan_versions` returning empty there BY DESIGN. It needs the same FIX as squash_restamp, not the same ruling. 3 passed, 3 failed (MAIN-566)
+it::migrate_dev_tolerance::dev_boot_proceeds_past_an_orphan_row  # (MAIN-566)
+it::migrate_dev_tolerance::dev_tolerance_does_not_mask_a_modified_migration  # (MAIN-566)
+it::migrate_dev_tolerance::production_stays_fatal_on_an_orphan_row  # (MAIN-566)
+
+# ── reconcile_tombstones: 1 of its 5 ──
+# MEASURED (MAIN-547, 2026-08-13): the production `path != ALL($2)` half is FIXED and its three assertions pass; the one remaining failure is the fixture `now() - ($8::bigint * interval '1 second')` at :246. That cause is MAIN-545's class but MAIN-545 NG-2 disowns this binary, so the fixture half has no card yet — this line waits on one (MAIN-547)
+it::reconcile_tombstones::retention_sweep_removes_only_expired_rows  # (MAIN-547)
 
 # ── the MAIN-423 residue, and what MEASURING it found (MAIN-472) ──
 #

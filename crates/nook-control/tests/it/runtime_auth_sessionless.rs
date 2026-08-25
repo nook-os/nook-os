@@ -29,7 +29,11 @@ fn auth(user: UserId, tenant: TenantId) -> AuthCtx {
 /// whichever ran first — these run in parallel in one binary. Nothing is ever
 /// dialled successfully: a flow that does spawn fails transport immediately,
 /// which is all these tests need it to do.
+///
+/// Under `common::env_guard` because the process is now shared with every other
+/// suite (MAIN-657), not just with the two below.
 fn configure_descriptor() {
+    let _g = crate::common::env_guard();
     std::env::set_var(
         "NOOK_CLAUDE_DEVICE_AUTH_ENDPOINT",
         "http://127.0.0.1:1/device",

@@ -180,9 +180,11 @@ async fn the_stall_scan_separates_a_silent_run_from_a_working_one() {
 /// migrator embeds, so the test cannot drift from what a deploy runs.
 fn migration_sql(engine: Engine) -> &'static str {
     match engine {
-        Engine::Postgres => include_str!("../migrations/0074_conclude_stalled_recorded_jobs.sql"),
+        Engine::Postgres => {
+            include_str!("../../migrations/0074_conclude_stalled_recorded_jobs.sql")
+        }
         Engine::Sqlite => {
-            include_str!("../migrations_sqlite/0074_conclude_stalled_recorded_jobs.sql")
+            include_str!("../../migrations_sqlite/0074_conclude_stalled_recorded_jobs.sql")
         }
     }
 }

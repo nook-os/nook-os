@@ -108,11 +108,11 @@ fn token_response(raw: Value) -> TokenResponse {
 /// Env-driven exactly as claude's is, and absent rather than guessed when the
 /// operator has configured nothing (NG-3: no OpenAI endpoint ships here).
 ///
-/// Serialized with the other env-touching test in this file: `set_var` is
+/// Serialized with every other env-touching test in this binary: `set_var` is
 /// process-global and these would otherwise race.
 #[test]
 fn the_descriptor_is_configured_by_env_and_absent_without_it() {
-    let _g = env_lock();
+    let _g = crate::common::env_guard();
     clear_codex_env();
     assert!(
         codex_descriptor().is_none(),
@@ -142,7 +142,7 @@ fn the_descriptor_is_configured_by_env_and_absent_without_it() {
 /// AC-6, stated as a regression: adding codex must not have disturbed claude.
 #[test]
 fn adding_codex_left_the_other_runtimes_alone() {
-    let _g = env_lock();
+    let _g = crate::common::env_guard();
     clear_codex_env();
     assert!(
         descriptor_for("hermes").is_none(),
@@ -410,13 +410,6 @@ fn the_materialized_credential_is_accepted_by_the_real_codex_cli() {
 }
 
 // ── env helpers ─────────────────────────────────────────────────────────────
-
-/// `set_var`/`remove_var` are process-global; these tests share one binary and
-/// would otherwise race each other.
-fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LOCK.lock().unwrap_or_else(|e| e.into_inner())
-}
 
 const CODEX_VARS: [&str; 4] = [
     "NOOK_CODEX_DEVICE_AUTH_ENDPOINT",

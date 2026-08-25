@@ -126,7 +126,7 @@ strip existing comments: leave them unless you are changing that code.
   00NN_x.sql` twin written by hand, in the same commit. The type map is
   `docs/db-dialect-audit.md`'s (uuid/timestamptz/jsonb → `TEXT`, `now()` →
   `nook_db::sqlite_time::NOW_SQL`, `::` casts stripped, `= ANY (ARRAY[…])` →
-  `IN (…)`), and `crates/nook-control/tests/sqlite_scaffold.rs` proves an empty
+  `IN (…)`), and `crates/nook-control/tests/it/sqlite_scaffold.rs` proves an empty
   SQLite database still builds from them. Boot wiring and the both-engines
   divergence guard are MAIN-196's, not here.
 - **A number is claimed on BOTH tracks at once: the next one free is the highest

@@ -578,7 +578,7 @@ async fn notebook_hardening_cycles_blanks_and_length() {
 /// this proves the operator route never selects the notebook tables.
 #[test]
 fn operator_routes_never_touch_the_notebook() {
-    let op = include_str!("../src/routes/operator.rs");
+    let op = include_str!("../../src/routes/operator.rs");
     assert!(
         !op.contains("user_notes") && !op.contains("user_note_folders"),
         "operator.rs must never query the person-owned notebook tables"
