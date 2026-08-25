@@ -8,19 +8,41 @@
 # Staleness is still checked. If one of these ever PASSES on SQLite the guard
 # goes red, because that means the classification was wrong, not that the
 # problem went away.
+#
+# Keyed `<binary-id>::<test-name>`, one test per line, for the reason
+# sqlite-ci-allowlist.txt gives (MAIN-656). It matters more here than there:
+# this file used to exclude the WHOLE `nook_db` lib binary to excuse five
+# `pg_*` tests, so every other test in nook-db's lib — the dialect seam's own
+# engine-agnostic assertions among them — was permanently outside the SQLite
+# leg. Naming the five puts the rest back under the gate.
 
-nook_db:lib  # dialect.rs `pg_*` tests execute the POSTGRES arm against a real Postgres connection (pool.pg()) — asserting Postgres behaviour is their entire purpose
+# ── nook-db's dialect tests (no card, by design) ────────────────────────────
+#
+# dialect.rs's `pg_*` tests execute the POSTGRES arm against a real Postgres
+# connection (`pool.pg()`). Asserting Postgres behaviour is their entire
+# purpose, so there is nothing for a SQLite run to prove about them.
+nook-db::dialect::tests::pg_ci_match_is_case_insensitive             # executes the Postgres arm on purpose
+nook-db::dialect::tests::pg_claim_clause_claims_a_row                # executes the Postgres arm on purpose
+nook-db::dialect::tests::pg_event_bus_round_trips_a_payload          # executes the Postgres arm on purpose
+nook-db::dialect::tests::pg_interval_expressions_execute             # executes the Postgres arm on purpose
+nook-db::dialect::tests::pg_json_and_cast_expressions_execute        # executes the Postgres arm on purpose
 
 # ── the cross-instance bus (MAIN-549, owner ruling 2026-08-12) ──
 #
 # SQLite is SINGLE-INSTANCE by design: one control plane per file, which
 # MAIN-197's lock already enforces. Multi-instance coordination is therefore a
-# Postgres CAPABILITY, not a SQLite gap, and this line is permanent rather than
-# a work item — which is why it is here and not in the allow-list it came from.
+# Postgres CAPABILITY, not a SQLite gap, and these lines are permanent rather
+# than work items — which is why they are here and not in the allow-list they
+# came from.
 #
 # A polling substitute was considered and explicitly REFUSED: building
 # distributed coordination on a single-file database is the wrong trade.
 #
-# Staleness still applies, and means something specific here — if this binary
-# ever PASSES on SQLite, the classification above is what was wrong.
-multi_instance  # ws/bus.rs publishes with `pg_notify` and subscribes with `PgListener`; SQLite has no cross-process notification channel and, being single-instance, needs none
+# `ws/bus.rs` publishes with `pg_notify` and subscribes with `PgListener`;
+# SQLite has no cross-process notification channel and, being single-instance,
+# needs none. Staleness still applies, and means something specific here — if
+# one of these ever PASSES on SQLite, the classification above is what was
+# wrong.
+nook-control::multi_instance::lease_takeover_flips_ownership         # pg_notify / PgListener; SQLite has no such channel
+nook-control::multi_instance::op_reply_routes_back_to_requester      # pg_notify / PgListener; SQLite has no such channel
+nook-control::multi_instance::send_to_node_routes_across_instances   # pg_notify / PgListener; SQLite has no such channel

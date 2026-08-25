@@ -1,0 +1,38 @@
+# nextest's configuration (MAIN-656). CI builds the test binaries once and both
+# engine legs execute that one archive; this file holds what that arrangement
+# needs beyond the command line.
+
+[profile.default]
+# `nook` is not in the archive by default and cannot be: nextest archives what
+# cargo BUILT, and cargo builds a package's bins only for that package's own
+# integration tests — `nook-node` has no `tests/` directory, so `nook` is never
+# written. `desktop_local_session` drives the real node binary and, finding it
+# absent, shells out to `cargo build` to make one. That is a link on a warm
+# target directory and a full dependency compile on an extracted archive, which
+# has no rlibs at all — so the binary travels instead.
+#
+# `ci/nook`, not `debug/nook`: CI archives with `--cargo-profile ci`, and cargo
+# puts a named profile's artifacts in `target/<profile>`. `on-missing = "error"`
+# because the alternative to noticing here is that in-test compile.
+archive.include = [
+    { path = "ci/nook", relative-to = "target", on-missing = "error" },
+]
+
+# The SQLite leg. Its verdict is NOT the runner's exit code — the tests named in
+# scripts/sqlite-ci-allowlist.txt are expected to fail until their upstream card
+# lands — so scripts/check-sqlite-ci.sh reads the run and decides. This profile
+# is what gives it something to read.
+#
+# `./test.sh rust --sqlite` runs this same profile, which is what makes it give
+# the same verdict CI gives rather than a second, similar one.
+[profile.sqlite]
+# Every test must report. Stopping at the first failure would let the allow-list
+# describe only a prefix of the suite.
+fail-fast = false
+
+# JUnit, rather than the human output the guard used to scrape. It is nextest's
+# own machine-readable format, and it cannot be broken by a colour escape or a
+# line-wrap — both of which have broken a scraped log here before. Written to
+# <target-dir>/nextest/sqlite/junit.xml.
+[profile.sqlite.junit]
+path = "junit.xml"

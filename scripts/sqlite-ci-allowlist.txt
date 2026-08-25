@@ -1,9 +1,9 @@
-# Test binaries that do NOT yet pass on SQLite (MAIN-270, epic AC-6).
+# Tests that do NOT yet pass on SQLite (MAIN-270, epic AC-6).
 #
 # This file is the SQLite leg's remaining work, in one place. Everything NOT
 # named here is COVERED: it passes on SQLite today and a failure fails the
-# build. scripts/check-sqlite-ci.sh enforces both directions — a covered binary
-# that breaks reddens CI, and a binary listed here that starts PASSING also
+# build. scripts/check-sqlite-ci.sh enforces both directions — a covered test
+# that breaks reddens CI, and a test listed here that starts PASSING also
 # reddens CI, so the list can only ever shrink.
 #
 # WHEN YOUR CARD LANDS, DELETE ITS LINES. That deletion is what grows the leg's
@@ -14,6 +14,21 @@
 # owner is where failures go to be forgotten. Tests that are Postgres-only BY
 # DESIGN have no card and never get deleted, so they are not in this file at
 # all: see scripts/sqlite-ci-engine-specific.txt.
+#
+# ── ONE TEST PER LINE, NOT ONE BINARY (MAIN-656) ────────────────────────────
+#
+# A key is `<binary-id>::<test-name>` — nextest's own two-part identity,
+# joined. It used to be the test BINARY, because `cargo test` reports one
+# pass/fail line per binary and there was nothing finer to name; nextest
+# reports per test, so an exemption is now exactly as wide as the failure it
+# describes. That was not a formality. The five excluded binaries held 110
+# tests between them and only 18 of them failed, so 92 PASSING tests were
+# outside the leg because they shared a file with a failure — 78 of them in
+# nook-db's lib alone, excluded to excuse five `pg_*` tests. The conversion
+# cost nothing and bought back all 92.
+#
+# A leftover binary-keyed line does not quietly under-protect — it matches no
+# test in the run and the guard reports it as "no such test in this run".
 #
 # WHAT THE SELF-TEST ACTUALLY CHECKS, and the gap that leaves (MAIN-423). It
 # greps each entry for `MAIN-NN` — a SPELLING rule, not an ownership one. The
@@ -30,171 +45,96 @@
 # spent six days naming a third dead card while the conversion they described
 # had already landed and the tests were failing on something else entirely.
 # MAIN-478 re-measured them on 2026-08-11. A tag is a claim about a LIVE card
-# and about a cause; moving one without re-running the binary carries both
+# and about a cause; moving one without re-running the test carries both
 # claims forward unchecked, which is how a wrong reason survives three cards.
 #
 # So when you CLOSE a card, grep this file for its number before you do.
 # Nothing else will.
 #
-# Measured on two full runs of `cargo test --workspace --no-fail-fast` under
-# sqlite://, which produced identical failure sets — nothing here is flaky.
+# ── THE TALLY IS READ OFF THE GATE, NEVER COMPUTED ─────────────────────────
 #
-# 169 test binaries: 164 COVERED, 3 pending below, 2 deliberately Postgres-only —
-# the numbers check-sqlite-ci.sh itself reports, not arithmetic on this file.
-# (Read off the leg's own verdict by MAIN-548, which deleted
-# `dispatch_ownership`. It said 168/162/4/2 before, and arithmetic on that
-# line would have given 168/163/3/2 — wrong on both totals, because a
-# binary arrived while this branch was open and came in COVERED.)
-# (Read off the leg's own verdict by MAIN-549, which deleted `squash_restamp`
-# and moved `multi_instance` to the engine-specific file — so this is the first
-# line where the third number is not 1.
+# The leg prints its own sentence — `✓ SQLite leg green over N covered tests
+# (…)` — and that sentence is the number, because arithmetic on the previous
+# one has been wrong every single time it was tried. Six cards in a row
+# predicted a total by adding or subtracting their own deletions and six got it
+# wrong, because binaries kept arriving COVERED while their branches were open
+# and nothing said so. Run the gate and copy what it says.
 #
-# The line it replaces was `168/155/12/1`, and that one was WRONG well before
-# this card touched it: #447, #448, #450 and #451 landed without re-measuring,
-# so the header claimed 12 pending while the file below it held 6. Nothing
-# detects that — the guard reads the entries and never reads this line — which
-# is exactly why it says to run the gate and copy its sentence. Arithmetic on
-# the stale line would have given 10 pending; the real answer is 4.
+# The stack of historical tallies that used to live here counted BINARIES, a
+# unit this file no longer has, and went with the conversion. The lesson they
+# were kept for is the paragraph above.
 #
-# Measured four times on this branch, once per rebase (#443 → #444 → #448 →
-# #451), because a tally is a property of the tree it was read on and nothing
-# carries across a rebase that changes the entry set. The last two runs agreed
-# — #450 and #451 changed no binary's verdict — and it was still re-run, since
-# "the numbers did not move" is a result, not an assumption.)
-# (Read off the leg's own verdict by MAIN-545, which deleted ten lines. It said
-# 166/143/22 before, and adding ten to that would have given 166/153/12 — right
-# only about the pending count, because two more binaries arrived while this
-# branch was open and both came in COVERED. Deleting a line is the one number
-# you CAN predict; the other two have to be measured.)
-# (Re-read from a real run by MAIN-385, which added `build_loop_pin`. It said
-# 163/141/21 before, and this branch still carried the pre-#442 line — 153/132/20
-# — until the rebase took main's. Two binaries arrived and one of them is
-# covered, which is why arithmetic on the old line would have been wrong in both
-# directions.)
-# (Read off the leg's own verdict by MAIN-552, which added
-# `build_port_leases_placement`. It said 153/132/20 before, and arithmetic on
-# that line would have given 154/132/21 — wrong on both totals again, because
-# nine binaries had become COVERED since it was last measured and nothing said
-# so. Do not add one to what is here; run the gate and copy its sentence.)
-# (Re-read from a real run by MAIN-478, which re-diagnosed every pending line
-# and deleted none: nothing here passes yet. It said 147/126/20 before.)
-# (Re-read from a real run by MAIN-509, which added `dispatch_order`. It said
-# 141/121/19 before, and arithmetic on that line would have given 142/121/20 —
-# wrong on both totals, because five binaries had become COVERED since it was
-# last measured and nothing said so. Taken from the leg's own verdict on this
-# PR instead: `✓ SQLite leg green over 126 covered binaries (20 excluded
-# pending a card, 1 deliberately Postgres-only)`. Read it off the run; do not
-# add one to what is here.)
-# (Re-read from a real run by MAIN-472, which deleted `node_owner`; it said
-# 137/116/20 before that.)
-# (Re-read from a real run by MAIN-442, which deleted `task_workspace`. The line
-# below said 103/61/41 while the file held 21 entries: cards deleted their lines
-# and left this count behind, which is what a hand-maintained tally does. It is
-# a note, not a check — the guard's own output is the number that matters.)
-# (93/50/42 before MAIN-355. The suite gained binaries and MAIN-288's
-# conversions landed; MAIN-355 itself added no line and removed none — it made
-# `claim_lease` pass rather than excusing it.)
-# (44/45 of 90 when this list was written; the suite has gained binaries since,
-# and MAIN-293 then MAIN-294 deleted three lines between them.)
-# (AC-1's "~55 of 101" was an earlier estimate of mine that counted the 11
-# `Doc-tests` result lines as binaries; cargo prints 101 `test result:` lines
-# but only 90 of them are test binaries. Corrected here against the real runs.)
+# MAIN-656 measured this set on one full `cargo nextest run --profile sqlite`
+# under sqlite:// — 2462 tests, 25 failures. The FAILURE counts it found in the
+# three binaries below are 6, 3 and 1, exactly the numbers MAIN-545 and
+# MAIN-547 recorded per binary, which is the corroboration that this conversion
+# changed the KEY and not the facts. (The PASS counts are higher than those
+# cards' notes, because tests have been added to all three since.)
 
-# ── RE-DIAGNOSED 2026-08-11 (MAIN-478). None of these was what its line said ──
+# ── job_reaper (MAIN-564) ───────────────────────────────────────────────────
+# MEASURED (MAIN-545, 2026-08-12, after its three fixtures were converted):
+# `near "j": syntax error` — production `repo/jobs.rs:1367` is
+# `UPDATE loop_jobs j … FROM nodes n`, and its `RETURNING n.last_seen_at` names
+# the joined table SQLite cannot return from. Six of the binary's nine tests;
+# the other three are covered and stay covered.
+nook-control::job_reaper::a_claimed_or_running_job_on_a_dead_executor_is_reaped                 # UPDATE … FROM with a RETURNING on the joined table (MAIN-564)
+nook-control::job_reaper::a_job_whose_executor_was_seen_recently_is_untouched                   # same query (MAIN-564)
+nook-control::job_reaper::a_paused_job_is_never_reaped                                          # same query (MAIN-564)
+nook-control::job_reaper::a_reaped_job_can_be_re_run                                            # same query (MAIN-564)
+nook-control::job_reaper::a_run_orphaned_by_an_agent_restart_does_not_stay_running_forever      # same query (MAIN-564)
+nook-control::job_reaper::the_reap_is_atomic_and_loses_a_live_transition_cleanly                # same query (MAIN-564)
+
+# ── migrate_dev_tolerance (MAIN-566) ────────────────────────────────────────
+# MEASURED (MAIN-545, 2026-08-12, after the bytea literals were bound and the
+# two schema/psql tests gated; re-measured unchanged by MAIN-549, 2026-08-13):
+# `VersionMissing(38)` and an empty orphan list — the Postgres MIGRATOR driven
+# at a SQLite bed, and `orphan_versions` returning empty there BY DESIGN. It
+# needs the same FIX as squash_restamp, not the same ruling.
+nook-control::migrate_dev_tolerance::dev_boot_proceeds_past_an_orphan_row                       # Postgres MIGRATOR at a SQLite bed (MAIN-566)
+nook-control::migrate_dev_tolerance::dev_tolerance_does_not_mask_a_modified_migration           # Postgres MIGRATOR at a SQLite bed (MAIN-566)
+nook-control::migrate_dev_tolerance::production_stays_fatal_on_an_orphan_row                    # orphan_versions is empty on SQLite by design (MAIN-566)
+
+# ── reconcile_tombstones (MAIN-547) ─────────────────────────────────────────
+# MEASURED (MAIN-547, 2026-08-13): the production `path != ALL($2)` half is
+# FIXED and its three assertions pass; the one remaining failure is the fixture
+# `now() - ($8::bigint * interval '1 second')` at :246. That cause is
+# MAIN-545's class but MAIN-545 NG-2 disowns this binary, so the fixture half
+# has no card yet — this line waits on one.
+nook-control::reconcile_tombstones::retention_sweep_removes_only_expired_rows                   # Postgres interval arithmetic in the fixture (MAIN-547)
+
+# ── what the five causes were, and who answered them (MAIN-478, 2026-08-11) ──
 #
-# Eighteen lines here read "raw sqlx / bed.pool in the test itself (MAIN-268)"
-# and one read "with executor_selection (MAIN-268)". Every one of the nineteen
-# named a card that CLOSED on 2026-08-05, and seventeen of them named a defect
-# that no longer existed: the de-sqlx chain moved these tests off `bed.pool`
-# onto `bed.db()`, which changed the RECEIVER and left the SQL alone, so the
-# tests kept failing for causes their annotations never described. That is the
-# gap the header warns about, arriving a second time — MAIN-289 → MAIN-423 →
-# MAIN-268, three tags, one unexamined inheritance.
-#
-# Re-measured line by line on one `cargo test --workspace --no-fail-fast` under
-# sqlite://, main at eb07629. NOTHING passed, so nothing is deleted; every line
-# below now names the card that owns the failure the run actually produced.
-#
-# FIVE causes, five owners, and only ONE of them is the cause the old lines
-# claimed (MAIN-549 has since been answered — see its entry):
+# Nineteen lines here once read "raw sqlx / bed.pool in the test itself
+# (MAIN-268)". Every one named a card that had CLOSED, and seventeen named a
+# defect that no longer existed: the de-sqlx chain moved these tests off
+# `bed.pool` onto `bed.db()`, which changed the RECEIVER and left the SQL
+# alone, so they kept failing for causes their annotations never described.
+# Re-measured line by line, five causes came out, and four of them are now
+# closed:
 #
 #   MAIN-545  the TEST's own fixtures emit Postgres-only SQL — `interval '…'`,
 #             `now()`, `gen_random_uuid()`, `::` casts, `CREATE SCHEMA`, and
-#             `UPDATE <table> <alias>` without the `AS` SQLite requires (the
-#             class MAIN-472 already fixed once, in node_owner).
-#             LANDED 2026-08-12. Ten of its thirteen went green and their lines
-#             are deleted. The other three each turned out to have a SECOND
-#             cause behind the fixture, which only converting the fixture could
-#             reveal — re-measured and re-tagged in place below, and the one
-#             with no owner (`job_reaper`) got MAIN-564 filed for it. That is
-#             the header's warning working as intended for once: a tag moved
-#             only after the binary was re-run.
-#   MAIN-546  PRODUCTION: `eligible_loop_executors` reads `json_each`'s alias
-#             as a column.
-#             LANDED 2026-08-13, and it took SIX lines with it, not the two
-#             this block named. Four were the placement binaries that had
-#             accumulated against the one query — executor_selection,
-#             dispatch_order, workspace_build_loop_status (MAIN-495),
-#             build_port_leases_placement (MAIN-552), build_loop_pin
-#             (MAIN-385) — and the sixth was `loops_switch`, which MAIN-545
-#             re-measured onto this cause the day before. The card's own text
-#             named two because the other four arrived after it was written;
-#             the deletions are what the guard checks, not the count in an AC.
-#             A second defect in the SAME query had to be fixed to get there:
-#             the `loop_kinds` test bound its needle JSON-encoded and cast it
-#             to `jsonb`, and both halves are Postgres-shaped — SQLite reads
-#             `CAST('"spec"' AS jsonb)` with NUMERIC affinity as the integer 0.
-#             Fixing only the alias left 21 of executor_selection's 29 failing.
+#             `UPDATE <table> <alias>` without the `AS` SQLite requires.
+#             LANDED 2026-08-12; ten of thirteen went green. The other three
+#             each had a SECOND cause behind the fixture, which only converting
+#             the fixture could reveal — re-measured and re-tagged above, and
+#             the one with no owner (`job_reaper`) got MAIN-564 filed for it.
+#   MAIN-546  PRODUCTION: `eligible_loop_executors` read `json_each`'s alias as
+#             a column. LANDED 2026-08-13 and took SIX lines with it. A second
+#             defect in the same query had to go too: the `loop_kinds` test
+#             bound its needle JSON-encoded and cast it to `jsonb`, and SQLite
+#             reads `CAST('"spec"' AS jsonb)` with NUMERIC affinity as 0.
 #   MAIN-547  PRODUCTION: `!= ALL($n)` bound an EMPTY list matches nothing on
 #             SQLite where Postgres matches everything — and returns Ok, so an
-#             unmounted node's checkouts are silently left un-tombstoned.
+#             unmounted node's checkouts are silently left un-tombstoned. The
+#             production half landed; the fixture half is the line above.
 #   MAIN-548  the one line where the old reason was TRUE: still raw sqlx.
-#             LANDED 2026-08-13, and it needed only what its line said:
-#             the fixture INSERT moved to `Db::exec` + `params!`, which
-#             binds `resources` as JSON on either engine. Nothing behind
-#             the fixture — `owned_with_resources` was already
-#             engine-agnostic — so this is the one of the five that had
-#             no second cause waiting under it.
-#   MAIN-549  the mechanism under test does not exist on SQLite; needs a ruling
-#             before it needs code. RULED 2026-08-12, and the two binaries it
-#             was filed for got DIFFERENT answers: `multi_instance` moved to
-#             sqlite-ci-engine-specific.txt — SQLite is single-instance by
-#             design, so a cross-instance bus is a Postgres CAPABILITY and not a
-#             gap — and `squash_restamp` was FIXED, its failure being a
-#             hardcoded Postgres MIGRATOR rather than a missing mechanism, so
-#             its line is deleted rather than moved. Both are gone from below.
-#             A THIRD binary briefly wore this number and does NOT belong to
-#             that ruling. MAIN-545 re-measured `migrate_dev_tolerance` onto
-#             MAIN-549 on 2026-08-12, after this card's acceptance criteria were
-#             written and fixed at two binaries — so closing MAIN-549 would have
-#             left a pending line naming a done card, the exact state the header
-#             above warns about three times. It is re-tagged to **MAIN-566**,
-#             filed for it: its `VersionMissing(38)` half is the same
-#             hardcoded-migrator defect and takes the same fix as
-#             squash_restamp, while its empty orphan list is `orphan_versions`
-#             answering honestly on SQLite and needs a gate, not a ruling.
-#             Neither half needed the ruling this card was raised for, which is
-#             why it is a separate owner rather than a third bullet here.
-job_reaper                 # MEASURED (MAIN-545, 2026-08-12, after its three fixtures were converted): `near "j": syntax error` — production `repo/jobs.rs:1367` is `UPDATE loop_jobs j … FROM nodes n`, and its `RETURNING n.last_seen_at` names the joined table SQLite cannot return from. 3 passed, 6 failed (MAIN-564)
-migrate_dev_tolerance      # MEASURED (MAIN-545, 2026-08-12, after the bytea literals were bound and the two schema/psql tests gated; re-measured unchanged by MAIN-549, 2026-08-13): `VersionMissing(38)` and an empty orphan list — the Postgres MIGRATOR driven at a SQLite bed, and `orphan_versions` returning empty there BY DESIGN. It needs the same FIX as squash_restamp, not the same ruling. 3 passed, 3 failed (MAIN-566)
-reconcile_tombstones       # MEASURED (MAIN-547, 2026-08-13): the production `path != ALL($2)` half is FIXED and its three assertions pass; the one remaining failure is the fixture `now() - ($8::bigint * interval '1 second')` at :246. That cause is MAIN-545's class but MAIN-545 NG-2 disowns this binary, so the fixture half has no card yet — this line waits on one (MAIN-547)
-
-# ── the MAIN-423 residue, and what MEASURING it found (MAIN-472) ──
-#
-# MAIN-423 closed as a tracker on 2026-08-08 and its one surviving line —
-# node_owner — moved here. It was measured rather than inherited, and the reason
-# it had carried since MAIN-289 was wrong: nothing on that path emits
-# Postgres-only SQL from production. Its single remaining failure was
-# `UPDATE nodes n SET …` in the TEST itself, which SQLite refuses for want of
-# the `AS` that Postgres treats as optional. Fixed there, so the line is DELETED
-# and no entry names MAIN-423 any more.
-
-# ── still production Postgres SQL, re-tagged by MAIN-293 ──
-#
-# These carried a MAIN-293 tag because that card's evidence was gathered with a
-# pattern matching BOTH `NOT NULL constraint failed: users.person_id` and
-# `no such function: gen_random_uuid` — two different defects. MAIN-293 fixed
-# the first (the missing column default) and every one of those failures is
-# gone; what remains here is the second, which is production emitting Postgres
-# SQL and belongs to the dialect sweep. `local_accounts` passed outright and its
-# line is deleted.
+#             LANDED 2026-08-13, and it needed only what its line said.
+#   MAIN-549  the mechanism under test does not exist on SQLite; needed a
+#             ruling before it needed code. RULED 2026-08-12: `multi_instance`
+#             moved to sqlite-ci-engine-specific.txt (SQLite is single-instance
+#             by design, so a cross-instance bus is a Postgres CAPABILITY and
+#             not a gap) and `squash_restamp` was FIXED. A third binary briefly
+#             wore this number and did not belong to that ruling —
+#             `migrate_dev_tolerance`, re-tagged to MAIN-566 above rather than
+#             left naming a done card.
