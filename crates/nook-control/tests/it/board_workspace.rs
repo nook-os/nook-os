@@ -1,5 +1,7 @@
-//! A board belongs to a workspace (MAIN-637): adoption, auto-creation,
-//! backfill and the two-way consistency rule.
+//! A board belongs to a workspace (MAIN-637): adoption, auto-creation and the
+//! two-way consistency rule. The one-shot boot backfill that caught up
+//! pre-existing workspaces was retired in MAIN-640, having done its job;
+//! `board_backfill_removed.rs` is what keeps it retired.
 //!
 //! Driven through the real route handlers, because every rule here is a
 //! refusal and a refusal that lives only in the repository is one an endpoint
@@ -12,7 +14,6 @@ use axum::extract::{Path, State};
 use axum::Json;
 use nook_control::auth::{AuthCtx, Principal};
 use nook_control::routes::{boards, workspaces};
-use nook_control::services;
 use nook_db::{params, Db, DbPool};
 use nook_testkit::TestBed;
 use nook_types::*;
@@ -266,99 +267,6 @@ async fn a_board_that_cannot_be_made_takes_the_workspace_with_it() {
     assert!(
         left.is_empty(),
         "the workspace must have been rolled back, found {left:?}"
-    );
-
-    bed.teardown().await;
-}
-
-/// AC-4. The backfill gives a boardless workspace a board, and a second run
-/// writes nothing.
-#[tokio::test]
-async fn the_backfill_is_idempotent() {
-    let Some(mut bed) = TestBed::new().await else {
-        return;
-    };
-    let state = bed.app_state().await;
-    let tenant = bed.tenant("backfill").await;
-    let ws = bed.workspace(tenant).await;
-
-    let created = services::boards::backfill(&state).await.expect("first run");
-    assert!(
-        created >= 1,
-        "the boardless workspace should have got a board"
-    );
-
-    let board = state
-        .tasks
-        .board_of_workspace(tenant, ws)
-        .await
-        .expect("query")
-        .expect("a board now exists");
-    assert!(board.key.is_some(), "the backfill derives a key");
-    assert_eq!(
-        state
-            .tasks
-            .board_columns(board.id)
-            .await
-            .expect("cols")
-            .len(),
-        5,
-        "the same five typed columns POST /boards creates"
-    );
-
-    let again = services::boards::backfill(&state)
-        .await
-        .expect("second run");
-    assert_eq!(again, 0, "a second boot performs no writes");
-    assert_eq!(
-        state
-            .tasks
-            .board_of_workspace(tenant, ws)
-            .await
-            .expect("query")
-            .map(|b| b.id),
-        Some(board.id),
-        "and certainly does not replace the board it made"
-    );
-
-    bed.teardown().await;
-}
-
-/// AC-5. A tenant holding ANY board with no workspace is skipped whole — the
-/// ordering rule that stops a second board being minted beside prod's `MAIN`
-/// while its adoption is still somebody's decision.
-#[tokio::test]
-async fn an_unattached_board_blocks_its_whole_tenant() {
-    let Some(mut bed) = TestBed::new().await else {
-        return;
-    };
-    let state = bed.app_state().await;
-    let db = bed.db();
-    let blocked = bed.tenant("blocked").await;
-    let clear = bed.tenant("clear").await;
-    let blocked_ws = bed.workspace(blocked).await;
-    let clear_ws = bed.workspace(clear).await;
-    raw_board(&db, blocked, "MAIN", None).await;
-
-    services::boards::backfill(&state).await.expect("backfill");
-
-    assert!(
-        state
-            .tasks
-            .board_of_workspace(blocked, blocked_ws)
-            .await
-            .expect("query")
-            .is_none(),
-        "the blocked tenant's workspace must still have no board"
-    );
-    assert!(
-        state
-            .tasks
-            .board_of_workspace(clear, clear_ws)
-            .await
-            .expect("query")
-            .is_some(),
-        "one tenant's unadopted board must not stall every other tenant"
     );
 
     bed.teardown().await;

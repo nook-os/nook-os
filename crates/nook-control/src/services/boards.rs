@@ -1,11 +1,10 @@
 //! A board belongs to a workspace (MAIN-637).
 //!
-//! Three callers needed the same three things — derive a free key, make a board
+//! Two callers need the same three things — derive a free key, make a board
 //! with the five typed columns, and hold "a workspace has at most one board" —
 //! so they live here rather than in `routes/boards.rs` where the create handler
-//! grew them. `POST /boards`, `POST /workspaces` and the boot backfill all go
-//! through this module, which is what makes a backfilled board indistinguishable
-//! from one a person clicked into being.
+//! grew them. `POST /boards` and `POST /workspaces` both go through this module,
+//! which is what makes the two indistinguishable.
 
 use nook_types::*;
 
@@ -197,81 +196,6 @@ async fn describe_workspace(state: &AppState, tenant: TenantId, id: WorkspaceId)
         Ok(Some(w)) => format!("'{}' ({})", w.name, id.0),
         _ => id.0.to_string(),
     }
-}
-
-/// Give every boardless workspace a board, in every tenant (AC-4).
-///
-/// Boot-time and idempotent: with nothing to do it performs two reads and no
-/// writes. Returns how many boards it made, which is what the caller logs and
-/// what the "second boot writes nothing" test asserts on.
-///
-/// A tenant holding ANY board that belongs to no workspace is SKIPPED whole
-/// (AC-5). That board may well be the one whose cards the workspace's people
-/// actually use — prod's `MAIN` is exactly this — and minting a second board
-/// beside it would split the workspace's work across two boards that both look
-/// right. Adoption is an operator's call (`PATCH /boards/{id}`, NG-7); until it
-/// is made, doing nothing is the only safe move.
-pub async fn backfill(state: &AppState) -> ApiResult<usize> {
-    let boards = state.tasks.boards_across_tenants().await?;
-    let workspaces = state.workspaces.workspaces_across_tenants().await?;
-
-    let mut blocked: std::collections::HashMap<TenantId, &Board> = Default::default();
-    let mut served: std::collections::HashSet<WorkspaceId> = Default::default();
-    for b in &boards {
-        match b.workspace_id {
-            Some(w) => {
-                served.insert(w);
-            }
-            None => {
-                blocked.entry(b.tenant_id).or_insert(b);
-            }
-        }
-    }
-
-    for (tenant, offender) in &blocked {
-        tracing::warn!(
-            tenant = %tenant.0,
-            board = %offender.name,
-            board_id = %offender.id.0,
-            board_key = offender.key.as_deref().unwrap_or("(none)"),
-            "board backfill SKIPPED for this tenant: it has a board that belongs \
-             to no workspace, and creating a second board beside one whose cards \
-             may already be the workspace's work would split them. Attach it with \
-             PATCH /api/v1/boards/{{id}} {{\"workspace_id\": …}} and restart \
-             (MAIN-637 AC-5)."
-        );
-    }
-
-    let mut created = 0usize;
-    for w in workspaces {
-        if served.contains(&w.id) || blocked.contains_key(&w.tenant_id) {
-            continue;
-        }
-
-        // Re-checked per workspace rather than trusted from the snapshot: two
-        // control-plane replicas boot at once often enough, and this is the
-        // read that stops both of them minting a board for the same workspace.
-        if state
-            .tasks
-            .board_of_workspace(w.tenant_id, w.id)
-            .await?
-            .is_some()
-        {
-            continue;
-        }
-
-        let key = unique_key(state, w.tenant_id, &w.name).await?;
-        let (board, _) = create_with_columns(state, w.tenant_id, Some(w.id), &w.name, &key).await?;
-        created += 1;
-        tracing::info!(
-            tenant = %w.tenant_id.0,
-            workspace = %w.name,
-            board = %board.id.0,
-            key = %key,
-            "created the board this workspace was missing (MAIN-637 AC-4)"
-        );
-    }
-    Ok(created)
 }
 
 #[cfg(test)]

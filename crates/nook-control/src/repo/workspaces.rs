@@ -121,11 +121,6 @@ pub trait WorkspaceRepository: Send + Sync {
 
     async fn get(&self, tenant: TenantId, id: WorkspaceId) -> ApiResult<Option<Workspace>>;
 
-    /// Every workspace in every tenant (MAIN-637 AC-4). Cross-tenant and
-    /// boot-only — the board backfill is the sole caller, and it has no tenant
-    /// to scope to.
-    async fn workspaces_across_tenants(&self) -> ApiResult<Vec<Workspace>>;
-
     /// Set or clear a workspace's declared session spec (MAIN-315). `None`
     /// clears it, returning the workspace to unmanaged.
     async fn set_session_spec(
@@ -923,16 +918,6 @@ impl WorkspaceRepository for DbWorkspaceRepository {
             .query_opt(
                 "SELECT * FROM workspaces WHERE tenant_id = $1 AND id = $2",
                 params![tenant, id],
-            )
-            .await?)
-    }
-
-    async fn workspaces_across_tenants(&self) -> ApiResult<Vec<Workspace>> {
-        Ok(self
-            .db
-            .query_all(
-                "SELECT * FROM workspaces ORDER BY tenant_id, created_at",
-                params![],
             )
             .await?)
     }
@@ -2367,13 +2352,6 @@ impl WorkspaceRepository for FakeWorkspaceRepository {
             .iter()
             .find(|w| w.tenant_id == tenant && w.id == id)
             .cloned())
-    }
-
-    async fn workspaces_across_tenants(&self) -> ApiResult<Vec<Workspace>> {
-        let s = self.inner.lock().unwrap();
-        let mut out = s.workspaces.clone();
-        out.sort_by_key(|w| (w.tenant_id.0, w.created_at));
-        Ok(out)
     }
 
     async fn create(

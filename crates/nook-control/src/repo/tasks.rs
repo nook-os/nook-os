@@ -251,12 +251,6 @@ pub trait TaskRepository: Send + Sync {
     /// because the delete confirmation needs the number and not the rows.
     async fn board_task_count(&self, board: BoardId) -> ApiResult<i64>;
 
-    /// Every board in every tenant (MAIN-637 AC-4/AC-5). Cross-tenant and
-    /// boot-only, which is why it takes no tenant: the backfill needs both
-    /// which workspaces are already served and which boards are attached to
-    /// none, and one unscoped read answers both.
-    async fn boards_across_tenants(&self) -> ApiResult<Vec<Board>>;
-
     /// The `KanbanProvider` name that owns a task, via its board.
     async fn board_provider_for_task(
         &self,
@@ -1060,16 +1054,6 @@ impl TaskRepository for DbTaskRepository {
             .query_scalar(
                 "SELECT count(*) FROM tasks WHERE board_id = $1",
                 params![board],
-            )
-            .await?)
-    }
-
-    async fn boards_across_tenants(&self) -> ApiResult<Vec<Board>> {
-        Ok(self
-            .db
-            .query_all(
-                "SELECT * FROM boards ORDER BY tenant_id, created_at",
-                params![],
             )
             .await?)
     }
@@ -3353,13 +3337,6 @@ impl TaskRepository for FakeTaskRepository {
     async fn board_task_count(&self, board: BoardId) -> ApiResult<i64> {
         let st = self.inner.lock().unwrap();
         Ok(st.tasks.iter().filter(|t| t.board_id == board).count() as i64)
-    }
-
-    async fn boards_across_tenants(&self) -> ApiResult<Vec<Board>> {
-        let st = self.inner.lock().unwrap();
-        let mut all = st.boards.clone();
-        all.sort_by_key(|b| (b.tenant_id.0, b.created_at));
-        Ok(all)
     }
 
     async fn board_provider_for_task(
