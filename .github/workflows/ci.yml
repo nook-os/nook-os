@@ -81,6 +81,8 @@ jobs:
       # archive is not the thing under test.
       RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
     steps:
+      - name: SCRATCH — force the build job to fail (MAIN-656 AC-3 evidence)
+        run: exit 1
       - uses: actions/checkout@v4
       # LLD (MAIN-578). `crates/nook-control/tests` holds 147 files, and every
       # `.rs` directly under `tests/` is its OWN binary — so a run links 147
