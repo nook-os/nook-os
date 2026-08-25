@@ -217,6 +217,60 @@ impl Client {
         Ok(resp.bytes().await?.to_vec())
     }
 
+    /// The same client, acting in a different tenant of the caller's.
+    ///
+    /// A copy rather than a mutation: `Client` is handed around by value, and a
+    /// command that re-scoped the one it was given would re-scope every later
+    /// call in the same process.
+    pub fn in_tenant(&self, tenant: &str) -> Self {
+        Client {
+            tenant: Some(tenant.to_string()),
+            ..self.clone()
+        }
+    }
+
+    /// Stream a body straight to a file the caller has already opened.
+    ///
+    /// Not [`Self::get_bytes`]: a tenant export is unbounded — every attachment
+    /// the tenant ever uploaded is in it — so holding it in memory to write it
+    /// out would undo the whole point of the endpoint streaming (MAIN-659).
+    /// Returns how many bytes were written.
+    pub async fn stream_to(&self, path: &str, out: &mut std::fs::File) -> Result<u64> {
+        use std::io::Write;
+
+        let url = format!("{}{path}", self.base);
+        let mut req = self.http.get(&url).bearer_auth(&self.token);
+        if let Some(t) = &self.tenant {
+            req = req.header("x-nook-tenant", t);
+        }
+        let mut resp = req
+            .send()
+            .await
+            .with_context(|| format!("could not reach {}", self.base))?;
+        let status = resp.status();
+        if !status.is_success() {
+            // The server's own sentence, when it sent one — "exporting a tenant
+            // needs the owner role" is the only account of a 403 that helps.
+            let text = resp.text().await.unwrap_or_default();
+            let detail = serde_json::from_str::<Value>(&text)
+                .ok()
+                .and_then(|v| v["error"].as_str().map(str::to_string))
+                .unwrap_or_else(|| text.trim().to_string());
+            bail!("{} {}: {}", status.as_u16(), path, detail);
+        }
+        let mut written = 0u64;
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .context("the download ended early — the archive is incomplete")?
+        {
+            out.write_all(&chunk)?;
+            written += chunk.len() as u64;
+        }
+        out.flush()?;
+        Ok(written)
+    }
+
     /// GET returning the RAW body, for endpoints whose answer is not JSON.
     ///
     /// The git-ssh shim's key material is one of those: a PEM block is not a
@@ -5171,6 +5225,165 @@ pub async fn epics_run(epic: &str, seed: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// `nook tenants export [--out …] [--tenant …]` (MAIN-659) — a tenant's data,
+/// leaving.
+///
+/// Streamed to the file rather than assembled in memory: the archive carries
+/// every attachment the tenant ever uploaded, so its size is a property of the
+/// tenant and not something this command gets to assume.
+///
+/// The manifest is read back out of the finished file to print the summary.
+/// That is not a detour — it is what proves the thing on disk is a readable
+/// archive, which is the only claim worth making after a download.
+pub async fn tenants_export(out: Option<&str>, tenant: Option<&str>) -> Result<()> {
+    let client = Client::from_config()?;
+    let (id, slug, name) = resolve_tenant(&client, tenant).await?;
+    let client = client.in_tenant(&id);
+
+    let path = match out {
+        Some(p) => std::path::PathBuf::from(p),
+        None => std::path::PathBuf::from(format!(
+            "{slug}-{}.tar.gz",
+            chrono::Utc::now().format("%Y%m%d")
+        )),
+    };
+
+    let mut file = create_private(&path)?;
+
+    let written = match client
+        .stream_to(&format!("/api/v1/tenants/{id}/export"), &mut file)
+        .await
+    {
+        Ok(n) => n,
+        Err(e) => {
+            // A half-written archive is worse than none: it would make the
+            // next attempt refuse to overwrite a file that is garbage.
+            drop(file);
+            let _ = std::fs::remove_file(&path);
+            return Err(e);
+        }
+    };
+    drop(file);
+
+    let manifest = read_manifest(&path)?;
+    let display = path.display().to_string();
+    eprintln!(
+        "Exported {} ({})",
+        crate::style::bold(&name),
+        crate::style::dim(&slug)
+    );
+    if let Some(tables) = manifest["tables"].as_object() {
+        for (table, count) in tables {
+            eprintln!("  {table:<32} {}", count.as_i64().unwrap_or_default());
+        }
+    }
+    eprintln!(
+        "  {:<32} {} ({})",
+        "content blobs",
+        manifest["blobs"]["count"].as_u64().unwrap_or_default(),
+        crate::loop_job::human_bytes(manifest["blobs"]["bytes"].as_u64().unwrap_or_default()),
+    );
+    // The mode is only claimed where it was actually set.
+    let mode = if cfg!(unix) { ", mode 0600" } else { "" };
+    eprintln!(
+        "  {} {} ({}{mode})",
+        crate::style::ok_c("→"),
+        display,
+        crate::loop_job::human_bytes(written)
+    );
+    eprintln!(
+        "  {}",
+        crate::style::dim(
+            "Secret values were omitted: git credentials, workspace secrets, vault items \
+             and channel tokens are absent from this archive."
+        )
+    );
+    Ok(())
+}
+
+/// Which tenant to export: the one named, or the session's own.
+///
+/// Returns `(id, slug, name)`. The id is what the path needs and the slug is
+/// what the default filename needs, so both are resolved once here rather than
+/// guessed later.
+async fn resolve_tenant(client: &Client, want: Option<&str>) -> Result<(String, String, String)> {
+    let list = client.get("/api/v1/tenants").await?;
+    let rows = list.as_array().cloned().unwrap_or_default();
+    let Some(t) = pick_tenant(&rows, want) else {
+        match want {
+            Some(w) => bail!("you are not a member of a tenant called '{w}'"),
+            None => bail!("this credential belongs to no tenant"),
+        }
+    };
+    Ok((
+        t["id"].as_str().unwrap_or_default().to_string(),
+        t["slug"].as_str().unwrap_or_default().to_string(),
+        t["name"].as_str().unwrap_or_default().to_string(),
+    ))
+}
+
+/// Create the archive's file, owner-only, refusing to overwrite.
+///
+/// `create_new` and the mode are both load-bearing. Overwriting would destroy
+/// an earlier export on a re-run — the shape of mistake a `--out` typo makes —
+/// and the mode is set at CREATION rather than after, because a create-then-
+/// chmod leaves a window in which a whole tenant is world-readable.
+fn create_private(path: &std::path::Path) -> Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path).with_context(|| {
+        format!(
+            "cannot create {} — it already exists, or its directory does not",
+            path.display()
+        )
+    })
+}
+
+/// Which membership `--tenant` names, or the session's own.
+///
+/// Slug or id, matched the way the control plane's own tenant header matches
+/// them — a person types the slug and a script holds the id, and answering
+/// only one of those would make `--tenant` inconsistent with `NOOK_TENANT_ID`.
+fn pick_tenant<'a>(rows: &'a [Value], want: Option<&str>) -> Option<&'a Value> {
+    match want {
+        Some(w) => rows.iter().find(|t| {
+            t["slug"]
+                .as_str()
+                .is_some_and(|s| s.eq_ignore_ascii_case(w))
+                || t["id"].as_str().is_some_and(|s| s.eq_ignore_ascii_case(w))
+        }),
+        // `current` is the tenant this session is scoped to, which is the one
+        // every other command in this CLI acts in.
+        None => rows
+            .iter()
+            .find(|t| t["current"].as_bool().unwrap_or(false))
+            .or_else(|| rows.first()),
+    }
+}
+
+/// `manifest.json`, read out of a finished archive.
+///
+/// It is the archive's first member, so this stops at the first entry rather
+/// than walking a file that may be gigabytes long.
+fn read_manifest(path: &std::path::Path) -> Result<Value> {
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("cannot read back {}", path.display()))?;
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    let mut entries = archive
+        .entries()
+        .context("the downloaded file is not a readable .tar.gz")?;
+    let entry = entries
+        .next()
+        .context("the archive is empty — the export produced nothing")?
+        .context("the archive's first entry is unreadable")?;
+    serde_json::from_reader(entry).context("the archive's manifest.json is not readable JSON")
+}
+
 /// `nook reviews verdict <verdict> [--body …]` (MAIN-455) — a review run
 /// reports its conclusion. Job-scoped: reads `NOOK_JOB_ID` from the run's own
 /// environment, so an agent cannot verdict a job it is not.
@@ -5692,5 +5905,75 @@ mod sandbox_column {
         let ready = json!({"state": "ready", "image": "img (unprivileged)"});
         assert_eq!(sandbox_cell(Some(&ready)), "yes (img (unprivileged))");
         assert_eq!(sandbox_cell(None), "-");
+    }
+}
+
+#[cfg(test)]
+mod tenant_export_tests {
+    use super::pick_tenant;
+    use serde_json::json;
+
+    fn memberships() -> Vec<serde_json::Value> {
+        vec![
+            json!({"id": "11111111-1111-1111-1111-111111111111", "slug": "acme", "name": "Acme", "current": false}),
+            json!({"id": "22222222-2222-2222-2222-222222222222", "slug": "Hein", "name": "Hein", "current": true}),
+        ]
+    }
+
+    /// With no `--tenant`, the export follows the session, exactly as every
+    /// other command in this CLI does.
+    #[test]
+    fn the_default_is_the_session_s_tenant() {
+        let rows = memberships();
+        assert_eq!(pick_tenant(&rows, None).unwrap()["slug"], "Hein");
+    }
+
+    /// A slug or an id, either case — a person types one and a script holds
+    /// the other.
+    #[test]
+    fn a_named_tenant_is_matched_by_slug_or_id() {
+        let rows = memberships();
+        assert_eq!(pick_tenant(&rows, Some("acme")).unwrap()["name"], "Acme");
+        assert_eq!(pick_tenant(&rows, Some("ACME")).unwrap()["name"], "Acme");
+        assert_eq!(pick_tenant(&rows, Some("hein")).unwrap()["name"], "Hein");
+        assert_eq!(
+            pick_tenant(&rows, Some("11111111-1111-1111-1111-111111111111")).unwrap()["name"],
+            "Acme"
+        );
+    }
+
+    /// A tenant you are not a member of is not found here rather than refused
+    /// by the server, so the message names what you asked for.
+    #[test]
+    fn a_tenant_you_do_not_belong_to_is_not_picked() {
+        assert!(pick_tenant(&memberships(), Some("someone-else")).is_none());
+        assert!(pick_tenant(&[], None).is_none());
+    }
+
+    /// AC-8: the archive is owner-only from the moment it exists, and a second
+    /// export to the same path is refused rather than destroying the first.
+    #[test]
+    fn the_archive_is_private_and_never_overwritten() {
+        use super::create_private;
+
+        let dir =
+            std::env::temp_dir().join(format!("nook-export-cli-{}", uuid::Uuid::now_v7().simple()));
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let path = dir.join("t.tar.gz");
+
+        create_private(&path).expect("the first write creates the file");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).expect("stat").permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "an export is not world-readable");
+        }
+        let again = create_private(&path);
+        assert!(
+            again.is_err(),
+            "a second export to the same path must refuse, not overwrite"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -37,6 +37,7 @@ pub mod task_query;
 pub mod task_reports;
 pub mod taskwork;
 pub mod tenant_ca;
+pub mod tenant_export;
 pub mod tenants;
 pub mod themes;
 pub mod tokens;
@@ -126,6 +127,7 @@ pub fn build_router(state: AppState) -> Router {
             patch(tenants::change_member_role).delete(tenants::remove_member),
         )
         .route("/tenants/{id}/leave", post(tenants::leave_tenant))
+        .route("/tenants/{id}/export", get(tenant_export::export))
         .route(
             "/tenants/{id}/invites",
             get(invites::list).post(invites::create),

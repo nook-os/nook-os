@@ -3316,6 +3316,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tenants/{id}/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The whole tenant, as a gzip tarball.
+         * @description Owner-only (AC-2). Not admin: an export is every card, every workspace and
+         *     every uploaded file in one file that leaves the deployment, which is a
+         *     decision about the tenant itself rather than about the work inside it. A
+         *     node token is refused outright — a machine has no reason to pull one.
+         */
+        get: operations["export_tenant"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tenants/{id}/invites": {
         parameters: {
             query?: never;
@@ -16425,6 +16448,41 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["TenantMembership"][];
                 };
+            };
+        };
+    };
+    export_tenant: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description a gzip tarball of the tenant */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/gzip": unknown;
+                };
+            };
+            /** @description the caller does not own this tenant */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

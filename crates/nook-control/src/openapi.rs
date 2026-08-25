@@ -31,6 +31,7 @@ use utoipa::OpenApi;
         crate::routes::tenants::change_member_role,
         crate::routes::tenants::remove_member,
         crate::routes::tenants::leave_tenant,
+        crate::routes::tenant_export::export,
         crate::routes::invites::create,
         crate::routes::invites::list,
         crate::routes::invites::revoke,

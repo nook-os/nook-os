@@ -28,5 +28,6 @@ pub mod secret_items;
 pub mod sessions;
 pub mod task_reports;
 pub mod tasks;
+pub mod tenant_export;
 pub mod user_content;
 pub mod workspaces;

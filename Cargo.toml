@@ -73,6 +73,12 @@ aws-sdk-sqs = { version = "1", default-features = false, features = ["rustls", "
 aws-credential-types = "1"
 aws-smithy-types = "1"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
+# The tenant export archive (MAIN-659). `tar` for the member headers — the
+# checksum and the ustar layout are the part worth not hand-rolling — and
+# `flate2` for the gzip stream, which the lockfile already resolved
+# transitively.
+tar = "0.4"
+flate2 = "1"
 clap = { version = "4", features = ["derive"] }
 portable-pty = "0.9"
 sysinfo = "0.33"

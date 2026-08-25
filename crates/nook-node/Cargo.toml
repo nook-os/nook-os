@@ -41,6 +41,11 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 toml = { workspace = true }
 walkdir = { workspace = true }
+# `nook tenants export` reads the manifest back out of the archive it just
+# wrote, which is also what proves the file it produced is a readable one
+# (MAIN-659).
+tar = { workspace = true }
+flate2 = { workspace = true }
 
 [dev-dependencies]
 # The generated Traefik tunnel rule is a regular expression, and the assertion
