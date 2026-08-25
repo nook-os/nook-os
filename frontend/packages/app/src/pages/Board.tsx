@@ -56,6 +56,7 @@ import { fetchTaskJobs, taskJobsKey } from "../loop";
 import { recall, remember } from "../lastPlace";
 import { priorityMeta, priorityRank, previewText, PRIORITIES } from "../taskmeta";
 import { WorkspacePicker } from "../WorkspacePicker";
+import { useWorkspaceContext } from "../context";
 import { useWorkspace, useWorkspaceNames, useWorkspaces } from "../workspaces";
 
 /** Exported for its own test: what a card shows at a glance is the whole
@@ -1133,6 +1134,30 @@ export function showsUnderArchive(
   return showArchived || !archivedAt;
 }
 
+/** The board this page shows: the one belonging to the workspace the top bar
+ *  has selected (MAIN-638).
+ *
+ *  Never `boards[0]`. With one board per tenant that was merely arbitrary;
+ *  since a board belongs to a workspace (MAIN-637) it is wrong — whichever row
+ *  the list happened to return first is a repo nobody asked about, and the
+ *  cards on screen then belong to something other than the context every other
+ *  page is scoped to.
+ *
+ *  Distinct from `newspec.ts`'s `boardForWorkspace`, and the difference is the
+ *  point: that one falls back to the first board so filing a card never
+ *  refuses, which is the exact behaviour this page must not have. Nothing to
+ *  show is `undefined` — one selector decides (NG-1), so with no workspace
+ *  chosen, or a workspace whose board is missing, the page says so rather than
+ *  guessing. A detached board (`workspace_id` null) is likewise unreachable
+ *  here; adopting it into a workspace is what puts it back on screen. */
+export function selectedBoard<T extends { workspace_id?: string | null }>(
+  boards: T[] | undefined,
+  workspaceId: string | null | undefined,
+): T | undefined {
+  if (!workspaceId) return undefined;
+  return (boards ?? []).find((b) => b.workspace_id === workspaceId);
+}
+
 export function BoardPage() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -1194,7 +1219,20 @@ export function BoardPage() {
     queryKey: ["boards"],
     queryFn: async () => (await api.GET("/api/v1/boards")).data ?? [],
   });
-  const board = (boards ?? [])[0];
+  // One read of the whole list, narrowed here (MAIN-638). `GET /boards` takes
+  // no workspace filter and adding one would be a backend change this card
+  // rules out (NG-2) — a tenant's boards are a handful of rows, and the list is
+  // already fetched for the switch to be instant.
+  const selectedWorkspaceId = useWorkspaceContext((s) => s.selectedWorkspaceId);
+  const board = selectedBoard(boards, selectedWorkspaceId);
+  const selectedWorkspace = useWorkspace(selectedWorkspaceId);
+  // Switching workspace switches the board, and the bulk selection holds ids
+  // belonging to the board being left — the same "must never outlive the rows
+  // it points at" rule the filter effect above enforces, for the other way the
+  // visible row set changes (MAIN-638 AC-2).
+  React.useEffect(() => {
+    clearSelection();
+  }, [board?.id, clearSelection]);
 
   const { data: detail } = useQuery({
     queryKey: ["boards", board?.id],
@@ -1428,6 +1466,19 @@ export function BoardPage() {
   // board (MAIN-99).
   const [showAutomation, setShowAutomation] = useState(false);
 
+  // Nothing chosen in the top bar is a different sentence from "this repo has
+  // no board", and offering `create one` here would have to invent a workspace
+  // to create it for — the unscoped board this card exists to stop making.
+  if (!selectedWorkspaceId) {
+    return (
+      <div className="nook-grid" style={{ gridTemplateColumns: "1fr" }}>
+        <Panel title="Board">
+          <Empty>Pick a workspace in the top bar to see its board.</Empty>
+        </Panel>
+      </div>
+    );
+  }
+
   if (!board) {
     return (
       <div className="nook-grid" style={{ gridTemplateColumns: "1fr" }}>
@@ -1437,7 +1488,16 @@ export function BoardPage() {
             <button
               className="btn"
               onClick={async () => {
-                await api.POST("/api/v1/boards", { body: { name: "Main" } });
+                await api.POST("/api/v1/boards", {
+                  // Named after its workspace and created FOR it (AC-4), the
+                  // same shape `POST /workspaces` uses — so the key the server
+                  // derives says which repo the board is, and the row is not
+                  // another unscoped board this page could never find again.
+                  body: {
+                    name: selectedWorkspace?.name ?? "Main",
+                    workspace_id: selectedWorkspaceId,
+                  },
+                });
                 queryClient.invalidateQueries({ queryKey: ["boards"] });
               }}
             >
@@ -1744,7 +1804,20 @@ export function BoardPage() {
   return (
     <div className="nook-grid" style={{ gridTemplateColumns: "1fr" }}>
       <Panel
-        title={`Board · ${detail.board.name}`}
+        // The KEY, not only the name (MAIN-638 AC-5). Two repos routinely name
+        // their board the same thing; the prefix in `MAIN-42` is what says
+        // which board is on screen, and it is the only part of it a PR body or
+        // a branch name ever quotes.
+        title={
+          <>
+            Board · {detail.board.name}{" "}
+            {detail.board.key && (
+              <Pill title={`cards on this board are ${detail.board.key}-N`}>
+                {detail.board.key}
+              </Pill>
+            )}
+          </>
+        }
         actions={
           <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
             <button className="btn small" onClick={addColumn} title="add column">
