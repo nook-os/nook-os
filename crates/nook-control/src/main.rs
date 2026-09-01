@@ -464,31 +464,63 @@ async fn wait_for_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
 #[cfg(test)]
 mod tests {
     use super::{bind_doors, wait_for_shutdown};
+    use std::io::{BufRead, Read, Write};
     use std::time::Duration;
 
-    /// Serialises allocate-then-bind for every test here that needs a port.
-    ///
-    /// `free_port` cannot hold its reservation: the code under test has to bind
-    /// the port itself, so there is always a window between "this was free" and
-    /// "we bound it". Sibling tests in this binary bind `:0` for their squatters
-    /// and land in that window — which is how `both_doors_come_back_together`
-    /// failed with `Address already in use` on the postgres leg while passing on
-    /// the sqlite leg at the SAME commit. Nothing about it was engine-dependent;
-    /// it was two tests racing for one port. Holding this across both steps
-    /// closes the window inside the binary, which is where the collision was.
-    static PORT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    /// How many times a port-using test re-rolls before it calls the failure
+    /// real. Losing the allocate-then-bind race is a chance event; losing it
+    /// this many times running is a bug, not bad luck.
+    const PORT_ATTEMPTS: usize = 20;
 
-    /// A free port, released before the call under test uses it — still better
-    /// than a hard-coded one that collides with whatever else the suite runs.
+    /// A free port, released before the call under test uses it.
     ///
-    /// The old note here said "racy in principle, fine in practice". It was not
-    /// fine in practice; hold [`PORT_LOCK`] across this call AND the bind that
-    /// follows it.
+    /// The window between "this was free" and "the code under test bound it"
+    /// cannot be closed from here, and no amount of locking closes it either:
+    /// `bind_doors` takes an address, so the port has to be *free* for it to
+    /// bind, and a port nobody holds is a port any process on the machine can
+    /// take. MAIN-285's mutex serialised the tests in this binary and left that
+    /// standing, which is why a sibling test binary binding `:0` still reddened
+    /// `both_doors_come_back_together` with `Address already in use` on CI
+    /// (MAIN-668) — the mutex was never in either process's way.
+    ///
+    /// So the port is not defended, it is re-rolled: every caller runs its
+    /// attempt inside a bounded loop, treats an unexpected [`addr_in_use`] as
+    /// "lost the race" rather than as a finding, and allocates again. That
+    /// tolerates losing to anything — a sibling binary, another test in this
+    /// one, a stray process — because it never assumes it won.
     async fn free_port() -> String {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap();
         drop(l);
         addr.to_string()
+    }
+
+    /// True when the failure is somebody else already holding the port, which
+    /// is the one failure a test re-rolls instead of reporting.
+    fn addr_in_use(err: &anyhow::Error) -> bool {
+        err.chain().any(|cause| {
+            cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::AddrInUse)
+        })
+    }
+
+    fn chain_of(err: &anyhow::Error) -> String {
+        err.chain()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .join(": ")
+    }
+
+    /// Every attempt lost the race, which stops being luck and starts being a
+    /// bug — so say which one it would be rather than reporting the raw
+    /// `Address already in use` that took MAIN-285 a week to read.
+    fn out_of_attempts(what: &str) -> ! {
+        panic!(
+            "{PORT_ATTEMPTS} attempts all lost the port: {what}. Either something \
+             on this machine is taking loopback ports as fast as they are \
+             allocated, or the behaviour under test regressed."
+        )
     }
 
     /// MAIN-285: the flap. When the control plane cannot take its browser port,
@@ -498,66 +530,286 @@ mod tests {
     /// enough to push its capabilities.
     #[tokio::test]
     async fn a_boot_that_cannot_take_the_browser_port_never_opens_the_agent_door() {
-        let _port = PORT_LOCK.lock().await;
-        // Something else already owns the browser port — a previous server that
-        // outlived its restart, which is exactly the dev-loop case.
-        let squatter = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let taken = squatter.local_addr().unwrap().to_string();
-        let agent = free_port().await;
+        for _ in 0..PORT_ATTEMPTS {
+            // Something else already owns the browser port — a previous server
+            // that outlived its restart, which is exactly the dev-loop case.
+            // Held for the whole attempt, so this port is never a race.
+            let squatter = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let taken = squatter.local_addr().unwrap().to_string();
+            let agent = free_port().await;
 
-        let err = bind_doors(&taken, &agent)
-            .await
-            .expect_err("the browser port is taken, so the boot must fail");
+            let err = bind_doors(&taken, &agent)
+                .await
+                .expect_err("the browser port is taken, so the boot must fail");
 
-        // The failure names the port. `Address already in use (os error 98)`
-        // alone is what made this take a week to find.
-        let chain = err
-            .chain()
-            .map(|c| c.to_string())
-            .collect::<Vec<_>>()
-            .join(": ");
-        assert!(
-            chain.contains(&taken),
-            "the error must name the contended port, got: {chain}"
-        );
+            // The failure names the port. `Address already in use (os error 98)`
+            // alone is what made this take a week to find.
+            let chain = chain_of(&err);
+            assert!(
+                chain.contains(&taken),
+                "the error must name the contended port, got: {chain}"
+            );
 
-        // The agent door is still shut: binding it now succeeds, which it could
-        // not do if the failed boot had left a listener on it.
-        tokio::net::TcpListener::bind(&agent)
-            .await
-            .expect("the agent door must be free — a doomed boot must not open it");
+            // The agent door is still shut: binding it now succeeds, which it
+            // could not do if the failed boot had left a listener on it. An
+            // `AddrInUse` here is ambiguous — a doomed boot that opened the
+            // door, or a stranger that took the released port — so re-roll,
+            // and let running out of attempts be what reports the bug.
+            match tokio::net::TcpListener::bind(&agent).await {
+                Ok(_) => return,
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => continue,
+                Err(e) => panic!("the agent door must be free, got: {e}"),
+            }
+        }
+        out_of_attempts("the agent door was occupied after every doomed boot")
     }
 
     /// The other order still fails loudly, and leaves nothing behind.
     #[tokio::test]
     async fn a_contended_agent_port_fails_the_boot_and_releases_the_browser_port() {
-        let _port = PORT_LOCK.lock().await;
-        let browser = free_port().await;
-        let squatter = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let taken_agent = squatter.local_addr().unwrap().to_string();
+        for _ in 0..PORT_ATTEMPTS {
+            let browser = free_port().await;
+            let squatter = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let taken_agent = squatter.local_addr().unwrap().to_string();
 
-        let err = bind_doors(&browser, &taken_agent)
-            .await
-            .expect_err("the agent port is taken, so the boot must fail");
-        assert!(err.to_string().contains(&taken_agent));
+            let err = bind_doors(&browser, &taken_agent)
+                .await
+                .expect_err("the agent port is taken, so the boot must fail");
+            // The browser door is bound first, so a failure naming *it* is this
+            // attempt losing the race, not the behaviour under test. Matched on
+            // `bind_doors`' whole context phrase rather than on the address
+            // alone: this predicate decides whether a failure is reported or
+            // discarded, and a bare address is a substring test —
+            // `127.0.0.1:4444` sits inside `127.0.0.1:44445`.
+            let chain = chain_of(&err);
+            if addr_in_use(&err)
+                && chain.contains(&format!("cannot bind the control plane port {browser}"))
+            {
+                continue;
+            }
+            assert!(
+                chain.contains(&taken_agent),
+                "the error must name the contended agent port, got: {chain}"
+            );
 
-        // The browser listener bound first must have been dropped with the
-        // error, not leaked.
-        tokio::net::TcpListener::bind(&browser)
-            .await
-            .expect("the browser port must be released when the agent bind fails");
+            // The browser listener bound first must have been dropped with the
+            // error, not leaked.
+            match tokio::net::TcpListener::bind(&browser).await {
+                Ok(_) => return,
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => continue,
+                Err(e) => panic!("the browser port must be released, got: {e}"),
+            }
+        }
+        out_of_attempts("the browser port was still held after every failed boot")
     }
 
     /// The happy path hands back both doors, so the caller can serve them
     /// together rather than one at a time.
     #[tokio::test]
     async fn both_doors_come_back_together() {
-        let _port = PORT_LOCK.lock().await;
-        let browser = free_port().await;
-        let agent = free_port().await;
-        let (a, b) = bind_doors(&browser, &agent).await.expect("both bind");
-        assert_eq!(a.local_addr().unwrap().to_string(), browser);
-        assert_eq!(b.local_addr().unwrap().to_string(), agent);
+        for _ in 0..PORT_ATTEMPTS {
+            let browser = free_port().await;
+            let agent = free_port().await;
+            match bind_doors(&browser, &agent).await {
+                Ok((a, b)) => {
+                    assert_eq!(a.local_addr().unwrap().to_string(), browser);
+                    assert_eq!(b.local_addr().unwrap().to_string(), agent);
+                    return;
+                }
+                Err(e) if addr_in_use(&e) => continue,
+                Err(e) => panic!("both doors must bind, got: {e:#}"),
+            }
+        }
+        out_of_attempts("a freshly allocated port was taken before every bind")
+    }
+
+    /// The variable that turns this same binary into the squatter below, the
+    /// line it prints once the port is really its, and the name the parent
+    /// runs it by.
+    const SQUAT_ENV: &str = "NOOK_TEST_SQUAT_ADDR";
+    const SQUAT_READY: &str = "nook-test-squatter-bound";
+    const SQUAT_TEST: &str = "tests::hold_the_squatted_port";
+
+    /// Not a test — the child half of [`a_port_stolen_by_another_process_is_re_rolled`],
+    /// run by name out of this same binary. It takes the port the parent names
+    /// and holds it until the parent closes its stdin.
+    ///
+    /// `#[ignore]` keeps it out of an ordinary run, and an absent variable
+    /// makes it a no-op rather than a hang for anyone running the ignored set
+    /// by hand.
+    #[test]
+    #[ignore = "the child process of a_port_stolen_by_another_process_is_re_rolled"]
+    fn hold_the_squatted_port() {
+        let Ok(addr) = std::env::var(SQUAT_ENV) else {
+            return;
+        };
+        let listener = std::net::TcpListener::bind(&addr).expect("the squatter takes the port");
+        println!("{SQUAT_READY}");
+        std::io::stdout().flush().unwrap();
+        let mut sink = String::new();
+        let _ = std::io::stdin().read_to_string(&mut sink);
+        drop(listener);
+    }
+
+    /// Another PROCESS holding a port.
+    ///
+    /// A thread would prove nothing: the collision MAIN-668 is about is a
+    /// *sibling test binary*, which is exactly what an in-process mutex cannot
+    /// reach — so the reproduction has to leave the process to be the failure
+    /// it claims to reproduce. Re-running this binary is
+    /// `nook-db/tests/single_instance_crash.rs`'s trick, and for its reason:
+    /// no fixture binary to build or keep in sync. It is released by closing
+    /// the child's stdin rather than by killing it after a sleep, so a stray
+    /// child cannot outlive the suite holding a port.
+    struct Squatter {
+        child: std::process::Child,
+        // Kept so the child never writes into a closed pipe while it is
+        // holding the port for us.
+        _stdout: std::io::BufReader<std::process::ChildStdout>,
+    }
+
+    /// How long the parent waits to hear that the child holds the port.
+    /// Generous for spawning a test binary, and finite on purpose: everything
+    /// else here turns a stuck state into a sentence, and the handshake was the
+    /// one path that could instead block forever.
+    const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+
+    impl Squatter {
+        /// Spawn the child on `addr` and return once it has *actually bound* —
+        /// handshaked over stdout rather than slept on, so the reproduction is
+        /// deterministic. `None` when the child lost the very race being
+        /// reproduced, which is the caller's cue to allocate another port; a
+        /// child that neither binds nor exits inside [`HANDSHAKE_TIMEOUT`]
+        /// panics by name rather than hanging.
+        fn hold(addr: &str) -> Option<Self> {
+            let exe = std::env::current_exe().expect("this test binary's own path");
+            let mut child = std::process::Command::new(exe)
+                .args(["--exact", SQUAT_TEST, "--ignored", "--nocapture"])
+                .env(SQUAT_ENV, addr)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .expect("spawning the squatter process");
+
+            // Read on a thread so the wait can be bounded: `read_line` blocks
+            // the tokio worker that called this, so a child that goes quiet
+            // would hang the test instead of failing it.
+            let stdout = child.stdout.take().expect("the squatter's stdout is piped");
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let mut reader = std::io::BufReader::new(stdout);
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    match reader.read_line(&mut line) {
+                        Ok(0) | Err(_) => return,
+                        // `contains`, never equality. Under `--nocapture` with
+                        // one test thread libtest writes `test <name> ... `
+                        // with NO trailing newline before running the test, so
+                        // the ready token arrives on the end of that line:
+                        //   test tests::hold_the_squatted_port ... nook-test-squatter-bound
+                        // Equality missed it and both sides then blocked
+                        // forever — the child in `read_to_string`, the parent
+                        // in `read_line`. `single_instance_crash.rs` matches
+                        // this way for exactly this reason.
+                        Ok(_) if line.contains(SQUAT_READY) => {
+                            let _ = tx.send(reader);
+                            return;
+                        }
+                        Ok(_) => {}
+                    }
+                }
+            });
+
+            match rx.recv_timeout(HANDSHAKE_TIMEOUT) {
+                Ok(reader) => Some(Self {
+                    child,
+                    _stdout: reader,
+                }),
+                // The child exited without ever reporting the port: it lost the
+                // same race being reproduced, so the caller re-rolls.
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    None
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!(
+                        "the squatter never reported holding {addr} within \
+                         {HANDSHAKE_TIMEOUT:?} — the handshake is broken, which \
+                         without this bound would have been an indefinite hang"
+                    )
+                }
+            }
+        }
+    }
+
+    impl Drop for Squatter {
+        fn drop(&mut self) {
+            // Closing stdin is the release signal; the child drops the listener
+            // and exits on its own.
+            drop(self.child.stdin.take());
+            let _ = self.child.wait();
+        }
+    }
+
+    /// MAIN-668 AC-2: the fix proven against the failure mode rather than
+    /// observed to be green. Another process occupies the allocate-then-bind
+    /// window deliberately — the collision `PORT_LOCK` was never able to see —
+    /// and the attempt still arrives at two bound doors.
+    #[tokio::test]
+    async fn a_port_stolen_by_another_process_is_re_rolled() {
+        let (stolen, _squatter) = {
+            let mut held = None;
+            for _ in 0..PORT_ATTEMPTS {
+                let addr = free_port().await;
+                if let Some(squatter) = Squatter::hold(&addr) {
+                    held = Some((addr, squatter));
+                    break;
+                }
+            }
+            held.expect("the squatter process must be able to take one allocated port")
+        };
+
+        // Un-re-rolled, this is the whole of CI run 32800414774: a port this
+        // process allocated, bound by someone else before the code under test
+        // could take it.
+        let err = bind_doors(&stolen, &free_port().await)
+            .await
+            .expect_err("a stolen port cannot be bound");
+        assert!(
+            addr_in_use(&err),
+            "the reproduction must be the real failure mode, got: {}",
+            chain_of(&err)
+        );
+
+        // Re-rolled, the attempt walks off the stolen port onto a fresh one.
+        // The first attempt IS the stolen port, so the recovery is exercised
+        // rather than waited for.
+        let mut attempts = 0;
+        for _ in 0..PORT_ATTEMPTS {
+            attempts += 1;
+            let browser = if attempts == 1 {
+                stolen.clone()
+            } else {
+                free_port().await
+            };
+            let agent = free_port().await;
+            match bind_doors(&browser, &agent).await {
+                Ok((a, b)) => {
+                    assert!(attempts > 1, "the first attempt must have been the theft");
+                    assert_ne!(browser, stolen, "the re-roll must pick a different port");
+                    assert_eq!(a.local_addr().unwrap().to_string(), browser);
+                    assert_eq!(b.local_addr().unwrap().to_string(), agent);
+                    return;
+                }
+                Err(e) if addr_in_use(&e) => continue,
+                Err(e) => panic!("both doors must bind once the port is re-rolled: {e:#}"),
+            }
+        }
+        out_of_attempts("the re-roll never got past the stolen port")
     }
 
     #[tokio::test]
