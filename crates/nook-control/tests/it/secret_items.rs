@@ -6,8 +6,6 @@
 //! value (AC-10), and that the password-sealed `.env` path this deliberately
 //! does not touch behaves exactly as it did (AC-9).
 
-mod common;
-
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use nook_control::repo::secret_items::NewSecretItem;
@@ -577,7 +575,7 @@ async fn an_unreadable_item_is_skipped_rather_than_fatal() {
 /// itself, which is the same `tmux::spawn` mechanism a tmux-adapter job uses.
 #[tokio::test]
 async fn a_dispatched_job_carries_its_workspaces_secrets() {
-    use common::build_ports::*;
+    use crate::common::build_ports::*;
 
     let Some(mut bed) = TestBed::new().await else {
         return;

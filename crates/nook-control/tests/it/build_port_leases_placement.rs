@@ -12,9 +12,7 @@
 //! than fails when a required listener has no port, and that the wait is one
 //! the starvation sweep can end.
 
-mod common;
-
-use common::build_ports::*;
+use crate::common::build_ports::*;
 use nook_control::services::jobs;
 use nook_testkit::TestBed;
 use nook_types::*;

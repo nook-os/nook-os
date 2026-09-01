@@ -570,8 +570,8 @@ async fn a_name_containing_a_slash_is_refused() {
 /// migrator embeds, so the test cannot drift from what a deploy runs.
 fn migration_sql(engine: Engine) -> &'static str {
     match engine {
-        Engine::Postgres => include_str!("../migrations/0071_notebook_unique_names.sql"),
-        Engine::Sqlite => include_str!("../migrations_sqlite/0071_notebook_unique_names.sql"),
+        Engine::Postgres => include_str!("../../migrations/0071_notebook_unique_names.sql"),
+        Engine::Sqlite => include_str!("../../migrations_sqlite/0071_notebook_unique_names.sql"),
     }
 }
 

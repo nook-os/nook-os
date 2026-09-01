@@ -256,10 +256,13 @@ async fn a_virgin_database_and_a_build_with_no_squash_both_pass_through() {
 #[test]
 fn the_shipped_manifests_are_parseable() {
     for (name, text) in [
-        ("control", include_str!("../migrations/squash-manifest.txt")),
+        (
+            "control",
+            include_str!("../../migrations/squash-manifest.txt"),
+        ),
         (
             "chat",
-            include_str!("../../nook-chat/migrations/squash-manifest.txt"),
+            include_str!("../../../nook-chat/migrations/squash-manifest.txt"),
         ),
     ] {
         let parsed = parse_manifest(text);

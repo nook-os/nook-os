@@ -92,7 +92,8 @@ grep -q 'good_one.*passes now' "$TMP/out" || { echo "  ✗ the stale entry is no
 # expire on its own.
 allow 'bad_one  # pending' 'ghost_binary  # pending'
 check "red when an excluded binary no longer exists" fail
-grep -q 'ghost_binary.*no such test binary' "$TMP/out" || { echo "  ✗ the ghost is not named" >&2; fail=1; }
+grep -q 'ghost_binary.*nothing in this run matches it' "$TMP/out" \
+  || { echo "  ✗ the ghost is not named" >&2; fail=1; }
 
 # ── a binary that CRASHES before reporting ──────────────────────────────────
 # A panic in a fixture prints no `test result:` line at all. Reading that as
@@ -178,11 +179,119 @@ check "red when a supposedly Postgres-only binary passes on SQLite" fail
 grep -q 'good_one.*passes now' "$TMP/out" || { echo "  ✗ the misclassification is not named" >&2; fail=1; }
 engine_only '# none'
 
+# ── ONE binary, many suites (MAIN-657) ─────────────────────────────────────
+# nook-control's 171 test binaries became one `it`, so a whole-binary verdict
+# there excludes 1160 tests to excuse three. Every case below is that shape: the
+# binary FAILS, and what an entry names is a test inside it.
+it_log() {
+  cat > "$TMP/run.txt" <<'EOF'
+     Running tests/it.rs (/app/target/debug/deps/it-dddd4444)
+
+running 4 tests
+test job_reaper::it_reaps ... FAILED
+test job_reaper::it_leaves_live_work_alone ... ok
+test multi_instance::the_bus_carries ... FAILED
+test node_owner::an_owner_sees_it ... ok
+
+test result: FAILED. 2 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+EOF
+}
+it_log
+allow 'it::job_reaper::it_reaps  # UPDATE … FROM with a RETURNING (MAIN-564)' \
+      'it::multi_instance::the_bus_carries  # pg_notify (MAIN-549)'
+check "green when every failing TEST in the one binary is named" pass
+
+# Direction 1 at test granularity: the binary is already failing for excused
+# reasons, and a NEW failure inside it must still redden.
+allow 'it::job_reaper::it_reaps  # (MAIN-564)'
+check "red when a covered test fails beside an excused one" fail
+grep -q 'it::multi_instance::the_bus_carries' "$TMP/out" \
+  || { echo "  ✗ the covered test's failure is not named" >&2; fail=1; }
+grep -q 'it::job_reaper::it_reaps' "$TMP/out" \
+  && { echo "  ✗ the EXCUSED test was reported as a regression" >&2; fail=1; }
+
+# Direction 2 at test granularity: a fixed test whose line nobody deleted.
+allow 'it::job_reaper::it_reaps  # (MAIN-564)' \
+      'it::multi_instance::the_bus_carries  # (MAIN-549)' \
+      'it::node_owner::an_owner_sees_it  # (MAIN-472)'
+check "red when an excluded TEST now passes" fail
+grep -q 'it::node_owner::an_owner_sees_it.*passes now' "$TMP/out" \
+  || { echo "  ✗ the stale test entry is not named" >&2; fail=1; }
+
+# A whole suite excluded by its MODULE — the direct translation of what a
+# per-file binary entry used to mean, and the only honest form when every test
+# in the file is Postgres-only.
+allow 'it::job_reaper::it_reaps  # (MAIN-564)'
+engine_only 'it::multi_instance  # pg_notify has no SQLite equivalent'
+check "a module-scope entry excludes the suite under it" pass
+engine_only '# none'
+
+# ...and a module entry is still held to staleness: nothing under it failing,
+# something under it passing, means the classification expired.
+allow '# nothing pending'
+engine_only 'it::node_owner  # claimed Postgres-only'
+check "red when a module-scope entry covers only passing tests" fail
+grep -q 'it::node_owner.*passes now' "$TMP/out" \
+  || { echo "  ✗ the stale module entry is not named" >&2; fail=1; }
+engine_only '# none'
+
+# An `ignored` test renders no verdict, so its entry is neither stale nor a
+# ghost — reading a skip as "fixed" would delete a line nobody has re-measured.
+cat > "$TMP/run.txt" <<'EOF'
+     Running tests/it.rs (/app/target/debug/deps/it-dddd4444)
+
+running 2 tests
+test job_reaper::it_reaps ... ignored, needs a live daemon
+test job_reaper::it_leaves_live_work_alone ... FAILED
+
+test result: FAILED. 0 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.20s
+EOF
+allow 'it::job_reaper::it_reaps  # (MAIN-564)' \
+      'it::job_reaper::it_leaves_live_work_alone  # (MAIN-564)'
+check "an ignored test's entry is neither stale nor a ghost" pass
+
+# A crash AFTER some tests passed. Per-test identity alone would find no failing
+# test here and call it green, which is the crash hole in a finer-grained
+# reading — so a binary with no `test result:` line still answers for itself.
+cat > "$TMP/run.txt" <<'EOF'
+     Running tests/it.rs (/app/target/debug/deps/it-dddd4444)
+
+running 900 tests
+test job_reaper::it_reaps ... ok
+test multi_instance::the_bus_carries ... ok
+error: test failed, to rerun pass `-p nook-control --test it`
+EOF
+allow '# nothing excluded'
+check "red when a binary crashes after its tests passed" fail
+grep -q '^ *it$' "$TMP/out" || { echo "  ✗ the crashed binary is not named" >&2; fail=1; }
+
+# ...and excusing that takes the BINARY, because nobody can say which test the
+# process died in.
+allow 'it  # the whole binary aborts on SQLite (MAIN-000)'
+check "a binary-scope entry excuses a crash" pass
+
 # ── --list seeds the allow-list ────────────────────────────────────────────
+# At the finest grain the run offers, which is what makes it usable against a
+# binary holding a thousand tests.
 log run.txt
 listed="$(SQLITE_CI_ALLOWLIST="$TMP/allow.txt" ./$GUARD --list "$TMP/run.txt")"
-if [ "$listed" = "bad_one" ]; then
-  echo "  ✓ --list prints exactly the failing binaries"
+if [ "$listed" = "bad_one::y" ]; then
+  echo "  ✓ --list prints exactly what failed"
+else
+  echo "  ✗ --list printed: $listed" >&2
+  fail=1
+fi
+
+# ...and falls back to the binary when it reported no individual tests at all.
+cat > "$TMP/run.txt" <<'EOF'
+     Running tests/crasher.rs (/app/target/debug/deps/crasher-cccc3333)
+
+running 1 test
+error: test failed, to rerun pass `-p nook-control --test crasher`
+EOF
+listed="$(SQLITE_CI_ALLOWLIST="$TMP/allow.txt" ./$GUARD --list "$TMP/run.txt")"
+if [ "$listed" = "crasher" ]; then
+  echo "  ✓ --list names the binary when there is nothing finer to name"
 else
   echo "  ✗ --list printed: $listed" >&2
   fail=1
@@ -204,16 +313,28 @@ else
   fail=1
 fi
 
-# ── the two lists must not overlap ─────────────────────────────────────────
-# The same binary in both would be both "pending work" and "permanent", so
+# ── the two lists must not overlap, at any scope ───────────────────────────
+# The same test in both would be both "pending work" and "permanent", so
 # deleting the pending line would silently change nothing.
-both="$(comm -12 \
-  <(sed -e 's/#.*//' -e 's/[[:space:]]*$//' scripts/sqlite-ci-allowlist.txt | grep -v '^$' | sort) \
-  <(sed -e 's/#.*//' -e 's/[[:space:]]*$//' scripts/sqlite-ci-engine-specific.txt | grep -v '^$' | sort) || true)"
+#
+# NESTING counts as overlap since MAIN-657, because an entry now covers
+# everything under it: `it::foo` in one file and `it::foo::a_test` in the other
+# is the same trap wearing two names, and `comm` cannot see it.
+entries() {
+  sed -e 's/#.*//' -e 's/[[:space:]]*$//' "$1" | grep -v '^$' | sort || true
+}
+entries scripts/sqlite-ci-allowlist.txt > "$TMP/pending.txt"
+entries scripts/sqlite-ci-engine-specific.txt > "$TMP/permanent.txt"
+both="$(awk -v other="$TMP/permanent.txt" '
+  BEGIN { while ((getline l < other) > 0) if (l != "") o[++n] = l }
+  { for (i = 1; i <= n; i++)
+      if ($0 == o[i] || index($0, o[i] "::") == 1 || index(o[i], $0 "::") == 1)
+        print $0 "  ↔  " o[i] }
+' "$TMP/pending.txt")"
 if [ -z "$both" ]; then
-  echo "  ✓ no binary is both pending and permanently engine-specific"
+  echo "  ✓ nothing is both pending and permanently engine-specific"
 else
-  echo "  ✗ binaries in BOTH lists:" >&2
+  echo "  ✗ entries covering each other across BOTH lists:" >&2
   printf '%s\n' "$both" | sed 's/^/      /' >&2
   fail=1
 fi

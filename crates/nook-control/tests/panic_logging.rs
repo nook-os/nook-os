@@ -1,11 +1,20 @@
 //! The panic log record (MAIN-273 AC-2/AC-3).
 //!
-//! Its own test binary, deliberately. `tracing` caches a callsite's interest
-//! process-wide the first time it is hit: if a sibling test in the same binary
-//! drives a panic before a subscriber exists, the `tracing::error!` inside
-//! `panic_response` is cached as "nobody is listening" and never fires again,
-//! however many subscribers a later test installs. Isolating this one is the
-//! difference between asserting the log and asserting an empty string.
+//! Its own test binary, deliberately — the ONE file MAIN-657 left out of
+//! `tests/it/`. `tracing` caches a callsite's interest process-wide the first
+//! time it is hit: if a sibling test in the same binary drives a panic before a
+//! subscriber exists, the `tracing::error!` inside `panic_response` is cached as
+//! "nobody is listening" and never fires again, however many subscribers a later
+//! test installs. Isolating this one is the difference between asserting the log
+//! and asserting an empty string.
+//!
+//! Measured rather than assumed: with this file inside `tests/it/` beside
+//! `panic_safety_net`, `--test-threads=8` failed every one of six runs. A shared
+//! discarding subscriber, a shared serialising lock, an always-live global
+//! default scoped to `nook_errors`, and `callsite::rebuild_interest_cache()`
+//! were each tried and each left it flaky — the cache is not reopened for a
+//! scoped subscriber. Two binaries where there were 171 costs one link; a test
+//! that passes six times in ten costs more.
 
 use std::sync::{Arc, Mutex};
 

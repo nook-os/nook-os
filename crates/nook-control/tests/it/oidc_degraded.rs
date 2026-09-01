@@ -19,7 +19,7 @@ use uuid::Uuid;
 /// It is TWO statements, and `Db` has no multi-statement path (MAIN-393), so
 /// running it needs `sqlx::raw_sql` against a raw Postgres pool. Splitting it
 /// here would be exactly the drift the line above exists to prevent.
-const BACKFILL_SQL: &str = include_str!("../migrations/0022_backfill_auth_mode.sql");
+const BACKFILL_SQL: &str = include_str!("../../migrations/0022_backfill_auth_mode.sql");
 
 async fn tenant(db: &EnginePool) -> Uuid {
     let id = Uuid::now_v7();

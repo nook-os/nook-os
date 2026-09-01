@@ -14,12 +14,10 @@
 //! that sweep reach a build's lease, this card has silently undone itself and
 //! no other test in the suite would notice.
 
-mod common;
-
 use std::sync::Mutex;
 
+use crate::common::build_ports::*;
 use async_trait::async_trait;
-use common::build_ports::*;
 use nook_control::services::stack_reaper::{self, NodeOps};
 use nook_control::services::{jobs, port_leases};
 use nook_control::state::AppState;

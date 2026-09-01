@@ -3,6 +3,12 @@ name = "nook-control"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+# One integration-test binary, declared rather than discovered (MAIN-657). With
+# autodiscovery on, a file dropped back into `tests/` would silently become a
+# 130 MB binary of its own again and nothing would say so; off, cargo never
+# builds it and the author finds out that a suite belongs under `tests/it/`
+# with a `mod` line in its main.rs.
+autotests = false
 
 [lib]
 name = "nook_control"
@@ -11,6 +17,18 @@ path = "src/lib.rs"
 [[bin]]
 name = "nook-control"
 path = "src/main.rs"
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"
+
+# The one exception, and it is about a process rather than a file: this suite
+# asserts on a `tracing` callsite whose interest is cached process-wide the
+# first time it is evaluated, so it needs a process no sibling has panicked in.
+# Its own header records what was tried before conceding the second link.
+[[test]]
+name = "panic_logging"
+path = "tests/panic_logging.rs"
 
 [dependencies]
 nook-db = { workspace = true }

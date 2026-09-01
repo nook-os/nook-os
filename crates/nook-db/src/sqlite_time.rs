@@ -20,7 +20,7 @@
 //! WRITES a timestamp ([`NOW_SQL`], [`COLUMN_DEFAULT_SQL`]) and the binder that
 //! sends one ([`render`]). `migrations_sqlite/0055_sqlite_timestamp_form.sql`
 //! puts the same form on every column default, and
-//! `nook-control/tests/sqlite_boot.rs` checks the migrated schema against
+//! `nook-control/tests/it/sqlite_boot.rs` checks the migrated schema against
 //! [`COLUMN_DEFAULT_SQL`] — so a future table declaring
 //! `DEFAULT CURRENT_TIMESTAMP` out of habit reddens CI instead of quietly
 //! reintroducing this.
@@ -69,7 +69,7 @@ pub const NOW_SQL: &str = concat!("strftime('", timestamp_format!(), "','now')")
 /// how SQLite requires an expression default to be written. This is the
 /// spelling DDL uses. (What comes back out of `pragma_table_info` is the
 /// parentheses stripped — i.e. [`NOW_SQL`] — which is what the schema guard in
-/// `nook-control/tests/sqlite_boot.rs` compares against.)
+/// `nook-control/tests/it/sqlite_boot.rs` compares against.)
 pub const COLUMN_DEFAULT_SQL: &str = concat!("(strftime('", timestamp_format!(), "','now'))");
 
 /// `now()` shifted by a SQLite date modifier — `'+14 days'`, or a composed

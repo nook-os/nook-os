@@ -215,8 +215,13 @@ mod paste_validation {
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        // Process-wide, which is why exactly ONE test in this binary sets it.
-        std::env::set_var("NOOK_GITHUB_API_BASE", format!("http://{addr}"));
+        // Process-wide, which is why exactly ONE test in this file sets it —
+        // and why it goes under the binary-wide guard (MAIN-657). Scoped so
+        // the guard is never alive across an `.await`.
+        {
+            let _g = crate::common::env_guard();
+            std::env::set_var("NOOK_GITHUB_API_BASE", format!("http://{addr}"));
+        }
         seen
     }
 

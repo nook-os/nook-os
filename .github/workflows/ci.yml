@@ -133,12 +133,12 @@ jobs:
       NOOK_TEST_SQS_ENDPOINT: http://localhost:9324
     steps:
       - uses: actions/checkout@v4
-      # LLD (MAIN-578). `crates/nook-control/tests` holds 147 files, and every
-      # `.rs` directly under `tests/` is its OWN binary — so a run links 147
-      # executables, each pulling the full crate graph. Linking, not compiling,
-      # is what makes `Test (postgres)` 10m31s of a 13m job, and that job is the
-      # entire CI wall clock: a `merge_group` build runs only three jobs and
-      # still takes 11m, because everything it drops is ≤2m and parallel.
+      # LLD (MAIN-578). Linking, not compiling, is what makes `Test (postgres)`
+      # 10m31s of a 13m job, and that job is the entire CI wall clock: a
+      # `merge_group` build runs only three jobs and still takes 11m, because
+      # everything it drops is ≤2m and parallel. The 147 nook-control test
+      # binaries this was originally weighed against are one binary since
+      # MAIN-657; the workspace still links ~30 more, so it still earns its 5s.
       #
       # Installed and applied in CI ONLY, via RUSTFLAGS rather than a checked-in
       # `.cargo/config.toml`: a config file would demand every developer and
