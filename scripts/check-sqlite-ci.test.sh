@@ -5,12 +5,13 @@
 # "the SQLite leg is decorative", and it is asserted in BOTH directions, because
 # each direction fails differently and silently:
 #
-#   * blind to a covered binary failing  → the leg is required but proves nothing
-#   * blind to an excluded binary passing → the allow-list never shrinks, and the
+#   * blind to a covered test failing  → the leg is required but proves nothing
+#   * blind to an excluded test passing → the allow-list never shrinks, and the
 #     leg keeps claiming coverage it no longer needs to exclude
 #
-# The guard is a pure function of a cargo log, so every case here is a real run
-# of the real script against a synthetic log — no mocking of its internals.
+# The guard is a pure function of a nextest JUnit report, so every case here is
+# a real run of the real script against a synthetic report — no mocking of its
+# internals.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -19,44 +20,48 @@ TMP="$(mktemp -d)"
 fail=0
 trap 'rm -rf "$TMP"' EXIT
 
-# A log in cargo's actual shape: one passing binary, one failing one.
-log() {
-  cat > "$TMP/$1" <<'EOF'
-   Compiling nook-control v0.4.22 (/app/crates/nook-control)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 02s
-     Running unittests src/lib.rs (/app/target/debug/deps/nook_control-1a2b3c4d)
-
-running 2 tests
-test a ... ok
-test b ... ok
-
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
-
-     Running tests/good_one.rs (/app/target/debug/deps/good_one-aaaa1111)
-
-running 1 test
-test x ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
-
-     Running tests/bad_one.rs (/app/target/debug/deps/bad_one-bbbb2222)
-
-running 2 tests
-test y ... FAILED
-test z ... ok
-
-test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
-EOF
+# A report in nextest's actual shape, from `binary|test|verdict` triples.
+# quick-junit self-closes a <testcase> that passed, hangs a <failure> child on
+# one that failed, and an <error> on one whose process died — nextest runs a
+# process per test, so an abort is that test's failure and nobody else's.
+report() {
+  local out="$TMP/$1"; shift
+  {
+    printf '<?xml version="1.0" encoding="UTF-8"?>\n'
+    printf '<testsuites name="nextest-run" tests="%d" failures="0" errors="0" time="1.0">\n' "$#"
+    local spec bin test verdict
+    for spec in "$@"; do
+      IFS='|' read -r bin test verdict <<<"$spec"
+      printf '    <testsuite name="%s" tests="1" disabled="0" errors="0" failures="0">\n' "$bin"
+      case "$verdict" in
+        ok)   printf '        <testcase name="%s" classname="%s" timestamp="2026-08-24T00:00:00.000+00:00" time="0.05" />\n' "$test" "$bin" ;;
+        fail) printf '        <testcase name="%s" classname="%s" timestamp="2026-08-24T00:00:00.000+00:00" time="0.05">\n            <failure type="test failure">assertion failed: 1 &lt; 0</failure>\n        </testcase>\n' "$test" "$bin" ;;
+        died) printf '        <testcase name="%s" classname="%s" timestamp="2026-08-24T00:00:00.000+00:00" time="0.05">\n            <error type="test failure">process aborted: SIGABRT</error>\n        </testcase>\n' "$test" "$bin" ;;
+        skip) printf '        <testcase name="%s" classname="%s" timestamp="2026-08-24T00:00:00.000+00:00" time="0.05">\n            <skipped />\n        </testcase>\n' "$test" "$bin" ;;
+        *)    echo "unknown verdict '$verdict'" >&2; exit 2 ;;
+      esac
+      printf '    </testsuite>\n'
+    done
+    printf '</testsuites>\n'
+  } >"$out"
 }
-log run.txt
 
-allow() { printf '%s\n' "$@" > "$TMP/allow.txt"; }
-engine_only() { printf '%s\n' "$@" > "$TMP/engine.txt"; }
+# One passing test and one failing one, in two different binaries.
+run_report() {
+  report run.xml \
+    'nook-control::good_one|x|ok' \
+    'nook-control::bad_one|y|fail' \
+    'nook-control::bad_one|z|ok'
+}
+run_report
+
+allow() { printf '%s\n' "$@" >"$TMP/allow.txt"; }
+engine_only() { printf '%s\n' "$@" >"$TMP/engine.txt"; }
 engine_only '# none'
-# The guard cd's to the repo root, so logs are named absolutely.
+# The guard cd's to the repo root, so reports are named absolutely.
 guard() {
   SQLITE_CI_ALLOWLIST="$TMP/allow.txt" SQLITE_CI_ENGINE_ONLY="$TMP/engine.txt" \
-    ./$GUARD "$TMP/run.txt"
+    ./$GUARD "$TMP/run.xml"
 }
 
 check() { # name, expect(pass|fail)
@@ -72,232 +77,157 @@ check() { # name, expect(pass|fail)
 }
 
 # ── the shape it is meant to accept ─────────────────────────────────────────
-allow 'bad_one  # bed.pool on a SQLite bed (MAIN-268)'
+allow 'nook-control::bad_one::y  # bed.pool on a SQLite bed (MAIN-268)'
 check "green when the only failure is allow-listed" pass
 
-# ── direction 1: a COVERED binary fails ─────────────────────────────────────
+# ── an entry names a SCOPE and covers what is under it (MAIN-657) ──────────
+# nook-control builds ONE integration binary, so a per-test-only rule would have
+# no way to say "this whole module is Postgres-only" — `nook-control::it::
+# multi_instance` is exactly that statement, and it is honest because every test
+# under it is excused for the one reason.
+allow 'nook-control::bad_one  # the whole binary'
+check "an entry covers every test beneath it" pass
+
+# The cost of that rule, stated as a test so nobody has to rediscover it: a
+# coarse entry excuses the PASSING tests under it too. `bad_one::z` passes and
+# `bad_one::y` fails, so the entry is not stale and `z` leaves the leg for free.
+# Nothing mechanical can tell an honest module-wide exemption from a lazy one —
+# what keeps entries at the finest grain that describes the failure is the
+# convention in the lists' own headers, and review.
+allow 'nook-control::bad_one::y  # only the failure (MAIN-268)'
+check "a per-test entry leaves its passing siblings covered" pass
+
+# ── direction 1: a COVERED test fails ───────────────────────────────────────
 # The whole point of a required leg. Without this the job is decorative.
 allow '# nothing excluded'
-check "red when a covered binary fails" fail
-grep -q 'bad_one' "$TMP/out" || { echo "  ✗ the regression is not named" >&2; fail=1; }
+check "red when a covered test fails" fail
+grep -q 'nook-control::bad_one::y' "$TMP/out" || { echo "  ✗ the regression is not named" >&2; fail=1; }
 
-# ── direction 2: an EXCLUDED binary passes (a stale entry) ──────────────────
+# ── direction 2: an EXCLUDED test passes (a stale entry) ────────────────────
 # Without this the list never shrinks and the leg quietly over-claims.
-allow 'bad_one  # pending' 'good_one  # pending'
-check "red when an excluded binary now passes" fail
-grep -q 'good_one.*passes now' "$TMP/out" || { echo "  ✗ the stale entry is not named" >&2; fail=1; }
+allow 'nook-control::bad_one::y  # pending' 'nook-control::good_one::x  # pending'
+check "red when an excluded test now passes" fail
+grep -q 'nook-control::good_one::x.*passes now' "$TMP/out" || { echo "  ✗ the stale entry is not named" >&2; fail=1; }
 
 # ── an allow-list entry naming nothing at all ───────────────────────────────
-# A renamed or deleted test file leaves an exemption behind that would never
-# expire on its own.
-allow 'bad_one  # pending' 'ghost_binary  # pending'
-check "red when an excluded binary no longer exists" fail
-grep -q 'ghost_binary.*nothing in this run matches it' "$TMP/out" \
+# A renamed or deleted test leaves an exemption behind that would never expire
+# on its own.
+allow 'nook-control::bad_one::y  # pending' 'nook-control::ghost::gone  # pending'
+check "red when an excluded test no longer exists" fail
+grep -q 'nook-control::ghost::gone.*nothing in this run matches it' "$TMP/out" \
   || { echo "  ✗ the ghost is not named" >&2; fail=1; }
 
-# ── a binary that CRASHES before reporting ──────────────────────────────────
-# A panic in a fixture prints no `test result:` line at all. Reading that as
-# "not failed" is how a crash would pass a required gate.
-cat > "$TMP/run.txt" <<'EOF'
-     Running tests/good_one.rs (/app/target/debug/deps/good_one-aaaa1111)
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+# ── a MODULE-scope entry, and staleness held against it ─────────────────────
+# The `it` binary's suites are modules inside one binary, so this is the form a
+# whole-file exemption takes now. It must exclude the suite...
+report run.xml \
+  'nook-control::it|job_reaper::reaps|fail' \
+  'nook-control::it|multi_instance::the_bus_carries|fail' \
+  'nook-control::it|node_owner::an_owner_sees_it|ok'
+allow 'nook-control::it::job_reaper::reaps  # (MAIN-564)'
+engine_only 'nook-control::it::multi_instance  # pg_notify has no SQLite equivalent'
+check "a module-scope entry excludes the suite under it" pass
 
-     Running tests/crasher.rs (/app/target/debug/deps/crasher-cccc3333)
+# ...and a new failure in a COVERED suite of the same binary must still redden,
+# which is the whole reason a whole-binary verdict is not good enough here.
+report run.xml \
+  'nook-control::it|job_reaper::reaps|fail' \
+  'nook-control::it|multi_instance::the_bus_carries|fail' \
+  'nook-control::it|node_owner::an_owner_sees_it|fail'
+check "red when a covered test in the one binary fails" fail
+grep -q 'nook-control::it::node_owner::an_owner_sees_it' "$TMP/out" \
+  || { echo "  ✗ the covered test's failure is not named" >&2; fail=1; }
+grep -q 'nook-control::it::job_reaper::reaps' "$TMP/out" \
+  && { echo "  ✗ an EXCUSED test was reported as a regression" >&2; fail=1; }
 
-running 1 test
-error: test failed, to rerun pass `-p nook-control --test crasher`
-EOF
-allow '# nothing excluded'
-check "red when a binary dies before printing a result" fail
-grep -q 'crasher' "$TMP/out" || { echo "  ✗ the crashed binary is not named" >&2; fail=1; }
-
-# ── doc-tests must not be attributed to the binary above them ──────────────
-# `Doc-tests` emits its own `test result:` line. Attributing it to the previous
-# binary would let a failing binary inherit the doc-tests' "ok".
-cat > "$TMP/run.txt" <<'EOF'
-     Running tests/bad_one.rs (/app/target/debug/deps/bad_one-bbbb2222)
-
-running 1 test
-error: test failed, to rerun pass `-p nook-control --test bad_one`
-
-   Doc-tests nook_control
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-EOF
-allow '# nothing excluded'
-check "red when a crashed binary is followed by passing doc-tests" fail
-
-# ── two binaries with the same name ────────────────────────────────────────
-# Identity is the binary name; two of them would silently merge verdicts.
-cat > "$TMP/run.txt" <<'EOF'
-     Running tests/dup.rs (/app/target/debug/deps/dup-1111aaaa)
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
-     Running tests/dup.rs (/app/target/debug/deps/dup-2222bbbb)
-test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
-EOF
-allow '# nothing excluded'
-check "red on two test binaries sharing a name" fail
-grep -q 'share a name' "$TMP/out" || { echo "  ✗ the ambiguity is not explained" >&2; fail=1; }
-
-# ── a log that never got to testing ────────────────────────────────────────
-# A compile failure must not read as "nothing failed, therefore green".
-printf 'error[E0432]: unresolved import\n' > "$TMP/run.txt"
-allow '# nothing excluded'
-check "red when the run never reached any test" fail
-
-# ── a colourised log (CARGO_TERM_COLOR=always, which CI sets) ──────────────
-# The first CI run of this guard failed exactly here: ANSI escapes meant the
-# anchored `Running` match found nothing, and the leg reported "no test binaries
-# found". Pinned so the parse can never again depend on whether the caller had a
-# TTY.
-printf '\033[0m\033[1m\033[32m     Running\033[0m tests/good_one.rs (/app/target/debug/deps/good_one-aaaa1111)\n' > "$TMP/run.txt"
-printf '\033[32mtest result\033[0m: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s\n' >> "$TMP/run.txt"
-printf '\033[0m\033[1m\033[32m     Running\033[0m tests/bad_one.rs (/app/target/debug/deps/bad_one-bbbb2222)\n' >> "$TMP/run.txt"
-printf 'test result: \033[31mFAILED\033[0m. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s\n' >> "$TMP/run.txt"
-allow 'bad_one  # pending (MAIN-268)'
-check "a colourised cargo log parses" pass
-
-# ...and the colours must not hide a regression either.
-allow '# nothing excluded'
-check "red on a colourised log when a covered binary fails" fail
-grep -q 'bad_one' "$TMP/out" || { echo "  ✗ the regression is not named in a colourised log" >&2; fail=1; }
-
-# ── the permanent engine-specific list excludes too ────────────────────────
-# A deliberately Postgres-only test must not read as a regression.
-log run.txt
+# ...and a module entry expires like any other: nothing under it failing and
+# something under it passing means the classification is over.
+report run.xml \
+  'nook-control::it|node_owner::an_owner_sees_it|ok' \
+  'nook-control::it|node_owner::and_another|ok'
 allow '# nothing pending'
-engine_only 'bad_one  # asserts Postgres behaviour on purpose'
-check "a deliberately Postgres-only binary is excluded, with no card" pass
+engine_only 'nook-control::it::node_owner  # claimed Postgres-only'
+check "red when a module-scope entry covers only passing tests" fail
+grep -q 'nook-control::it::node_owner.*passes now' "$TMP/out" \
+  || { echo "  ✗ the stale module entry is not named" >&2; fail=1; }
+engine_only '# none'
+
+# ── a SKIPPED test renders no verdict ───────────────────────────────────────
+# So its entry is neither stale nor a ghost. Reading a skip as "fixed" would
+# delete a line nobody has re-measured.
+report run.xml \
+  'nook-control::it|job_reaper::reaps|skip' \
+  'nook-control::it|node_owner::an_owner_sees_it|ok'
+allow 'nook-control::it::job_reaper::reaps  # (MAIN-564)'
+check "a skipped test's entry is neither stale nor a ghost" pass
+
+# ── a test whose PROCESS dies ───────────────────────────────────────────────
+# nextest reports an abort as an <error>, not a <failure>. Reading that as "not
+# failed" is how a crash would pass a required gate.
+report run.xml \
+  'nook-control::good_one|x|ok' \
+  'nook-control::crasher|boom|died'
+allow '# nothing excluded'
+check "red when a test's process dies" fail
+grep -q 'nook-control::crasher::boom' "$TMP/out" || { echo "  ✗ the crashed test is not named" >&2; fail=1; }
+
+# ── two tests with the same key ─────────────────────────────────────────────
+# Identity is `<binary-id>::<test-name>`; two of them would silently merge
+# verdicts.
+report run.xml \
+  'nook-control::dup|same|ok' \
+  'nook-control::dup|same|fail'
+allow '# nothing excluded'
+check "red on two tests sharing a key" fail
+grep -q 'share a key' "$TMP/out" || { echo "  ✗ the ambiguity is not explained" >&2; fail=1; }
+
+# ── a report that never got to testing ──────────────────────────────────────
+# A run that died before the first test must not read as "nothing failed,
+# therefore green".
+printf '<?xml version="1.0" encoding="UTF-8"?>\n<testsuites name="nextest-run" tests="0" failures="0" errors="0" time="0.0">\n</testsuites>\n' >"$TMP/run.xml"
+allow '# nothing excluded'
+check "red when the report holds no tests at all" fail
+
+# ── the parse does not depend on the writer's formatting ────────────────────
+# The log parser this replaced was broken in CI by ANSI colour, because it
+# matched anchored lines. Element records, not lines: a report written on ONE
+# line must give the identical verdict.
+run_report
+tr -d '\n' <"$TMP/run.xml" >"$TMP/oneline.xml" && mv "$TMP/oneline.xml" "$TMP/run.xml"
+allow 'nook-control::bad_one::y  # pending (MAIN-268)'
+check "a report with no line breaks parses the same" pass
+
+# ...and the formatting must not hide a regression either.
+allow '# nothing excluded'
+check "red on a one-line report when a covered test fails" fail
+grep -q 'nook-control::bad_one::y' "$TMP/out" || { echo "  ✗ the regression is not named in a one-line report" >&2; fail=1; }
+
+# ── the permanent engine-specific list excludes too ─────────────────────────
+# A deliberately Postgres-only test must not read as a regression.
+run_report
+allow '# nothing pending'
+engine_only 'nook-control::bad_one::y  # asserts Postgres behaviour on purpose'
+check "a deliberately Postgres-only test is excluded, with no card" pass
 
 # ...and it is still held to the staleness rule: passing on SQLite means the
 # classification was wrong, not that the problem went away.
 allow '# nothing pending'
-engine_only 'good_one  # claimed Postgres-only'
-check "red when a supposedly Postgres-only binary passes on SQLite" fail
-grep -q 'good_one.*passes now' "$TMP/out" || { echo "  ✗ the misclassification is not named" >&2; fail=1; }
+engine_only 'nook-control::good_one::x  # claimed Postgres-only'
+check "red when a supposedly Postgres-only test passes on SQLite" fail
+grep -q 'nook-control::good_one::x.*passes now' "$TMP/out" || { echo "  ✗ the misclassification is not named" >&2; fail=1; }
 engine_only '# none'
 
-# ── ONE binary, many suites (MAIN-657) ─────────────────────────────────────
-# nook-control's 171 test binaries became one `it`, so a whole-binary verdict
-# there excludes 1160 tests to excuse three. Every case below is that shape: the
-# binary FAILS, and what an entry names is a test inside it.
-it_log() {
-  cat > "$TMP/run.txt" <<'EOF'
-     Running tests/it.rs (/app/target/debug/deps/it-dddd4444)
-
-running 4 tests
-test job_reaper::it_reaps ... FAILED
-test job_reaper::it_leaves_live_work_alone ... ok
-test multi_instance::the_bus_carries ... FAILED
-test node_owner::an_owner_sees_it ... ok
-
-test result: FAILED. 2 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
-EOF
-}
-it_log
-allow 'it::job_reaper::it_reaps  # UPDATE … FROM with a RETURNING (MAIN-564)' \
-      'it::multi_instance::the_bus_carries  # pg_notify (MAIN-549)'
-check "green when every failing TEST in the one binary is named" pass
-
-# Direction 1 at test granularity: the binary is already failing for excused
-# reasons, and a NEW failure inside it must still redden.
-allow 'it::job_reaper::it_reaps  # (MAIN-564)'
-check "red when a covered test fails beside an excused one" fail
-grep -q 'it::multi_instance::the_bus_carries' "$TMP/out" \
-  || { echo "  ✗ the covered test's failure is not named" >&2; fail=1; }
-grep -q 'it::job_reaper::it_reaps' "$TMP/out" \
-  && { echo "  ✗ the EXCUSED test was reported as a regression" >&2; fail=1; }
-
-# Direction 2 at test granularity: a fixed test whose line nobody deleted.
-allow 'it::job_reaper::it_reaps  # (MAIN-564)' \
-      'it::multi_instance::the_bus_carries  # (MAIN-549)' \
-      'it::node_owner::an_owner_sees_it  # (MAIN-472)'
-check "red when an excluded TEST now passes" fail
-grep -q 'it::node_owner::an_owner_sees_it.*passes now' "$TMP/out" \
-  || { echo "  ✗ the stale test entry is not named" >&2; fail=1; }
-
-# A whole suite excluded by its MODULE — the direct translation of what a
-# per-file binary entry used to mean, and the only honest form when every test
-# in the file is Postgres-only.
-allow 'it::job_reaper::it_reaps  # (MAIN-564)'
-engine_only 'it::multi_instance  # pg_notify has no SQLite equivalent'
-check "a module-scope entry excludes the suite under it" pass
-engine_only '# none'
-
-# ...and a module entry is still held to staleness: nothing under it failing,
-# something under it passing, means the classification expired.
-allow '# nothing pending'
-engine_only 'it::node_owner  # claimed Postgres-only'
-check "red when a module-scope entry covers only passing tests" fail
-grep -q 'it::node_owner.*passes now' "$TMP/out" \
-  || { echo "  ✗ the stale module entry is not named" >&2; fail=1; }
-engine_only '# none'
-
-# An `ignored` test renders no verdict, so its entry is neither stale nor a
-# ghost — reading a skip as "fixed" would delete a line nobody has re-measured.
-cat > "$TMP/run.txt" <<'EOF'
-     Running tests/it.rs (/app/target/debug/deps/it-dddd4444)
-
-running 2 tests
-test job_reaper::it_reaps ... ignored, needs a live daemon
-test job_reaper::it_leaves_live_work_alone ... FAILED
-
-test result: FAILED. 0 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.20s
-EOF
-allow 'it::job_reaper::it_reaps  # (MAIN-564)' \
-      'it::job_reaper::it_leaves_live_work_alone  # (MAIN-564)'
-check "an ignored test's entry is neither stale nor a ghost" pass
-
-# A crash AFTER some tests passed. Per-test identity alone would find no failing
-# test here and call it green, which is the crash hole in a finer-grained
-# reading — so a binary with no `test result:` line still answers for itself.
-cat > "$TMP/run.txt" <<'EOF'
-     Running tests/it.rs (/app/target/debug/deps/it-dddd4444)
-
-running 900 tests
-test job_reaper::it_reaps ... ok
-test multi_instance::the_bus_carries ... ok
-error: test failed, to rerun pass `-p nook-control --test it`
-EOF
-allow '# nothing excluded'
-check "red when a binary crashes after its tests passed" fail
-grep -q '^ *it$' "$TMP/out" || { echo "  ✗ the crashed binary is not named" >&2; fail=1; }
-
-# ...and excusing that takes the BINARY, because nobody can say which test the
-# process died in.
-allow 'it  # the whole binary aborts on SQLite (MAIN-000)'
-check "a binary-scope entry excuses a crash" pass
-
-# ── --list seeds the allow-list ────────────────────────────────────────────
-# At the finest grain the run offers, which is what makes it usable against a
-# binary holding a thousand tests.
-log run.txt
-listed="$(SQLITE_CI_ALLOWLIST="$TMP/allow.txt" ./$GUARD --list "$TMP/run.txt")"
-if [ "$listed" = "bad_one::y" ]; then
-  echo "  ✓ --list prints exactly what failed"
+# ── --list seeds the allow-list ─────────────────────────────────────────────
+run_report
+listed="$(SQLITE_CI_ALLOWLIST="$TMP/allow.txt" ./$GUARD --list "$TMP/run.xml")"
+if [ "$listed" = "nook-control::bad_one::y" ]; then
+  echo "  ✓ --list prints exactly the failing tests"
 else
   echo "  ✗ --list printed: $listed" >&2
   fail=1
 fi
 
-# ...and falls back to the binary when it reported no individual tests at all.
-cat > "$TMP/run.txt" <<'EOF'
-     Running tests/crasher.rs (/app/target/debug/deps/crasher-cccc3333)
-
-running 1 test
-error: test failed, to rerun pass `-p nook-control --test crasher`
-EOF
-listed="$(SQLITE_CI_ALLOWLIST="$TMP/allow.txt" ./$GUARD --list "$TMP/run.txt")"
-if [ "$listed" = "crasher" ]; then
-  echo "  ✓ --list names the binary when there is nothing finer to name"
-else
-  echo "  ✗ --list printed: $listed" >&2
-  fail=1
-fi
-
-# ── the committed pending list is well-formed ──────────────────────────────
+# ── the committed pending list is well-formed ───────────────────────────────
 # Every line must name the upstream card it waits on, or the list stops being a
 # work-list and becomes a place failures go to be forgotten. This is exactly why
 # the permanent engine-specific exclusions live in their own file: they have no
@@ -313,13 +243,20 @@ else
   fail=1
 fi
 
-# ── the two lists must not overlap, at any scope ───────────────────────────
+# A static "is this a test key and not a binary id" check is deliberately NOT
+# here. Nothing in an entry's SHAPE distinguishes `nook-control::job_reaper`
+# from a test key, so such a check would pass exactly the entries most likely to
+# be wrong while looking like it had ruled them out. The guard proper is what
+# holds an over-wide entry to account: it either covers nothing in the run, or
+# covers only passing tests, and both come back as stale above.
+
+# ── the two lists must not overlap, at any scope ────────────────────────────
 # The same test in both would be both "pending work" and "permanent", so
 # deleting the pending line would silently change nothing.
 #
-# NESTING counts as overlap since MAIN-657, because an entry now covers
-# everything under it: `it::foo` in one file and `it::foo::a_test` in the other
-# is the same trap wearing two names, and `comm` cannot see it.
+# NESTING counts as overlap since MAIN-657, because an entry covers everything
+# under it: `it::foo` in one file and `it::foo::a_test` in the other is the same
+# trap wearing two names, and `comm` cannot see it.
 entries() {
   sed -e 's/#.*//' -e 's/[[:space:]]*$//' "$1" | grep -v '^$' | sort || true
 }
