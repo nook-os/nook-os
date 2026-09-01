@@ -7773,6 +7773,40 @@
         }
       }
     },
+    "/api/v1/tenants/{id}/export": {
+      "get": {
+        "tags": [
+          "crate::routes::tenant_export"
+        ],
+        "summary": "The whole tenant, as a gzip tarball.",
+        "description": "Owner-only (AC-2). Not admin: an export is every card, every workspace and\nevery uploaded file in one file that leaves the deployment, which is a\ndecision about the tenant itself rather than about the work inside it. A\nnode token is refused outright — a machine has no reason to pull one.",
+        "operationId": "export_tenant",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "a gzip tarball of the tenant",
+            "content": {
+              "application/gzip": {}
+            }
+          },
+          "403": {
+            "description": "the caller does not own this tenant"
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/tenants/{id}/invites": {
       "get": {
         "tags": [

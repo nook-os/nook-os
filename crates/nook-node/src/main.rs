@@ -217,6 +217,12 @@ enum Command {
     /// deliberate enqueue per pass.
     #[command(subcommand)]
     Epics(EpicsCommand),
+    /// A tenant's own data (MAIN-659).
+    ///
+    ///     nook tenants export                 the whole tenant, as a .tar.gz
+    ///     nook tenants export --out t.tar.gz  under a name you choose
+    #[command(subcommand)]
+    Tenants(TenantsCommand),
     /// Reach a port on this machine from anywhere in the tenant (MAIN-9).
     ///
     ///     nook tunnel 3000        open one, and print its URL
@@ -682,6 +688,9 @@ async fn main() -> Result<()> {
         }) => cli::reviews_enqueue(&workspace, seed.as_deref(), pr, force).await,
         Command::Epics(EpicsCommand::Run { epic, seed }) => {
             cli::epics_run(&epic, seed.as_deref()).await
+        }
+        Command::Tenants(TenantsCommand::Export { out, tenant }) => {
+            cli::tenants_export(out.as_deref(), tenant.as_deref()).await
         }
         Command::Issues(IssuesCommand::List {
             board,
@@ -1975,6 +1984,26 @@ enum InteractionsCommand {
         id: String,
         /// The response.
         response: String,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum TenantsCommand {
+    /// Write the tenant's whole board, workspaces and configuration to a
+    /// `.tar.gz`.
+    ///
+    /// Owner-only, and secret VALUES never travel — credentials, vault items
+    /// and channel tokens are absent by design, which the summary says out
+    /// loud so nobody mistakes the archive for a backup of them.
+    Export {
+        /// Where to write it. Default: `<slug>-<YYYYMMDD>.tar.gz` here.
+        /// Never overwrites.
+        #[arg(long)]
+        out: Option<String>,
+        /// A tenant other than the session's, by slug or id. You must be its
+        /// owner either way.
+        #[arg(long)]
+        tenant: Option<String>,
     },
 }
 

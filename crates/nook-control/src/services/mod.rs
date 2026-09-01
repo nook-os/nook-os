@@ -119,6 +119,9 @@ pub mod stack_reaper;
 pub mod task_reports;
 pub mod tasks;
 pub mod taskwork;
+/// The tenant export archive format, v1 (MAIN-659): what travels, what does
+/// not, what is redacted, and how the tar stream is laid out.
+pub mod tenant_archive;
 pub mod triggers;
 pub mod tunnel_reaper;
 pub mod work_source;
