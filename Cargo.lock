@@ -2918,7 +2918,7 @@ dependencies = [
 
 [[package]]
 name = "nook-auth"
-version = "0.6.14"
+version = "0.6.15"
 dependencies = [
  "nook-db",
  "sha2 0.10.9",
@@ -2928,7 +2928,7 @@ dependencies = [
 
 [[package]]
 name = "nook-chat"
-version = "0.6.14"
+version = "0.6.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2958,7 +2958,7 @@ dependencies = [
 
 [[package]]
 name = "nook-control"
-version = "0.6.14"
+version = "0.6.15"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3022,7 +3022,7 @@ dependencies = [
 
 [[package]]
 name = "nook-db"
-version = "0.6.14"
+version = "0.6.15"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3039,7 +3039,7 @@ dependencies = [
 
 [[package]]
 name = "nook-db-derive"
-version = "0.6.14"
+version = "0.6.15"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3048,7 +3048,7 @@ dependencies = [
 
 [[package]]
 name = "nook-desktop-env"
-version = "0.6.14"
+version = "0.6.15"
 dependencies = [
  "libc",
  "rand 0.9.5",
@@ -3059,7 +3059,7 @@ dependencies = [
 
 [[package]]
 name = "nook-dispatcher"
-version = "0.6.14"
+version = "0.6.15"
 dependencies = [
  "async-trait",
  "nook-types",
@@ -3070,7 +3070,7 @@ dependencies = [
 
 [[package]]
 name = "nook-errors"
-version = "0.6.14"
+version = "0.6.15"
 dependencies = [
  "anyhow",
  "axum",
@@ -3087,7 +3087,7 @@ dependencies = [
 
 [[package]]
 name = "nook-infra"
-version = "0.6.14"
+version = "0.6.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3115,7 +3115,7 @@ dependencies = [
 
 [[package]]
 name = "nook-k8s"
-version = "0.6.14"
+version = "0.6.15"
 dependencies = [
  "futures-util",
  "http 1.4.2",
@@ -3132,7 +3132,7 @@ dependencies = [
 
 [[package]]
 name = "nook-mcp"
-version = "0.6.14"
+version = "0.6.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3151,7 +3151,7 @@ dependencies = [
 
 [[package]]
 name = "nook-node"
-version = "0.6.14"
+version = "0.6.15"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3187,7 +3187,7 @@ dependencies = [
 
 [[package]]
 name = "nook-openapi-gen"
-version = "0.6.14"
+version = "0.6.15"
 dependencies = [
  "anyhow",
  "nook-control",
@@ -3197,7 +3197,7 @@ dependencies = [
 
 [[package]]
 name = "nook-proto"
-version = "0.6.14"
+version = "0.6.15"
 dependencies = [
  "base64 0.22.1",
  "nook-types",
@@ -3209,7 +3209,7 @@ dependencies = [
 
 [[package]]
 name = "nook-testkit"
-version = "0.6.14"
+version = "0.6.15"
 dependencies = [
  "anyhow",
  "nook-control",
@@ -3223,7 +3223,7 @@ dependencies = [
 
 [[package]]
 name = "nook-types"
-version = "0.6.14"
+version = "0.6.15"
 dependencies = [
  "chrono",
  "nook-db",
@@ -3236,7 +3236,7 @@ dependencies = [
 
 [[package]]
 name = "nook-worker"
-version = "0.6.14"
+version = "0.6.15"
 dependencies = [
  "anyhow",
  "async-trait",
