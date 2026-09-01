@@ -1406,7 +1406,7 @@ enum IssuesCommand {
         /// The title (required).
         #[arg(long)]
         title: String,
-        /// Board key or uuid. Defaults to the first board.
+        /// Board key or uuid. Defaults to this session's workspace's board.
         #[arg(long)]
         board: Option<String>,
         /// Markdown body. `-` reads stdin, for multi-line bodies.

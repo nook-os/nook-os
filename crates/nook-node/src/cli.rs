@@ -2718,27 +2718,120 @@ async fn resolve_workspace(client: &Client, needle: &str) -> Result<String> {
         .with_context(|| format!("no workspace named '{needle}' — try `nook get workspaces`"))
 }
 
-/// The board's id: an explicit key/uuid, or the first board when none is given.
-/// The create endpoint is keyed by board UUID, so a key must be resolved here.
-async fn resolve_board(client: &Client, needle: Option<&str>) -> Result<String> {
-    let list = client.get("/api/v1/boards").await?;
-    let boards: Vec<Value> = list.as_array().cloned().unwrap_or_default();
-    match needle {
-        None => boards
-            .first()
-            .and_then(|b| b.get("id").and_then(Value::as_str).map(str::to_string))
-            .context("no boards exist yet"),
-        Some(n) => boards
-            .iter()
-            .find(|b| {
-                b.get("id").and_then(Value::as_str) == Some(n)
-                    || b.get("key")
-                        .and_then(Value::as_str)
-                        .is_some_and(|k| k.eq_ignore_ascii_case(n))
-            })
-            .and_then(|b| b.get("id").and_then(Value::as_str).map(str::to_string))
-            .with_context(|| format!("no board '{n}' — try `nook issues list` or omit --board")),
+/// The workspace a command with no `--workspace` is acting in, if any.
+///
+/// `NOOK_WORKSPACE_ID` is exported into every session and every loop job
+/// (MAIN-367), so the common case answers with no round trip; the session
+/// lookup is the fallback for a shell carrying the session id and not the
+/// workspace one. A loop job's agent has the variable and no `NOOK_SESSION_ID`
+/// at all, which is why the variable is asked first and not second.
+async fn ambient_workspace(client: &Client) -> Result<Option<String>> {
+    if let Some(w) = std::env::var("NOOK_WORKSPACE_ID")
+        .ok()
+        .map(|w| w.trim().to_string())
+        .filter(|w| !w.is_empty())
+    {
+        return Ok(Some(w));
     }
+    Ok(current_session_scope(client)
+        .await?
+        .workspace()
+        .map(|w| w.id.clone()))
+}
+
+/// One board, reduced to the three fields choosing between them needs, so the
+/// choice is a pure function of the tenant's boards rather than of a live
+/// control plane.
+#[derive(Debug, Clone, PartialEq)]
+struct BoardRef {
+    id: String,
+    key: Option<String>,
+    workspace_id: Option<String>,
+}
+
+impl BoardRef {
+    fn from_json(v: &Value) -> Option<Self> {
+        Some(Self {
+            id: v.get("id").and_then(Value::as_str)?.to_string(),
+            key: v.get("key").and_then(Value::as_str).map(str::to_string),
+            workspace_id: v
+                .get("workspace_id")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        })
+    }
+
+    /// What a human calls this board: its key, or the id for a keyless one.
+    fn label(&self) -> &str {
+        self.key.as_deref().unwrap_or(&self.id)
+    }
+}
+
+/// Which board a command acts on (MAIN-639). Pure, so the refuse-rather-than-
+/// guess rule is tested without a control plane.
+///
+/// `--board` wins. Otherwise the workspace this session is in picks its own
+/// board: the bug this replaces was `boards.first()`, which filed a card from
+/// one repo's session onto whichever board happened to sort first. With nothing
+/// to go on, a single-board tenant is unambiguous and still resolves — which is
+/// also what keeps a board that predates workspace ownership working — but two
+/// boards are a choice this cannot make, and it names the flag instead of
+/// guessing.
+fn pick_board<'a>(
+    boards: &'a [BoardRef],
+    needle: Option<&str>,
+    workspace: Option<&str>,
+) -> Result<&'a BoardRef> {
+    if let Some(n) = needle {
+        return boards
+            .iter()
+            .find(|b| b.id == n || b.key.as_deref().is_some_and(|k| k.eq_ignore_ascii_case(n)))
+            .with_context(|| format!("no board '{n}' — try `nook issues list` or omit --board"));
+    }
+    if let Some(b) =
+        workspace.and_then(|w| boards.iter().find(|b| b.workspace_id.as_deref() == Some(w)))
+    {
+        return Ok(b);
+    }
+    match boards {
+        [] => bail!("no boards exist yet"),
+        [only] => Ok(only),
+        many => {
+            let names: Vec<&str> = many.iter().map(BoardRef::label).collect();
+            let why = match workspace {
+                Some(w) => format!("this workspace ({w}) has no board of its own"),
+                None => "nothing here says which workspace this is for".to_string(),
+            };
+            bail!(
+                "{why}, and this tenant has {} boards: {}.\n\
+                 Name the one you mean with --board <KEY>.\n\
+                 Refusing rather than guessing, which would file this onto another \
+                 workspace's board.",
+                many.len(),
+                names.join(", ")
+            )
+        }
+    }
+}
+
+/// The board's id: an explicit key/uuid, else the board of the workspace this
+/// session is in. The create endpoint is keyed by board UUID, so a key must be
+/// resolved here.
+///
+/// The one place a board is resolved — `board_resolution_tests` fails the build
+/// if a second appears, because two verbs disagreeing about which board is
+/// current is the whole of MAIN-639.
+async fn resolve_board(
+    client: &Client,
+    needle: Option<&str>,
+    workspace: Option<&str>,
+) -> Result<String> {
+    let list = client.get("/api/v1/boards").await?;
+    let boards: Vec<BoardRef> = list
+        .as_array()
+        .map(|a| a.iter().filter_map(BoardRef::from_json).collect())
+        .unwrap_or_default();
+    Ok(pick_board(&boards, needle, workspace)?.id.clone())
 }
 
 /// The flags for `nook issues create`, one field per flag (mirrors `main.rs`).
@@ -2797,7 +2890,6 @@ fn build_create_body(
 /// title); `Client::post` surfaces its message and this exits non-zero on a 4xx.
 pub async fn create_task(opts: CreateTask) -> Result<()> {
     let client = Client::from_config()?;
-    let board = resolve_board(&client, opts.board.as_deref()).await?;
 
     // `-` reads the body from stdin, so a multi-line spec can be piped in.
     let description = match opts.description.as_deref() {
@@ -2813,13 +2905,16 @@ pub async fn create_task(opts: CreateTask) -> Result<()> {
     // Workspace: an explicit flag wins; otherwise inherit the session's, like
     // `nook issues list` — so a filer inside a repo files against that repo by
     // default.
+    //
+    // Resolved BEFORE the board, and handed to it: the card's workspace and the
+    // board it lands on are then the same answer to the same question, which is
+    // what stops a card being stamped with one repo while filed onto another's
+    // board (MAIN-639).
     let workspace_id = match opts.workspace.as_deref() {
         Some(w) => Some(resolve_workspace(&client, w).await?),
-        None => current_session_scope(&client)
-            .await?
-            .workspace()
-            .map(|w| w.id.clone()),
+        None => ambient_workspace(&client).await?,
     };
+    let board = resolve_board(&client, opts.board.as_deref(), workspace_id.as_deref()).await?;
 
     let body = build_create_body(&opts, description, workspace_id);
     let created = client
@@ -4385,6 +4480,149 @@ mod task_verb_tests {
         let body = build_create_body(&bare, None, None);
         assert_eq!(body["title"], "t");
         assert_eq!(body.as_object().unwrap().len(), 1, "only title: {body}");
+    }
+}
+
+#[cfg(test)]
+mod board_resolution_tests {
+    //! Which board a verb with no `--board` acts on (MAIN-639).
+    //!
+    //! `boards.first()` was a guess dressed as a default: once boards belong to
+    //! workspaces it files a session's card onto whichever board sorts first,
+    //! and nothing in the output says it went somewhere else.
+    use super::*;
+
+    fn board(id: &str, key: &str, workspace: Option<&str>) -> BoardRef {
+        BoardRef {
+            id: id.into(),
+            key: Some(key.into()),
+            workspace_id: workspace.map(str::to_string),
+        }
+    }
+
+    /// Two boards, and the session's workspace owns the SECOND one — the shape
+    /// the old `first()` got wrong every time.
+    fn two() -> Vec<BoardRef> {
+        vec![
+            board("b-web", "WEB", Some("ws-web")),
+            board("b-main", "MAIN", Some("ws-main")),
+        ]
+    }
+
+    #[test]
+    fn the_session_workspace_wins_over_the_first_board() {
+        let boards = two();
+        let picked = pick_board(&boards, None, Some("ws-main")).expect("ws-main has a board");
+        assert_eq!(picked.id, "b-main");
+    }
+
+    #[test]
+    fn an_explicit_board_overrides_the_workspace() {
+        let boards = two();
+        // Key matching is case-insensitive, and a uuid still addresses a board.
+        assert_eq!(
+            pick_board(&boards, Some("web"), Some("ws-main"))
+                .unwrap()
+                .id,
+            "b-web"
+        );
+        assert_eq!(
+            pick_board(&boards, Some("b-web"), Some("ws-main"))
+                .unwrap()
+                .id,
+            "b-web"
+        );
+    }
+
+    #[test]
+    fn an_unknown_board_errors_by_name() {
+        let boards = two();
+        let err = pick_board(&boards, Some("NOPE"), Some("ws-main"))
+            .expect_err("an unknown board must not fall back to anything");
+        assert!(err.to_string().contains("NOPE"), "{err}");
+    }
+
+    #[test]
+    fn no_workspace_and_two_boards_refuses_and_names_the_flag() {
+        let boards = two();
+        let err = pick_board(&boards, None, None).expect_err("two boards is a choice, not a guess");
+        let msg = err.to_string();
+        assert!(msg.contains("--board"), "the way out must be named: {msg}");
+        // Both candidates listed, so the reader can answer without a second command.
+        assert!(msg.contains("WEB") && msg.contains("MAIN"), "{msg}");
+    }
+
+    #[test]
+    fn a_workspace_with_no_board_of_its_own_refuses_too() {
+        let boards = two();
+        let err = pick_board(&boards, None, Some("ws-docs"))
+            .expect_err("a workspace whose board does not exist must not inherit another's");
+        let msg = err.to_string();
+        assert!(msg.contains("ws-docs"), "{msg}");
+        assert!(msg.contains("--board"), "{msg}");
+    }
+
+    #[test]
+    fn a_single_board_tenant_is_unchanged() {
+        // With one board there is no choice to get wrong, so both the ambient
+        // shell and a session whose workspace owns nothing resolve to it —
+        // which is also every tenant whose board predates workspace ownership.
+        let boards = vec![board("b-main", "MAIN", None)];
+        assert_eq!(pick_board(&boards, None, None).unwrap().id, "b-main");
+        assert_eq!(
+            pick_board(&boards, None, Some("ws-main")).unwrap().id,
+            "b-main"
+        );
+    }
+
+    #[test]
+    fn no_boards_at_all_says_so() {
+        let err = pick_board(&[], None, Some("ws-main")).expect_err("nothing to pick");
+        assert!(err.to_string().contains("no boards exist yet"), "{err}");
+    }
+
+    #[test]
+    fn board_ref_reads_the_wire_shape() {
+        let v = serde_json::json!({
+            "id": "b-1", "key": "MAIN", "workspace_id": "ws-1", "name": "Main"
+        });
+        assert_eq!(
+            BoardRef::from_json(&v),
+            Some(board("b-1", "MAIN", Some("ws-1")))
+        );
+        // A board with no key and no workspace is still a board; one with no id
+        // is not addressable and is dropped rather than guessed at.
+        let bare = serde_json::json!({ "id": "b-2" });
+        let parsed = BoardRef::from_json(&bare).expect("an id is all it takes");
+        assert_eq!(parsed.label(), "b-2");
+        assert!(BoardRef::from_json(&serde_json::json!({ "key": "X" })).is_none());
+    }
+
+    /// AC-4: one resolution path, enforced by the source, because a verb that
+    /// grows its own board defaulting is exactly how two of them come to
+    /// disagree about which board is current.
+    #[test]
+    fn only_one_place_resolves_a_board() {
+        // Built rather than written out, so this scan does not count itself.
+        let path = format!("\"/api/v1/{}\"", "boards");
+        let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cli.rs"))
+            .expect("cli.rs must be readable");
+        assert_eq!(
+            src.matches(&path).count(),
+            1,
+            "the board list is read from more than one place — every verb must \
+             resolve its board through `resolve_board`, or `nook issues create` \
+             and its neighbours will disagree about which board is current"
+        );
+        let body = src
+            .split("\nasync fn resolve_board(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("resolve_board must exist");
+        assert!(
+            body.contains(&path),
+            "…and that place must be `resolve_board` itself"
+        );
     }
 }
 
