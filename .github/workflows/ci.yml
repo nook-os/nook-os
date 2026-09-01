@@ -127,6 +127,29 @@ jobs:
       # invocation in the job, and so `rust-cache` keys on it — a linker change
       # is a build-input change and the cache should know.
       RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
+      # No debug info in CI (MAIN-664). Roughly 45% of a linked test binary is
+      # DWARF — measured, `crates/nook-control/tests`' binaries link to 23.4 GB
+      # with it and 13.0 GB without — and nothing here ever reads it:
+      # `RUST_BACKTRACE` is set nowhere in `.github/`, `scripts/`, `test.sh` or
+      # `docker-compose.yml`, so no frame is ever symbolized. Writing those
+      # bytes is link time, and linking is what makes this job's build most of
+      # its minutes.
+      #
+      # Failure diagnostics do NOT depend on it: a panic's `file:line` comes
+      # from `Location::caller()`, compile-time metadata rather than DWARF (the
+      # distinction `crates/nook-errors/src/lib.rs:23` draws), so `assert_eq!`
+      # failures and panics keep naming their file and line with this set.
+      #
+      # It is a CI-only override, deliberately not a `Cargo.toml` change:
+      # `[profile.dev] debug = "line-tables-only"` stays the LOCAL default,
+      # because the machine you debug on is the one that wants line tables.
+      # `[profile.test]` inherits `[profile.dev]`, so test binaries and
+      # dependencies are both covered by this one variable.
+      #
+      # ESCAPE HATCH: when a CI-only flake genuinely needs frames, comment this
+      # line out on a scratch branch and push — there is no input or toggle to
+      # find, and nothing else has to change.
+      CARGO_PROFILE_DEV_DEBUG: "0"
       DATABASE_URL: ${{ matrix.database_url }}
       NOOK_REQUIRE_DB: "1"
       NOOK_TEST_REDIS_URL: redis://localhost:6379
