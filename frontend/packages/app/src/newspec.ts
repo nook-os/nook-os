@@ -21,11 +21,15 @@ export const SPEC_DRAFT_TITLE = "New spec";
 /**
  * The board this workspace's cards belong on.
  *
- * A board may be bound to one workspace (`boards.workspace_id`), or be the
- * tenant's single shared board — which is the common shape, and what the Board
- * page assumes when it just takes `boards[0]`. So: prefer a board that names
- * this workspace, otherwise fall back to that same first board rather than
- * refusing. A tenant with one board is not a misconfiguration.
+ * A board may be bound to one workspace (`boards.workspace_id`), or be a
+ * tenant's leftover shared board from before MAIN-637. So: prefer a board that
+ * names this workspace, otherwise fall back to the first rather than refusing.
+ * A tenant with one unbound board is not a misconfiguration.
+ *
+ * Deliberately NOT what the Board page does — `Board.tsx`'s `selectedBoard`
+ * has no fallback, because showing an arbitrary board is a lie about what you
+ * are looking at (MAIN-638), whereas filing a card on the only board there is
+ * beats refusing to file it.
  */
 export function boardForWorkspace(
   boards: Board[] | undefined,
