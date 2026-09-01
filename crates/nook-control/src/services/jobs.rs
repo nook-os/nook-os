@@ -3289,26 +3289,68 @@ pub async fn refuse_from_node(
     refuse(state, tenant, id, reason).await
 }
 
-/// Fail every job a node was executing when it disconnected (AC-4): the session
-/// died with the node. Terminal jobs are untouched (the guard in `transition`).
+/// What a reaper does with a run whose completion signal never arrived.
+///
+/// A run that recorded an outcome has CONCLUDED — whatever became of the
+/// signal that should have followed. MAIN-607 established that for the stall
+/// reaper; this is the same rule, in one place, so the two reapers cannot
+/// answer the same question differently again. They previously did: a run that
+/// went quiet was concluded, and an identical run whose node disconnected was
+/// failed.
+///
+/// The bool is whether the handback should run. A recorded outcome already ran
+/// it, and running it twice is precisely what gives a finished card back.
+fn conclusion_for(recorded_outcome: Option<&str>) -> (&'static str, bool) {
+    match recorded_outcome {
+        Some(_) => ("completed", false),
+        None => ("failed", true),
+    }
+}
+
+/// Conclude every job a node was executing when it disconnected (AC-4): the
+/// session died with the node. Terminal jobs are untouched (the guard in
+/// `transition`).
+///
+/// A run that had already recorded its outcome is `completed`, not `failed`.
+/// The agent-update drain (MAIN-505) makes that ordinary rather than exotic: a
+/// node installs its update "the moment the last run concludes", which is
+/// exactly the window in which the conclusion is still in flight. Failing it
+/// there charged the card a strike for work that succeeded, and the failure
+/// ladder escalated on it.
 pub async fn fail_stranded_for_node(state: &AppState, node: NodeId) -> ApiResult<()> {
     let stranded: Vec<JobId> = state.jobs.in_flight_on_node(node).await?;
     for id in stranded {
-        append_transcript(
-            state,
-            id,
-            "system",
-            "executor node disconnected — job failed",
-        )
-        .await
-        .ok();
         // Each job's OWN tenant (MAIN-515): the scan is by node, and a node may
         // hold work from any tenant its owner belongs to, so the disconnecting
         // connection's tenant is not the one to write the failure in.
         let Some((tenant, _)) = state.jobs.tenant_and_target_of(id).await? else {
             continue;
         };
-        let _ = transition(state, tenant, id, "failed").await;
+        // Kind-wise, through the same accessor the stall reaper's SQL twin
+        // uses: reading `build_outcome` here would answer `None` for every
+        // `review` run, and this reaper would go on disagreeing with that one
+        // for exactly the kind nobody thought to check.
+        let recorded = load(state, tenant, id)
+            .await
+            .ok()
+            .and_then(|j| crate::repo::jobs::recorded_outcome(&j).map(str::to_owned));
+        let (next, _handback) = conclusion_for(recorded.as_deref());
+        let line = match recorded.as_deref() {
+            Some(outcome) => format!(
+                "executor node disconnected — but this run had already recorded its outcome \
+                 ({outcome}), so it is concluded, not failed: only the completion signal was lost"
+            ),
+            None => "executor node disconnected — job failed".to_string(),
+        };
+        append_transcript(state, id, "system", &line).await.ok();
+        // NOT `let _ =`: a refused transition here means this reaper believes a
+        // run concluded and the state machine does not, and swallowing that
+        // leaves the row in flight with a transcript line saying otherwise —
+        // until the hour-long stall reaper finds it. Nothing here can act on
+        // the error, so it is logged rather than handled.
+        if let Err(e) = transition(state, tenant, id, next).await {
+            tracing::warn!(job_id = %id, %next, error = %e, "stranded job could not be concluded");
+        }
     }
     Ok(())
 }
@@ -3465,8 +3507,10 @@ pub async fn scan_stalled_jobs(state: &AppState, stall_secs: u64) -> ApiResult<S
             let private = target_is_private(state, *tenant, *target).await;
             record_job_event(state, *tenant, "job.state_changed", &job, private).await;
             // The handback ALREADY ran when the outcome was recorded; running
-            // it again is precisely what gives a finished card back.
-            if recorded_outcome.is_none() {
+            // it again is precisely what gives a finished card back. Asked
+            // through `conclusion_for` so this reaper and the disconnect one
+            // read one rule rather than two copies of it.
+            if conclusion_for(recorded_outcome.as_deref()).1 {
                 reap.handed_back += 1;
                 crate::services::build_handback::on_run_concluded(state, *tenant, &job).await;
             }
@@ -3887,7 +3931,25 @@ pub async fn revoke_job_token(state: &AppState, tenant: TenantId, id: JobId) {
 
 #[cfg(test)]
 mod tests {
-    use super::closes_key;
+    use super::{closes_key, conclusion_for};
+
+    /// MAIN-645: both reapers ask this, so they cannot answer the same question
+    /// differently. They used to — a run that went quiet was concluded, and an
+    /// identical run whose node disconnected was failed, though each had said
+    /// exactly the same thing about itself.
+    ///
+    /// The bool is whether the handback runs. A recorded outcome already ran
+    /// it; running it twice gives a finished card back.
+    #[test]
+    fn a_recorded_outcome_concludes_a_run_however_its_signal_was_lost() {
+        assert_eq!(conclusion_for(Some("pr_opened")), ("completed", false));
+        assert_eq!(conclusion_for(Some("no_change")), ("completed", false));
+
+        // Nothing reported: the run really is lost, and nothing will ever
+        // report for it. That is the case `failed` is for, and the handback
+        // has to run because the outcome never did.
+        assert_eq!(conclusion_for(None), ("failed", true));
+    }
 
     /// The literal contract, and only it: a line starting `Closes `, a token
     /// shaped like a key. Lookalikes must not join a PR to a card it does not

@@ -454,6 +454,25 @@ fn concluded(j: &str) -> String {
     )
 }
 
+/// `concluded()`'s Rust twin, and the ONE place the question is answered for a
+/// job already in hand (MAIN-645). The stall reaper asks the SQL above; the
+/// disconnect reaper has no query to ask and used to read `build_outcome`
+/// directly, which answered `None` for every `review` run — so a review that
+/// posted its verdict and then lost its node was still `failed`, while the
+/// identical run that merely went quiet was `completed`. Two reapers, two
+/// answers, which is the drift this whole card exists to end.
+///
+/// Kind-wise for the reason the SQL is: the two kinds record a conclusion in
+/// different columns, and a `spec` run has neither. Change this and change
+/// `concluded()` in the same edit — they are one rule in two dialects.
+pub fn recorded_outcome(job: &LoopJob) -> Option<&str> {
+    match job.kind.as_str() {
+        "build" => job.build_outcome.as_deref(),
+        "review" => job.review_verdict.as_deref(),
+        _ => None,
+    }
+}
+
 /// One silent in-flight job, read before the fail — for `QueuedCandidate`'s
 /// reason (SQLite's `RETURNING` reaches neither an alias nor a joined table).
 ///
@@ -2250,14 +2269,6 @@ fn last_progress(
         .max(job.updated_at)
 }
 
-fn recorded_outcome(job: &LoopJob) -> Option<String> {
-    match job.kind.as_str() {
-        "build" => job.build_outcome.clone(),
-        "review" => job.review_verdict.clone(),
-        _ => None,
-    }
-}
-
 /// The shared body of both queued-job endings: cancel every `queued` job the
 /// predicate picks, reporting what was ended. Mirrors the real guarded
 /// `UPDATE … WHERE state = 'queued' … RETURNING`.
@@ -3152,7 +3163,7 @@ impl LoopJobRepository for FakeLoopJobRepository {
                     tenant: j.tenant_id,
                     target_task_id: j.target_task_id,
                     last_progress_at: progress,
-                    recorded_outcome: recorded_outcome(j),
+                    recorded_outcome: recorded_outcome(j).map(str::to_owned),
                 })
             })
             .collect())
