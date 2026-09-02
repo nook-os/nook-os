@@ -316,6 +316,19 @@ More than one replica needs either a `ReadWriteMany` storage class or
 `config.artifactStore: s3` — with S3 the bytes go to the bucket and the volume
 is unused.
 
+**A `ReadWriteOnce` claim makes control-plane upgrades `Recreate`, not
+rolling.** That volume attaches to one node at a time, and a rolling update
+needs the outgoing and incoming pods alive together — so the incoming pod hangs
+on `Multi-Attach error for volume`, the outgoing pod is never removed to free
+it, and the upgrade deadlocks until somebody intervenes. The chart therefore
+stops the old pod before starting the new one whenever it mounts a claim
+without `ReadWriteMany`: **expect a few seconds with no control plane on every
+`helm upgrade`**. Web is untouched and stays up. To get the rolling upgrade
+back, give the claim a `ReadWriteMany` class, or move uploads off the volume
+entirely with `config.artifactStore: s3`; `userContent.persistence.enabled=false`
+also leaves the rolling update in place, since there is then no volume to
+contend for.
+
 **A store the control plane cannot write does not stop the pod.** It boots,
 serves everything else, and logs one `WARN` naming the backend, the path or
 bucket, and the underlying error; uploads answer `503 file storage is not

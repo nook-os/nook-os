@@ -177,7 +177,8 @@ kube -n "$NS" create secret generic "$SECRET" \
   --from-literal=SECRETS_KEY="$(openssl rand -hex 32)"
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
-install_at() { # $1 = image tag
+install_at() { # $1 = image tag, $2... = extra --set flags
+  local tag="$1"; shift
   # No `helm --wait`: its failure is an opaque "context deadline exceeded" with
   # no pod state. Apply, then wait_rollout ourselves so a stuck deployment is
   # attributed and the trap dumps its pods/events/logs.
@@ -185,8 +186,8 @@ install_at() { # $1 = image tag
     --kube-context "$CTX" -n "$NS" \
     -f "$CHART/ci/e2e-values.yaml" \
     --set existingSecret="$SECRET" \
-    --set controlPlane.image.tag="$1" \
-    --set web.image.tag="$1"
+    --set controlPlane.image.tag="$tag" \
+    --set web.image.tag="$tag" "$@"
 }
 
 assert_healthy() { # $1 = label for the log line
@@ -226,5 +227,43 @@ assert_healthy "install"
 log "helm upgrade (image tag e2e-1 -> e2e-2)"
 install_at e2e-2
 assert_healthy "upgrade"
+
+# ── Upgrading a release that mounts the upload PVC (MAIN-653) ────────────────
+# Everything above ran on the emptyDir case, which ci/e2e-values.yaml selects
+# deliberately. But a real install has the PVC, and that is the configuration
+# where every upgrade used to stop and wait for a human: the replacement pod
+# cannot attach a ReadWriteOnce volume the outgoing pod still holds, and
+# RollingUpdate does not remove the outgoing pod until the replacement is
+# Ready. So turn persistence ON and upgrade twice more on top of it.
+#
+# TWICE, not once, because the first upgrade after a strategy change is the
+# easy one — it is the SECOND that proves the release settled into a shape it
+# can keep leaving, rather than one that merely survived being entered.
+persist=(--set userContent.persistence.enabled=true
+         --set userContent.persistence.size=1Gi)
+
+log "helm upgrade (userContent.persistence -> enabled)"
+install_at e2e-2 "${persist[@]}"
+assert_healthy "persistence on"
+
+kube -n "$NS" get deploy -l app.kubernetes.io/component=control \
+  -o jsonpath='{.items[0].spec.strategy.type}' | grep -qx Recreate \
+  || die "the control-plane Deployment mounts a PVC but is not set to Recreate"
+
+# A changed config value per upgrade, so each one is a real rollout: the pod
+# template carries a checksum of the ConfigMap, so an identical upgrade would
+# replace nothing and prove nothing.
+for lvl in debug info; do
+  log "helm upgrade with the PVC mounted (logLevel=$lvl)"
+  install_at e2e-2 "${persist[@]}" --set config.logLevel="$lvl"
+  assert_healthy "pvc upgrade ($lvl)"
+done
+
+# Nothing above deletes a pod, so reaching here IS "no hand-deleting". This
+# catches the failure by name in case a future strategy change reintroduces the
+# overlap and the rollout happens to win the race anyway.
+if kube -n "$NS" get events 2>/dev/null | grep -q 'Multi-Attach'; then
+  die "a Multi-Attach error appeared — the rollout overlapped on the upload volume"
+fi
 
 log "chart end-to-end PASSED — install + upgrade converged and served"
