@@ -17,11 +17,24 @@ COPY crates ./crates
 # The agent skill is embedded with include_str!: a build input, not a
 # runtime file.
 COPY skills ./skills
+# The Pod executor (MAIN-623), which is an OPTIONAL feature of nook-node so that
+# the desktop bundle does not ship a Kubernetes client to laptops with no
+# cluster. THIS image is the one the operator-node chart deploys, and that chart
+# has a `kubernetes` executor mode — so the image has to be able to honour it.
+#
+# Built in rather than left to a `--build-arg`, because the failure of leaving
+# it out is silent and total: an operator following the chart's README gets the
+# ServiceAccount, the Role and `NOOK_EXECUTOR=kubernetes` in the pod, and a
+# binary with `mod k8s_exec` compiled out that ignores all three — including the
+# all-or-nothing validation that is supposed to make a half-configured executor
+# a loud error.
+ARG NOOK_NODE_FEATURES=kubernetes
+
 # Shared cargo caches. The copy-out has to live in this RUN: target/ is a mount
 # rather than image content, so it is gone by the next instruction.
 RUN --mount=type=cache,id=nook-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=nook-cargo-target,target=/src/target,sharing=locked \
-    cargo build --release -p nook-node \
+    cargo build --release -p nook-node --features "${NOOK_NODE_FEATURES}" \
     && mkdir -p /out && cp target/release/nook /out/
 
 FROM debian:bookworm-slim

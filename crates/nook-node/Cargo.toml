@@ -47,6 +47,19 @@ walkdir = { workspace = true }
 tar = { workspace = true }
 flate2 = { workspace = true }
 
+# OPTIONAL, and that is the whole point (MAIN-623). The desktop bundle builds
+# this crate's `nook` binary, so a plain dependency here would ship k8s-openapi
+# to every laptop install of an app with no cluster -- the trade nook-k8s's
+# guard exists to make somebody look at. Behind a feature, the default build is
+# byte-for-byte what it was, and a cluster image opts in with
+# `--features kubernetes`.
+nook-k8s = { workspace = true, optional = true }
+
+[features]
+default = []
+# The Pod executor: run loop jobs as Kubernetes Pods instead of local processes.
+kubernetes = ["dep:nook-k8s"]
+
 [dev-dependencies]
 # The generated Traefik tunnel rule is a regular expression, and the assertion
 # that it cannot match the apex is only worth anything if a regex engine makes

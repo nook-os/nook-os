@@ -175,6 +175,79 @@ else
   fail=1
 fi
 
+# ── executor mode (MAIN-623) ────────────────────────────────────────────────
+# The default must grant NOTHING. An upgrade that does not opt in cannot be the
+# thing that hands a cluster permission to an agent.
+for pattern in '^kind: Role$' '^kind: RoleBinding$' '^kind: ServiceAccount$' 'NOOK_EXECUTOR'; do
+  if grep -qE "$pattern" <<<"$out"; then
+    echo "  FAIL: local mode rendered $pattern"
+    fail=1
+  fi
+done
+echo "  ok:   local mode grants no RBAC and sets no executor env"
+
+k8s="$(render "${min[@]}" --set executor.mode=kubernetes --set executor.image=ghcr.io/x/job:1)"
+kneed() {
+  local label="$1" pattern="$2" want="$3" got
+  got="$(grep -cE "$pattern" <<<"$k8s" || true)"
+  if [ "$got" -ne "$want" ]; then
+    echo "  FAIL: $label — expected $want, got $got"
+    fail=1
+  else
+    echo "  ok:   $label ($got)"
+  fi
+}
+kneed "ServiceAccount"        '^kind: ServiceAccount$' 1
+kneed "Role, not ClusterRole" '^kind: Role$' 1
+kneed "no ClusterRole"        '^kind: ClusterRole' 0
+kneed "RoleBinding"           '^kind: RoleBinding$' 1
+kneed "pod verbs, exactly"    '^    verbs: \["create", "get", "list", "watch", "delete"\]$' 1
+kneed "logs are read-only"    '^    verbs: \["get"\]$' 1
+kneed "two rules and no more" '^  - apiGroups:' 2
+kneed "executor env"          'NOOK_EXECUTOR$' 1
+
+# The permission that would make a Pod job steerable, and is deliberately not
+# granted: anything holding it can write into a running container.
+if grep -qE 'pods/(attach|exec|portforward)' <<<"$k8s"; then
+  echo "  FAIL: the Role grants attach/exec/port-forward"
+  fail=1
+else
+  echo "  ok:   no attach, exec or port-forward"
+fi
+
+# AC-10. A Pod's env is returned by `get pods`, which the Role above grants
+# across this namespace — so a credential must arrive by reference or not at
+# all. Unset is a WORKING state, and the chart must not invent a Secret name.
+kneed "no credential secret by default" 'NOOK_JOB_CREDENTIALS_SECRET' 0
+
+creds=$(render "${min[@]}" --set executor.mode=kubernetes --set executor.image=i:1 \
+  --set executor.credentialsSecret=nook-job-credentials)
+if grep -q 'NOOK_JOB_CREDENTIALS_SECRET' <<<"$creds" \
+   && grep -q 'nook-job-credentials' <<<"$creds"; then
+  echo "  ok:   a named credential Secret is passed through"
+else
+  echo "  FAIL: executor.credentialsSecret did not reach the pod"
+  fail=1
+fi
+
+# The Role must NOT gain a secrets verb for this: the agent references a
+# hand-created Secret and never reads, writes or creates one.
+if grep -qE '^    resources: \[.*"secrets".*\]' <<<"$creds"; then
+  echo "  FAIL: the Role grants a secrets verb"
+  fail=1
+else
+  echo "  ok:   no secrets verb"
+fi
+
+# Both or neither: half a build pool reads as protection and is not.
+if render "${min[@]}" --set executor.mode=kubernetes --set executor.image=i:1 \
+     --set executor.buildPool.taint=t >/dev/null 2>&1; then
+  echo "  FAIL: a taint with no selector rendered"
+  fail=1
+else
+  echo "  ok:   half a build pool is refused"
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "chart validation FAILED"
   exit 1

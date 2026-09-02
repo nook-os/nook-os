@@ -215,6 +215,151 @@ If your DNS does not live in a namespace labelled
 
 Turn the whole thing off with `--set networkPolicy.enabled=false`.
 
+## Running each job as a Pod (MAIN-623)
+
+By default this chart runs every loop job as a **process inside the agent's own
+pod** (`executor.mode: local`). That is simple and it is what has always
+happened, but the jobs share one filesystem, one process table and one crash.
+
+`executor.mode: kubernetes` gives each job a **Pod of its own**:
+
+```bash
+helm install operator ./charts/nook-operator-node \
+  --set server=agent.nook.example.com:8081 \
+  --set existingSecret=nook-operator-join \
+  --set executor.mode=kubernetes \
+  --set executor.namespace=nook-jobs \
+  --set executor.image=ghcr.io/nook-os/nook-job-sandbox:<tag>
+```
+
+`executor.namespace` must already exist, and is usually **not** this chart's own
+namespace: a job Pod is the untrusted half, and a blast radius that excludes the
+agent's pod is worth a namespace of its own.
+
+`executor.image` has no default on purpose. A default would be this chart
+guessing at a registry, and a wrong guess fails at `ImagePullBackOff` — long
+after the install reported success.
+
+**The agent image has to be built with the `kubernetes` feature.** The Pod
+executor is an optional feature of `nook-node`, so that the desktop bundle does
+not ship a Kubernetes client to laptops with no cluster. The published
+`ghcr.io/nook-os/nook-operator-node` is built with it (see
+`deploy/docker/operator-node.Dockerfile`), so a stock install needs nothing
+here. A **hand-built** image does: without `--build-arg
+NOOK_NODE_FEATURES=kubernetes` you get the ServiceAccount, the Role and
+`NOOK_EXECUTOR=kubernetes` in the pod, and a binary that ignores all three — the
+mode silently does nothing and every job runs locally.
+
+### What a job Pod gets, and what it does not
+
+- **Its own checkout, from a fresh clone.** A job Pod mounts nothing, so the
+  node's clone cache and its per-job worktree are unreachable from inside one;
+  the Pod clones the workspace itself at `/home/agent/workspace`. There is no
+  PVC and no warm state carried between passes, so a repair pass on a card
+  starts cold — a review or build's warm agent session is a host-node feature
+  and does not apply here.
+- **The same environment contract a container-confined job gets** — `HOME`,
+  `CLAUDE_CONFIG_DIR`, `NOOK_SANDBOX=1`, `NOOK_SERVER`, `NOOK_JOB_ID` and the
+  job's own variables. One function builds it for both, so an agent cannot tell
+  which executor started it — **except for credentials**, which are held back
+  here and come from a Secret or not at all (see below).
+- **No leased ports.** A cluster job's port would need a Service to be
+  reachable and this chart creates none, so the lease is not taken rather than
+  delivered and quietly useless.
+- **No Docker socket and no privilege**, for every kind this executor runs.
+
+### Exactly what it grants
+
+A **Role**, bound in `executor.namespace` alone. Never a ClusterRole: an
+executor reaches the one namespace it creates jobs in, and a cluster-wide grant
+would let a compromised agent read every Secret on the cluster — the blast
+radius this design exists to avoid.
+
+| resource | verbs |
+| --- | --- |
+| `pods` | `create`, `get`, `list`, `watch`, `delete` |
+| `pods/log` | `get` |
+
+Two rules, and the list is closed. It matches the client's operations exactly,
+because a convenience method nobody calls is a permission somebody has to
+justify. `ci/validate.sh` asserts the count, so a third rule fails the build.
+
+**`pods/attach` is deliberately absent, and it has a consequence.** Anything
+holding it can write into a running container. Without it a job Pod's output
+streams to the card exactly as a host node's does, but a **steering message
+cannot reach a running Pod job** (MAIN-231). `nook interactions ask --wait` is
+unaffected — it goes over the control-plane API, not the agent's stdin — so a
+spec job can still raise a question and block on it; it just cannot receive an
+unsolicited one. A steering message for a Pod job is refused rather than
+silently dropped.
+
+**Left at `local`, this chart renders byte-for-byte what it rendered before**:
+no ServiceAccount, no Role, no RoleBinding, no new environment. An upgrade
+cannot be the thing that quietly grants a cluster permission.
+
+### Builds need a pool of their own — and are not run here yet
+
+`build` is **not** in `loopKinds` and this executor does not offer it, so
+everything in this subsection is inert today: it is the ground MAIN-655 builds
+on, and configuring a pool now changes nothing. The one thing it does change is
+the refusal you get if a build ever is placed here — with no pool it is
+*refused* rather than mis-scheduled.
+
+A build Pod runs a nested Docker daemon and is **privileged**, so it must never
+share a node with anything else:
+
+```bash
+  --set executor.buildPool.selector=nook.io/pool=build \
+  --set executor.buildPool.taint=nook.io/build-only
+```
+
+**Both or neither.** Either half alone reads as protection and is not: a
+selector with no taint puts builds on a pool nothing keeps other work off, and a
+taint with no selector lets a build schedule anywhere. Setting one refuses the
+install by name. Declaring neither is fine and means this cluster runs no
+builds — a build job is then *refused* rather than mis-scheduled, which leaves
+the card's strike budget alone.
+
+Even on its own pool, a privileged build Pod can reach the node it runs on
+(MAIN-612). The mitigation is blast radius — a dedicated, disposable pool — and
+**not** confinement. Do not describe it as a boundary against a hostile agent.
+
+### Credentials are not a shipped path yet
+
+**By default a job Pod gets no credentials at all, and its agent will fail to
+authenticate.** That is the honest state of this mode, not an oversight.
+
+The credentials a job would want — the fleet's GitHub token, the run's own
+`NOOK_TOKEN`, the workspace's secret items — are **deliberately not written into
+the Pod's environment**. A Pod's `env` values are returned by `get pods` and
+printed by `kubectl describe pod`, and the Role above grants `pods
+get/list/watch` across `executor.namespace`; putting a token there would publish
+it to every principal with pod-read, a far lower bar than `get secrets`, and
+store it in etcd under a resource that is not encrypted at rest by default. The
+run records on its transcript which credentials it held back.
+
+What exists instead is a **seam**: create a Secret by hand and name it.
+
+```bash
+kubectl create secret generic nook-job-credentials -n nook-jobs \
+  --from-literal=GH_TOKEN=... --from-literal=NOOK_TOKEN=...
+helm upgrade ... --set executor.credentialsSecret=nook-job-credentials
+```
+
+Every key in it becomes an environment variable in the job Pod. Nothing in this
+chart or in the agent creates, reads or updates that Secret — the executor's
+Role grants no `secrets` verb at all, so the agent could not if it tried.
+
+**This is test scaffolding, not a supported way to run in production.** A Secret
+read as environment variables is better than a Pod spec but is still not a
+credential store: it is namespace-wide, static, and unaudited. MAIN-337/339 own
+the real path; until they land, treat cluster-executed jobs as a capability you
+are trying out rather than one you depend on.
+
+A `credentialsSecret` naming a Secret that does not exist keeps the Pod in
+`CreateContainerConfigError`, and the agent refuses the job naming it — rather
+than starting, silently having no credentials, and spending a pass finding out.
+
 ## What it is not
 
 - **Unauthenticated.** The CLIs ship without credentials (NG-1); agent

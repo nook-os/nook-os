@@ -127,6 +127,61 @@ pub fn sweep_job_sandboxes() {
         .map(|s| s.clone())
         .unwrap_or_default();
     crate::sandbox::sweep_orphans(&running);
+    // The same reconcile, for the executor whose objects are Pods (MAIN-623
+    // AC-8). Here rather than at the two call sites so there stays ONE seam:
+    // both of them already ask this function "clean up after jobs I am no
+    // longer running", and which engine holds the leftovers is its business,
+    // not theirs. It spawns rather than blocks — see `spawn_orphan_sweep`.
+    //
+    // The node's NAME goes with it: a namespace can hold two agents' job Pods,
+    // and without it each would read the other's running work as an orphan.
+    #[cfg(feature = "kubernetes")]
+    crate::k8s_exec::spawn_orphan_sweep(
+        NodeConfig::load()
+            .map(|c| c.node_name)
+            .unwrap_or_else(|_| String::from("unknown")),
+        running,
+    );
+}
+
+/// Jobs this node is running as Pods rather than as local processes.
+///
+/// A third registry beside `running_jobs` and `running_job_ids`, and it earns
+/// its place: those two answer "is this job live here", and this answers "can
+/// this job be written to" — the question a steering message asks, whose answer
+/// for a Pod is no (see [`deliver_message`]).
+#[cfg(feature = "kubernetes")]
+fn pod_jobs() -> &'static Mutex<HashSet<String>> {
+    static P: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    P.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// This job's entry in [`pod_jobs`], removed however the run ends.
+///
+/// A guard rather than a pair of calls because the entry outliving its run is
+/// not inert: job ids are the control plane's, and a steering message for a
+/// later job that reused one would be told it cannot be steered — a confident
+/// wrong answer, which is worse than the "no live session" it replaced.
+#[cfg(feature = "kubernetes")]
+struct PodSteeringEntry(String);
+
+#[cfg(feature = "kubernetes")]
+impl PodSteeringEntry {
+    fn register(job_id: &str) -> Self {
+        if let Ok(mut s) = pod_jobs().lock() {
+            s.insert(job_id.to_string());
+        }
+        Self(job_id.to_string())
+    }
+}
+
+#[cfg(feature = "kubernetes")]
+impl Drop for PodSteeringEntry {
+    fn drop(&mut self) {
+        if let Ok(mut s) = pod_jobs().lock() {
+            s.remove(&self.0);
+        }
+    }
 }
 
 /// How many loop jobs are running here right now (MAIN-505).
@@ -1769,6 +1824,31 @@ pub fn deliver_message(job_id: &str, body: &str) -> Result<(), String> {
         return Err("empty message".into());
     }
 
+    // A job running as a Pod is REFUSED a steering message, by owner ruling
+    // (MAIN-623, 2026-08-24) — never silently dropped.
+    //
+    // `StreamingSession::send` writes to the agent's stdin pipe; a container has
+    // no such pipe, and reaching into a running one needs the `pods/attach`
+    // subresource over a WebSocket. AC-1 lists the executor's Role exactly and
+    // `attach` is not in it, deliberately: anything holding that token could
+    // then write into any running container. So K1 ships without steering.
+    //
+    // `nook interactions ask --wait` is unaffected — it goes over the control
+    // plane's API rather than stdin — so a spec run in a Pod can still raise a
+    // question and block on the answer. It just cannot receive an unsolicited
+    // one, which is worth saying out loud: `nook-spec` documents steering as one
+    // of its two input channels, so a run here is a degraded run.
+    #[cfg(feature = "kubernetes")]
+    if pod_jobs().lock().is_ok_and(|s| s.contains(job_id)) {
+        return Err(
+            "this job runs as a Kubernetes Pod, which cannot be steered: writing to a \
+             running container needs the `pods/attach` permission, which this executor's \
+             Role deliberately does not grant. The agent can still ask you a question \
+             itself — that goes over the API, not its stdin."
+                .into(),
+        );
+    }
+
     // Streaming first (MAIN-240): write the turn as structured input. Note the
     // message is NOT flattened here — the tmux path had to collapse newlines
     // because `send_keys` would submit at the first one; structured input
@@ -2017,6 +2097,59 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
     // sweep could see it and call it an orphan (MAIN-617).
     if let Ok(mut s) = running_job_ids().lock() {
         s.insert(job_id.clone());
+    }
+
+    // A node in Pod-executor mode runs the job on the CLUSTER (MAIN-623), and
+    // nothing below this line applies to it: a Pod mounts nothing, so the clone
+    // cache, the per-job worktree and the Docker sandbox are all unreachable
+    // from inside one. It takes over here rather than deeper down for that
+    // reason — the first thing `run` does after this is fetch a mirror the Pod
+    // will never see.
+    //
+    // Every host-installed node and every containerised operator reaches this
+    // with no executor configured and falls straight through (NG-8).
+    #[cfg(feature = "kubernetes")]
+    match crate::k8s_exec::ExecutorConfig::from_env() {
+        Ok(Some(executor)) => {
+            run_in_pod(
+                &cfg,
+                &out,
+                &executor,
+                PodRun {
+                    job_id: &job_id,
+                    kind: &kind,
+                    dirname: &dirname,
+                    skill: skill_for(&kind).unwrap_or("nook-spec"),
+                    repo_url: &repo_url,
+                    branch: &branch,
+                    review_pr_number,
+                    review_forced,
+                    target_task_key: &target_task_key,
+                    seed: seed.as_deref(),
+                    secrets: &secrets,
+                    references: &references,
+                    server_url: server_url.as_deref(),
+                    workspace_id: workspace_id.as_deref(),
+                    nook_token: nook_token.as_deref(),
+                    gh_token: gh_token.as_deref(),
+                },
+            );
+            return;
+        }
+        // Reported, not run. `capabilities::sandbox_capability` already answers
+        // `Unavailable` for this, so the dispatcher should not have placed
+        // anything here — and if it did, a refusal hands the card back with its
+        // strike budget intact rather than failing it for a misconfiguration.
+        Err(e) => {
+            refused(
+                &out,
+                &job_id,
+                format!("this node's Pod executor is misconfigured: {e}"),
+            );
+            unregister(&dirname, &job_id);
+            return;
+        }
+        Ok(None) => {}
     }
 
     let base = cache_base(&cfg.server);
@@ -2619,19 +2752,17 @@ fn drive_streaming(
     brief: RunBrief<'_>,
     identity: AgentIdentity<'_>,
 ) -> (bool, String) {
+    // Only what the LAUNCH needs. Everything else the brief carries is an
+    // environment variable, and those are `run_env`'s business now — the whole
+    // point of it being one function rather than a block in here.
     let RunBrief {
         skill,
         target,
         seed,
-        review_pr,
-        review_forced,
-        build_task,
         warm_session,
-        ports,
-        unsatisfied_ports,
-        secrets,
         references,
         sandbox,
+        ..
     } = brief;
     use crate::job_adapter;
 
@@ -2648,117 +2779,11 @@ fn drive_streaming(
         Some(sid) => (job_adapter::claude_stream_args(sid), false),
         None => (job_adapter::claude_stream_args(job_id), false),
     };
-    // Secrets go in FIRST, before every variable below (MAIN-625 AC-6).
-    // `docker exec -e` and the direct spawn both take the LAST value for a
-    // name, so this ordering is what stops a secret shadowing the run's own
-    // credential, its leased ports, or the id it reports under. The names nook
-    // sets for itself are refused at write time as well — belt and braces,
-    // because only one of the two survives somebody adding a variable here.
-    let mut env: Vec<(&str, &str)> = secret_env(secrets);
-    env.extend([
-        ("NOOK_JOB_ID", job_id),
-        // The agent runs headless with `--dangerously-skip-permissions`
-        // (job_adapter), which Claude Code refuses under root "for security
-        // reasons" — and the node runs as root. But a per-job worktree on a
-        // confined node genuinely IS a sandbox, and `IS_SANDBOX=1` is exactly
-        // how Claude Code sanctions the flag there. Without it the agent exits 1
-        // on launch and the run fails before it does anything.
-        ("IS_SANDBOX", "1"),
-    ]);
-    if let Some(s) = seed.filter(|s| !s.trim().is_empty()) {
-        env.push(("NOOK_JOB_SEED", s));
-    }
-    // The one PR this run owns. It replaces MAIN-446's shard pair: a run that is
-    // told its item needs no arithmetic to work out which slice of the repo is
-    // its own, and cannot pick a PR another run is already on.
-    let pr_env;
-    if let Some(pr) = review_pr {
-        pr_env = pr.to_string();
-        env.push(("NOOK_REVIEW_PR", &pr_env));
-    }
-    // A human forced this run at an already-verdicted head (MAIN-473): the
-    // skill's already-reviewed skip-check stands aside for exactly this run.
-    if review_forced {
-        env.push(("NOOK_REVIEW_FORCED", "1"));
-    }
-    // The one ticket this run owns — `NOOK_REVIEW_PR`'s twin for builds
-    // (MAIN-383 AC-5): the skill reads which card it was enqueued for instead
-    // of re-deriving it from a pick.
-    if let Some(key) = build_task.filter(|k| !k.is_empty()) {
-        env.push(("NOOK_BUILD_TASK", key));
-    }
-    // The fleet's GitHub credential, under the name `gh` actually reads — the
-    // SAME mapping the tmux path has done since MAIN-407, which this path
-    // never got. Without it the node holds `NOOK_GH_TOKEN` while the agent's
-    // `gh auth status` fails, and what happens next is agent improvisation:
-    // one run noticed the fleet variable and exported it by hand, the next run
-    // did not and died at preflight. A credential must not depend on the
-    // agent's mood. Absent, nothing is exported at all — an empty `GH_TOKEN`
-    // out-prefers a logged-in account, same reasoning as `tmux::spawn`.
-    //
-    // The fallback is resolved in `run` rather than here (MAIN-331): a
-    // read-only run must reach this line with nothing to export, and a fallback
-    // at the point of export would hand it the fleet's token regardless of what
-    // the control plane withheld.
-    let gh_env;
-    if let Some(t) = identity.gh_token {
-        gh_env = t.to_string();
-        env.push(("GH_TOKEN", &gh_env));
-    }
-    // The agent's own identity, in the JOB's tenant. `AuthConfig::load` reads a
-    // FILE, so without this `nook` inside the agent acts as whoever last ran
-    // `nook login` on this machine — on a shared operator node, one human in one
-    // tenant, which is how a job for another tenant's workspace listed the wrong
-    // boards and drafted against the wrong one.
-    //
-    // The URL is spelled as the agent must use it where it RUNS. A sandboxed
-    // agent is in a container, and this node's own spelling of a loopback
-    // control plane means the CONTAINER's loopback there — nothing listens on
-    // it, so `nook` preflight fails and the run ends having done nothing.
-    let server_env = match sandbox {
-        Some(_) => crate::sandbox::server_for_container(identity.server),
-        None => identity.server.to_string(),
-    };
-    if let Some(t) = identity.token.filter(|t| !t.trim().is_empty()) {
-        env.push(("NOOK_TOKEN", t));
-        env.push(("NOOK_SERVER", &server_env));
-    }
-    // The ports this run leased (MAIN-552), each under the variable the
-    // WORKSPACE named — so `dev-up.sh` in the worktree binds them instead of
-    // compose's `${VAR:-default}` fallbacks, which every other stack on this
-    // machine also falls back to. Nothing here recognises any of the names, the
-    // same property that lets `tmux::spawn` serve a Next.js app and a Rust
-    // backend without learning either.
-    let port_values: Vec<(String, String)> = ports
+    let owned_env = run_env(job_id, &brief, &identity);
+    let env: Vec<(&str, &str)> = owned_env
         .iter()
-        .map(|p| (p.env.clone(), p.port.to_string()))
+        .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
-    for (env_name, value) in &port_values {
-        env.push((env_name.as_str(), value.as_str()));
-    }
-    // An ABSENT variable has two opposite meanings — "cloned outside nook, use
-    // your default" and "the node ran out" — and only this distinguishes them
-    // (MAIN-377). Same name a session gets, so a consumer reads one variable.
-    let skipped = unsatisfied_ports.join(",");
-    if !skipped.is_empty() {
-        env.push(("NOOK_PORTS_UNSATISFIED", &skipped));
-    }
-    // The streaming adapter spawns the agent directly and never touches tmux,
-    // so it never inherited what `tmux.rs` exports. `nook get workspace git-ssh`
-    // needs this to name the repo it is authenticating for; without it, git
-    // inside the agent silently falls back to the node's own key.
-    if let Some(w) = identity.workspace_id.filter(|w| !w.trim().is_empty()) {
-        env.push(("NOOK_WORKSPACE_ID", w));
-        // …and the OTHER half of MAIN-367's mechanism, without which the
-        // variable above feeds a shim nothing invokes: git resolves its ssh
-        // through the shim, which pulls the workspace's pinned key — so a
-        // build's `git push` speaks as the workspace, not as the node
-        // (MAIN-460 AC-3). The shim falls through to plain ssh when nothing
-        // is pinned, so this changes nothing for public repos and local
-        // paths — the same reasoning as `tmux::spawn`'s export, and the two
-        // must stay together the way tmux.rs's guard test says.
-        env.push(("GIT_SSH_COMMAND", "nook get workspace git-ssh"));
-    }
 
     let mut end = match run_agent_once(
         out, job_id, worktree, &args, &env, skill, target, seed, references, sandbox,
@@ -2792,27 +2817,449 @@ fn drive_streaming(
         };
     }
 
-    match end.outcome {
-        Some((ok, message)) => (ok, message),
-        // The stream ended without a result record: fall back to the exit code
-        // and the tail, the same crash-honesty rule the tmux path uses (AC-4 of
-        // MAIN-161) rather than reporting a success nobody observed.
-        None => {
-            let reason = match end.code {
-                Some(0) => "the agent exited without a result record".to_string(),
-                Some(c) => format!("the agent exited with status {c}"),
-                None => "the agent died without an exit status".to_string(),
-            };
-            (
-                false,
-                if end.tail.is_empty() {
-                    reason
-                } else {
-                    format!("{reason}\n{}", end.tail)
-                },
-            )
-        }
+    end.conclude()
+}
+
+/// Everything a Pod run needs that is not on this node's disk (MAIN-623).
+///
+/// A struct rather than fifteen parameters, and borrowed rather than owned,
+/// because `run` has already destructured the `LoopJob` and this is a view of
+/// it — the same reason [`RunBrief`] is one.
+#[cfg(feature = "kubernetes")]
+struct PodRun<'a> {
+    job_id: &'a str,
+    kind: &'a str,
+    dirname: &'a str,
+    skill: &'a str,
+    repo_url: &'a str,
+    branch: &'a str,
+    review_pr_number: Option<u64>,
+    review_forced: bool,
+    target_task_key: &'a str,
+    seed: Option<&'a str>,
+    secrets: &'a [nook_types::SecretEnv],
+    references: &'a [nook_types::WorkspaceRef],
+    server_url: Option<&'a str>,
+    workspace_id: Option<&'a str>,
+    nook_token: Option<&'a str>,
+    gh_token: Option<&'a str>,
+}
+
+/// Run one loop job as a Kubernetes Pod (MAIN-623 AC-3, AC-4, AC-5).
+///
+/// The Docker path's shape, with the cluster where the machine used to be:
+/// create the Pod, wait for it to actually start, stream its output onto the
+/// card, wait for it to exit, and delete it. What differs is only what a
+/// failure MEANS — every step up to "the agent is running" is the cluster's
+/// business rather than the card's, so it is a [`refused`] rather than a
+/// failure, which is `SandboxUnavailable`'s argument (AC-7).
+///
+/// **The Pod is deleted on every exit path that returns** (AC-5): the driving
+/// is [`drive_pod`], so its `?`s return into a binding and the `stop` after it
+/// still runs — success, failure and cancel alike. A PANIC would skip it, and
+/// that case belongs to `sweep_orphans` rather than to this function: a node
+/// that is killed mid-run leaves exactly the same Pod behind, and one reconcile
+/// answers both (AC-8).
+#[cfg(feature = "kubernetes")]
+fn run_in_pod(
+    cfg: &NodeConfig,
+    out: &Sender<NodeToControl>,
+    executor: &crate::k8s_exec::ExecutorConfig,
+    run: PodRun<'_>,
+) {
+    use crate::k8s_exec;
+
+    let job_id = run.job_id;
+    // `run` is on a blocking thread of the node's own runtime, so a handle is
+    // always there; `try_current` rather than `current` because a panic here
+    // would take the node down over a job.
+    let Ok(rt) = tokio::runtime::Handle::try_current() else {
+        refused(out, job_id, "no async runtime to reach the cluster with");
+        unregister(run.dirname, job_id);
+        return;
+    };
+
+    let server = run_server(run.server_url, &cfg.server);
+    let identity = AgentIdentity {
+        token: run.nook_token,
+        server,
+        workspace_id: run.workspace_id,
+        gh_token: run.gh_token,
+    };
+    // `sandbox: None` and `ports: &[]` are the two facts about a Pod run, not
+    // omissions: its confinement IS the Pod rather than a local container, so
+    // the control-plane URL is not rewritten onto a host gateway it has no
+    // route to; and NG-7 leaves a cluster job's ports unleased, because
+    // reaching one would need a Service this ticket does not create.
+    let brief = RunBrief {
+        skill: run.skill,
+        target: run.target_task_key,
+        seed: run.seed,
+        review_pr: run.review_pr_number,
+        review_forced: run.review_forced,
+        build_task: (run.kind == "build").then_some(run.target_task_key),
+        warm_session: None,
+        ports: &[],
+        unsatisfied_ports: &[],
+        secrets: run.secrets,
+        references: run.references,
+        sandbox: None,
+    };
+    let (env, withheld) = pod_env(job_id, &brief, &identity);
+
+    // The opening turn is the skill command — the same line every other
+    // executor sends, as an ARGUMENT because a Pod has no stdin to write it to.
+    let opening = opening_line(run.skill, run.target_task_key, run.seed, run.references);
+    let args = crate::job_adapter::claude_pod_args(job_id, &opening);
+    let command = k8s_exec::pod_command(&k8s_exec::AgentLaunch {
+        runtime: RUNTIME,
+        args: &args,
+        repo_url: run.repo_url,
+        branch: run.branch,
+    });
+
+    note(
+        out,
+        job_id,
+        format!(
+            "launching claude to run /{} {} — in a Pod of its own in namespace {}",
+            run.skill, run.target_task_key, executor.namespace
+        ),
+    );
+    // Said OUT LOUD, on the transcript, because the consequence lands on the
+    // agent and nowhere else: a run whose `gh auth status` fails at preflight
+    // needs the reason on the card, not in a node's log. AC-10 ships no
+    // credential path, so this is the normal state of a cluster job rather than
+    // an incident.
+    if !withheld.is_empty() {
+        note(
+            out,
+            job_id,
+            match &executor.credentials_secret {
+                Some(secret) => format!(
+                    "{} credential(s) are not written into this Pod ({}); it reads them from \
+                     Secret {secret} instead — a hand-created fixture, not a shipped \
+                     credential path (MAIN-337/339)",
+                    withheld.len(),
+                    withheld.join(", ")
+                ),
+                None => format!(
+                    "this Pod gets NO credentials: {} were withheld ({}) and no \
+                     executor.credentialsSecret is configured. A Pod's env is readable by \
+                     anything with pod-read in this namespace, so they are not written \
+                     there. Expect the agent to fail authenticating.",
+                    withheld.len(),
+                    withheld.join(", ")
+                ),
+            },
+        );
     }
+
+    // Before anything starts, so a steering message that arrives while the Pod
+    // is still pulling its image is refused rather than falling through to the
+    // tmux path and reporting "no live session for this job on this node" —
+    // which is true, and answers a different question than the one asked.
+    //
+    // A GUARD, so a panic cannot leave the id behind: a stale entry would make
+    // a later steering message for a recycled id report the Pod refusal, which
+    // is the wrong answer given confidently.
+    let _steering = PodSteeringEntry::register(job_id);
+
+    let outcome: Result<(bool, String), k8s_exec::Refusal> = rt.block_on(async {
+        let exec = match executor
+            .executor(cfg.node_name.clone(), identity.server.to_string())
+            .await
+        {
+            Ok(e) => e,
+            // No cluster, no Pod. Refused for AC-7's reason: nothing about the
+            // card is wrong, so nothing of its strike budget should be spent.
+            Err(e) => return Err(k8s_exec::refusal_for(&e)),
+        };
+        // A create that failed made no Pod, so there is nothing to remove and
+        // the `?` may return straight out. Every path AFTER it goes through the
+        // delete below — which is why the driving is its own function rather
+        // than inline `?`s that would each need remembering.
+        let name = exec.start(job_id, run.kind, env, command).await?;
+        let driven = drive_pod(out, job_id, &exec, &name).await;
+        // AC-5, on success, on failure and on cancel. AWAITED rather than
+        // spawned: the run is over, so there is nothing to be quick for, and a
+        // spawned delete is one the process can exit before performing.
+        //
+        // A PANIC in `drive_pod` would skip this, and that is the case
+        // `sweep_orphans` exists for — a node that dies mid-run leaves the same
+        // Pod behind, and one reconcile answers both (AC-8).
+        exec.stop(job_id).await;
+        driven
+    });
+
+    unregister(run.dirname, job_id);
+    match outcome {
+        Ok((ok, message)) => finished(out, job_id, ok, message),
+        // AC-7. A Pod that never ran cannot have failed the card, so the job
+        // goes back to the queue with the card's strike budget untouched.
+        //
+        // Whether the shortage clears itself is SAID rather than acted on. A
+        // `Configuration` refusal will meet every job this node is handed until
+        // somebody fixes it, and the reader of a refusal reason is the person
+        // who would; standing the node down as well is a second mechanism with
+        // its own failure modes, and it belongs to the card that adds it rather
+        // than being smuggled in here.
+        Err(refusal) => refused(
+            out,
+            job_id,
+            match refusal.keep_claiming() {
+                true => format!("{refusal} — this clears itself; the job stays queued"),
+                false => format!(
+                    "{refusal} — this will not clear on its own, and every job placed on \
+                     node {} will be refused the same way until it is fixed",
+                    cfg.node_name
+                ),
+            },
+        ),
+    }
+}
+
+/// Everything between a job Pod existing and it having finished: wait for it to
+/// start, stream it onto the card, and read what it exited with.
+///
+/// Split out so its caller has exactly one `?`-free line between it and the
+/// delete — every early return in here is this function's, and the Pod is
+/// removed after it whatever it returned.
+#[cfg(feature = "kubernetes")]
+async fn drive_pod(
+    out: &Sender<NodeToControl>,
+    job_id: &str,
+    exec: &crate::k8s_exec::PodExecutor,
+    name: &str,
+) -> Result<(bool, String), crate::k8s_exec::Refusal> {
+    // An image that will not pull and a pool nothing can schedule onto are both
+    // ACCEPTED at create and only admitted to here, so this is a refusal too
+    // (AC-7): the agent has not run, so the card cannot have failed.
+    exec.await_start(name).await?;
+
+    let reader = match exec.follow(name).await {
+        Ok(r) => r,
+        // The Pod IS running; only the log stream failed. That is a real run
+        // whose transcript we cannot see, so it is a failure rather than a
+        // refusal — handing the card back while an agent keeps working on it is
+        // how two runs end up on one card.
+        Err(e) => {
+            return Ok((
+                false,
+                format!("the job Pod started but its output could not be followed: {e}"),
+            ))
+        }
+    };
+
+    // The pump is blocking and this is an async context, so it goes to a
+    // blocking thread — the same split `ChannelReader` exists to bridge.
+    let tail = Arc::new(Mutex::new(VecDeque::new()));
+    let outcome = {
+        let out = out.clone();
+        let id = job_id.to_string();
+        let tail = tail.clone();
+        tokio::task::spawn_blocking(move || pump_transcript(&out, &id, reader, tail, None))
+            .await
+            .unwrap_or(None)
+    };
+
+    let code = exec.await_exit(name).await;
+    Ok(AgentEnd {
+        outcome,
+        code,
+        tail: tail
+            .lock()
+            .map(|t| t.iter().cloned().collect::<Vec<_>>().join("\n"))
+            .unwrap_or_default(),
+    }
+    .conclude())
+}
+
+/// [`run_env`], with every credential taken back out (MAIN-623 AC-10).
+///
+/// Returns the surviving pairs and the NAMES that were withheld — never their
+/// values, which is the whole point.
+///
+/// **A Pod's environment is not a private place.** Every `env` pair becomes a
+/// literal `value:` on the Pod object, which `get pods` returns and `kubectl
+/// describe pod` prints, and this executor's own Role grants `pods
+/// get/list/watch` across `executor.namespace`. Writing the fleet's GitHub
+/// token there would publish it to every principal with pod-read — a far lower
+/// bar than `get secrets` — and store it in etcd under a resource that, unlike a
+/// Secret, is not encrypted at rest by default. The Docker path has no
+/// equivalent exposure: a container's env is readable only by someone who
+/// already has the daemon.
+///
+/// So the credentials do not travel this way at all. What a job Pod gets is
+/// `executor.credentialsSecret`, a Secret a human created — which is exactly
+/// AC-10's "seam with a single dev/test implementation", and exactly as far as
+/// this ticket goes. With none configured a job runs with no credentials, and
+/// says so on its transcript.
+///
+/// **What counts as a credential is decided by ORIGIN, not by name.** The
+/// workspace's own secret items are named by the workspace and this end
+/// recognises none of them (MAIN-625) — so they are withheld because of where
+/// they came from, which is the only property that cannot go stale.
+#[cfg(feature = "kubernetes")]
+fn pod_env(
+    job_id: &str,
+    brief: &RunBrief<'_>,
+    identity: &AgentIdentity<'_>,
+) -> (Vec<(String, String)>, Vec<String>) {
+    let credentials: std::collections::HashSet<&str> = brief
+        .secrets
+        .iter()
+        .map(|s| s.name.as_str())
+        // The run's own two, which `run_env` adds by name.
+        .chain(["GH_TOKEN", "NOOK_TOKEN"])
+        .collect();
+
+    let mut withheld = Vec::new();
+    let env = run_env(job_id, brief, identity)
+        .into_iter()
+        .filter(|(name, _)| {
+            let keep = !credentials.contains(name.as_str());
+            if !keep && !withheld.contains(name) {
+                withheld.push(name.clone());
+            }
+            keep
+        })
+        .collect();
+    (env, withheld)
+}
+
+/// The environment a loop run's agent gets, whatever executes it.
+///
+/// Extracted from [`drive_streaming`] when the Pod executor arrived (MAIN-623
+/// AC-3): a job Pod is asked for "the same environment contract the docker
+/// sandbox provides today", and the only way to keep that a fact rather than an
+/// intention is for both to read one function. A second copy would be two
+/// answers to one question, and the day a variable was added to only one of
+/// them the agent would behave differently for a reason nobody could see.
+///
+/// Owned pairs rather than borrows, because the Pod path hands them across an
+/// `await` and the local path only needs a cheap re-borrow.
+fn run_env(
+    job_id: &str,
+    brief: &RunBrief<'_>,
+    identity: &AgentIdentity<'_>,
+) -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = Vec::new();
+    let mut push = |k: &str, v: &str| env.push((k.to_string(), v.to_string()));
+    // Secrets go in FIRST, before every variable below (MAIN-625 AC-6).
+    // `docker exec -e`, a Pod's env list and the direct spawn all take the LAST
+    // value for a name, so this ordering is what stops a secret shadowing the
+    // run's own credential, its leased ports, or the id it reports under. The
+    // names nook sets for itself are refused at write time as well — belt and
+    // braces, because only one of the two survives somebody adding a variable
+    // here.
+    for (k, v) in secret_env(brief.secrets) {
+        push(k, v);
+    }
+    push("NOOK_JOB_ID", job_id);
+    // The agent runs headless with `--dangerously-skip-permissions`
+    // (job_adapter), which Claude Code refuses under root "for security
+    // reasons" — and the node runs as root. But a per-job worktree on a
+    // confined node genuinely IS a sandbox, and `IS_SANDBOX=1` is exactly
+    // how Claude Code sanctions the flag there. Without it the agent exits 1
+    // on launch and the run fails before it does anything.
+    push("IS_SANDBOX", "1");
+    if let Some(s) = brief.seed.filter(|s| !s.trim().is_empty()) {
+        push("NOOK_JOB_SEED", s);
+    }
+    // The one PR this run owns. It replaces MAIN-446's shard pair: a run that is
+    // told its item needs no arithmetic to work out which slice of the repo is
+    // its own, and cannot pick a PR another run is already on.
+    if let Some(pr) = brief.review_pr {
+        push("NOOK_REVIEW_PR", &pr.to_string());
+    }
+    // A human forced this run at an already-verdicted head (MAIN-473): the
+    // skill's already-reviewed skip-check stands aside for exactly this run.
+    if brief.review_forced {
+        push("NOOK_REVIEW_FORCED", "1");
+    }
+    // The one ticket this run owns — `NOOK_REVIEW_PR`'s twin for builds
+    // (MAIN-383 AC-5): the skill reads which card it was enqueued for instead
+    // of re-deriving it from a pick.
+    if let Some(key) = brief.build_task.filter(|k| !k.is_empty()) {
+        push("NOOK_BUILD_TASK", key);
+    }
+    // The fleet's GitHub credential, under the name `gh` actually reads — the
+    // SAME mapping the tmux path has done since MAIN-407, which this path
+    // never got. Without it the node holds `NOOK_GH_TOKEN` while the agent's
+    // `gh auth status` fails, and what happens next is agent improvisation:
+    // one run noticed the fleet variable and exported it by hand, the next run
+    // did not and died at preflight. A credential must not depend on the
+    // agent's mood. Absent, nothing is exported at all — an empty `GH_TOKEN`
+    // out-prefers a logged-in account, same reasoning as `tmux::spawn`.
+    //
+    // The fallback is resolved in `run` rather than here (MAIN-331): a
+    // read-only run must reach this line with nothing to export, and a fallback
+    // at the point of export would hand it the fleet's token regardless of what
+    // the control plane withheld.
+    if let Some(t) = identity.gh_token {
+        push("GH_TOKEN", t);
+    }
+    // The agent's own identity, in the JOB's tenant. `AuthConfig::load` reads a
+    // FILE, so without this `nook` inside the agent acts as whoever last ran
+    // `nook login` on this machine — on a shared operator node, one human in one
+    // tenant, which is how a job for another tenant's workspace listed the wrong
+    // boards and drafted against the wrong one.
+    //
+    // The URL is spelled as the agent must use it where it RUNS. A sandboxed
+    // agent is in a container, and this node's own spelling of a loopback
+    // control plane means the CONTAINER's loopback there — nothing listens on
+    // it, so `nook` preflight fails and the run ends having done nothing.
+    //
+    // A job POD is not rewritten: it is not on this machine at all, so a
+    // host-gateway alias would name a gateway it has no route to. It reaches the
+    // control plane by the URL the node was joined with, which in a cluster is
+    // already a Service name.
+    let server_env = match brief.sandbox {
+        Some(_) => crate::sandbox::server_for_container(identity.server),
+        None => identity.server.to_string(),
+    };
+    if let Some(t) = identity.token.filter(|t| !t.trim().is_empty()) {
+        push("NOOK_TOKEN", t);
+        push("NOOK_SERVER", &server_env);
+    }
+    // The ports this run leased (MAIN-552), each under the variable the
+    // WORKSPACE named — so `dev-up.sh` in the worktree binds them instead of
+    // compose's `${VAR:-default}` fallbacks, which every other stack on this
+    // machine also falls back to. Nothing here recognises any of the names, the
+    // same property that lets `tmux::spawn` serve a Next.js app and a Rust
+    // backend without learning either.
+    //
+    // A Pod run reaches this with an EMPTY list, by NG-7: a cluster job's ports
+    // would need a Service to be reachable and there is none, so the lease is
+    // not made rather than delivered and quietly useless.
+    for p in brief.ports {
+        push(&p.env, &p.port.to_string());
+    }
+    // An ABSENT variable has two opposite meanings — "cloned outside nook, use
+    // your default" and "the node ran out" — and only this distinguishes them
+    // (MAIN-377). Same name a session gets, so a consumer reads one variable.
+    let skipped = brief.unsatisfied_ports.join(",");
+    if !skipped.is_empty() {
+        push("NOOK_PORTS_UNSATISFIED", &skipped);
+    }
+    // The streaming adapter spawns the agent directly and never touches tmux,
+    // so it never inherited what `tmux.rs` exports. `nook get workspace git-ssh`
+    // needs this to name the repo it is authenticating for; without it, git
+    // inside the agent silently falls back to the node's own key.
+    if let Some(w) = identity.workspace_id.filter(|w| !w.trim().is_empty()) {
+        push("NOOK_WORKSPACE_ID", w);
+        // …and the OTHER half of MAIN-367's mechanism, without which the
+        // variable above feeds a shim nothing invokes: git resolves its ssh
+        // through the shim, which pulls the workspace's pinned key — so a
+        // build's `git push` speaks as the workspace, not as the node
+        // (MAIN-460 AC-3). The shim falls through to plain ssh when nothing
+        // is pinned, so this changes nothing for public repos and local
+        // paths — the same reasoning as `tmux::spawn`'s export, and the two
+        // must stay together the way tmux.rs's guard test says.
+        push("GIT_SSH_COMMAND", "nook get workspace git-ssh");
+    }
+    env
 }
 
 /// How one agent launch ended: the result record if one arrived, else the raw
@@ -2821,6 +3268,36 @@ struct AgentEnd {
     outcome: Option<(bool, String)>,
     code: Option<i32>,
     tail: String,
+}
+
+impl AgentEnd {
+    /// The run's `(ok, message)`.
+    ///
+    /// A method rather than a `match` at each driver, because both executors owe
+    /// the board the same crash-honesty rule (AC-4 of MAIN-161): a stream that
+    /// ended without a result record falls back to the exit facts rather than
+    /// reporting a success nobody observed. Two copies of that would be two
+    /// definitions of "the run succeeded".
+    fn conclude(self) -> (bool, String) {
+        match self.outcome {
+            Some((ok, message)) => (ok, message),
+            None => {
+                let reason = match self.code {
+                    Some(0) => "the agent exited without a result record".to_string(),
+                    Some(c) => format!("the agent exited with status {c}"),
+                    None => "the agent died without an exit status".to_string(),
+                };
+                (
+                    false,
+                    if self.tail.is_empty() {
+                        reason
+                    } else {
+                        format!("{reason}\n{}", self.tail)
+                    },
+                )
+            }
+        }
+    }
 }
 
 /// One launch of the agent: spawn, send the skill command, pump events, wait.
@@ -2843,7 +3320,7 @@ fn run_agent_once(
     references: &[nook_types::WorkspaceRef],
     sandbox: Option<&crate::sandbox::Sandbox>,
 ) -> Result<AgentEnd, String> {
-    use crate::job_adapter::{self, Event, StreamingSession, TurnState};
+    use crate::job_adapter::StreamingSession;
     let mut session = StreamingSession::spawn(RUNTIME, args, worktree, env, sandbox)?;
     register_stream(job_id, &session);
 
@@ -2865,12 +3342,46 @@ fn run_agent_once(
     // Pump events on this thread; the child owns the pace.
     let tail = session.tail.clone();
     let stdin_for_close = session.stdin_handle();
+    let outcome = pump_transcript(out, job_id, stdout, tail, Some(&stdin_for_close));
+
+    let code = session.wait();
+    unregister_stream(job_id);
+
+    Ok(AgentEnd {
+        outcome,
+        code,
+        tail: session.tail_text(),
+    })
+}
+
+/// Read an agent's stream-json output, mirror it onto the card, and return the
+/// run's result record if one arrived.
+///
+/// Generic over the source for the reason [`crate::job_adapter::pump_events`]
+/// is: a job Pod's output arrives over the apiserver's log endpoint rather than
+/// from a child's stdout (MAIN-623 AC-4), and the transcript a reader sees must
+/// not depend on which. Everything a run says to the board is decided here,
+/// once, so the two executors cannot drift into two transcripts.
+///
+/// `stdin` is `None` where the agent has none — a Pod, whose stdin is reachable
+/// only through `pods/attach`. It costs the two things that write back, and
+/// both degrade honestly: nothing closes the agent's stdin (a Pod's agent is
+/// not waiting on one), and a permission request cannot be denied — see the
+/// arm below.
+fn pump_transcript<R: std::io::Read>(
+    out: &Sender<NodeToControl>,
+    job_id: &str,
+    source: R,
+    tail: Arc<Mutex<VecDeque<String>>>,
+    stdin: Option<&crate::job_adapter::SharedStdin>,
+) -> Option<(bool, String)> {
+    use crate::job_adapter::{self, Event, TurnState};
     let mut turn = TurnState::default();
     let mut outcome: Option<(bool, String)> = None;
     let tx = out.clone();
     let id = job_id.to_string();
 
-    job_adapter::pump_events(stdout, tail, |ev| match ev {
+    job_adapter::pump_events(source, tail, |ev| match ev {
         Event::SessionStarted { session_id } => {
             // On the transcript, which is durable (MAIN-127) — an in-memory
             // copy would die with the very restart it is meant to survive.
@@ -2928,7 +3439,9 @@ fn run_agent_once(
             // The run's result: no more turns are coming, so let the agent
             // exit. Without this the agent blocks reading stdin while we block
             // reading its stdout (see `close_stdin`).
-            job_adapter::close_stdin(&stdin_for_close);
+            if let Some(w) = stdin {
+                job_adapter::close_stdin(w);
+            }
         }
         // A headless run launches with `--dangerously-skip-permissions`, so
         // this should never arrive (MAIN-502). If it does, DENY it: nobody is
@@ -2936,18 +3449,32 @@ fn run_agent_once(
         // ignoring it would hang the job forever with no sign of why, which is
         // the one outcome worse than a failed pass.
         Event::PermissionRequest(req) => {
+            let answered = stdin.is_some();
             let _ = tx.blocking_send(NodeToControl::JobTranscript {
                 job_id: id.clone(),
                 source: "system".into(),
-                content: format!(
-                    "the agent asked permission for {} — denied: a loop run has nobody to ask",
-                    req.tool_name
-                ),
+                content: match answered {
+                    true => format!(
+                        "the agent asked permission for {} — denied: a loop run has nobody to ask",
+                        req.tool_name
+                    ),
+                    // A Pod's agent cannot be written to at all, so this cannot
+                    // even be denied — it will block until the start budget or
+                    // an operator ends it. Said out loud rather than swallowed:
+                    // a job that stops dead with no line on the card is the one
+                    // outcome worse than a failed pass.
+                    false => format!(
+                        "the agent asked permission for {} and nothing can answer it — a job \
+                         Pod has no stdin, so this run is stuck. It should not happen: the \
+                         launch skips permissions.",
+                        req.tool_name
+                    ),
+                },
             });
-            let _ = job_adapter::write_line(
-                &stdin_for_close,
-                &job_adapter::permission_response_line(&req, false),
-            );
+            if let Some(w) = stdin {
+                let _ =
+                    job_adapter::write_line(w, &job_adapter::permission_response_line(&req, false));
+            }
         }
         Event::Ignored => {}
     });
@@ -2957,15 +3484,7 @@ fn run_agent_once(
     if turn.active() {
         report_turn(out, job_id, false);
     }
-
-    let code = session.wait();
-    unregister_stream(job_id);
-
-    Ok(AgentEnd {
-        outcome,
-        code,
-        tail: session.tail_text(),
-    })
+    outcome
 }
 
 /// Tell the control plane whether a turn is in flight (AC-2). A real signal
@@ -3199,6 +3718,167 @@ fn exit_is_ok(status: Option<i32>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One environment contract, whatever executes the run (MAIN-623 AC-3).
+    ///
+    /// A job Pod is asked for "the same environment the docker sandbox provides
+    /// today", and one function is the only way to keep that a fact. Two things
+    /// are pinned here because both are silent when broken: the ORDER, since
+    /// every executor takes the last value for a name and secrets going in first
+    /// is what stops one shadowing the run's own credential; and the SERVER
+    /// spelling, since a Pod rewritten onto a container host-gateway would name
+    /// a gateway it has no route to and every `nook` call in the run would fail.
+    #[test]
+    fn one_function_decides_a_runs_environment_for_every_executor() {
+        let secrets = vec![nook_types::SecretEnv {
+            name: "NOOK_TOKEN".into(),
+            value: "a secret trying to shadow the run's own credential".into(),
+        }];
+        let brief = RunBrief {
+            skill: "nook-spec",
+            target: "MAIN-1",
+            seed: None,
+            review_pr: None,
+            review_forced: false,
+            build_task: None,
+            warm_session: None,
+            ports: &[],
+            unsatisfied_ports: &[],
+            secrets: &secrets,
+            references: &[],
+            sandbox: None,
+        };
+        let identity = AgentIdentity {
+            token: Some("the-real-token"),
+            server: "http://127.0.0.1:8080",
+            workspace_id: None,
+            gh_token: None,
+        };
+        let env = run_env("job-1", &brief, &identity);
+
+        // Last value wins everywhere, so the run's own credential must come
+        // AFTER the secret that tried to take its name.
+        let last = |k: &str| env.iter().rfind(|(n, _)| n == k).map(|(_, v)| v.as_str());
+        assert_eq!(last("NOOK_TOKEN"), Some("the-real-token"));
+        // Not rewritten: a Pod is not on this machine, so it uses the URL the
+        // node was joined with.
+        assert_eq!(last("NOOK_SERVER"), Some("http://127.0.0.1:8080"));
+        assert_eq!(last("NOOK_JOB_ID"), Some("job-1"));
+        assert_eq!(last("IS_SANDBOX"), Some("1"));
+    }
+
+    /// AC-10, at the seam where it is decided: no credential reaches a Pod's
+    /// environment, and the run says which ones it held back.
+    ///
+    /// The Docker path is UNAFFECTED and must stay so — a container's env is
+    /// readable only by someone who already holds the daemon, whereas a Pod's is
+    /// returned by `get pods` to anything this executor's own Role admits. That
+    /// asymmetry is the entire reason these are two functions, so both halves
+    /// are asserted here together.
+    #[cfg(feature = "kubernetes")]
+    #[test]
+    fn a_pod_is_given_no_credential_and_the_run_names_what_it_withheld() {
+        let secrets = vec![
+            nook_types::SecretEnv {
+                name: "STRIPE_KEY".into(),
+                value: "sk_live_do_not_publish".into(),
+            },
+            nook_types::SecretEnv {
+                name: "NOT_A_SECRET_BY_NAME".into(),
+                value: "but it came from the secret store".into(),
+            },
+        ];
+        let brief = RunBrief {
+            skill: "nook-spec",
+            target: "MAIN-1",
+            seed: None,
+            review_pr: None,
+            review_forced: false,
+            build_task: None,
+            warm_session: None,
+            ports: &[],
+            unsatisfied_ports: &[],
+            secrets: &secrets,
+            references: &[],
+            sandbox: None,
+        };
+        let identity = AgentIdentity {
+            token: Some("the-node-token"),
+            server: "https://control.nook.svc:8080",
+            workspace_id: Some("ws-1"),
+            gh_token: Some("ghp_do_not_publish"),
+        };
+
+        let (env, withheld) = pod_env("job-1", &brief, &identity);
+        let names: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+        let values = env.iter().map(|(_, v)| v.as_str()).collect::<Vec<_>>();
+
+        for secret in [
+            "GH_TOKEN",
+            "NOOK_TOKEN",
+            "STRIPE_KEY",
+            "NOT_A_SECRET_BY_NAME",
+        ] {
+            assert!(!names.contains(&secret), "{secret} reached a Pod's env");
+            assert!(withheld.iter().any(|w| w == secret), "{secret} unreported");
+        }
+        // …and not under some other name either. The values are what matter.
+        for leaked in [
+            "ghp_do_not_publish",
+            "sk_live_do_not_publish",
+            "the-node-token",
+        ] {
+            assert!(
+                !values.contains(&leaked),
+                "a credential value reached the Pod"
+            );
+        }
+
+        // What is NOT a credential still travels, or the job would arrive
+        // unable to say who it is or what it is doing.
+        assert!(names.contains(&"NOOK_JOB_ID"));
+        assert!(names.contains(&"NOOK_SERVER"));
+        assert!(names.contains(&"NOOK_WORKSPACE_ID"));
+        assert!(names.contains(&"IS_SANDBOX"));
+
+        // The DOCKER path is untouched: it still gets everything, because a
+        // container's environment is not published to a namespace.
+        let local = run_env("job-1", &brief, &identity);
+        let local_names: Vec<&str> = local.iter().map(|(k, _)| k.as_str()).collect();
+        for secret in ["GH_TOKEN", "NOOK_TOKEN", "STRIPE_KEY"] {
+            assert!(
+                local_names.contains(&secret),
+                "{secret} was taken from the docker path, which this must not change"
+            );
+        }
+    }
+
+    /// The owner's ruling of 2026-08-24, made a fact: a steering message for a
+    /// Pod job is REFUSED with a clear message rather than silently dropped.
+    ///
+    /// Silence is the failure worth asserting against. Without this the message
+    /// falls through to the tmux path and comes back "no live session for this
+    /// job on this node" — true, and an answer to a different question than the
+    /// one the person asked.
+    #[cfg(feature = "kubernetes")]
+    #[test]
+    fn a_pod_job_refuses_a_steering_message_and_says_why() {
+        let job = "0198f0aa-2222-7000-8000-000000000001";
+        pod_jobs().lock().expect("the registry").insert(job.into());
+
+        let err = deliver_message(job, "try the other approach").expect_err("refused");
+        // The person is told what to do instead, not merely that it failed:
+        // `nook interactions ask --wait` goes over the API rather than stdin, so
+        // the agent can still raise a question itself.
+        assert!(err.contains("pods/attach"), "{err}");
+        assert!(err.contains("ask you a question"), "{err}");
+
+        pod_jobs().lock().expect("the registry").remove(job);
+        // Off the registry it is an ordinary job again, and gets the ordinary
+        // "nothing is listening here" answer rather than this one.
+        let err = deliver_message(job, "try the other approach").expect_err("no session");
+        assert!(!err.contains("pods/attach"), "{err}");
+    }
 
     fn reference(slug: &str, path: Option<&str>) -> nook_types::WorkspaceRef {
         nook_types::WorkspaceRef {

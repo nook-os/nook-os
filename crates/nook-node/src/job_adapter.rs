@@ -141,6 +141,40 @@ pub fn claude_resume_args(session_id: &str) -> Vec<String> {
     stream_args(session_id, true, Permissions::Skip)
 }
 
+/// The argv for a run whose agent has NO STDIN: a job Pod (MAIN-623).
+///
+/// Two deliberate subtractions from [`claude_stream_args`], both forced by the
+/// same fact — a container's stdin is reachable only through `pods/attach`, a
+/// verb the executor's Role does not grant:
+///
+/// - **No `--input-format stream-json`.** With it the runtime blocks reading
+///   turns that can never arrive, and the job hangs having produced nothing.
+/// - **No `--replay-user-messages`.** It echoes turns written to stdin, and
+///   there are none.
+///
+/// So the opening turn travels as the PROMPT argument instead. Everything the
+/// transcript depends on is unchanged — `--output-format stream-json` and
+/// `--verbose` are what make the run emit per-event records, and `pump_events`
+/// reads exactly the same stream off the Pod's log endpoint that it reads off a
+/// child's stdout.
+#[cfg(feature = "kubernetes")]
+pub fn claude_pod_args(session_id: &str, prompt: &str) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "-p",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--dangerously-skip-permissions",
+        "--session-id",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    args.push(session_id.to_string());
+    args.push(prompt.to_string());
+    args
+}
+
 fn stream_args(session_id: &str, resume: bool, permissions: Permissions) -> Vec<String> {
     let mut args: Vec<String> = [
         "-p",
@@ -657,8 +691,13 @@ impl StreamingSession {
 
 /// Read `stdout` line by line, handing each parsed event to `on_event`, and
 /// keeping a bounded tail. Blocking; run it on its own thread.
-pub fn pump_events<F: FnMut(Event)>(
-    stdout: std::process::ChildStdout,
+/// Generic over the SOURCE, not because two callers wanted it but because a
+/// job's output does not always come from a child process: a job running as a
+/// Kubernetes Pod streams the same stream-json over the apiserver's log
+/// endpoint (MAIN-623). The body never needed more than `Read`, and every
+/// existing caller passes a `ChildStdout`, which is one.
+pub fn pump_events<R: std::io::Read, F: FnMut(Event)>(
+    stdout: R,
     tail: Arc<Mutex<VecDeque<String>>>,
     mut on_event: F,
 ) {
@@ -728,6 +767,37 @@ mod tests {
         // The acknowledgement that a steering message actually arrived.
         assert!(a.contains(&"--replay-user-messages".to_string()));
         assert!(joined.contains("--session-id sess-1"));
+    }
+
+    /// A Pod's agent has no stdin, so the two flags that depend on one must be
+    /// absent and the opening turn must be in the argv instead (MAIN-623).
+    ///
+    /// Asserted because both failures are SILENT: with `--input-format
+    /// stream-json` the runtime blocks on turns that can never arrive and the
+    /// job hangs having produced nothing, and without the prompt it runs an
+    /// agent nobody told what to do.
+    #[cfg(feature = "kubernetes")]
+    #[test]
+    fn the_pod_argv_asks_for_no_input_it_cannot_be_given() {
+        let a = claude_pod_args("sess-3", "/nook-spec MAIN-1");
+        let joined = a.join(" ");
+        assert!(!joined.contains("--input-format"), "{joined}");
+        assert!(!joined.contains("--replay-user-messages"), "{joined}");
+        assert_eq!(
+            a.last().map(String::as_str),
+            Some("/nook-spec MAIN-1"),
+            "the opening turn is not in the argv"
+        );
+
+        // …and everything the transcript depends on is unchanged, so
+        // `pump_events` reads the same stream off a Pod's log endpoint that it
+        // reads off a child's stdout.
+        assert!(a.contains(&"-p".to_string()));
+        assert!(joined.contains("--output-format stream-json"));
+        assert!(a.contains(&"--verbose".to_string()));
+        assert!(joined.contains("--session-id sess-3"));
+        // Nobody is watching a loop run, here as anywhere else.
+        assert!(a.contains(&"--dangerously-skip-permissions".to_string()));
     }
 
     /// The resume launch names an EXISTING session and must not also pin a new

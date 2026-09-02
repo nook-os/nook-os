@@ -1,0 +1,58 @@
+{{- if eq .Values.executor.mode "kubernetes" }}
+{{- /*
+  The permission an in-cluster executor needs to run loop jobs as Pods
+  (MAIN-623 AC-1), and deliberately nothing more.
+
+  Role, never ClusterRole, and bound in `executor.namespace` alone: an executor
+  reaches the one namespace it creates jobs in. A cluster-wide grant would let a
+  compromised agent read every Secret on the cluster, which is the blast radius
+  this whole design exists to avoid.
+
+  The verb list is closed and matches nook-k8s's five Pod operations exactly.
+  `pods/attach` is NOT here: it would let anything holding this token write into
+  a running container, and the ticket's ruling is that a Pod job is not steerable
+  rather than that the permission is worth granting.
+*/}}
+{{- if .Values.executor.serviceAccount.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "nook-operator-node.serviceAccountName" . }}
+  labels:
+    {{- include "nook-operator-node.labels" . | nindent 4 }}
+---
+{{- end }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "nook-operator-node.fullname" . }}-executor
+  namespace: {{ .Values.executor.namespace }}
+  labels:
+    {{- include "nook-operator-node.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  # Read-only, and the reason the transcript can reach the card at all.
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "nook-operator-node.fullname" . }}-executor
+  namespace: {{ .Values.executor.namespace }}
+  labels:
+    {{- include "nook-operator-node.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "nook-operator-node.fullname" . }}-executor
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "nook-operator-node.serviceAccountName" . }}
+    # The agent's own namespace, which is NOT executor.namespace: the subject
+    # lives where the agent runs, the Role is bound where the jobs are made.
+    namespace: {{ .Release.Namespace }}
+{{- end }}

@@ -168,6 +168,24 @@ jobs:
         # warning merged clean and then broke every local run until someone
         # hunted it down — which is how main came to be red on three of them.
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # The Pod executor is an OPTIONAL feature of nook-node (MAIN-623), so the
+      # line above never compiles it and the `rust` legs never execute its
+      # tests: `build` archives default features, by design — that is what keeps
+      # the desktop bundle free of a Kubernetes client.
+      #
+      # Which left a 1000-line module that no required check compiled, whose
+      # tests are the only evidence AC-3, AC-4, AC-7 and AC-8 have short of a
+      # cluster. Code CI cannot see is code CI cannot keep clean.
+      #
+      # Here rather than in `build`'s archive because it is one package, not the
+      # workspace, and adding a second archive would double the compile this
+      # workflow exists to do once. `cargo test`, not nextest, for the same
+      # reason `Doc tests` above uses it: nothing here needs a database, and
+      # this job already has no nextest installed.
+      - name: Clippy (kubernetes feature)
+        run: cargo clippy -p nook-node --features kubernetes --all-targets -- -D warnings
+      - name: Test (kubernetes feature)
+        run: cargo test -p nook-node --features kubernetes
       # The source guards, and their self-tests. Pure shell + awk over the tree:
       # no Docker, well under a second, and nothing else was running them —
       # `check-sqlx-signatures.sh` had been RED on main unnoticed because it

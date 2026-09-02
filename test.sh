@@ -120,7 +120,23 @@ run_lint() {
   # Warnings are the point: this project keeps clippy at zero, so let any
   # warning fail rather than scroll past.
   rust cargo clippy --workspace --all-targets -- -D warnings || die "clippy"
+  # The Pod executor is behind a feature, so the line above never compiles it --
+  # code CI cannot see is code CI cannot keep clean (MAIN-623). Its own pass,
+  # rather than folding the feature into the one above, because the default
+  # build being byte-for-byte unchanged is the property that feature exists for
+  # and it deserves to be checked on its own.
+  rust cargo clippy -p nook-node --features kubernetes --all-targets -- -D warnings \
+    || die "clippy (kubernetes)"
   pass "clippy clean"
+
+  # …and RUN them, for the same reason. Clippy proves the module compiles; only
+  # this proves the Pod spec, the refusal classifier and the orphan sweep still
+  # do what they claim — and they are the only evidence AC-3, AC-4, AC-7 and
+  # AC-8 have short of a cluster. `cargo test`, not nextest: this is one
+  # package's inline tests, and it is the same line CI's `lint` job runs.
+  say "cargo test (kubernetes)"
+  rust cargo test -p nook-node --features kubernetes || die "tests (kubernetes)"
+  pass "kubernetes feature tests passed"
 
   # nextest never runs doctests — rustdoc compiles and runs those, which is a
   # different tool — so they moved here when `rust` moved to nextest (MAIN-656),

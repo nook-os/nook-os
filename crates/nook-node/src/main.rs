@@ -14,6 +14,10 @@ mod enroll;
 mod gitops;
 mod human_permissions;
 mod job_adapter;
+// The Pod executor, behind the same feature as the client it needs: the default
+// build of this binary is a laptop's, and a laptop has no cluster (MAIN-623).
+#[cfg(feature = "kubernetes")]
+mod k8s_exec;
 mod loop_job;
 mod notebook;
 mod pinning;
