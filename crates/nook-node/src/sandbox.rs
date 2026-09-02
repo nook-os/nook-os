@@ -1833,13 +1833,6 @@ pub fn server_for_container(server: &str) -> String {
     }
 }
 
-/// The addresses the egress policy lets through: the control plane, resolved
-/// now, on this node.
-///
-/// BY ADDRESS (AC-5), which is the point — "it is private" is never the reason
-/// a packet is allowed. A control plane on loopback (the dev stack) is reached
-/// through the container's default gateway instead, since the container's own
-/// loopback is not the host's.
 /// What one resolved address contributes to the allow list, or `None` when it
 /// cannot be expressed as a rule.
 ///
@@ -1866,6 +1859,42 @@ fn allow_entry(ip: IpAddr) -> Option<String> {
     })
 }
 
+/// A resolver answer the IPv4 rules can express nothing from: every address in
+/// it was a real IPv6 one.
+///
+/// Named rather than left as an empty `Vec`, because the two are the same value
+/// and not the same fact: "this name resolves to nothing" and "this name
+/// resolves only to addresses `iptables` cannot take" send an operator to
+/// different places (MAIN-648, AC-4).
+#[derive(Debug, PartialEq, Eq)]
+struct Ipv6OnlyAnswer {
+    skipped: usize,
+}
+
+/// The allow list one resolver answer yields.
+///
+/// Split from [`control_plane_allow`] because that one RESOLVES and this one
+/// only decides: the decision is over addresses, so it is testable without a
+/// network and without depending on what DNS hands this machine today.
+fn allow_from_addrs(
+    addrs: impl IntoIterator<Item = IpAddr>,
+) -> Result<Vec<String>, Ipv6OnlyAnswer> {
+    let mut out = Vec::new();
+    let mut skipped = 0usize;
+    for ip in addrs {
+        match allow_entry(ip) {
+            Some(entry) => out.push(entry),
+            None => skipped += 1,
+        }
+    }
+    out.sort();
+    out.dedup();
+    if out.is_empty() && skipped > 0 {
+        return Err(Ipv6OnlyAnswer { skipped });
+    }
+    Ok(out)
+}
+
 /// The addresses the egress policy lets through: the control plane, resolved
 /// now, on this node.
 ///
@@ -1875,30 +1904,24 @@ pub fn control_plane_allow(server: &str) -> Vec<String> {
     let Some((host, port)) = host_and_port(server) else {
         return Vec::new();
     };
-    let mut out = Vec::new();
-    let mut skipped_v6 = 0usize;
-    if let Ok(addrs) = format!("{host}:{port}").to_socket_addrs() {
-        for a in addrs {
-            match allow_entry(a.ip()) {
-                Some(entry) => out.push(entry),
-                None => skipped_v6 += 1,
-            }
+    let Ok(addrs) = format!("{host}:{port}").to_socket_addrs() else {
+        return Vec::new();
+    };
+    match allow_from_addrs(addrs.map(|a| a.ip())) {
+        Ok(out) => out,
+        // An empty allow list on its own reads as "no control plane to permit"
+        // and yields a policy that silently blocks the job's own control plane.
+        // Say which of the two it was.
+        Err(Ipv6OnlyAnswer { skipped }) => {
+            tracing::warn!(
+                host = %host,
+                skipped_v6 = skipped,
+                "the control plane resolves only to IPv6, and the host egress rules are IPv4 — \
+                 the job container cannot reach it"
+            );
+            Vec::new()
         }
     }
-    out.sort();
-    out.dedup();
-    // Every answer was IPv6. Saying nothing would hand back an empty allow list,
-    // which reads as "no control plane to permit" and yields a policy that
-    // silently blocks the job's own control plane.
-    if out.is_empty() && skipped_v6 > 0 {
-        tracing::warn!(
-            host = %host,
-            skipped_v6,
-            "the control plane resolves only to IPv6, and the host egress rules are IPv4 — \
-             the job container cannot reach it"
-        );
-    }
-    out
 }
 
 /// The escape suite (AC-11).
@@ -2720,6 +2743,62 @@ mod tests {
             super::allow_entry("::ffff:127.0.0.1".parse::<IpAddr>().unwrap()),
             Some(super::HOST_GATEWAY.to_string())
         );
+    }
+
+    /// MAIN-648 over a WHOLE resolver answer, which is the shape the bug
+    /// arrived in: the failing node's answer was mixed, so one usable A record
+    /// was never the thing in question — the AAAA beside it was.
+    #[test]
+    fn a_mixed_resolver_answer_yields_only_its_ipv4_addresses() {
+        use std::net::IpAddr;
+
+        let answer = |ips: &[&str]| {
+            ips.iter()
+                .map(|s| s.parse::<IpAddr>().unwrap())
+                .collect::<Vec<_>>()
+        };
+
+        // The measured answer for the node that could not start a job.
+        let out = super::allow_from_addrs(answer(&[
+            "104.21.96.102",
+            "2606:4700:3035::6815:6066",
+            "172.67.176.149",
+            "2606:4700:3036::ac43:b095",
+        ]))
+        .expect("a mixed answer has IPv4 in it");
+        assert_eq!(out, vec!["104.21.96.102", "172.67.176.149"]);
+        // The whole point: nothing here can reach `iptables` as a v6 literal.
+        assert!(
+            out.iter().all(|e| !e.contains(':')),
+            "an IPv6 literal reached the host rules: {out:?}"
+        );
+
+        // azul's answer — mapped v6 only — is unchanged by all of this.
+        assert_eq!(
+            super::allow_from_addrs(answer(&["10.12.29.201", "::ffff:10.12.29.201"])),
+            Ok(vec!["10.12.29.201".to_string()])
+        );
+
+        // A loopback control plane is the gateway in either family, and the two
+        // spellings collapse to one rule rather than two identical ones.
+        assert_eq!(
+            super::allow_from_addrs(answer(&["127.0.0.1", "::ffff:127.0.0.1"])),
+            Ok(vec![super::HOST_GATEWAY.to_string()])
+        );
+
+        // v6-only: named, so the caller can say WHY the list is empty instead of
+        // installing a policy that silently permits nothing.
+        assert_eq!(
+            super::allow_from_addrs(answer(&[
+                "2606:4700:3035::6815:6066",
+                "2606:4700:3036::ac43:b095"
+            ])),
+            Err(super::Ipv6OnlyAnswer { skipped: 2 })
+        );
+
+        // Resolving to nothing at all is a different fact, and stays the empty
+        // list it always was.
+        assert_eq!(super::allow_from_addrs(answer(&[])), Ok(Vec::new()));
     }
     use super::*;
 
