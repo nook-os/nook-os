@@ -170,10 +170,18 @@ executor:
   #
   # It arrives BOTH ways, because a job needs both kinds of credential. Every
   # key becomes an environment variable, and the whole Secret is also mounted
-  # read-only at CLAUDE_CONFIG_DIR — which is what carries the fleet's Claude
-  # session, since a subscription login is a directory (`.claude.json` beside
-  # `.credentials.json`) and not a variable. Without that mount a cluster node
-  # reports the runtime unauthorized and is sent no loop work at all.
+  # read-only at a private path and copied into a WRITABLE emptyDir at
+  # CLAUDE_CONFIG_DIR — which is what carries the fleet's Claude session, since
+  # a subscription login is a directory (`.claude.json` beside
+  # `.credentials.json`) and not a variable. Writable because that directory is
+  # claude's own scratch space and not a credential store; a Secret volume is
+  # read-only whatever is asked for, so mounting one there leaves an agent
+  # unable to start (MAIN-672). Without the session a cluster node reports the
+  # runtime unauthorized and is sent no loop work at all.
+  #
+  # The copy dies with the Pod, so a token claude refreshes never travels back
+  # here: the Secret is a SNAPSHOT and goes stale when its refresh token
+  # expires. See the chart README.
   #
   # SCAFFOLDING, and it is named that way on purpose. Create it by hand; nothing
   # in this chart or in the agent writes one, and the executor's Role grants no
