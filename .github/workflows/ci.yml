@@ -150,6 +150,11 @@ jobs:
       RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The chart guard below compares each chart's appVersion against the
+          # newest `v*` tag, and a default checkout fetches no tags at all — it
+          # would find nothing to compare against on every run (MAIN-652).
+          fetch-tags: true
       - name: Fast linker
         run: sudo apt-get update && sudo apt-get install -y lld
       - uses: dtolnay/rust-toolchain@stable
@@ -193,6 +198,12 @@ jobs:
           # is the exact placement the note above blames for
           # `check-sqlx-signatures.sh` sitting red on main unnoticed.
           ./scripts/check-sqlite-ci.test.sh
+          # MAIN-652. `--require` because this runner HAS the tags: the guard
+          # skips when it cannot find a release to compare against, and a skip
+          # here would mean the fetch-tags above stopped working, not that the
+          # charts are fine.
+          ./scripts/check-chart-appversion.sh --require
+          ./scripts/check-chart-appversion.test.sh
           # `check-dialect-dispatch.sh` is deliberately absent, and so is its
           # self-test. Both are RED on main today — an unlisted offender in
           # repo/read_model.rs plus three stale entries — and the self-test's
