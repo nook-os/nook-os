@@ -413,6 +413,12 @@ pub fn run_args(spec: &SandboxSpec) -> Vec<String> {
         a.push(bind(gitdir, gitdir));
     }
     if let Some(claude) = &spec.claude_dir {
+        // READ-WRITE, and no `:ro` is ever right here: `CLAUDE_CONFIG_DIR` is
+        // claude's own working directory, not a credential store, and it
+        // refreshes `.credentials.json` and creates `projects/` and
+        // `sessions/` in it as it runs. The Pod executor has to agree — it
+        // seeds a writable `emptyDir` at this path (MAIN-672) — and a test in
+        // `k8s_exec` fails the build if the two adapters drift on it again.
         a.push("-v".into());
         a.push(bind(claude, Path::new(CLAUDE_DIR)));
     }
