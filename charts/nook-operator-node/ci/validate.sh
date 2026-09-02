@@ -239,6 +239,42 @@ else
   echo "  ok:   no secrets verb"
 fi
 
+# MAIN-669 AC-3. Naming a Secret changes the JOB POD and must change nothing
+# about what the agent may do: the KUBELET resolves a mounted Secret, so the
+# closed verb list stays exactly what it was. Asserted as a diff of the two
+# renders' rules rather than as a repeat of the patterns above, so a verb added
+# to both would still be caught.
+rules() { sed -n '/^rules:/,/^---/p' <<<"$1"; }
+if diff <(rules "$k8s") <(rules "$creds") >/dev/null; then
+  echo "  ok:   a credential Secret adds no permission"
+else
+  echo "  FAIL: naming a credential Secret changed the Role"
+  diff <(rules "$k8s") <(rules "$creds") || true
+  fail=1
+fi
+
+# MAIN-669 AC-5. The Secret carries the fleet's Claude SESSION, which is a
+# directory and not a variable — so the README has to say what goes in it, who
+# creates it, what it is (scaffolding), and who can read it. Every one of those
+# is a thing an operator gets wrong silently, and the last is a security
+# property nobody should have to infer.
+readme="$chart/README.md"
+readme_says() {
+  if grep -qF "$2" "$readme"; then
+    echo "  ok:   README states $1"
+  else
+    echo "  FAIL: README does not state $1 (looked for: $2)"
+    fail=1
+  fi
+}
+readme_says "what the Secret must contain" '.credentials.json'
+readme_says "…and its configuration half"  '.claude.json'
+readme_says "where it is mounted"          'CLAUDE_CONFIG_DIR'
+readme_says "that a human creates it"      '**A human creates that Secret.**'
+readme_says "that it is scaffolding"       'scaffolding pending MAIN-337'
+readme_says "who can read it"              'readable by any agent this node runs'
+readme_says "subscription login only"      'never an API key'
+
 # Both or neither: half a build pool reads as protection and is not.
 if render "${min[@]}" --set executor.mode=kubernetes --set executor.image=i:1 \
      --set executor.buildPool.taint=t >/dev/null 2>&1; then

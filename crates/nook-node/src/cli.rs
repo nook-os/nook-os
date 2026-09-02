@@ -1337,6 +1337,13 @@ fn columns(resource: &str, first: &Value) -> Vec<&'static str> {
             // floor claims nothing either. "Is azul out of space" was a
             // question with no answer short of a shell on azul.
             "disk",
+            // And the last one (MAIN-669): the dispatcher places no loop job on
+            // a node whose loop runtime is not authorized, so an unauthorized
+            // machine reads on every other column as healthy and idle while
+            // every job raised for it waits with "no eligible executor". A
+            // CLUSTER node cannot answer this from a shell either — its Pods
+            // hold the session, not the agent's own pod.
+            "auth",
             "capabilities.runtimes",
             "last_seen_at",
         ],
@@ -1423,6 +1430,12 @@ fn cell(row: &Value, key: &str) -> String {
     // plus whether that has taken it out of the running (MAIN-618 AC-6).
     if key == "disk" {
         return disk_cell(row.get("resources"));
+    }
+    // Nor is `auth`: it is the one entry in `capabilities.runtime_auth` the
+    // dispatcher gates on, read as the answer to "will loop work land here"
+    // (MAIN-669 AC-6).
+    if key == "auth" {
+        return auth_cell(row.pointer("/capabilities/runtime_auth"));
     }
     let mut node = row;
     for part in key.split('.') {
@@ -1539,6 +1552,47 @@ fn disk_cell(v: Option<&Value>) -> String {
         if low { " LOW" } else { "" }
     )
 }
+
+/// Whether a node's LOOP RUNTIME is authorized, as one narrow cell (MAIN-669
+/// AC-6).
+///
+/// One profile of the several a node reports, because one is what the
+/// dispatcher gates on: `jobs::runtime_authorized(node, LOOP_RUNTIME)`. A
+/// column showing every profile would be three states wide and still would not
+/// answer the question anybody has, which is *"will loop work land here"*.
+///
+/// The four states stay distinct rather than collapsing to yes/no, because they
+/// are four different things to do about it: sign in, install the runtime, look
+/// at why the probe failed, or upgrade an agent too old to report at all. A
+/// cluster node's `yes` comes from the Secret its job Pods mount, and the
+/// account behind it is one `--json` away — this node cannot read the Secret,
+/// so there is no account to shorten into the cell.
+fn auth_cell(v: Option<&Value>) -> String {
+    let Some(profiles) = v.and_then(Value::as_array) else {
+        return "-".into();
+    };
+    let state = profiles
+        .iter()
+        .filter(|p| p.get("runtime").and_then(Value::as_str) == Some(LOOP_RUNTIME))
+        .filter_map(|p| p.get("state").and_then(Value::as_str))
+        // A runtime with several profiles is authorized if ANY of them is,
+        // which is the dispatcher's own reading of the same list.
+        .max_by_key(|s| *s == "authorized");
+    match state {
+        Some("authorized") => "yes".into(),
+        Some("not_authorized") => "no".into(),
+        Some("unavailable") => "not installed".into(),
+        Some("unknown") => "unknown".into(),
+        _ => "-".into(),
+    }
+}
+
+/// The runtime a loop job runs in, and the one the dispatcher's authorization
+/// gate asks about. `nook-control`'s `jobs::LOOP_RUNTIME`, restated rather than
+/// imported — the CLI does not depend on the control plane's crate, and a table
+/// column reading a different runtime than the gate would be a column that
+/// disagrees with the placement it is being used to explain.
+const LOOP_RUNTIME: &str = "claude";
 
 /// Which loop stages a node accepts, as one cell (MAIN-647 AC-5).
 ///
@@ -6143,6 +6197,61 @@ mod sandbox_column {
         let ready = json!({"state": "ready", "image": "img (unprivileged)"});
         assert_eq!(sandbox_cell(Some(&ready)), "yes (img (unprivileged))");
         assert_eq!(sandbox_cell(None), "-");
+    }
+}
+
+/// The `AUTH` column (MAIN-669 AC-6). A node whose loop runtime is not
+/// authorized is sent no loop work at all, and every other column on its line
+/// reads as a healthy idle machine.
+#[cfg(test)]
+mod auth_column {
+    use super::*;
+    use serde_json::json;
+
+    fn profile(runtime: &str, state: &str) -> Value {
+        json!({"id": runtime, "label": runtime, "runtime": runtime, "state": state})
+    }
+
+    /// A cluster node with its Secret in place reads `yes`, which is the whole
+    /// of "why is nothing building on it" answered without a shell on it.
+    #[test]
+    fn the_loop_runtime_decides_the_cell_and_nothing_else_does() {
+        let authorized = json!([
+            profile("claude", "authorized"),
+            profile("codex", "unavailable"),
+        ]);
+        assert_eq!(auth_cell(Some(&authorized)), "yes");
+
+        // …and another runtime being signed in says nothing about loop work.
+        let wrong_runtime = json!([
+            profile("claude", "unavailable"),
+            profile("codex", "authorized"),
+        ]);
+        assert_eq!(auth_cell(Some(&wrong_runtime)), "not installed");
+    }
+
+    /// Four states, because they are four different things to do about it, and
+    /// a yes/no column would send an operator to sign in to a machine that has
+    /// no runtime installed.
+    #[test]
+    fn each_state_is_rendered_as_the_action_it_calls_for() {
+        for (state, want) in [
+            ("authorized", "yes"),
+            ("not_authorized", "no"),
+            ("unavailable", "not installed"),
+            ("unknown", "unknown"),
+        ] {
+            let v = json!([profile("claude", state)]);
+            assert_eq!(auth_cell(Some(&v)), want, "{state}");
+        }
+
+        // An agent too old to report the field, and one reporting no profile
+        // for the loop runtime, are both "nothing said" rather than a refusal.
+        assert_eq!(auth_cell(None), "-");
+        assert_eq!(
+            auth_cell(Some(&json!([profile("hermes", "authorized")]))),
+            "-"
+        );
     }
 }
 

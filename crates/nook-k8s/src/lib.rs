@@ -40,7 +40,7 @@ pub mod pods;
 pub mod types {
     pub use k8s_openapi::api::core::v1::{
         Container, EnvFromSource, EnvVar, Pod, PodSecurityContext, PodSpec, SecretEnvSource,
-        SecurityContext, Toleration,
+        SecretVolumeSource, SecurityContext, Toleration, Volume, VolumeMount,
     };
     pub use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 }

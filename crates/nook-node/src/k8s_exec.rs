@@ -16,8 +16,9 @@
 
 use nook_k8s::types::{
     Container, EnvFromSource, EnvVar, ObjectMeta, Pod, PodSecurityContext, PodSpec,
-    SecretEnvSource, SecurityContext, Toleration,
+    SecretEnvSource, SecretVolumeSource, SecurityContext, Toleration, Volume, VolumeMount,
 };
+use nook_types::{AuthProfile, AuthState};
 
 // The label is `sandbox`'s (MAIN-617), not a second spelling of it. It marks
 // "an object NookOS created for this job" and that claim is the same one
@@ -38,11 +39,33 @@ pub const AGENT_CONTAINER: &str = "agent";
 /// orphans and delete them mid-run. This is what makes "mine" mean mine.
 pub const NODE_LABEL: &str = "nook.node";
 
+/// The volume the credential Secret arrives on. One name, because the volume
+/// and the mount that reads it have to agree.
+pub const CREDENTIALS_VOLUME: &str = "nook-credentials";
+
+/// The mode every file in that volume is projected with (MAIN-669 AC-1).
+///
+/// Owner-read and nothing else. The Pod's command replaces the image's
+/// entrypoint — the one that would have created the unprivileged `agent` uid —
+/// so the agent here IS the container's root, which is the owner a Secret
+/// volume's files already belong to. Anything with a group or other bit set
+/// would hand the session to every other uid in the container for no gain.
+pub const CREDENTIALS_MODE: i32 = 0o400;
+
+/// The runtime a job Pod's credential Secret authorizes (MAIN-669 AC-6).
+///
+/// ONE runtime because the mount is one directory: the Secret lands at
+/// [`CLAUDE_DIR`], which is what `CLAUDE_CONFIG_DIR` names, and that is claude's
+/// configuration directory and no other runtime's. A second runtime would need
+/// a second mount, not a second entry here.
+pub const CREDENTIALS_RUNTIME: &str = "claude";
+
 /// Where a job Pod checks the workspace out.
 ///
-/// Under [`AGENT_HOME`] rather than beside it: the Pod mounts nothing (see
-/// [`job_pod`]), so the checkout is the container's own writable layer and it
-/// belongs where the agent's other state does.
+/// Under [`AGENT_HOME`] rather than beside it: the Pod mounts no storage (see
+/// [`job_pod`] — a read-only credential Secret is all it can ever mount), so the
+/// checkout is the container's own writable layer and it belongs where the
+/// agent's other state does.
 pub const POD_WORKDIR: &str = "/home/agent/workspace";
 
 /// How long a Pod may take to reach `Running` before the job is handed back.
@@ -79,16 +102,17 @@ pub struct ExecutorConfig {
     /// `None` where the cluster has no dedicated build pool, which is what
     /// makes a build refuse rather than land beside other work.
     pub build_pool: Option<BuildPool>,
-    /// The Secret a job Pod reads its credentials from (AC-10).
+    /// The Secret a job Pod reads its credentials from (AC-10, MAIN-669).
     ///
     /// SCAFFOLDING, and named as such: a human creates this Secret by hand, and
     /// nothing in this tree writes one — the executor's Role grants no `secrets`
     /// verb at all, so the node could not if it wanted to. MAIN-337/339 own the
     /// real credential path; until they land this is the whole of it.
     ///
-    /// `None` means a job Pod gets no credentials, which is the DEFAULT and is
-    /// a working state rather than a broken one: the run starts, and an agent
-    /// that cannot authenticate says so on the card.
+    /// `None` means a job Pod gets no credentials. That is the DEFAULT, and it
+    /// is a working state rather than a broken one — the node simply reports
+    /// the loop runtime unauthorized (see [`delivered_runtime_auth`]) and is
+    /// sent no loop work, instead of claiming jobs it cannot run.
     pub credentials_secret: Option<String>,
 }
 
@@ -236,8 +260,8 @@ pub struct PodJobSpec {
     /// at least keeps them behind `get secrets`. `loop_job::pod_env` is what
     /// holds them back, and a test pins it.
     pub env: Vec<(String, String)>,
-    /// A hand-created Secret whose every key becomes an environment variable
-    /// (AC-10). `None` delivers no credentials at all.
+    /// A hand-created Secret, mounted at [`CLAUDE_DIR`] and read as environment
+    /// variables (AC-10, MAIN-669). `None` delivers no credentials at all.
     pub credentials_secret: Option<String>,
     /// What the container runs — the agent runtime, its flags, and the opening
     /// turn among them.
@@ -401,8 +425,8 @@ fn label_value(raw: &str) -> String {
 /// What a job Pod runs: check the workspace out, then become the agent.
 ///
 /// The clone is HERE and not on the node, and that is forced rather than
-/// chosen. A Pod mounts nothing (see [`job_pod`]), so the node's clone cache and
-/// its per-job worktree — the whole first half of `loop_job::run` — are simply
+/// chosen. A Pod mounts no storage (see [`job_pod`]), so the node's clone cache
+/// and its per-job worktree — the whole first half of `loop_job::run` — are simply
 /// not reachable from inside one. NG-2 settles what to do instead: every job Pod
 /// starts from a fresh clone, with no PVC and no warm state to reuse.
 ///
@@ -562,15 +586,101 @@ fn base_env(spec: &PodJobSpec) -> Vec<(String, String)> {
     env
 }
 
+/// The credential Secret as a volume and the mount that reads it, or nothing
+/// (MAIN-669 AC-1/AC-2).
+///
+/// **A subscription Claude session is a DIRECTORY, not an environment
+/// variable** — `.claude.json` beside `.credentials.json` — which is why the
+/// Docker sandbox bind-mounts one at `CLAUDE_CONFIG_DIR`. A Pod had no
+/// equivalent, so `claude` found an empty directory, the node reported the
+/// runtime unauthorized, and every job for it stayed queued forever.
+///
+/// **`optional: true` on the volume, while the `env_from` beside it stays
+/// `optional: false`, and the pairing is the whole of AC-4.** A missing Secret
+/// has to REFUSE the job by name; the two seams fail differently and only one
+/// of them says anything a caller can read. A failed Secret *mount* leaves the
+/// Pod in `ContainerCreating` with the reason in an Event — a resource the
+/// executor's Role deliberately cannot read (NG-3) — so the run would sit there
+/// until [`START_BUDGET`] expired ten minutes later and be handed back as a
+/// generic timeout. A missing `env_from` Secret is `CreateContainerConfigError`
+/// within seconds, which [`start_verdict`] already reads as a configuration
+/// refusal carrying the apiserver's own words. So the env seam is the DETECTOR
+/// and the volume is the DELIVERY, and neither is redundant.
+///
+/// Read-only because a Secret volume is read-only whatever is asked for; saying
+/// so is documentation that the kubelet happens to enforce.
+fn credential_volume(secret: &str) -> (Volume, VolumeMount) {
+    (
+        Volume {
+            name: CREDENTIALS_VOLUME.to_string(),
+            secret: Some(SecretVolumeSource {
+                secret_name: Some(secret.to_string()),
+                default_mode: Some(CREDENTIALS_MODE),
+                optional: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        VolumeMount {
+            name: CREDENTIALS_VOLUME.to_string(),
+            mount_path: CLAUDE_DIR.to_string(),
+            read_only: Some(true),
+            ..Default::default()
+        },
+    )
+}
+
+/// What this node reports for the runtimes a job Pod's Secret carries
+/// (MAIN-669 AC-6).
+///
+/// **A probe on the node answers the wrong question here.** `probe_all` runs
+/// `claude auth status` in the agent's own pod, which holds no session and
+/// generally not even the binary, so it reports `Unavailable` — and the control
+/// plane's `runtime_authorized` gate then refuses to place any loop job on this
+/// node, leaving every one of them queued with *"no eligible executor"*. What
+/// that gate is asking is whether a job started HERE can authenticate, and
+/// under a Pod executor the Secret answers it, not the node.
+///
+/// Only with a Secret configured. Without one the probed state stands, so a
+/// cluster node nobody has given credentials is passed over rather than
+/// claiming work it would fail in turn.
+pub fn delivered_runtime_auth(
+    profiles: Vec<AuthProfile>,
+    cfg: &ExecutorConfig,
+) -> Vec<AuthProfile> {
+    let Some(secret) = cfg.credentials_secret.as_deref() else {
+        return profiles;
+    };
+    profiles
+        .into_iter()
+        .map(|p| {
+            if p.runtime != CREDENTIALS_RUNTIME {
+                return p;
+            }
+            AuthProfile {
+                state: AuthState::Authorized,
+                // Not an account: this node cannot read the Secret and has no
+                // way to learn whose session is in it. Saying where the
+                // credential came from is the true thing available, and it is
+                // what an operator looking at an authorized cluster node with
+                // no login of its own needs to see.
+                identity: Some(format!("from Secret {secret}")),
+                ..p
+            }
+        })
+        .collect()
+}
+
 /// Describe the Pod this job runs in.
 ///
 /// The three properties worth reading off the result, because they are the
 /// whole security argument:
 ///
-/// 1. **No host Docker socket, for any kind.** There is no `volumes` entry at
-///    all — a container holding the host's socket can start a privileged
-///    sibling and undo everything else, and the way to never do that is to have
-///    nowhere to write it.
+/// 1. **No host path, for any kind.** The only `volumes` entry a Pod can ever
+///    have is the credential Secret of [`credential_volume`], and only when one
+///    is configured — a container holding the host's Docker socket can start a
+///    privileged sibling and undo everything else, and the way to never do that
+///    is for `hostPath` to appear nowhere this function can reach.
 /// 2. **Privilege only where the profile declares a nested daemon**, which is
 ///    `build` alone. Every other kind gets `allowPrivilegeEscalation: false`.
 /// 3. **A privileged Pod is pinned to the build pool**, or refused.
@@ -591,6 +701,12 @@ pub fn job_pod(spec: &PodJobSpec) -> Result<Pod, Refusal> {
     let mut env: Vec<(String, String)> = base_env(spec);
     env.extend(spec.env.iter().cloned());
 
+    // Built together from one Option so the two seams cannot drift apart: the
+    // volume alone would deliver a session and go silent when the Secret is
+    // absent, and the env alone is what a Pod had before MAIN-669 — no session
+    // at all. See [`credential_volume`].
+    let credentials = spec.credentials_secret.as_deref().map(credential_volume);
+
     let container = Container {
         name: AGENT_CONTAINER.to_string(),
         image: Some(spec.image.clone()),
@@ -610,10 +726,14 @@ pub fn job_pod(spec: &PodJobSpec) -> Result<Pod, Refusal> {
         // scaffolding, and scaffolding must not be able to redirect a run at the
         // wrong control plane.
         //
-        // `optional: false` deliberately. A named Secret that does not exist
-        // keeps the Pod in `CreateContainerConfigError`, which `start_verdict`
-        // reads as a configuration refusal naming it — far better than an agent
-        // that starts, silently has no credentials, and burns a pass finding out.
+        // `optional: false` deliberately, and it is what makes AC-4 hold for the
+        // MOUNT as well: a named Secret that does not exist keeps the Pod in
+        // `CreateContainerConfigError`, which `start_verdict` reads as a
+        // configuration refusal naming it — far better than an agent that
+        // starts, silently has no credentials, and burns a pass finding out.
+        // Keys a Secret carries for the session rather than the environment
+        // (`.claude.json`) are not legal variable names; the kubelet skips
+        // those with an event and starts the container.
         env_from: spec.credentials_secret.as_ref().map(|name| {
             vec![EnvFromSource {
                 secret_ref: Some(SecretEnvSource {
@@ -623,6 +743,7 @@ pub fn job_pod(spec: &PodJobSpec) -> Result<Pod, Refusal> {
                 ..Default::default()
             }]
         }),
+        volume_mounts: credentials.as_ref().map(|(_, m)| vec![m.clone()]),
         security_context: Some(SecurityContext {
             privileged: Some(privileged),
             // Belt and braces with `privileged`, which already implies it: a
@@ -636,6 +757,7 @@ pub fn job_pod(spec: &PodJobSpec) -> Result<Pod, Refusal> {
 
     let pod_spec = PodSpec {
         containers: vec![container],
+        volumes: credentials.map(|(v, _)| vec![v]),
         // A loop job runs once. Restarting it here would re-run an agent the
         // control plane already believes finished, against a card whose state
         // has moved on.
@@ -1012,20 +1134,22 @@ mod tests {
         assert!(!env_of(&job_pod(&s).unwrap()).contains_key("NOOK_SERVER"));
     }
 
+    const KINDS: &[&str] = &[
+        "build",
+        "review",
+        "spec",
+        "decompose",
+        "epic-run",
+        "investigate",
+    ];
+
     /// The property the whole design rests on. A container holding the host's
     /// Docker socket can start a privileged sibling and undo every other
-    /// control, so no kind gets one — and the way to guarantee that is to mount
-    /// nothing at all.
+    /// control, so no kind gets one — and with no Secret configured the way
+    /// that is guaranteed is still to mount nothing at all (MAIN-669 AC-2).
     #[test]
     fn no_kind_gets_a_host_socket_or_any_host_path() {
-        for kind in [
-            "build",
-            "review",
-            "spec",
-            "decompose",
-            "epic-run",
-            "investigate",
-        ] {
+        for kind in KINDS {
             let pod = job_pod(&spec(kind)).unwrap();
             let p = pod.spec.as_ref().unwrap();
             assert!(p.volumes.is_none(), "{kind} has volumes");
@@ -1033,6 +1157,153 @@ mod tests {
             assert_ne!(p.host_network, Some(true), "{kind} on the host network");
             assert_ne!(p.host_pid, Some(true), "{kind} in the host PID namespace");
         }
+    }
+
+    /// …and with one configured, the credential Secret is the ONLY thing that
+    /// may appear (MAIN-669 AC-2). A `hostPath` is what the assertion above
+    /// really excludes, and the mount arriving must not become the door it
+    /// comes back through.
+    #[test]
+    fn a_configured_secret_is_the_only_volume_any_kind_may_have() {
+        for kind in KINDS {
+            let mut s = spec(kind);
+            s.credentials_secret = Some("nook-job-credentials".into());
+            let pod = job_pod(&s).unwrap();
+            let p = pod.spec.as_ref().unwrap();
+
+            let volumes = p.volumes.as_ref().unwrap_or_else(|| panic!("{kind}"));
+            assert_eq!(volumes.len(), 1, "{kind} has more than the Secret");
+            assert!(volumes[0].host_path.is_none(), "{kind} mounts a host path");
+            assert!(volumes[0].secret.is_some(), "{kind}: not a Secret");
+
+            let mounts = container(&pod).volume_mounts.as_ref().unwrap();
+            assert_eq!(mounts.len(), 1, "{kind} mounts more than the Secret");
+            assert_ne!(p.host_network, Some(true), "{kind} on the host network");
+            assert_ne!(p.host_pid, Some(true), "{kind} in the host PID namespace");
+        }
+    }
+
+    /// AC-1. A subscription session is a DIRECTORY, so it arrives as one — at
+    /// the path `CLAUDE_CONFIG_DIR` already names, which is what makes `claude`
+    /// find it here exactly as it does under the Docker sandbox.
+    #[test]
+    fn a_configured_secret_is_mounted_read_only_where_claude_looks_for_it() {
+        let mut s = spec("spec");
+        s.credentials_secret = Some("nook-job-credentials".into());
+        let pod = job_pod(&s).unwrap();
+
+        let volume = &pod.spec.as_ref().unwrap().volumes.as_ref().unwrap()[0];
+        let source = volume.secret.as_ref().expect("a Secret volume source");
+        assert_eq!(source.secret_name.as_deref(), Some("nook-job-credentials"));
+        // Owner-read and nothing else: a session readable by every uid in the
+        // container is one an unprivileged process in it could copy out.
+        assert_eq!(source.default_mode, Some(0o400));
+        let mode = source.default_mode.unwrap();
+        assert_eq!(mode & 0o007, 0, "world-readable: {mode:o}");
+        assert_eq!(mode & 0o070, 0, "group-readable: {mode:o}");
+
+        let mount = &container(&pod).volume_mounts.as_ref().unwrap()[0];
+        assert_eq!(mount.name, volume.name, "the mount reads another volume");
+        assert_eq!(mount.read_only, Some(true));
+        // The mount path and the variable are ONE decision. Asserted against
+        // the env rather than against the constant, because an agent reads the
+        // variable and a mount somewhere else would leave it looking at an
+        // empty directory — the exact failure MAIN-669 exists to end.
+        assert_eq!(mount.mount_path, CLAUDE_DIR);
+        assert_eq!(env_of(&pod)["CLAUDE_CONFIG_DIR"], mount.mount_path);
+    }
+
+    /// The two seams are one decision, and AC-4 rests on their pairing: the
+    /// `env_from` is the DETECTOR — a missing Secret there is
+    /// `CreateContainerConfigError` in seconds — and the volume is the
+    /// DELIVERY, optional because a failed Secret MOUNT reports itself only in
+    /// an Event, which this executor's Role cannot read, and would otherwise
+    /// hang the run until the start budget expired ten minutes later.
+    ///
+    /// So an edit that drops either half fails here rather than in a cluster.
+    #[test]
+    fn the_secret_is_delivered_as_files_and_detected_as_environment() {
+        let mut s = spec("review");
+        s.credentials_secret = Some("nook-job-credentials".into());
+        let pod = job_pod(&s).unwrap();
+
+        let secret_ref = container(&pod).env_from.as_ref().expect("an env_from")[0]
+            .secret_ref
+            .clone()
+            .expect("a secret ref");
+        assert_eq!(secret_ref.name, "nook-job-credentials");
+        assert_eq!(secret_ref.optional, Some(false), "the detector went quiet");
+
+        let source = pod.spec.as_ref().unwrap().volumes.as_ref().unwrap()[0]
+            .secret
+            .as_ref()
+            .unwrap();
+        assert_eq!(source.optional, Some(true), "a failed mount hangs the run");
+        assert_eq!(
+            source.secret_name.as_deref(),
+            Some(secret_ref.name.as_str())
+        );
+
+        // And with none configured, neither half appears.
+        let pod = job_pod(&spec("review")).unwrap();
+        assert!(container(&pod).env_from.is_none());
+        assert!(pod.spec.as_ref().unwrap().volumes.is_none());
+    }
+
+    /// AC-6. The gate `nook get nodes` reports and the dispatcher enforces asks
+    /// whether a job started here can authenticate. A probe inside the agent's
+    /// own pod answers a different question — it has no session and often no
+    /// binary — and answering that one is why a cluster node claimed nothing.
+    #[test]
+    fn a_cluster_node_reports_the_authorization_its_job_pods_will_have() {
+        let signed_out = || {
+            vec![
+                AuthProfile {
+                    id: "claude".into(),
+                    label: "Claude Code".into(),
+                    runtime: "claude".into(),
+                    state: AuthState::Unavailable,
+                    identity: None,
+                },
+                AuthProfile {
+                    id: "codex".into(),
+                    label: "Codex CLI".into(),
+                    runtime: "codex".into(),
+                    state: AuthState::Unavailable,
+                    identity: None,
+                },
+            ]
+        };
+        let mut cfg = ExecutorConfig {
+            namespace: "nook-jobs".into(),
+            image: "img:1".into(),
+            build_pool: None,
+            credentials_secret: None,
+        };
+
+        // No Secret: the probe stands, so the dispatcher passes this node over
+        // rather than sending it work it would fail in turn.
+        let reported = delivered_runtime_auth(signed_out(), &cfg);
+        assert!(reported.iter().all(|p| p.state != AuthState::Authorized));
+
+        cfg.credentials_secret = Some("nook-job-credentials".into());
+        let reported = delivered_runtime_auth(signed_out(), &cfg);
+        let claude = reported
+            .iter()
+            .find(|p| p.runtime == CREDENTIALS_RUNTIME)
+            .expect("the loop runtime");
+        assert_eq!(claude.state, AuthState::Authorized);
+        // Where it came from, not who it is: this node cannot read the Secret.
+        assert_eq!(
+            claude.identity.as_deref(),
+            Some("from Secret nook-job-credentials")
+        );
+
+        // One mount is one runtime's configuration directory. A Secret at
+        // CLAUDE_CONFIG_DIR says nothing about codex, and claiming otherwise
+        // would offer a runtime the Pod cannot authenticate.
+        let codex = reported.iter().find(|p| p.runtime == "codex").unwrap();
+        assert_eq!(codex.state, AuthState::Unavailable);
     }
 
     /// Privilege follows the nested daemon, and the nested daemon is declared by
@@ -1390,9 +1661,9 @@ mod tests {
         assert_eq!(labels[NODE_LABEL], "azul-local");
     }
 
-    /// A Pod mounts nothing, so the node's clone cache and its per-job worktree
-    /// are unreachable from inside one: the checkout happens IN the Pod, from a
-    /// fresh clone (NG-2).
+    /// A Pod mounts no storage, so the node's clone cache and its per-job
+    /// worktree are unreachable from inside one: the checkout happens IN the
+    /// Pod, from a fresh clone (NG-2).
     #[test]
     fn the_pod_clones_its_own_checkout_and_then_becomes_the_agent() {
         let args = ["-p".to_string(), "/nook-spec MAIN-1".to_string()];
@@ -1528,6 +1799,44 @@ mod tests {
             start_verdict(&job_pod(&spec("review")).unwrap()),
             StartVerdict::Waiting
         );
+    }
+
+    /// AC-4. A Secret that was never created, or whose name has a typo in it, is
+    /// the cluster's state and not the card's — so the job is REFUSED and goes
+    /// back to the queue, rather than failing and spending a strike from a
+    /// budget that exists to catch an agent that cannot do the work.
+    ///
+    /// The `env_from` is what turns it into this status within seconds, and the
+    /// refusal carries the kubelet's own sentence, so the operator is told which
+    /// Secret is missing rather than that "the job Pod will not start".
+    #[test]
+    fn a_missing_credentials_secret_refuses_the_job_rather_than_failing_it() {
+        for message in [
+            "secret \"nook-job-credentials\" not found",
+            "secret \"nook-job-credentails\" not found",
+        ] {
+            let pod = pod_with_status(serde_json::json!({
+                "phase": "Pending",
+                "containerStatuses": [{
+                    "name": AGENT_CONTAINER, "ready": false, "restartCount": 0,
+                    "image": "img", "imageID": "",
+                    "state": { "waiting": {
+                        "reason": "CreateContainerConfigError",
+                        "message": message,
+                    } },
+                }],
+            }));
+            match start_verdict(&pod) {
+                StartVerdict::Refused(r) => {
+                    // Configuration, not transient: a Secret nobody has created
+                    // will not appear by waiting, and a node that kept claiming
+                    // into one would refuse in turn everything it was sent.
+                    assert!(!r.keep_claiming(), "waiting cannot create a Secret");
+                    assert!(r.to_string().contains(message), "{r}");
+                }
+                other => panic!("a missing Secret was not refused: {other:?}"),
+            }
+        }
     }
 
     /// The crash-honesty fallback's input (MAIN-161 AC-4): with no result

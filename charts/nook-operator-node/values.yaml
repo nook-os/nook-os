@@ -166,13 +166,20 @@ executor:
     create: true
     name: ""
 
-  # The Secret a job Pod reads its credentials from, as environment variables
-  # (MAIN-623 AC-10).
+  # The Secret a job Pod reads its credentials from (MAIN-623 AC-10, MAIN-669).
+  #
+  # It arrives BOTH ways, because a job needs both kinds of credential. Every
+  # key becomes an environment variable, and the whole Secret is also mounted
+  # read-only at CLAUDE_CONFIG_DIR — which is what carries the fleet's Claude
+  # session, since a subscription login is a directory (`.claude.json` beside
+  # `.credentials.json`) and not a variable. Without that mount a cluster node
+  # reports the runtime unauthorized and is sent no loop work at all.
   #
   # SCAFFOLDING, and it is named that way on purpose. Create it by hand; nothing
   # in this chart or in the agent writes one, and the executor's Role grants no
   # `secrets` verb at all — the agent could not create, read or update it if it
-  # tried. MAIN-337/339 own the real credential path.
+  # tried. MAIN-337/339 own the real credential path. Everything in it is
+  # readable by every agent this node runs; see the chart README.
   #
   # Empty (the default) means a job Pod gets NO credentials and its agent will
   # fail to authenticate. That is deliberate: the alternative is writing the
