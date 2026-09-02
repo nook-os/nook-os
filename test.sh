@@ -134,6 +134,7 @@ run_lint() {
   lint_in koalaman/shellcheck:stable install/install.sh deploy/enable-agent-mtls.sh test.sh \
     charts/nook-control/ci/validate.sh scripts/k8s-e2e.sh scripts/dev-db-heal.sh \
     scripts/check-release-version.sh scripts/check-release-version.test.sh \
+    scripts/check-chart-appversion.sh scripts/check-chart-appversion.test.sh \
     scripts/check-secrets-untracked.test.sh run.sh \
     scripts/check-inline-sql.sh scripts/check-inline-sql.test.sh \
     scripts/check-sqlx-signatures.sh scripts/check-sqlx-signatures.test.sh \
@@ -152,6 +153,16 @@ run_lint() {
   say "release version guard"
   ./scripts/check-release-version.test.sh || die "release version guard"
   pass "release version guard"
+
+  # MAIN-652: a chart's default image tag is its appVersion, so a stale one
+  # sends every `helm install` from this repo to an image ghcr never had. The
+  # guard reads the release tags, so a tagless or offline checkout gets a loud
+  # skip (2) rather than a verdict it could not compute — CI runs it with
+  # `--require`, where the tags are fetched and silence would mean broken wiring.
+  say "chart appVersion"
+  ./scripts/check-chart-appversion.sh || [ "$?" = "2" ] || die "chart appVersion"
+  ./scripts/check-chart-appversion.test.sh || die "chart appVersion guard self-test"
+  pass "chart appVersion guarded"
 
   say "credentials untracked"
   ./scripts/check-secrets-untracked.test.sh || die "credentials untracked"
