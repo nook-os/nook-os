@@ -112,7 +112,7 @@ pub fn detect() -> Capabilities {
         // on it: a host node that answers `unavailable` claims no loop work at
         // all, so a wrong answer here is a node that quietly stops working or
         // one that quietly runs an agent on the owner's home directory.
-        sandbox: Some(crate::sandbox::probe()),
+        sandbox: Some(sandbox_capability()),
         // Whether anything would start this agent again (MAIN-647). Reported
         // so readiness is answerable from the control plane rather than only
         // from a shell on the machine — an unsupervised node is exactly the
@@ -121,6 +121,46 @@ pub fn detect() -> Capabilities {
             .ok()
             .and_then(|c| crate::selfupdate::supervision(&c)),
     }
+}
+
+/// What this node confines a loop-job agent with.
+///
+/// Almost always [`crate::sandbox::probe`]. The exception is a node in
+/// Pod-executor mode (MAIN-623): it is already `Exempt` because its own cgroup
+/// says it is containerised, but that detail describes the NODE and answers a
+/// question nobody asked. A job here gets a Pod of its own, and the sandbox
+/// column exists to say what a JOB gets.
+///
+/// Reported, never trusted: the control plane keeps failing closed on this, and
+/// nothing about saying "Pods" grants a permission. MAIN-655 is where the wall
+/// learns to read it.
+fn sandbox_capability() -> nook_types::SandboxCapability {
+    #[cfg(feature = "kubernetes")]
+    {
+        match crate::k8s_exec::ExecutorConfig::from_env() {
+            Ok(Some(cfg)) => {
+                return nook_types::SandboxCapability::Exempt {
+                    detail: cfg.sandbox_detail(),
+                }
+            }
+            // A misconfigured executor is NOT reported as a working sandbox.
+            // The node still starts -- it may hold interactive sessions -- but
+            // it says it cannot confine a job, which is what stops the
+            // dispatcher sending one.
+            Err(e) => {
+                return nook_types::SandboxCapability::Unavailable {
+                    detail: e,
+                    // `Unknown` is the documented catch-all, and the right
+                    // answer here: naming a new variant would change a type the
+                    // control plane compiles, which MAIN-623 NG-6 excludes. The
+                    // detail carries what actually went wrong.
+                    reason: nook_types::SandboxUnavailable::Unknown,
+                };
+            }
+            Ok(None) => {}
+        }
+    }
+    crate::sandbox::probe()
 }
 
 /// Every loop stage a node may be configured to run (MAIN-142). `build` is

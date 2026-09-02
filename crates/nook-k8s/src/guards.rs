@@ -102,10 +102,17 @@ fn the_control_plane_never_gains_a_kubernetes_client() {
 /// AC-5. One manifest names the Kubernetes crates, so adding them changed
 /// nothing the control plane, the web build or the desktop bundle compiles.
 ///
-/// The next crate to name them will be `nook-node`, when MAIN-623 grows the Pod
-/// driver — and that DOES change the desktop bundle, which ships the `nook`
-/// binary. This guard is where that trade gets looked at rather than absorbed
-/// silently.
+/// The next crate to name them was `nook-node`, when MAIN-623 grew the Pod
+/// driver. This guard is where that trade got looked at rather than absorbed
+/// silently, and the answer was to keep the promise rather than widen past it:
+/// `nook-node` names `nook-k8s` **optionally**, behind a `kubernetes` feature
+/// that is off by default, so the desktop bundle compiles exactly what it did
+/// before. `cargo tree -p nook-node` finds no `k8s-openapi`;
+/// `--features kubernetes` finds it.
+///
+/// So the rule is no longer "only this crate" but "only this crate, and only
+/// optionally elsewhere" — which is still a rule with teeth, because the shape
+/// that would actually cost the bundle is the one still refused.
 #[test]
 fn only_this_crate_names_the_kubernetes_dependency() {
     let crates = workspace_root().join("crates");
@@ -123,15 +130,27 @@ fn only_this_crate_names_the_kubernetes_dependency() {
         };
         checked += 1;
         for kube in KUBERNETES_CRATES {
+            if !names_dependency(&manifest, kube) {
+                continue;
+            }
+            // The one permitted shape, and it is permitted because it costs the
+            // bundle nothing: optional, and not turned on by default.
             assert!(
-                !names_dependency(&manifest, kube),
-                "{name} depends on `{kube}`. MAIN-339 AC-5 confined the \
-                 Kubernetes client to nook-k8s so that adding it changed \
-                 nothing the control plane, the web build or the desktop \
-                 bundle compiles. The desktop bundle builds `nook` and \
+                is_optional_dependency(&manifest, kube),
+                "{name} depends on `{kube}` unconditionally. MAIN-339 AC-5 \
+                 confined the Kubernetes client to nook-k8s so that adding it \
+                 changed nothing the control plane, the web build or the \
+                 desktop bundle compiles. The desktop bundle builds `nook` and \
                  `nook-control`: if this crate is one of them, that bundle now \
-                 carries k8s-openapi. Widen this guard deliberately, with the \
-                 card that needs it."
+                 carries k8s-openapi. Make it `optional = true` behind a \
+                 feature, as nook-node does (MAIN-623), or widen this guard \
+                 deliberately with the card that needs it."
+            );
+            assert!(
+                !default_features_enable(&manifest, kube),
+                "{name} names `{kube}` optionally but a default feature turns \
+                 it on, which costs the desktop bundle exactly what a plain \
+                 dependency would. Leave it out of `default`."
             );
         }
     }
@@ -139,6 +158,65 @@ fn only_this_crate_names_the_kubernetes_dependency() {
         checked > 10,
         "the guard read {checked} manifests — it is looking in the wrong place"
     );
+}
+
+/// The dependency line for `dep` carries `optional = true`.
+///
+/// Deliberately reads the line rather than parsing the manifest: this guard
+/// runs in the crate it protects and a TOML parser here would be a dependency
+/// added to avoid one.
+fn is_optional_dependency(manifest: &str, dep: &str) -> bool {
+    manifest.lines().any(|line| {
+        let line = line.trim();
+        !line.starts_with('#')
+            && line
+                .split_once('=')
+                .is_some_and(|(key, _)| key.trim() == dep || key.trim() == format!("\"{dep}\""))
+            && line.contains("optional")
+            && line.contains("true")
+    })
+}
+
+/// Any feature in the `default` list pulls `dep` in, directly or by naming the
+/// feature that does.
+fn default_features_enable(manifest: &str, dep: &str) -> bool {
+    let Some((_, after)) = manifest.split_once("[features]") else {
+        return false;
+    };
+    let features = after.split("\n[").next().unwrap_or(after);
+    // The features that `default` lists, then whether any of them -- or
+    // `default` itself -- names this dependency.
+    let mut enabled: Vec<String> = Vec::new();
+    for line in features.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() == "default" {
+            if value.contains(dep) {
+                return true;
+            }
+            enabled = value
+                .trim_matches(|c: char| c.is_whitespace() || c == '[' || c == ']')
+                .split(',')
+                .map(|f| f.trim().trim_matches('"').to_string())
+                .filter(|f| !f.is_empty())
+                .collect();
+        }
+    }
+    for line in features.lines() {
+        let line = line.trim();
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if enabled.iter().any(|f| f == key.trim()) && value.contains(dep) {
+            return true;
+        }
+    }
+    false
 }
 
 /// The manifest names `dep` as a dependency of its own, rather than merely

@@ -27,6 +27,24 @@ pub mod config;
 pub mod error;
 pub mod pods;
 
+/// The API types a caller needs to BUILD what [`pods`] sends.
+///
+/// A client that can create a Pod while exposing no way to construct one is
+/// unusable, and the alternative -- its caller naming `k8s-openapi` itself --
+/// is the second manifest AC-5 exists to prevent. So the types come through
+/// here, and the kube dependency stays named in exactly one place.
+///
+/// Deliberately a re-export and not a wrapper: a hand-rolled Pod builder would
+/// be a second, lossier spelling of a schema that already exists, and every
+/// field it forgot would be one a caller could not set.
+pub mod types {
+    pub use k8s_openapi::api::core::v1::{
+        Container, EnvFromSource, EnvVar, Pod, PodSecurityContext, PodSpec, SecretEnvSource,
+        SecurityContext, Toleration,
+    };
+    pub use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+}
+
 pub use config::{connect, resolve, Connection, Environment, Source, SERVICE_ACCOUNT_DIR};
 pub use error::{Error, Operation, Result};
 pub use pods::Pods;

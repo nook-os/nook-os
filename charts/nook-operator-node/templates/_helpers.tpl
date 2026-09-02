@@ -65,3 +65,12 @@ Refuse to render half a configuration.
 {{- fail "\n\nvalues.existingSecret is required: create a Kubernetes Secret holding the join token, then set --set existingSecret=<name>. Join stays operator-driven; the chart never stores the token itself." -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+The ServiceAccount the agent runs as. Named explicitly or derived; only ever
+used when the executor is in `kubernetes` mode, since `local` needs no identity
+at the apiserver at all.
+*/}}
+{{- define "nook-operator-node.serviceAccountName" -}}
+{{- default (printf "%s-executor" (include "nook-operator-node.fullname" .)) .Values.executor.serviceAccount.name -}}
+{{- end -}}

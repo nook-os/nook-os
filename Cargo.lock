@@ -3180,6 +3180,7 @@ dependencies = [
  "futures-util",
  "libc",
  "nook-desktop-env",
+ "nook-k8s",
  "nook-proto",
  "nook-types",
  "portable-pty",

@@ -135,6 +135,69 @@ loopKinds:
 # chart must keep the last word.
 maxLoopJobs: 2
 
+# How this node RUNS a loop job (MAIN-623).
+#
+# `local` (the default) is what this chart has always done: the agent runs each
+# job as a process inside this pod. `kubernetes` schedules each job as a Pod of
+# its own, so one job cannot read another's checkout and a crash takes nothing
+# with it.
+#
+# Left at `local`, this chart renders EXACTLY what it rendered before: no
+# ServiceAccount, no RBAC, no new environment. That is deliberate — an upgrade
+# must not quietly grant a cluster permission nobody asked for.
+executor:
+  mode: local
+
+  # Where job Pods are created, and the ONLY namespace the Role below is bound
+  # in. Usually a namespace of its own rather than this one: a job Pod is the
+  # untrusted half, and a blast radius that excludes the agent's own pod is
+  # worth a namespace.
+  namespace: nook-jobs
+
+  # The image a job Pod runs. No default: naming one here would be this chart
+  # guessing at a registry, and a wrong guess fails at ImagePullBackOff, long
+  # after the install reported success.
+  image: ""
+
+  # The ServiceAccount the agent uses to talk to the apiserver. Created by this
+  # chart unless `create: false`, which is for a cluster whose accounts are
+  # managed elsewhere.
+  serviceAccount:
+    create: true
+    name: ""
+
+  # The Secret a job Pod reads its credentials from, as environment variables
+  # (MAIN-623 AC-10).
+  #
+  # SCAFFOLDING, and it is named that way on purpose. Create it by hand; nothing
+  # in this chart or in the agent writes one, and the executor's Role grants no
+  # `secrets` verb at all — the agent could not create, read or update it if it
+  # tried. MAIN-337/339 own the real credential path.
+  #
+  # Empty (the default) means a job Pod gets NO credentials and its agent will
+  # fail to authenticate. That is deliberate: the alternative is writing the
+  # fleet's GitHub token into the Pod's `env`, where `kubectl describe pod` and
+  # anything holding this Role's own `pods get` can read it back.
+  #
+  # A name that does not exist keeps the Pod in CreateContainerConfigError, and
+  # the agent refuses the job naming it — rather than starting, silently having
+  # no credentials, and spending a pass discovering that.
+  credentialsSecret: ""
+
+  # Where BUILD Pods may run (MAIN-655). A build Pod is privileged, so it must
+  # never share a node with anything else.
+  #
+  # BOTH or NEITHER. Either half alone reads as protection and is not: a
+  # selector with no taint puts builds on a pool nothing keeps other work off,
+  # and a taint with no selector lets a build schedule anywhere. The agent
+  # refuses to start with only one of them set. Neither means this cluster runs
+  # no builds, and a build job is then refused rather than mis-scheduled.
+  buildPool:
+    # `key=value`, matched against node labels.
+    selector: ""
+    # The taint key those nodes carry, which only build Pods tolerate.
+    taint: ""
+
 # Extra environment for the node process (e.g. RUST_LOG overrides).
 extraEnv: []
 
