@@ -43,6 +43,10 @@ async fn main() -> Result<()> {
     // retired variable hears about it in the same breath as the boot (MAIN-602).
     nook_infra::config::warn_retired_env();
     let cfg = Config::from_env()?;
+    // Every boot, not just the first: an install whose values file said `dev`
+    // months ago is still answering dev-login today, and the values file is not
+    // where anyone looks (MAIN-671).
+    nook_infra::config::warn_dev_login_open(&cfg);
 
     // One control plane per SQLite file (MAIN-197). Taken BEFORE the pool,
     // because `create_if_missing` means connecting is already a write, and the

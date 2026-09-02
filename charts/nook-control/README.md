@@ -43,6 +43,10 @@ a newer image tag rolls the Deployment and the new image converges the schema.
 The control-plane pod reaches Ready once `/healthz` passes (Postgres reachable);
 the web pod serves the SPA and proxies `/api` to the control-plane Service.
 
+Those defaults leave the dev-login hatch OFF, which is what you want — see
+[The dev-login hatch](#the-dev-login-hatch-configauthdevmode) before turning it
+on, and to check an install you already run.
+
 ## Secrets (by reference)
 
 **The contract:** the chart consumes exactly one Kubernetes Secret, by name
@@ -334,6 +338,54 @@ serves everything else, and logs one `WARN` naming the backend, the path or
 bucket, and the underlying error; uploads answer `503 file storage is not
 configured` until it is fixed. `kubectl logs` is where the detail is — the
 response body deliberately carries none of it.
+
+## The dev-login hatch (`config.authDevMode`)
+
+`AUTH_DEV_MODE` turns on `POST /api/v1/auth/dev-login`. That endpoint takes an
+email and issues a session for it — **no password, no verification** — and
+*creates* the user when the email is unknown. The first user on a fresh
+deployment is granted `operator`, so on a new install **the first caller owns
+the deployment**. Configuring OIDC does not turn it off; nothing does but the
+setting itself.
+
+It exists so the compose dev stack and CI can sign in, and it stays. The rule is
+the whole of it:
+
+> **Never leave it on where the control plane is reachable.**
+
+The chart's defaults are `config.appEnv: production` and
+`config.authDevMode: false`, and `nook k8s init` defaults to the same. Setting
+`authDevMode: true` with `appEnv: production` fails to render (the control plane
+refuses to boot on that combination too). Setting it with `ingress.enabled: true`
+renders a warning banner, annotates the ConfigMap `nook.dev/insecure-dev-login`,
+and prints the exposure in the install notes — the pairing is the dangerous
+shape, and an ingress-less dev install is not.
+
+The control plane also logs a `WARN` naming the open endpoint at **every** boot
+while the hatch is on, so `kubectl logs` answers the question without anyone
+re-reading a values file.
+
+### Checking an install you already run
+
+Every install `nook k8s init` generated before this default changed has the
+hatch **on** — it wrote `appEnv: dev` whenever no `--app-env` was given. Ask the
+deployment rather than the values file:
+
+```bash
+curl -si -X POST https://<host>/api/v1/auth/dev-login \
+  -H 'content-type: application/json' -d '{}' | head -1
+```
+
+- `403` — the pass. The hatch is closed.
+- `200` — the install is **open to anyone who can reach it**. Close it:
+
+  ```bash
+  helm upgrade --reuse-values --set config.authDevMode=false <release> <chart>
+  ```
+
+  Then re-run the curl and confirm the 403. Review the tenant's members before
+  assuming nobody used it — the endpoint *creates* accounts, so an unrecognised
+  user is the evidence.
 
 ## Security
 

@@ -2264,7 +2264,8 @@ enum K8sCommand {
         /// full interactive result from flags alone.
         #[arg(long)]
         advanced: bool,
-        /// APP_ENV: "dev" (default, dev-login hatch ON) or "production" (OFF).
+        /// APP_ENV: "production" (default, dev-login hatch OFF) or "dev" (ON —
+        /// POST /api/v1/auth/dev-login then signs any caller in as any email).
         #[arg(long)]
         app_env: Option<String>,
         /// RUST_LOG: a bare level (error/warn/info/debug/trace) or a full

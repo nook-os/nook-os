@@ -2,12 +2,26 @@
 {{- if and $c.authDevMode (eq $c.appEnv "production") -}}
 {{- fail "config.authDevMode=true is incompatible with config.appEnv=production: the dev-login hatch must be OFF in production. The control plane (config.rs) refuses to boot on this combo, so the chart refuses to render it. Set config.authDevMode=false, or use a non-production appEnv." -}}
 {{- end -}}
+{{- $exposure := trim (include "nook-control.devLoginExposure" .) -}}
+{{- if $exposure }}
+{{ repeat 76 "#" }}
+{{ regexReplaceAll "(?m)^" $exposure "# " }}
+{{ repeat 76 "#" }}
+{{ end -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: {{ include "nook-control.fullname" . }}-config
   labels:
     {{- include "nook-control.labels" . | nindent 4 }}
+  {{- if $exposure }}
+  annotations:
+    # An annotation as well as the banner above: a comment is lost the moment
+    # this is applied, and `kubectl get cm -o yaml` is where somebody auditing a
+    # cluster they did not install looks (MAIN-671).
+    nook.dev/insecure-dev-login: |-
+      {{- $exposure | nindent 6 }}
+  {{- end }}
 data:
   # Non-secret control-plane configuration. Secrets are wired separately from
   # existingSecret via secretKeyRef — never here.

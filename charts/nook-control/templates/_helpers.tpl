@@ -182,3 +182,35 @@ are served under.
 {{- define "nook-control.tunnelWildcard" -}}
 {{- printf "*.%s" (include "nook-control.tunnelHost" .) -}}
 {{- end -}}
+
+{{/*
+The dev-login exposure, or empty (MAIN-671).
+
+`config.authDevMode` opens POST /api/v1/auth/dev-login, which signs any caller
+in as any email and CREATES the user when the email is unknown; the first user
+on a fresh deployment is granted operator. Paired with an Ingress that is what
+the values file above actually says: whoever reaches the host first owns the
+deployment. A live install shipped exactly this pair for eight days, which is
+why the guard lives here as well as in the generator that wrote it — a values
+file is only one of the ways these two keys get set.
+
+It WARNS rather than fails. The pair is not always wrong (an internal-only
+ingress class, a cluster behind a VPN) and helm has no --force, so refusing
+would dead-end an install the chart cannot tell apart from the dangerous one.
+Empty unless both are set, so callers may branch on it directly.
+*/}}
+{{- define "nook-control.devLoginExposure" -}}
+{{- if and .Values.config.authDevMode .Values.ingress.enabled -}}
+INSECURE: config.authDevMode is true and this release publishes an Ingress at
+{{ .Values.ingress.host }}. Anyone who can reach
+
+    POST https://{{ .Values.ingress.host }}/api/v1/auth/dev-login
+
+is signed in as any email they name — the user is CREATED when the email is
+unknown — and the first user on a fresh deployment is granted operator, so the
+first caller owns this deployment.
+
+Set config.authDevMode=false (with config.appEnv=production), or leave
+ingress.enabled=false so the hatch is not reachable from outside the cluster.
+{{- end -}}
+{{- end -}}
