@@ -129,6 +129,27 @@ tlsSecret mounts here; the process reads the cert and key from these paths.
 {{- define "nook-control.agentKeyPath" -}}{{ include "nook-control.agentCertDir" . }}/{{ .Values.agent.tlsKeyKey }}{{- end -}}
 
 {{/*
+Non-empty when the control-plane pod mounts a volume a second copy of itself
+could not mount at the same time (MAIN-653).
+
+A ReadWriteOnce claim attaches to ONE node at a time, and RollingUpdate needs
+both pods alive at once: the new pod sits in ContainerCreating with
+`Multi-Attach error for volume`, and the old pod is not removed until the new
+one is Ready. `helm upgrade --wait` then times out and marks the release
+failed, `helm rollback` deadlocks the same way, and deleting the old pod does
+not help because its ReplicaSet immediately makes a replacement that takes the
+volume again. Empty when there is nothing to contend for — an emptyDir, or a
+class granting ReadWriteMany.
+*/}}
+{{- define "nook-control.userContentIsExclusive" -}}
+{{- if .Values.userContent.persistence.enabled -}}
+{{- if not (has "ReadWriteMany" (.Values.userContent.persistence.accessModes | default list)) -}}
+exclusive
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 The tunnel zone (MAIN-512), validated once for every consumer. The ConfigMap
 renders whatever ingress.enabled says, so the check lives here rather than in
 the Ingress — a deployment fronted by something other than this chart's Ingress

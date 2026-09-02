@@ -9,6 +9,15 @@ NookOS is installing.
 
    kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "nook-control.componentName" (dict "root" . "component" "control") }}
    kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "nook-control.componentName" (dict "root" . "component" "web") }}
+{{- if include "nook-control.userContentIsExclusive" . }}
+
+   Note: upgrades REPLACE the control plane rather than rolling it. The upload
+   volume is {{ join "/" .Values.userContent.persistence.accessModes }}, so it attaches to one node at a time and the old
+   pod must stop before the new one starts — expect a few seconds with no
+   control plane on every `helm upgrade`. Web stays up throughout. For a
+   zero-downtime rollout, set userContent.persistence.accessModes to
+   ReadWriteMany, or move uploads off the volume with config.artifactStore=s3.
+{{- end }}
 
 {{- if .Values.ingress.enabled }}
 

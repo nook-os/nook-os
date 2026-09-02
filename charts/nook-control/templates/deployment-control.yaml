@@ -9,6 +9,14 @@ metadata:
     app.kubernetes.io/component: control
 spec:
   replicas: {{ .Values.controlPlane.replicas }}
+  {{- if include "nook-control.userContentIsExclusive" . }}
+  # Stop the old pod BEFORE starting the new one: the upload volume attaches to
+  # one node at a time, so an overlapping rollout deadlocks on it (MAIN-653).
+  # The trade is a few seconds with no control plane per upgrade, against an
+  # upgrade that never finishes without a human holding kubectl.
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       {{- include "nook-control.componentSelectorLabels" (dict "root" . "component" "control") | nindent 6 }}

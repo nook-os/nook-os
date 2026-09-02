@@ -392,6 +392,15 @@ userContent:
     storageClass: ""
     # -- Access modes. ReadWriteOnce is right for controlPlane.replicas=1; more
     #    than one replica needs a ReadWriteMany class, or artifactStore="s3".
+    #
+    #    This also picks the ROLLOUT STRATEGY, and the trade is worth knowing:
+    #    a ReadWriteOnce volume attaches to one node at a time, so the control
+    #    plane switches to `Recreate` — the old pod stops, THEN the new one
+    #    starts, which is a few seconds of downtime on every `helm upgrade`.
+    #    That is deliberate. A rolling update needs both pods alive at once,
+    #    which this volume cannot allow, so it deadlocks on Multi-Attach and
+    #    the upgrade never completes at all (MAIN-653). ReadWriteMany, or
+    #    persistence disabled, keeps the zero-downtime rolling update.
     accessModes:
       - ReadWriteOnce
 

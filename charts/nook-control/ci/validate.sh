@@ -127,6 +127,55 @@ else
   fail=1
 fi
 
+# ── Rollout strategy vs. the upload volume (MAIN-653) ────────────────────────
+# A ReadWriteOnce claim attaches to one node at a time, and RollingUpdate wants
+# both pods alive at once — so the new pod hangs on Multi-Attach and the old one
+# is never removed to free it. Every upgrade needed a human with kubectl. What
+# the chart must get right is the CONDITION: forced only where a volume is
+# actually contended, since the outage Recreate costs is real.
+echo "==> helm template (rollout strategy)"
+need "Recreate with an RWO upload volume" '^    type: Recreate$' 1
+need "and nothing else declares a strategy" '^  strategy:$' 1
+
+ctl="$(render "${min[@]}" --show-only templates/deployment-control.yaml)"
+if grep -qE '^    type: Recreate$' <<<"$ctl"; then
+  echo "  ok:   the Recreate is the control-plane Deployment's"
+else
+  echo "  FAIL: the control-plane Deployment is not the one set to Recreate"
+  fail=1
+fi
+
+# AC-4: no PVC, no contention — and a rolling upgrade is strictly better, so
+# nothing may force the outage.
+if grep -q 'type: Recreate' <<<"$ephemeral"; then
+  echo "  FAIL: persistence=false forced Recreate — there is no volume to contend for"
+  fail=1
+else
+  echo "  ok:   persistence=false keeps the rolling update"
+fi
+
+# The other way out, and the reason the condition reads accessModes rather than
+# `enabled`: an RWX class attaches to many nodes, so the overlap RWO forbids is
+# available again.
+rwx="$(render "${min[@]}" --set userContent.persistence.accessModes[0]=ReadWriteMany)"
+if grep -q 'type: Recreate' <<<"$rwx"; then
+  echo "  FAIL: a ReadWriteMany upload volume still forced Recreate"
+  fail=1
+else
+  echo "  ok:   ReadWriteMany keeps the rolling update"
+fi
+
+# An existingClaim renders no PVC, but the pod still MOUNTS one — so the
+# deadlock is identical and the strategy must not key off the chart-created
+# claim's presence.
+existing="$(render "${min[@]}" --set userContent.persistence.existingClaim=nook-uploads)"
+if grep -q 'type: Recreate' <<<"$existing"; then
+  echo "  ok:   an existingClaim is treated as contended too"
+else
+  echo "  FAIL: existingClaim skipped Recreate — the pod still mounts an RWO volume"
+  fail=1
+fi
+
 # ── Dev-mode, log level, and mail config (MAIN-62) ───────────────────────────
 echo "==> helm template (authDevMode + logLevel + mail)"
 cfgout="$(render "${min[@]}" \
