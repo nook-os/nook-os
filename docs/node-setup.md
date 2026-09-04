@@ -120,7 +120,7 @@ and has nothing to confine.
 
 ```
 nook nodes readiness <name>     # every gate ✓
-nook get nodes                  # LOOPS, SANDBOX, CAPACITY, DISK all read
+nook get nodes                  # LOOPS, SANDBOX, CAPACITY, DISK, AUTH all read
 ```
 
 ---

@@ -82,9 +82,11 @@ spec:
             - name: NOOK_JOB_IMAGE
               value: {{ required "executor.image is required when executor.mode=kubernetes — a default here would be this chart guessing at a registry, and a wrong guess fails at ImagePullBackOff long after the install reported success" .Values.executor.image | quote }}
             {{- with .Values.executor.credentialsSecret }}
-            # A hand-created Secret, read as the job Pod's environment (AC-10).
-            # Absent means the Pod gets no credentials — never that they are
-            # written into its env, which pod-read would expose.
+            # A hand-created Secret: read as the job Pod's environment (AC-10)
+            # and mounted at CLAUDE_CONFIG_DIR, which is what carries the
+            # fleet's Claude session (MAIN-669). Absent means the Pod gets no
+            # credentials — never that they are written into its env, which
+            # pod-read would expose.
             - name: NOOK_JOB_CREDENTIALS_SECRET
               value: {{ . | quote }}
             {{- end }}

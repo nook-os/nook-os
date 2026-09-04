@@ -256,7 +256,31 @@ pub fn is_authorized(runtime: &str) -> bool {
 /// Probe every allowlisted profile, in registry order. Best-effort and never
 /// fatal — this runs during capability detection on connect.
 pub fn probe_all() -> Vec<AuthProfile> {
-    ADAPTERS.iter().map(profile_for).collect()
+    delivered_by_executor(ADAPTERS.iter().map(profile_for).collect())
+}
+
+/// A node in Pod-executor mode reports what a JOB POD can authenticate as, not
+/// what this process can (MAIN-669 AC-6). The rule is
+/// [`crate::k8s_exec::delivered_runtime_auth`]; this is only where it is asked.
+///
+/// Applied here rather than in `capabilities::detect` because THREE call sites
+/// push a fresh probe — the connect, a credential delivery, an authorize
+/// session ending — and a reported state that depended on which of them ran
+/// last would flip the dispatcher's gate at random.
+#[cfg(feature = "kubernetes")]
+fn delivered_by_executor(probed: Vec<AuthProfile>) -> Vec<AuthProfile> {
+    match crate::k8s_exec::ExecutorConfig::from_env() {
+        Ok(Some(cfg)) => crate::k8s_exec::delivered_runtime_auth(probed, &cfg),
+        // Not a Pod executor, or one so misconfigured it will run nothing —
+        // `capabilities::sandbox_capability` reports that state, and inventing
+        // an authorization on top of it would say the node is ready to claim.
+        _ => probed,
+    }
+}
+
+#[cfg(not(feature = "kubernetes"))]
+fn delivered_by_executor(probed: Vec<AuthProfile>) -> Vec<AuthProfile> {
+    probed
 }
 
 /// Which of the two captured streams this adapter's parser should read.

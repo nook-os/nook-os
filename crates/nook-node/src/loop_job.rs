@@ -2100,8 +2100,8 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
     }
 
     // A node in Pod-executor mode runs the job on the CLUSTER (MAIN-623), and
-    // nothing below this line applies to it: a Pod mounts nothing, so the clone
-    // cache, the per-job worktree and the Docker sandbox are all unreachable
+    // nothing below this line applies to it: a Pod mounts no storage, so the
+    // clone cache, the per-job worktree and the Docker sandbox are all unreachable
     // from inside one. It takes over here rather than deeper down for that
     // reason — the first thing `run` does after this is fetch a mirror the Pod
     // will never see.
