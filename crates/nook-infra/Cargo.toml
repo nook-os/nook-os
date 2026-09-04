@@ -49,3 +49,7 @@ nook-control = { workspace = true }
 # the tree's one way to get one, and it already rides the same dev-only cycle
 # nook-control does above.
 nook-testkit = { workspace = true }
+# MAIN-671's boot warning is proved by capturing the RECORD, not by re-reading
+# the constant it formats — a subscriber over a buffer is the only way to show
+# the WARN actually reaches a log.
+tracing-subscriber = { workspace = true }

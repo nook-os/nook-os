@@ -45,7 +45,8 @@ pub struct InitOptions {
     /// Force the Advanced path on every multi-field branch without a TTY (AC-1):
     /// prompt-parity for automation. Per-field flags below work with or without it.
     pub advanced: bool,
-    /// `dev` (default) or `production` (AC-4). Anything but `production` is dev.
+    /// `production` (default) or `dev` (AC-4). Anything but `production` is dev,
+    /// which turns the dev-login hatch ON — see [`dev_login_note`] (MAIN-671).
     pub app_env: Option<String>,
     /// RUST_LOG: a bare level or a full EnvFilter directive (AC-6). Default `info`.
     pub log_level: Option<String>,
@@ -261,6 +262,16 @@ pub struct Outcome {
     /// a change to a Secret it does not render, so this says the quiet part
     /// (MAIN-650).
     pub secret_change_note: String,
+    /// What the dev-login hatch is, and — when this install pairs it with a
+    /// public host — what that costs (MAIN-671). Never empty: an operator who
+    /// took the safe default is still told the rule, because the values file
+    /// they keep is the thing a later `--set` will edit.
+    pub dev_login_note: String,
+    /// Whether [`Self::dev_login_note`] is the WARNING shape rather than the
+    /// reassuring one — the hatch on, and a host published. Carried as a fact
+    /// rather than left for the caller to re-derive from the text, so the
+    /// hand-off's banner and this run's decision cannot disagree.
+    pub dev_login_exposed: bool,
 }
 
 /// CLI entry point: open a terminal if there is one, do the work, print the
@@ -295,6 +306,18 @@ pub fn init(opts: InitOptions) -> Result<()> {
     println!();
     n += 1;
     println!("{n}. {}", out.secret_change_note);
+    println!();
+    n += 1;
+    // Last, and banner-wrapped when it is the warning shape: an operator scans
+    // the END of a hand-off for what to do next, and this is the one step whose
+    // cost is paid by everyone who can reach the host (MAIN-671).
+    if out.dev_login_exposed {
+        println!("{}", "!".repeat(72));
+    }
+    println!("{n}. {}", out.dev_login_note);
+    if out.dev_login_exposed {
+        println!("{}", "!".repeat(72));
+    }
     println!();
     if !have("helm") {
         println!("Helm 3 is not installed here — get it to run the command above:");
@@ -364,27 +387,36 @@ pub fn run(opts: InitOptions, tty: Option<Tty>, discover: &Discover) -> Result<O
     )?;
 
     // ── app-env (dev vs prod) ───────────────────────────────────────────────
-    // Default dev (AC-4). `authDevMode` is derived, never prompted, and forced
-    // off for production so the wizard can never emit the combo the chart rejects.
+    // Default PRODUCTION (MAIN-671). It used to be dev, which made the hatch's
+    // own gate — `AUTH_DEV_MODE && !production` — fire only for someone who
+    // already knew to ask for it: every non-interactive run wrote a public
+    // ingress host and an open `POST /api/v1/auth/dev-login` in the same file.
+    // `authDevMode` is still derived, never prompted, and forced off for
+    // production so the wizard cannot emit the combo the chart rejects.
     let app_env_seed = trimmed(opts.app_env.clone())
         .or_else(|| existing.app_env.clone())
         .map(|s| normalize_app_env(&s))
-        .unwrap_or_else(|| "dev".into());
+        .unwrap_or_else(|| "production".into());
     let app_env = match &mut tty {
         Some(t) => {
             let idx = t.choose(
                 "Application environment",
-                &[
-                    ("dev", "dev-login hatch ON — for trying NookOS out"),
-                    ("production", "real deployment — dev-login OFF"),
-                ],
-                if app_env_seed == "production" { 1 } else { 0 },
+                APP_ENV_CHOICES,
+                app_env_choice_default(&app_env_seed),
             )?;
-            if idx == 1 { "production" } else { "dev" }.to_string()
+            APP_ENV_CHOICES[idx].0.to_string()
         }
         None => app_env_seed,
     };
     let auth_dev_mode = app_env != "production";
+
+    // Said HERE, before the remaining questions, so an interactive operator
+    // hears the cost of the answer they just gave while they can still change
+    // it — not only in the hand-off after the file is written (AC-2/AC-3).
+    let dev_login_note = dev_login_note(auth_dev_mode, &host);
+    if auth_dev_mode && !host.is_empty() {
+        warn(&mut tty, &dev_login_note);
+    }
 
     // ── logging ─────────────────────────────────────────────────────────────
     // Recommended = pick a level (default info); Advanced = a full EnvFilter (AC-6).
@@ -1072,7 +1104,78 @@ pub fn run(opts: InitOptions, tty: Option<Tty>, discover: &Discover) -> Result<O
         agent_steps,
         database_note: database_note(),
         secret_change_note,
+        dev_login_exposed: values.auth_dev_mode && !values.ingress_host.is_empty(),
+        dev_login_note,
     })
+}
+
+/// The two application environments, in the order the prompt offers them
+/// (MAIN-671). Production is FIRST as well as the default: a menu whose safe
+/// answer is second reads as the alternative to the one above it, and this is
+/// the question a hurried operator answers by pressing return.
+const APP_ENV_CHOICES: &[(&str, &str)] = &[
+    ("production", "real deployment — the dev-login hatch is OFF"),
+    (
+        "dev",
+        "trying NookOS out — dev-login hatch ON: anyone who can reach it \
+         signs in as anyone",
+    ),
+];
+
+/// Which entry the prompt pre-selects. Anything that is not `production` is
+/// dev, matching [`normalize_app_env`], so a re-run over a dev values file
+/// still offers dev rather than silently flipping an install's environment.
+fn app_env_choice_default(seed: &str) -> usize {
+    if normalize_app_env(seed) == "production" {
+        0
+    } else {
+        1
+    }
+}
+
+/// What the dev-login hatch is, and what it costs on this install (MAIN-671).
+///
+/// Two shapes, because both are worth saying. With the hatch OFF it states the
+/// rule — the values file is kept, and a later `--set config.authDevMode=true`
+/// is exactly the edit this note exists to pre-empt. With the hatch ON *and* a
+/// host published it names the exposure, the endpoint, and who ends up owning
+/// the deployment; the PAIRING is the defect, so a dev install binding no
+/// public host gets the ordinary rule and no siren.
+fn dev_login_note(auth_dev_mode: bool, ingress_host: &str) -> String {
+    let host = ingress_host.trim();
+    if !auth_dev_mode {
+        return [
+            "The dev-login hatch (AUTH_DEV_MODE / config.authDevMode) is OFF, which",
+            "   is what this values file says. It must NEVER be on where the control",
+            "   plane is reachable: POST /api/v1/auth/dev-login signs any caller in as",
+            "   any email, creating the user when the email is unknown, and the first",
+            "   user on a fresh deployment is granted operator.",
+        ]
+        .join("\n");
+    }
+    if host.is_empty() {
+        return [
+            "The dev-login hatch (AUTH_DEV_MODE / config.authDevMode) is ON, because",
+            "   this is a dev install. It must NEVER be on where the control plane is",
+            "   reachable: POST /api/v1/auth/dev-login signs any caller in as any",
+            "   email. Re-run with --app-env production before publishing a host.",
+        ]
+        .join("\n");
+    }
+    [
+        "INSECURE — this install publishes a host AND leaves the dev-login".to_string(),
+        "   hatch open. Anyone on the internet who can reach".to_string(),
+        String::new(),
+        format!("     POST https://{host}/api/v1/auth/dev-login"),
+        String::new(),
+        "   is signed in as any email they name — the user is CREATED when the".to_string(),
+        "   email is unknown — and the first user on a fresh deployment is granted".to_string(),
+        "   operator. The first caller owns the deployment.".to_string(),
+        String::new(),
+        "   Re-run with --app-env production (the default) unless this host is".to_string(),
+        "   unreachable from anywhere you would not hand the deployment to.".to_string(),
+    ]
+    .join("\n")
 }
 
 /// The database step (MAIN-650 AC-6).
@@ -2243,8 +2346,9 @@ mod tests {
 
     #[test]
     fn recommended_defaults_are_minimal_and_safe() {
-        // No branch flags: dev app-env (hatch on), info logging, no OIDC, mail
-        // left at the chart default (capture) — nothing but the base secret.
+        // No branch flags: production app-env (hatch off), info logging, no
+        // OIDC, mail left at the chart default (capture) — nothing but the base
+        // secret.
         let dir = tmp();
         let out = run(
             InitOptions {
@@ -2256,8 +2360,7 @@ mod tests {
         )
         .unwrap();
         let text = std::fs::read_to_string(&out.path).unwrap();
-        assert!(text.contains("  appEnv: dev"));
-        assert!(text.contains("  authDevMode: true")); // dev ⇒ hatch on (AC-4)
+        assert!(text.contains("  appEnv: production"));
         assert!(text.contains("  logLevel: info")); // default level (AC-6)
         assert!(!text.contains("oidc:")); // OIDC skipped (AC-3)
         assert!(!text.contains("mail:")); // capture ⇒ no mail block (AC-5)
@@ -2329,6 +2432,133 @@ mod tests {
             .unwrap()
             .contains("  giphyKey: NOOK_GIPHY_KEY"));
         assert!(!out.secret_command.contains("NOOK_GIPHY_KEY"));
+    }
+
+    /// MAIN-671 AC-1: the whole defect in one assertion. A non-interactive run
+    /// with no `--app-env` used to write `appEnv: dev` + `authDevMode: true`
+    /// beside the public host it was just given, so every generated install
+    /// answered `POST /api/v1/auth/dev-login` from the internet.
+    #[test]
+    fn the_non_interactive_default_is_production_with_the_hatch_off() {
+        let dir = tmp();
+        let out = run(
+            InitOptions {
+                host: Some("nook.example.com".into()),
+                ..base_opts(&dir)
+            },
+            None,
+            &no_probe,
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&out.path).unwrap();
+        assert!(text.contains("  appEnv: production"), "{text}");
+        assert!(!text.contains("authDevMode: true"), "{text}");
+        assert!(!out.dev_login_exposed);
+        // AC-6: the hand-off still says what the hatch is, because the file it
+        // just wrote is the one a later --set edits.
+        assert!(
+            out.dev_login_note.contains("AUTH_DEV_MODE"),
+            "{}",
+            out.dev_login_note
+        );
+        assert!(
+            out.dev_login_note.contains("is OFF"),
+            "{}",
+            out.dev_login_note
+        );
+
+        // Full OIDC does NOT quietly re-open it — configuring a real identity
+        // provider was reproduced as having no effect on the hatch at all.
+        let out = run(
+            InitOptions {
+                host: Some("nook.example.com".into()),
+                oidc: true,
+                oidc_issuer: Some("https://id.example".into()),
+                oidc_client_id: Some("nook".into()),
+                oidc_client_secret: Some("shh".into()),
+                ..base_opts(&dir)
+            },
+            None,
+            &probe_registering(),
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&out.path).unwrap();
+        assert!(text.contains("  appEnv: production"), "{text}");
+        assert!(!text.contains("authDevMode: true"), "{text}");
+    }
+
+    /// MAIN-671 AC-2: the PAIRING is the defect, so the warning tracks the pair
+    /// and not either half. Both combinations, over the function the wizard
+    /// prints and the interactive path warns with.
+    #[test]
+    fn a_dev_install_with_a_published_host_is_warned_about_by_name() {
+        let dir = tmp();
+        let out = run(
+            InitOptions {
+                host: Some("nook.example.com".into()),
+                app_env: Some("dev".into()),
+                ..base_opts(&dir)
+            },
+            None,
+            &no_probe,
+        )
+        .unwrap();
+        assert!(std::fs::read_to_string(&out.path)
+            .unwrap()
+            .contains("  authDevMode: true"));
+        assert!(out.dev_login_exposed);
+        let note = &out.dev_login_note;
+        // The exposure, the exact endpoint, and who ends up owning the box.
+        assert!(note.contains("INSECURE"), "{note}");
+        assert!(
+            note.contains("POST https://nook.example.com/api/v1/auth/dev-login"),
+            "{note}"
+        );
+        assert!(note.contains("operator"), "{note}");
+        assert!(note.contains("--app-env production"), "{note}");
+
+        // Production with the same host: no warning, because there is nothing
+        // open to warn about.
+        assert!(!dev_login_note(false, "nook.example.com").contains("INSECURE"));
+
+        // Dev with no published host stays supported and unsirened — it is the
+        // pairing that is the defect, not the hatch (NG-1).
+        let quiet = dev_login_note(true, "");
+        assert!(!quiet.contains("INSECURE"), "{quiet}");
+        assert!(quiet.contains("is ON"), "{quiet}");
+        assert!(quiet.contains("--app-env production"), "{quiet}");
+    }
+
+    /// MAIN-671 AC-3: the interactive path makes the same statement. The prompt
+    /// cannot be driven in a unit test — `Tty` is a handle on /dev/tty — so its
+    /// two decisions are the pure functions it is built from: which entry is
+    /// pre-selected, and what the entries say.
+    #[test]
+    fn the_prompt_defaults_to_production_and_says_what_dev_costs() {
+        // Nothing stored and no flag ⇒ the seed is production ⇒ entry 0.
+        assert_eq!(app_env_choice_default("production"), 0);
+        assert_eq!(APP_ENV_CHOICES[0].0, "production");
+        // A re-run over a dev values file still offers dev — the prompt states a
+        // default, it does not silently flip a running install's environment.
+        assert_eq!(app_env_choice_default("dev"), 1);
+        assert_eq!(app_env_choice_default("staging"), 1);
+        assert_eq!(APP_ENV_CHOICES[1].0, "dev");
+
+        // And the menu says the cost in the line the operator reads before
+        // choosing, not only in the warning after.
+        assert!(
+            APP_ENV_CHOICES[0].1.contains("OFF"),
+            "{:?}",
+            APP_ENV_CHOICES
+        );
+        let dev = APP_ENV_CHOICES[1].1;
+        assert!(dev.contains("ON"), "{dev}");
+        assert!(dev.contains("signs in as anyone"), "{dev}");
+
+        // The warning the interactive path emits on a dev + host answer is the
+        // one the hand-off prints; asserting it here is asserting both.
+        let warned = dev_login_note(true, "nook.example.com");
+        assert!(warned.contains("/api/v1/auth/dev-login"), "{warned}");
     }
 
     #[test]

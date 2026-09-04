@@ -228,9 +228,44 @@ else
   fail=1
 fi
 
+# ── The hatch paired with a public Ingress (MAIN-671) ────────────────────────
+# The pair a live install shipped for eight days: appEnv=dev writes AUTH_DEV_MODE
+# and the SAME values file publishes a host, so POST /api/v1/auth/dev-login
+# answered the internet. Warned rather than failed — an internal-only ingress
+# class is a real configuration and helm has no --force — but it must be
+# impossible to render this and not see it. `cfgout` above IS the pair.
+if grep -q 'INSECURE: config.authDevMode is true' <<<"$cfgout" &&
+   grep -q 'POST https://nook.example.com/api/v1/auth/dev-login' <<<"$cfgout" &&
+   grep -q 'nook.dev/insecure-dev-login' <<<"$cfgout"; then
+  echo "  ok:   authDevMode=true + ingress.enabled=true warns and annotates"
+else
+  echo "  FAIL: authDevMode=true with a published Ingress rendered no warning"
+  fail=1
+fi
+
+# The other half of the pair, and the one that must stay supported: a dev
+# install binding no public host is not the defect, so it gets no warning.
+noingress="$(render "${min[@]}" --set ingress.enabled=false \
+  --set config.appEnv=dev --set config.authDevMode=true)"
+if grep -qE 'INSECURE|insecure-dev-login' <<<"$noingress"; then
+  echo "  FAIL: a dev install with no Ingress was warned about anyway"
+  fail=1
+elif grep -q 'AUTH_DEV_MODE: "true"' <<<"$noingress"; then
+  echo "  ok:   dev without an Ingress still renders, unwarned"
+else
+  echo "  FAIL: dev without an Ingress did not render the hatch at all"
+  fail=1
+fi
+
 # Additive: with none of the new keys set, the manifest is what it was before —
 # every new env key omitted, so no MAIL_/RUST_LOG/AUTH_DEV_MODE lines appear.
 baseout="$(render "${min[@]}")"
+if grep -qE 'INSECURE|insecure-dev-login' <<<"$baseout"; then
+  echo "  FAIL: the exposure warning rendered on a default (hatch-off) install"
+  fail=1
+else
+  echo "  ok:   no exposure warning with the hatch off"
+fi
 if grep -qE 'AUTH_DEV_MODE|RUST_LOG|MAIL_|SMTP_PASSWORD|POSTMARK_' <<<"$baseout"; then
   echo "  FAIL: a new env key leaked into the default render (breaks additive-ness)"
   fail=1

@@ -222,6 +222,12 @@ config:
   #    manifest — the control plane defaults to off. Rendering `true` with
   #    appEnv=production FAILS to render, mirroring config.rs which refuses to
   #    boot on that combo. Only ever true for a non-production install.
+  #
+  #    true opens POST /api/v1/auth/dev-login, which signs ANY caller in as ANY
+  #    email and creates the user when the email is unknown; the first user on a
+  #    fresh deployment is granted operator. With ingress.enabled it renders a
+  #    loud warning and annotates the ConfigMap (MAIN-671) — never set it on an
+  #    install the internet can reach. See README, "The dev-login hatch".
   authDevMode: false
   # -- RUST_LOG: a bare level ("info", "debug", "warn") or a full EnvFilter
   #    directive ("nook_control=debug,info"). Empty (default) omits the key, so

@@ -888,6 +888,116 @@ pub fn warn_retired_env() {
     }
 }
 
+/// What the dev-login hatch actually opens, in one sentence (MAIN-671).
+///
+/// Held as data beside [`RETIRED_ENV`] and for the same reason: the warning and
+/// the remedy it names must not drift, and a test can read it. It says the
+/// endpoint because that is what an operator greps their logs and their
+/// ingress access log for.
+pub const DEV_LOGIN_OPEN_WARNING: &str =
+    "AUTH_DEV_MODE is ON: POST /api/v1/auth/dev-login signs ANY caller in as ANY email — \
+     creating the user when the email is unknown — and the first user on a fresh deployment \
+     is granted operator, so the first caller owns this deployment. Never leave this on where \
+     the control plane is reachable. Turn it off with AUTH_DEV_MODE=false (Helm: \
+     --set config.authDevMode=false) and restart.";
+
+/// Say, at every boot, that this instance answers `dev-login` (MAIN-671).
+///
+/// A values file is read once, at install, and then never again; a deployment
+/// that has been open for eight days says nothing about it anywhere an operator
+/// looks. This is the sentence that makes `kubectl logs` answer the question,
+/// and it repeats on every boot on purpose — a warning you can only find in the
+/// scrollback of the install that caused it is not a warning.
+///
+/// Never a refusal: the hatch is how the dev stack and CI sign in, and
+/// `from_env` already refuses the one combination that is never intended
+/// (`APP_ENV=production` with it on).
+pub fn warn_dev_login_open(cfg: &Config) {
+    if cfg.auth_dev_mode {
+        tracing::warn!(
+            setting = "AUTH_DEV_MODE",
+            endpoint = "POST /api/v1/auth/dev-login",
+            "{DEV_LOGIN_OPEN_WARNING}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod dev_login_warning_tests {
+    use super::{warn_dev_login_open, Config, DEV_LOGIN_OPEN_WARNING};
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::fmt::MakeWriter;
+
+    /// A `MakeWriter` collecting every formatted record into one buffer, so the
+    /// test asserts what was LOGGED rather than what a helper returned.
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("the capture buffer")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for Captured {
+        type Writer = Self;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Records emitted by `f`, with a subscriber scoped to this thread —
+    /// `set_global_default` would be won by whichever test got there first.
+    fn records_of(f: impl FnOnce()) -> String {
+        let captured = Captured::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(captured.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        let bytes = captured.0.lock().expect("the capture buffer").clone();
+        String::from_utf8(bytes).expect("utf-8 log output")
+    }
+
+    /// AC-5: an install that already has the hatch on says so in its own logs.
+    #[test]
+    fn a_boot_with_the_hatch_on_warns_and_names_the_endpoint() {
+        let mut cfg = Config::for_test();
+        cfg.auth_dev_mode = true;
+        let logged = records_of(|| warn_dev_login_open(&cfg));
+
+        assert!(logged.contains("WARN"), "not a WARN: {logged}");
+        assert!(
+            logged.contains("POST /api/v1/auth/dev-login"),
+            "the open endpoint is not named: {logged}"
+        );
+        // The remedy, not just the diagnosis — an operator reading this in the
+        // middle of an incident should not have to go and find the flag.
+        assert!(
+            logged.contains("config.authDevMode=false"),
+            "the fix is not named: {logged}"
+        );
+        assert!(DEV_LOGIN_OPEN_WARNING.contains("owns this deployment"));
+    }
+
+    /// The other half: an ordinary production boot is silent, so the warning
+    /// keeps meaning something when it does appear.
+    #[test]
+    fn a_boot_with_the_hatch_off_says_nothing() {
+        let mut cfg = Config::for_test();
+        cfg.auth_dev_mode = false;
+        let logged = records_of(|| warn_dev_login_open(&cfg));
+        assert!(logged.trim().is_empty(), "{logged}");
+    }
+}
+
 #[cfg(test)]
 mod retired_env_tests {
     use super::RETIRED_ENV;
