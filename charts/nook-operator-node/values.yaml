@@ -154,10 +154,25 @@ executor:
   # worth a namespace.
   namespace: nook-jobs
 
-  # The image a job Pod runs. No default: naming one here would be this chart
-  # guessing at a registry, and a wrong guess fails at ImagePullBackOff, long
-  # after the install reported success.
+  # The image a job Pod runs. Empty derives it from `image.registry`,
+  # `imageRepository` below and this chart's appVersion — the same way the
+  # node's own image is derived, and correct because the release workflow
+  # publishes the sandbox in lockstep with the node at every version.
+  #
+  # It used to be `required`, on the reasoning that a default would be this
+  # chart guessing at a registry. But the chart already names
+  # `ghcr.io/nook-os/nook-operator-node` for itself two blocks up, so the guess
+  # was being made either way — and leaving THIS one blank did not avoid a bad
+  # install, it just moved the failure to `helm install` and made
+  # `executor.mode=kubernetes` unusable without a value nobody could look up.
+  #
+  # Set it explicitly for a private registry, or for a sandbox built from
+  # `scripts/build-job-sandbox.sh`.
   image: ""
+
+  # Where the job sandbox lives, when `image` above is empty. Split out so a
+  # mirror only has to restate the path, not the whole reference with its tag.
+  imageRepository: nook-os/nook-job-sandbox
 
   # The ServiceAccount the agent uses to talk to the apiserver. Created by this
   # chart unless `create: false`, which is for a cluster whose accounts are

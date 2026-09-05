@@ -80,7 +80,7 @@ spec:
             - name: NOOK_EXECUTOR_NAMESPACE
               value: {{ .Values.executor.namespace | quote }}
             - name: NOOK_JOB_IMAGE
-              value: {{ required "executor.image is required when executor.mode=kubernetes — a default here would be this chart guessing at a registry, and a wrong guess fails at ImagePullBackOff long after the install reported success" .Values.executor.image | quote }}
+              value: {{ include "nook-operator-node.jobImage" . | quote }}
             {{- with .Values.executor.credentialsSecret }}
             # A hand-created Secret: read as the job Pod's environment (AC-10)
             # and copied into the writable CLAUDE_CONFIG_DIR, which is what

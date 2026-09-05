@@ -206,6 +206,26 @@ kneed "logs are read-only"    '^    verbs: \["get"\]$' 1
 kneed "two rules and no more" '^  - apiGroups:' 2
 kneed "executor env"          'NOOK_EXECUTOR$' 1
 
+# The job image (MAIN-650). `executor.mode=kubernetes` used to be unusable
+# without an `executor.image` nobody could look up — the sandbox is published in
+# lockstep with the node, so it is derived from the same registry and version.
+appver="$(awk -F'"' '/^appVersion:/ {print $2}' "$chart/Chart.yaml")"
+derived="$(render "${min[@]}" --set executor.mode=kubernetes)"
+if grep -qF "ghcr.io/nook-os/nook-job-sandbox:${appver}" <<<"$derived"; then
+  echo "  ok:   job image defaults to the sandbox at appVersion ${appver}"
+else
+  echo "  FAIL: job image did not default to nook-job-sandbox:${appver}"
+  fail=1
+fi
+# And an explicit value still wins, for a private mirror or a sandbox built
+# from scripts/build-job-sandbox.sh.
+if grep -qF 'ghcr.io/x/job:1' <<<"$k8s"; then
+  echo "  ok:   an explicit executor.image overrides the derived default"
+else
+  echo "  FAIL: executor.image was not honoured"
+  fail=1
+fi
+
 # The permission that would make a Pod job steerable, and is deliberately not
 # granted: anything holding it can write into a running container.
 if grep -qE 'pods/(attach|exec|portforward)' <<<"$k8s"; then
