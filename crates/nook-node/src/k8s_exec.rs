@@ -829,10 +829,17 @@ pub fn delivered_runtime_auth(
             }
             AuthProfile {
                 state: AuthState::Authorized,
-                // A terminal on THIS node would sign in a container that runs
-                // no jobs. The credential has to arrive by delivery, so the UI
-                // must offer the device flow instead of a session (MAIN-650).
-                device_flow: true,
+                // The SESSION flow, deliberately — see `sync_local_credential`.
+                //
+                // A terminal here does sign in the node's own container rather
+                // than a job Pod, but that is the only place a Claude
+                // subscription login can happen at all: it is `claude`'s own
+                // OAuth client doing a PKCE/loopback exchange, so the control
+                // plane has no client to be and its device flow (which expects
+                // endpoints an operator registered) cannot mint one. The node
+                // closes the gap afterwards by publishing what it just obtained
+                // into the Secret job Pods read.
+                device_flow: false,
                 // Not an account: this node cannot read the Secret and has no
                 // way to learn whose session is in it. Saying where the
                 // credential came from is the true thing available, and it is
@@ -883,6 +890,87 @@ pub async fn deliver_credential_to_secret(runtime: &str, payload: &[u8]) -> anyh
         )]))
         .await?;
     Ok(format!("Secret {}/{} key {key}", cfg.namespace, secret))
+}
+
+/// Publish the credential this node holds into the Secret job Pods read
+/// (MAIN-650).
+///
+/// This is what closes the loop for a cluster install done entirely from the
+/// web UI. A Claude subscription login can only be performed by `claude` itself
+/// — it is that CLI's own OAuth client doing a PKCE/loopback exchange, so the
+/// control plane has no client to be and its device flow cannot mint one. So
+/// the login happens where `claude` is, in a session on this node, exactly as
+/// it does on a laptop; and then this carries the result to where the agents
+/// actually read it.
+///
+/// Without it a Pod executor is authorized in name only: the operator signs in,
+/// the node reports authorized, and every job Pod still starts with nothing —
+/// which is what made seeding a `kubectl create secret` step performed with
+/// credentials obtained some other way.
+///
+/// Cheap and idempotent, so it can be called from anything periodic: the file
+/// read and the change check are synchronous and local, and the apiserver is
+/// touched ONLY when the bytes actually differ from the last publish. A token
+/// `claude` refreshes on this node therefore reaches job Pods on its own.
+pub fn spawn_credential_sync() {
+    let Ok(Some(cfg)) = ExecutorConfig::from_env() else {
+        return;
+    };
+    if cfg.credentials_secret.is_none() {
+        return;
+    }
+    let Some(key) = crate::runtime_auth::credential_file(CREDENTIALS_RUNTIME) else {
+        return;
+    };
+    // No credential here yet is the ordinary pre-login state, not an error.
+    let Some(bytes) = crate::runtime_auth::credential_bytes(CREDENTIALS_RUNTIME) else {
+        return;
+    };
+
+    // Change detection only — never a security claim, and deliberately not a
+    // cryptographic digest: the question is "are these the bytes I last sent",
+    // which a collision-prone hash answers well enough to save an apiserver
+    // round trip on every sweep.
+    use std::hash::{Hash as _, Hasher as _};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut h);
+    let stamp = h.finish();
+    {
+        let last = last_published();
+        let mut last = last.lock().expect("credential stamp");
+        if *last == Some(stamp) {
+            return;
+        }
+        // Recorded BEFORE the write, so a failing apiserver cannot make this a
+        // hot loop against it; the next change re-arms it either way.
+        *last = Some(stamp);
+    }
+
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    handle.spawn(async move {
+        match deliver_credential_to_secret(CREDENTIALS_RUNTIME, &bytes).await {
+            Ok(target) => tracing::info!(
+                runtime = CREDENTIALS_RUNTIME, %target, key,
+                "published this node's runtime credential for its job Pods"
+            ),
+            Err(e) => {
+                // Reported, never fatal: a node that cannot publish keeps
+                // running sessions, and the operator is told why.
+                *last_published().lock().expect("credential stamp") = None;
+                tracing::warn!(
+                    runtime = CREDENTIALS_RUNTIME, error = %e,
+                    "cannot publish this node's runtime credential"
+                );
+            }
+        }
+    });
+}
+
+fn last_published() -> &'static std::sync::Mutex<Option<u64>> {
+    static LAST: std::sync::OnceLock<std::sync::Mutex<Option<u64>>> = std::sync::OnceLock::new();
+    LAST.get_or_init(|| std::sync::Mutex::new(None))
 }
 
 /// Describe the Pod this job runs in.

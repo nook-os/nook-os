@@ -181,6 +181,15 @@ pub fn credential_file(runtime: &str) -> Option<&'static str> {
         .map(|rule| rule.file)
 }
 
+/// The credential this node holds for `runtime`, as bytes, if there is one.
+///
+/// The read half of [`install_credential`], for the executor that has to
+/// PUBLISH what a login on this machine produced (MAIN-650). Same table, so it
+/// cannot read from somewhere the writer would not have written.
+pub fn credential_bytes(runtime: &str) -> Option<Vec<u8>> {
+    std::fs::read(credential_path(runtime)?).ok()
+}
+
 /// Install a credential payload where `runtime` expects it (MAIN-283 AC-2).
 ///
 /// The payload is **opaque** — this neither parses nor validates it. What is
@@ -284,6 +293,13 @@ pub fn probe_all() -> Vec<AuthProfile> {
 /// last would flip the dispatcher's gate at random.
 #[cfg(feature = "kubernetes")]
 fn delivered_by_executor(probed: Vec<AuthProfile>) -> Vec<AuthProfile> {
+    // Publish what this node holds, if it changed (MAIN-650). Here because this
+    // is the ONE place all three probe pushes pass through — the connect, a
+    // credential delivery, and an authorize session ending — so a login
+    // performed by any of them reaches job Pods without a fourth call site to
+    // keep in step. Cheap and idempotent: a local read and a hash compare, and
+    // the apiserver only when the bytes actually differ.
+    crate::k8s_exec::spawn_credential_sync();
     match crate::k8s_exec::ExecutorConfig::from_env() {
         Ok(Some(cfg)) => crate::k8s_exec::delivered_runtime_auth(probed, &cfg),
         // Not a Pod executor, or one so misconfigured it will run nothing —
