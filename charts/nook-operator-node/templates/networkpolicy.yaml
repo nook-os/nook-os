@@ -57,6 +57,22 @@ spec:
         - protocol: TCP
           port: {{ .Values.networkPolicy.controlPlane.port }}
     {{- end }}
+    {{- if eq .Values.executor.mode "kubernetes" }}
+    {{- if not .Values.networkPolicy.apiServer.cidr }}
+    {{- fail "executor.mode=kubernetes needs networkPolicy.apiServer.cidr: the node creates job Pods through the Kubernetes API, and the apiserver lives on a PRIVATE address that networkPolicy.deniedCIDRs severs. Without it the node joins, reports healthy, and then every reconcile fails with \"cannot reach the Kubernetes API server\". Find it with:  kubectl get svc kubernetes -n default -o jsonpath='{.spec.clusterIP}'  (append /32), or set networkPolicy.enabled=false." }}
+    {{- end }}
+    # The apiserver. This node's whole job in `kubernetes` mode is creating Pods
+    # through it, and it is reachable only on a private address — exactly what
+    # the deny list below removes. Narrow on purpose: one address and one port,
+    # not the service CIDR, because everything else in that range is other
+    # people's workloads.
+    - to:
+        - ipBlock:
+            cidr: {{ .Values.networkPolicy.apiServer.cidr | quote }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.apiServer.port }}
+    {{- end }}
     {{- range .Values.networkPolicy.additionalAllowedCIDRs }}
     # An explicit hole for something the deny list would otherwise sever —
     # typically a control plane that is only reachable on a private address.

@@ -72,6 +72,24 @@ networkPolicy:
   # no warning from Kubernetes. See the chart README.
   enabled: true
 
+  # How this node reaches the Kubernetes API, and REQUIRED when
+  # `executor.mode=kubernetes` (MAIN-650).
+  #
+  # In that mode the node's entire job is creating job Pods through the
+  # apiserver — and the apiserver answers on a private address, which
+  # `deniedCIDRs` below severs. The node still joins and still reports healthy,
+  # so the symptom is every reconcile failing with "cannot reach the Kubernetes
+  # API server" long after the install said it worked. The chart refuses to
+  # render rather than ship that.
+  #
+  #   kubectl get svc kubernetes -n default -o jsonpath='{.spec.clusterIP}'
+  #
+  # One address, not the service CIDR: the rest of that range is other people's
+  # workloads, and this node has no business reaching them.
+  apiServer:
+    cidr: ""
+    port: 443
+
   # Private ranges subtracted from the `0.0.0.0/0` egress allowance. The
   # defaults cover RFC1918, link-local (which is where the cloud metadata
   # endpoint 169.254.169.254 lives) and the carrier-grade NAT range some

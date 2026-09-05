@@ -15,6 +15,13 @@ render() { helm template operator "$chart" "$@"; }
 min=(--set server=agent.nook.example.com:8081
      --set existingSecret=nook-operator-join)
 
+# `executor.mode=kubernetes` renders only with an apiserver address — the node
+# reaches the API on a private one, which the egress deny list severs. Every
+# kubernetes-mode render below carries it; the requirement itself is asserted
+# separately.
+k8smin=("${min[@]}" --set executor.mode=kubernetes
+        --set networkPolicy.apiServer.cidr=10.0.0.1/32)
+
 echo "==> helm lint"
 helm lint "$chart" "${min[@]}"
 
@@ -186,7 +193,7 @@ for pattern in '^kind: Role$' '^kind: RoleBinding$' '^kind: ServiceAccount$' 'NO
 done
 echo "  ok:   local mode grants no RBAC and sets no executor env"
 
-k8s="$(render "${min[@]}" --set executor.mode=kubernetes --set executor.image=ghcr.io/x/job:1)"
+k8s="$(render "${min[@]}" "${k8smin[@]:2}" --set executor.image=ghcr.io/x/job:1)"
 kneed() {
   local label="$1" pattern="$2" want="$3" got
   got="$(grep -cE "$pattern" <<<"$k8s" || true)"
@@ -210,7 +217,7 @@ kneed "executor env"          'NOOK_EXECUTOR$' 1
 # without an `executor.image` nobody could look up — the sandbox is published in
 # lockstep with the node, so it is derived from the same registry and version.
 appver="$(awk -F'"' '/^appVersion:/ {print $2}' "$chart/Chart.yaml")"
-derived="$(render "${min[@]}" --set executor.mode=kubernetes)"
+derived="$(render "${k8smin[@]}")"
 if grep -qF "ghcr.io/nook-os/nook-job-sandbox:${appver}" <<<"$derived"; then
   echo "  ok:   job image defaults to the sandbox at appVersion ${appver}"
 else
@@ -240,7 +247,7 @@ fi
 # all. Unset is a WORKING state, and the chart must not invent a Secret name.
 kneed "no credential secret by default" 'NOOK_JOB_CREDENTIALS_SECRET' 0
 
-creds=$(render "${min[@]}" --set executor.mode=kubernetes --set executor.image=i:1 \
+creds=$(render "${min[@]}" "${k8smin[@]:2}" --set executor.image=i:1 \
   --set executor.credentialsSecret=nook-job-credentials)
 if grep -q 'NOOK_JOB_CREDENTIALS_SECRET' <<<"$creds" \
    && grep -q 'nook-job-credentials' <<<"$creds"; then
@@ -307,7 +314,7 @@ readme_says "that re-seeding is a human"     'until a human replaces the Secret'
 readme_says "who owns closing the gap"       "Automatic re-seeding is MAIN-337's"
 
 # Both or neither: half a build pool reads as protection and is not.
-if render "${min[@]}" --set executor.mode=kubernetes --set executor.image=i:1 \
+if render "${min[@]}" "${k8smin[@]:2}" --set executor.image=i:1 \
      --set executor.buildPool.taint=t >/dev/null 2>&1; then
   echo "  FAIL: a taint with no selector rendered"
   fail=1
@@ -320,8 +327,31 @@ fi
 # of its own — the chart refuses to render one half of that arrangement, because
 # a privileged Pod on a general node pool is the thing the control plane's wall
 # exists to prevent.
+# The apiserver hole is REQUIRED in kubernetes mode: without it the node joins,
+# reports healthy, and every reconcile fails against an API the policy severed.
+if render "${min[@]}" --set executor.mode=kubernetes >/dev/null 2>&1; then
+  echo "  FAIL: kubernetes mode rendered with no networkPolicy.apiServer.cidr"
+  fail=1
+else
+  echo "  ok:   kubernetes mode without an apiserver address is refused"
+fi
+if grep -qE "cidr: .10\.0\.0\.1/32." <<<"$(render "${k8smin[@]}")"; then
+  echo "  ok:   the apiserver hole renders as one address"
+else
+  echo "  FAIL: the apiserver egress rule did not render"
+  fail=1
+fi
+# …and it is skipped entirely when the policy is off, rather than demanded.
+if render "${min[@]}" --set executor.mode=kubernetes \
+     --set networkPolicy.enabled=false >/dev/null 2>&1; then
+  echo "  ok:   networkPolicy.enabled=false needs no apiserver address"
+else
+  echo "  FAIL: kubernetes mode is blocked even with the policy off"
+  fail=1
+fi
+
 echo "==> helm template (build kind)"
-if render "${min[@]}" --set executor.mode=kubernetes --set 'loopKinds={spec,build}' \
+if render "${min[@]}" "${k8smin[@]:2}" --set 'loopKinds={spec,build}' \
      >/dev/null 2>&1; then
   echo "  FAIL: loopKinds=build rendered with no executor.buildPool"
   fail=1
@@ -336,7 +366,7 @@ if render "${min[@]}" --set 'loopKinds={spec,build}' \
 else
   echo "  ok:   build outside kubernetes mode is refused"
 fi
-pooled="$(render "${min[@]}" --set executor.mode=kubernetes --set 'loopKinds={spec,build}' \
+pooled="$(render "${min[@]}" "${k8smin[@]:2}" --set 'loopKinds={spec,build}' \
   --set executor.buildPool.selector=nook.io/pool=build \
   --set executor.buildPool.taint=nook.io/build 2>/dev/null)"
 if grep -q 'value: "spec,build"' <<<"$pooled"; then
