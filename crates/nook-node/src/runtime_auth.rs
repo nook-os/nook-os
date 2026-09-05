@@ -36,6 +36,10 @@ struct Adapter {
     /// The allowlisted LOGIN subcommand — the flow the Authorize button runs in
     /// a session (MAIN-126). Fixed here; never taken from the wire.
     login: &'static str,
+    /// Argv for driving this login with PIPES instead of a terminal, when the
+    /// runtime supports it (MAIN-650). `None` means the only way to sign this
+    /// runtime in is a session.
+    managed_login: Option<&'static str>,
     parse: fn(code: Option<i32>, output: &str) -> (AuthState, Option<String>),
     /// Which stream carries this runtime's status text.
     ///
@@ -82,6 +86,13 @@ const ADAPTERS: &[Adapter] = &[
         runtime: "claude",
         probe: "auth status",
         login: "auth login",
+        // The MANAGED form: no TTY, and pinned to the subscription flow.
+        //
+        // `--claudeai` is not a nicety. Bare `auth login` offers a console
+        // (API-billing) alternative, and this fleet's rule is subscription
+        // login only — a flow nobody is watching must not be able to take the
+        // other branch.
+        managed_login: Some("auth login --claudeai"),
         parse: parse_claude,
         status_on_stderr: false,
         credential: Some(CredentialRule {
@@ -98,6 +109,7 @@ const ADAPTERS: &[Adapter] = &[
         // Present so the older per-node path stays uniform; the epic obtains
         // codex's credential from the CONTROL PLANE and delivers it (MAIN-291
         // NG-1), so nothing routine runs this.
+        managed_login: None,
         login: "login --device-auth",
         parse: parse_codex,
         // Measured on codex-cli 0.145.0: `login status` goes to stderr.
@@ -113,6 +125,7 @@ const ADAPTERS: &[Adapter] = &[
         label: "Hermes → Nous Portal",
         runtime: "hermes",
         probe: "portal status",
+        managed_login: None,
         login: "setup --portal",
         parse: parse_hermes_portal,
         status_on_stderr: false,
@@ -125,6 +138,14 @@ const ADAPTERS: &[Adapter] = &[
 /// The allowlisted login subcommand for a runtime, if we know one — the ONLY
 /// thing a node will run for an authorize request, chosen here and never from
 /// the wire (MAIN-126). `None` for an unknown runtime → refuse to launch.
+/// Argv for the piped, terminal-free login, when this runtime has one.
+pub fn managed_login_args(runtime: &str) -> Option<&'static str> {
+    ADAPTERS
+        .iter()
+        .find(|a| a.runtime == runtime)
+        .and_then(|a| a.managed_login)
+}
+
 pub fn login_args(runtime: &str) -> Option<&'static str> {
     ADAPTERS
         .iter()

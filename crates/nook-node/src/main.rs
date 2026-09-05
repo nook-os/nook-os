@@ -19,6 +19,7 @@ mod job_adapter;
 #[cfg(feature = "kubernetes")]
 mod k8s_exec;
 mod loop_job;
+mod managed_login;
 mod notebook;
 mod pinning;
 mod ports;

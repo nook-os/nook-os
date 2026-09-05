@@ -42,8 +42,13 @@ export interface RuntimeAuthFlow {
   flowId: string;
   runtime: string;
   state: "starting" | "prompt" | "delivered" | "failed";
+  /** A code to TYPE somewhere else (device flow). */
   userCode?: string;
+  /** A link to open — device flow's verification URI, or a managed login's
+   *  authorize URL. */
   verificationUri?: string;
+  /** The runtime is waiting for a code to be pasted BACK (managed login). */
+  wantsCode?: boolean;
   error?: string;
 }
 
@@ -154,6 +159,33 @@ export function startLive(queryClient: QueryClient) {
           verificationUri: event.data.verification_uri,
         },
       });
+    } else if (event.type === "managed_login_prompt") {
+      // The link the runtime itself printed. Re-sent when it starts asking for
+      // a code, so `wantsCode` flipping is what opens the box.
+      useLive.setState({
+        runtimeAuth: {
+          flowId: event.data.flow_id,
+          runtime: event.data.runtime,
+          state: "prompt",
+          verificationUri: event.data.url,
+          wantsCode: event.data.wants_code,
+        },
+      });
+    } else if (event.type === "managed_login_finished") {
+      const failed = (event.data as { error?: string | null }).error;
+      useLive.setState((s) => ({
+        runtimeAuth: s.runtimeAuth
+          ? {
+              ...s.runtimeAuth,
+              state: failed ? "failed" : "delivered",
+              wantsCode: false,
+              error: failed ?? undefined,
+            }
+          : null,
+      }));
+      // The node re-probes after a login and pushes fresh profiles, so the
+      // panel's authorized state comes from the refetch rather than from here.
+      queryClient.invalidateQueries({ queryKey: ["nodes"] });
     } else if (event.type === "runtime_auth_delivered") {
       useLive.setState((s) => ({
         runtimeAuth: s.runtimeAuth

@@ -518,6 +518,47 @@ async fn handle_message(
             )
             .await;
         }
+        NodeToControl::ManagedLoginPrompt {
+            flow_id,
+            runtime,
+            url,
+            wants_code,
+        } => {
+            // Straight through to the browser that asked for it. Not recorded:
+            // the URL carries a PKCE challenge and a state parameter, and an
+            // authorization link in the activity log is a link somebody else
+            // can finish.
+            state.registry.publish(
+                tenant,
+                nook_proto::UiEvent::ManagedLoginPrompt {
+                    flow_id,
+                    node_id: node_id.0,
+                    runtime,
+                    url,
+                    wants_code,
+                },
+            );
+        }
+        NodeToControl::ManagedLoginFinished {
+            flow_id,
+            runtime,
+            error,
+        } => {
+            if let Some(e) = &error {
+                tracing::warn!(node = %name, %runtime, error = %e, "a managed login failed");
+            } else {
+                tracing::info!(node = %name, %runtime, "a managed login completed");
+            }
+            state.registry.publish(
+                tenant,
+                nook_proto::UiEvent::ManagedLoginFinished {
+                    flow_id,
+                    node_id: node_id.0,
+                    runtime,
+                    error,
+                },
+            );
+        }
         NodeToControl::RuntimeCredentialInstalled {
             runtime,
             path,

@@ -3155,6 +3155,104 @@
         }
       }
     },
+    "/api/v1/nodes/{id}/managed-login": {
+      "post": {
+        "tags": [
+          "crate::routes::runtime_auth"
+        ],
+        "summary": "Start a MANAGED login on one node (MAIN-650).",
+        "description": "The third way to authorize a runtime, and the one a Kubernetes install\nneeds. `POST /runtime-auth` requires a provider whose OAuth client this\ndeployment can be, which a Claude subscription is not. `POST\n/nodes/{id}/authorize` works but puts a terminal in front of a person. This\nruns the runtime's own login on the node with pipes, and hands the UI a link\nand — when the runtime asks for one — a box.\n\nSame authorization rule as its two siblings: a personal machine is its\nowner's alone, a shared or operator machine needs `node.manage`.",
+        "operationId": "start_managed_login",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Node id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuthorizeRuntimeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeAuthAccepted"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/nodes/{id}/managed-login/code": {
+      "post": {
+        "tags": [
+          "crate::routes::runtime_auth"
+        ],
+        "summary": "Hand a pasted code to a managed login in progress.",
+        "operationId": "submit_managed_login_code",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Node id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManagedLoginCodeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": ""
+          },
+          "400": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/nodes/{id}/placement": {
       "get": {
         "tags": [
@@ -14884,6 +14982,27 @@
           }
         }
       },
+      "ManagedLoginCodeRequest": {
+        "type": "object",
+        "description": "The code an operator pasted back, for one flow.",
+        "required": [
+          "flow_id",
+          "runtime",
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "flow_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "runtime": {
+            "type": "string"
+          }
+        }
+      },
       "ManagedPurpose": {
         "type": "string",
         "description": "What a MANAGED session exists to do (MAIN-326).\n\nThe reconciler runs two declarations per workspace, and this is what keeps\nthem apart: `sessions_one_managed_per_checkout_purpose` is unique on\n`(checkout_id, managed_purpose)`, so a repo's clone can hold both a person's\nterminal and the always-on review loop without either counting as the\nother's replica. Without it the second declaration's session would be read\nas a duplicate of the first and stopped on the next pass.",
@@ -20036,6 +20155,98 @@
                 "type": "string",
                 "enum": [
                   "runtime_auth_prompt"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A managed login is waiting on a person (MAIN-650).\n\nSeparate from [`Self::RuntimeAuthPrompt`] because the two ask for\ndifferent things: a device flow shows a code to TYPE somewhere else,\nthis shows a link to open and takes a code BACK. Overloading one on the\nother would give the panel a code field it must not display and a URL\nfield doing double duty.",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "A managed login is waiting on a person (MAIN-650).\n\nSeparate from [`Self::RuntimeAuthPrompt`] because the two ask for\ndifferent things: a device flow shows a code to TYPE somewhere else,\nthis shows a link to open and takes a code BACK. Overloading one on the\nother would give the panel a code field it must not display and a URL\nfield doing double duty.",
+                "required": [
+                  "flow_id",
+                  "node_id",
+                  "runtime",
+                  "url",
+                  "wants_code"
+                ],
+                "properties": {
+                  "flow_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "node_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "runtime": {
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string",
+                    "description": "Printed by the runtime itself, so it carries that runtime's own\nclient id and scopes. Nothing here composes an OAuth URL."
+                  },
+                  "wants_code": {
+                    "type": "boolean",
+                    "description": "The runtime is waiting for a code to be pasted back."
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "managed_login_prompt"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A managed login ended (MAIN-650). `error` absent means the runtime wrote\nits credential — and on a Pod executor the node has already published it\nto the Secret its job Pods read.",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "A managed login ended (MAIN-650). `error` absent means the runtime wrote\nits credential — and on a Pod executor the node has already published it\nto the Secret its job Pods read.",
+                "required": [
+                  "flow_id",
+                  "node_id",
+                  "runtime"
+                ],
+                "properties": {
+                  "error": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "flow_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "node_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "runtime": {
+                    "type": "string"
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "managed_login_finished"
                 ]
               }
             }

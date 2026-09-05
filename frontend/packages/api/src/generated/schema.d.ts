@@ -1552,6 +1552,51 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/nodes/{id}/managed-login": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start a MANAGED login on one node (MAIN-650).
+         * @description The third way to authorize a runtime, and the one a Kubernetes install
+         *     needs. `POST /runtime-auth` requires a provider whose OAuth client this
+         *     deployment can be, which a Claude subscription is not. `POST
+         *     /nodes/{id}/authorize` works but puts a terminal in front of a person. This
+         *     runs the runtime's own login on the node with pipes, and hands the UI a link
+         *     and — when the runtime asks for one — a box.
+         *
+         *     Same authorization rule as its two siblings: a personal machine is its
+         *     owner's alone, a shared or operator machine needs `node.manage`.
+         */
+        post: operations["start_managed_login"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/nodes/{id}/managed-login/code": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Hand a pasted code to a managed login in progress. */
+        post: operations["submit_managed_login_code"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/nodes/{id}/placement": {
         parameters: {
             query?: never;
@@ -6683,6 +6728,13 @@ export interface components {
              */
             version: number;
         };
+        /** @description The code an operator pasted back, for one flow. */
+        ManagedLoginCodeRequest: {
+            code: string;
+            /** Format: uuid */
+            flow_id: string;
+            runtime: string;
+        };
         /**
          * @description What a MANAGED session exists to do (MAIN-326).
          *
@@ -9517,6 +9569,48 @@ export interface components {
             };
             /** @enum {string} */
             type: "runtime_auth_prompt";
+        } | {
+            /**
+             * @description A managed login is waiting on a person (MAIN-650).
+             *
+             *     Separate from [`Self::RuntimeAuthPrompt`] because the two ask for
+             *     different things: a device flow shows a code to TYPE somewhere else,
+             *     this shows a link to open and takes a code BACK. Overloading one on the
+             *     other would give the panel a code field it must not display and a URL
+             *     field doing double duty.
+             */
+            data: {
+                /** Format: uuid */
+                flow_id: string;
+                /** Format: uuid */
+                node_id: string;
+                runtime: string;
+                /**
+                 * @description Printed by the runtime itself, so it carries that runtime's own
+                 *     client id and scopes. Nothing here composes an OAuth URL.
+                 */
+                url: string;
+                /** @description The runtime is waiting for a code to be pasted back. */
+                wants_code: boolean;
+            };
+            /** @enum {string} */
+            type: "managed_login_prompt";
+        } | {
+            /**
+             * @description A managed login ended (MAIN-650). `error` absent means the runtime wrote
+             *     its credential — and on a Pod executor the node has already published it
+             *     to the Secret its job Pods read.
+             */
+            data: {
+                error?: string | null;
+                /** Format: uuid */
+                flow_id: string;
+                /** Format: uuid */
+                node_id: string;
+                runtime: string;
+            };
+            /** @enum {string} */
+            type: "managed_login_finished";
         } | {
             /**
              * @description One node's outcome for a delivery (MAIN-290).
@@ -12919,6 +13013,92 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["NodePorts"];
                 };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    start_managed_login: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Node id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AuthorizeRuntimeRequest"];
+            };
+        };
+        responses: {
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeAuthAccepted"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    submit_managed_login_code: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Node id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ManagedLoginCodeRequest"];
+            };
+        };
+        responses: {
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             403: {
                 headers: {

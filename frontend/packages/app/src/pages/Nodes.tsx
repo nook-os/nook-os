@@ -405,6 +405,12 @@ export function NodesPage() {
   );
 }
 
+/** Runtimes whose login the node can drive without a terminal (MAIN-650).
+ *  Mirrors `runtime_auth::managed_login_args` on the node; a runtime absent
+ *  here falls back to the session flow, which is still the only path for one
+ *  that cannot be piped. */
+const MANAGED_LOGIN_RUNTIMES = ["claude"];
+
 /** One agent-authorization profile the node reported.
  *
  *  The GENERATED type, not a hand-written twin: this was a copy, and it drifted
@@ -433,6 +439,7 @@ const AUTH_LABEL: Record<AuthProfile["state"], string> = {
 function AgentAuthPanel({ node }: { node: { id: string; capabilities: unknown } }) {
   const navigate = useNavigate();
   const flow = useLive((s) => s.runtimeAuth);
+  const [pastedCode, setPastedCode] = useState("");
   const profiles =
     ((node.capabilities as { runtime_auth?: AuthProfile[] })?.runtime_auth ?? []);
 
@@ -447,26 +454,34 @@ function AgentAuthPanel({ node }: { node: { id: string; capabilities: unknown } 
     // succeed and changes nothing. Such a node asks for the control plane's
     // device flow, which delivers the credential to where jobs actually read
     // it.
-    if (p.device_flow) {
+    // The managed login: the node runs the runtime's own sign-in with pipes and
+    // reports the link, so the operator gets a link and a box instead of a
+    // terminal. Preferred wherever the runtime supports it — a session is a
+    // heavy answer to "open this and paste what it gives you".
+    if (MANAGED_LOGIN_RUNTIMES.includes(p.runtime)) {
       const ok = await askConfirm({
         title: `Authorize ${p.label}?`,
         description:
-          "Signs in through your browser and delivers the credential to this node's executor — no terminal. The code appears here. On shared substrate the credential is usable by every workload allowed to run there.",
+          "Signs in through your browser — the link appears here and you paste the code back. On shared substrate the credential is usable by every workload allowed to run there.",
         confirmLabel: "start sign-in",
       });
       if (!ok) return;
       useLive.setState({
         runtimeAuth: { flowId: "", runtime: p.runtime, state: "starting" },
       });
-      const { error } = await api.POST("/api/v1/runtime-auth", {
-        body: { runtime: p.runtime, node_ids: [node.id] },
+      const { data, error } = await api.POST("/api/v1/nodes/{id}/managed-login", {
+        params: { path: { id: node.id } },
+        body: { runtime: p.runtime },
       });
-      if (error) {
+      if (error || !data) {
         useLive.setState({ runtimeAuth: null });
-        await notify("Couldn't start authorization", JSON.stringify(error));
+        await notify("Couldn't start sign-in", JSON.stringify(error));
+        return;
       }
-      // The code arrives as a `runtime_auth_prompt` event and renders below;
-      // there is nothing to navigate to.
+      useLive.setState({
+        runtimeAuth: { flowId: data.flow_id, runtime: p.runtime, state: "starting" },
+      });
+      // The link arrives as a `managed_login_prompt` event and renders below.
       return;
     }
 
@@ -499,19 +514,49 @@ function AgentAuthPanel({ node }: { node: { id: string; capabilities: unknown } 
           {flow.state === "prompt" && (
             <>
               <div>
-                Open{" "}
+                Open this to sign in:{" "}
                 <a href={flow.verificationUri} target="_blank" rel="noreferrer">
                   {flow.verificationUri}
-                </a>{" "}
-                and enter:
+                </a>
               </div>
-              <div className="mono bright" style={{ fontSize: 18, letterSpacing: 2 }}>
-                {flow.userCode}
-              </div>
+              {flow.wantsCode && (
+                <form
+                  style={{ display: "flex", gap: 8, marginTop: 8 }}
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    const code = pastedCode.trim();
+                    if (!code) return;
+                    setPastedCode("");
+                    const { error } = await api.POST(
+                      "/api/v1/nodes/{id}/managed-login/code",
+                      {
+                        params: { path: { id: node.id } },
+                        body: {
+                          flow_id: flow.flowId,
+                          runtime: flow.runtime,
+                          code,
+                        },
+                      },
+                    );
+                    if (error) await notify("Couldn't send the code", JSON.stringify(error));
+                  }}
+                >
+                  <input
+                    className="mono"
+                    style={{ flex: 1 }}
+                    placeholder="paste the code from that page"
+                    value={pastedCode}
+                    onChange={(e) => setPastedCode(e.target.value)}
+                  />
+                  <button className="btn primary small" type="submit">
+                    send
+                  </button>
+                </form>
+              )}
             </>
           )}
           {flow.state === "delivered" && (
-            <span>Signed in — the credential was delivered to this node.</span>
+            <span>Signed in — the credential is in place on this node.</span>
           )}
           {flow.state === "failed" && <span>Sign-in failed: {flow.error}</span>}
         </div>

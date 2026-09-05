@@ -1553,6 +1553,35 @@ pub async fn connect_once(cfg: &NodeConfig, min_free_disk: u64) -> Result<()> {
                         .ok();
                 }
             }
+            ControlToNode::StartManagedLogin { runtime, flow_id } => {
+                // Spawned, never awaited: this arm holds the socket's only
+                // reader and the flow lasts as long as a person takes to open a
+                // link and paste something back.
+                let tx = ctl_tx.clone();
+                tokio::spawn(crate::managed_login::run(flow_id, runtime, tx));
+            }
+            ControlToNode::SubmitManagedLoginCode { flow_id, code } => {
+                if !crate::managed_login::submit_code(flow_id, code) {
+                    // Not fatal, and worth saying: the usual cause is a flow
+                    // that already finished or expired, and the operator is
+                    // looking at a box that no longer goes anywhere.
+                    ctl_tx
+                        .send(NodeToControl::ManagedLoginFinished {
+                            flow_id,
+                            runtime: String::new(),
+                            error: Some(
+                                "no login is waiting for a code on this node — it finished, \
+                                 expired, or was started somewhere else"
+                                    .into(),
+                            ),
+                        })
+                        .await
+                        .ok();
+                }
+            }
+            ControlToNode::CancelManagedLogin { flow_id } => {
+                crate::managed_login::cancel(flow_id);
+            }
             ControlToNode::InstallHooks { content, sha256 } => {
                 // Reported, never fatal (AC-2). A machine whose settings.json is
                 // hand-broken should keep running sessions — the operator is
