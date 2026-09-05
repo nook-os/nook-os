@@ -509,56 +509,80 @@ function AgentAuthPanel({ node }: { node: { id: string; capabilities: unknown } 
   return (
     <Panel title="Agent authorization">
       {flow && (
-        <div className="m-card-body" style={{ marginBottom: 8 }}>
-          {flow.state === "starting" && <span>Starting sign-in…</span>}
-          {flow.state === "prompt" && (
-            <>
-              <div>
-                Open this to sign in:{" "}
-                <a href={flow.verificationUri} target="_blank" rel="noreferrer">
-                  {flow.verificationUri}
-                </a>
-              </div>
-              {flow.wantsCode && (
-                <form
-                  style={{ display: "flex", gap: 8, marginTop: 8 }}
-                  onSubmit={async (e) => {
-                    e.preventDefault();
-                    const code = pastedCode.trim();
-                    if (!code) return;
-                    setPastedCode("");
-                    const { error } = await api.POST(
-                      "/api/v1/nodes/{id}/managed-login/code",
-                      {
-                        params: { path: { id: node.id } },
-                        body: {
-                          flow_id: flow.flowId,
-                          runtime: flow.runtime,
-                          code,
-                        },
-                      },
-                    );
-                    if (error) await notify("Couldn't send the code", JSON.stringify(error));
-                  }}
-                >
-                  <input
-                    className="mono"
-                    style={{ flex: 1 }}
-                    placeholder="paste the code from that page"
-                    value={pastedCode}
-                    onChange={(e) => setPastedCode(e.target.value)}
-                  />
-                  <button className="btn primary small" type="submit">
-                    send
-                  </button>
-                </form>
+        <div className="modal-backdrop dialog-backdrop">
+          <div className="modal dialog" role="dialog" aria-modal="true">
+            <div className="modal-header">Sign in to {flow.runtime}</div>
+            <div className="modal-body">
+              {flow.state === "starting" && <p>Starting sign-in on this node…</p>}
+
+              {flow.state === "prompt" && (
+                <>
+                  <p>
+                    <strong>1.</strong> Open this page and approve:
+                  </p>
+                  <p style={{ margin: "4px 0 12px" }}>
+                    <a href={flow.verificationUri} target="_blank" rel="noreferrer">
+                      {flow.verificationUri}
+                    </a>
+                  </p>
+                  <p>
+                    <strong>2.</strong>{" "}
+                    {flow.wantsCode
+                      ? "It gives you a code — paste it here:"
+                      : "Waiting for the sign-in page…"}
+                  </p>
+                  {flow.wantsCode && (
+                    <form
+                      style={{ display: "flex", gap: 8, marginTop: 8 }}
+                      onSubmit={async (e) => {
+                        e.preventDefault();
+                        const code = pastedCode.trim();
+                        if (!code) return;
+                        setPastedCode("");
+                        const { error } = await api.POST(
+                          "/api/v1/nodes/{id}/managed-login/code",
+                          {
+                            params: { path: { id: node.id } },
+                            body: { flow_id: flow.flowId, runtime: flow.runtime, code },
+                          },
+                        );
+                        if (error)
+                          await notify("Couldn't send the code", JSON.stringify(error));
+                      }}
+                    >
+                      <input
+                        className="mono"
+                        style={{ flex: 1 }}
+                        autoFocus
+                        placeholder="paste the code from that page"
+                        value={pastedCode}
+                        onChange={(e) => setPastedCode(e.target.value)}
+                      />
+                      <button className="btn primary small" type="submit">
+                        send
+                      </button>
+                    </form>
+                  )}
+                </>
               )}
-            </>
-          )}
-          {flow.state === "delivered" && (
-            <span>Signed in — the credential is in place on this node.</span>
-          )}
-          {flow.state === "failed" && <span>Sign-in failed: {flow.error}</span>}
+
+              {flow.state === "delivered" && (
+                <p>
+                  Signed in. The credential is on this node, and an in-cluster
+                  executor has already published it for its job Pods.
+                </p>
+              )}
+              {flow.state === "failed" && <p>Sign-in failed: {flow.error}</p>}
+            </div>
+            <div className="modal-footer">
+              <button
+                className="btn small"
+                onClick={() => useLive.setState({ runtimeAuth: null })}
+              >
+                {flow.state === "delivered" || flow.state === "failed" ? "close" : "cancel"}
+              </button>
+            </div>
+          </div>
         </div>
       )}
       {profiles.length === 0 ? (

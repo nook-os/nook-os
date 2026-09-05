@@ -30,7 +30,7 @@ use std::sync::{Mutex, OnceLock};
 
 use anyhow::{anyhow, Result};
 use nook_proto::NodeToControl;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -137,33 +137,45 @@ async fn drive(flow_id: Uuid, runtime: &str, tx: &mpsc::Sender<NodeToControl>) -
         }
     });
 
-    let mut lines = BufReader::new(stdout).lines();
+    // Read BYTES, not lines. The paste prompt is a PROMPT — `claude` writes
+    // "Paste code here if prompted > " with no trailing newline and then waits,
+    // so a line reader holds it in the buffer forever and the operator gets a
+    // link with nowhere to put the answer. That is exactly what happened.
+    let mut reader = BufReader::new(stdout);
+    let mut buf = [0u8; 1024];
+    let mut seen = String::new();
     let mut sent_url: Option<String> = None;
-    while let Ok(Some(line)) = lines.next_line().await {
-        // The URL and the paste prompt can arrive on one line or two, so the
-        // prompt re-sends rather than waiting for a second URL that never comes.
-        let url = scrape_url(&line);
-        if let Some(u) = url {
-            sent_url = Some(u.clone());
+    let mut asked = false;
+    loop {
+        let n = match reader.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        seen.push_str(&String::from_utf8_lossy(&buf[..n]));
+
+        if sent_url.is_none() {
+            if let Some(u) = scrape_url(&seen) {
+                sent_url = Some(u);
+            }
+        }
+        // The prompt may arrive in the same read as the URL or a later one, and
+        // either way it never ends a line.
+        asked = asked || wants_code(&seen);
+
+        if let Some(url) = sent_url.clone() {
             tx.send(NodeToControl::ManagedLoginPrompt {
                 flow_id,
                 runtime: runtime.to_string(),
-                url: u,
-                wants_code: wants_code(&line),
+                url,
+                wants_code: asked,
             })
             .await
             .ok();
-        } else if wants_code(&line) {
-            if let Some(u) = sent_url.clone() {
-                tx.send(NodeToControl::ManagedLoginPrompt {
-                    flow_id,
-                    runtime: runtime.to_string(),
-                    url: u,
-                    wants_code: true,
-                })
-                .await
-                .ok();
-            }
+        }
+        // Unbounded growth would be a leak on a chatty runtime; the two things
+        // looked for are near the start and never split across this much.
+        if seen.len() > 64 * 1024 {
+            seen.drain(..32 * 1024);
         }
     }
 
@@ -205,6 +217,30 @@ mod tests {
         // Wording is the runtime's and may change; the scheme is ours to insist on.
         assert_eq!(scrape_url("visit http://claude.com/x"), None);
         assert_eq!(scrape_url("Opening browser to sign in…"), None);
+    }
+
+    /// The whole reason this reads bytes: the runtime's real output arrives as
+    /// one unterminated chunk, and a line reader sees the URL but never the
+    /// prompt — a link with nowhere to paste the answer.
+    #[test]
+    fn the_prompt_is_found_even_though_it_ends_no_line() {
+        let chunk = "Opening browser to sign in…\n\
+                     If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true\n\
+                     Paste code here if prompted > ";
+        assert!(
+            !chunk.ends_with('\n'),
+            "the prompt is unterminated, as it is live"
+        );
+        assert_eq!(
+            scrape_url(chunk).as_deref(),
+            Some("https://claude.com/cai/oauth/authorize?code=true")
+        );
+        assert!(wants_code(chunk), "the box has to open on this");
+
+        // And the URL alone, before the prompt arrives, must not claim it.
+        let partial = "If the browser didn't open, visit: https://claude.com/x\n";
+        assert!(scrape_url(partial).is_some());
+        assert!(!wants_code(partial));
     }
 
     #[test]
