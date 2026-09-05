@@ -11,7 +11,7 @@ import {
   SquareTerminal,
   Trash2,
 } from "lucide-react";
-import { api, type NodeInfo } from "@nookos/api";
+import { api, type NodeInfo, type AuthProfile } from "@nookos/api";
 import {
   Empty,
   Panel,
@@ -405,14 +405,13 @@ export function NodesPage() {
   );
 }
 
-/** One agent-authorization profile the node reported. */
-type AuthProfile = {
-  id: string;
-  label: string;
-  runtime: string;
-  state: "authorized" | "not_authorized" | "unknown" | "unavailable";
-  identity?: string | null;
-};
+/** One agent-authorization profile the node reported.
+ *
+ *  The GENERATED type, not a hand-written twin: this was a copy, and it drifted
+ *  the moment the node grew a field — `device_flow` existed in the schema and
+ *  not here, so the page could not see the one fact that decides which
+ *  authorization flow is correct (MAIN-650). */
+
 
 const AUTH_TONE: Record<AuthProfile["state"], "ok" | "warn" | "dim"> = {
   authorized: "ok",
@@ -433,6 +432,7 @@ const AUTH_LABEL: Record<AuthProfile["state"], string> = {
  *  is the follow-up (AC-2/AC-4). */
 function AgentAuthPanel({ node }: { node: { id: string; capabilities: unknown } }) {
   const navigate = useNavigate();
+  const flow = useLive((s) => s.runtimeAuth);
   const profiles =
     ((node.capabilities as { runtime_auth?: AuthProfile[] })?.runtime_auth ?? []);
 
@@ -440,6 +440,36 @@ function AgentAuthPanel({ node }: { node: { id: string; capabilities: unknown } 
   // (MAIN-126 AC-2). A warning first, because on a shared machine the credential
   // becomes usable by everyone allowed to run there.
   const authorize = async (p: AuthProfile) => {
+    // Two flows, and which one is right is a property of the NODE, not a
+    // preference (MAIN-650). On a Pod executor the agent is a Pod elsewhere in
+    // the cluster and reads only the credential Secret, so a terminal here
+    // would sign in a container that runs no work — the login appears to
+    // succeed and changes nothing. Such a node asks for the control plane's
+    // device flow, which delivers the credential to where jobs actually read
+    // it.
+    if (p.device_flow) {
+      const ok = await askConfirm({
+        title: `Authorize ${p.label}?`,
+        description:
+          "Signs in through your browser and delivers the credential to this node's executor — no terminal. The code appears here. On shared substrate the credential is usable by every workload allowed to run there.",
+        confirmLabel: "start sign-in",
+      });
+      if (!ok) return;
+      useLive.setState({
+        runtimeAuth: { flowId: "", runtime: p.runtime, state: "starting" },
+      });
+      const { error } = await api.POST("/api/v1/runtime-auth", {
+        body: { runtime: p.runtime, node_ids: [node.id] },
+      });
+      if (error) {
+        useLive.setState({ runtimeAuth: null });
+        await notify("Couldn't start authorization", JSON.stringify(error));
+      }
+      // The code arrives as a `runtime_auth_prompt` event and renders below;
+      // there is nothing to navigate to.
+      return;
+    }
+
     const ok = await askConfirm({
       title: `Authorize ${p.label}?`,
       description:
@@ -463,6 +493,29 @@ function AgentAuthPanel({ node }: { node: { id: string; capabilities: unknown } 
 
   return (
     <Panel title="Agent authorization">
+      {flow && (
+        <div className="m-card-body" style={{ marginBottom: 8 }}>
+          {flow.state === "starting" && <span>Starting sign-in…</span>}
+          {flow.state === "prompt" && (
+            <>
+              <div>
+                Open{" "}
+                <a href={flow.verificationUri} target="_blank" rel="noreferrer">
+                  {flow.verificationUri}
+                </a>{" "}
+                and enter:
+              </div>
+              <div className="mono bright" style={{ fontSize: 18, letterSpacing: 2 }}>
+                {flow.userCode}
+              </div>
+            </>
+          )}
+          {flow.state === "delivered" && (
+            <span>Signed in — the credential was delivered to this node.</span>
+          )}
+          {flow.state === "failed" && <span>Sign-in failed: {flow.error}</span>}
+        </div>
+      )}
       {profiles.length === 0 ? (
         <Empty>
           No agent runtimes to authorize on this machine — install claude or

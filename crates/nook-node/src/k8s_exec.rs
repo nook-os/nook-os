@@ -829,6 +829,10 @@ pub fn delivered_runtime_auth(
             }
             AuthProfile {
                 state: AuthState::Authorized,
+                // A terminal on THIS node would sign in a container that runs
+                // no jobs. The credential has to arrive by delivery, so the UI
+                // must offer the device flow instead of a session (MAIN-650).
+                device_flow: true,
                 // Not an account: this node cannot read the Secret and has no
                 // way to learn whose session is in it. Saying where the
                 // credential came from is the true thing available, and it is
@@ -1655,6 +1659,7 @@ mod tests {
                     runtime: "claude".into(),
                     state: AuthState::Unavailable,
                     identity: None,
+                    device_flow: false,
                 },
                 AuthProfile {
                     id: "codex".into(),
@@ -1662,6 +1667,7 @@ mod tests {
                     runtime: "codex".into(),
                     state: AuthState::Unavailable,
                     identity: None,
+                    device_flow: false,
                 },
             ]
         };

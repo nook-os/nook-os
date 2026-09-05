@@ -330,6 +330,11 @@ fn profile_for(a: &Adapter) -> AuthProfile {
         runtime: a.runtime.into(),
         state,
         identity,
+        // A session on this machine is the right flow by default — it is the
+        // only one for a runtime with no device-flow descriptor. The executor
+        // overrides it where a terminal here would sign in the wrong place
+        // (`delivered_by_executor`).
+        device_flow: false,
     }
 }
 

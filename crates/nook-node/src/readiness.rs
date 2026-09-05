@@ -436,6 +436,7 @@ mod tests {
                 runtime: "claude".into(),
                 state: AuthState::Authorized,
                 identity: Some("fleet@example.com".into()),
+                device_flow: false,
             }],
             sandbox: Some(SandboxCapability::Ready {
                 image: "ghcr.io/nook-os/nook-job-sandbox:0.6.13".into(),
@@ -576,6 +577,7 @@ mod tests {
                         runtime: "claude".into(),
                         state: AuthState::NotAuthorized,
                         identity: None,
+                        device_flow: false,
                     }],
                     ..ready()
                 },
@@ -633,6 +635,7 @@ mod tests {
                     runtime: "claude".into(),
                     state: AuthState::Unavailable,
                     identity: None,
+                    device_flow: false,
                 },
                 AuthProfile {
                     id: "codex".into(),
@@ -640,6 +643,7 @@ mod tests {
                     runtime: "codex".into(),
                     state: AuthState::Unavailable,
                     identity: None,
+                    device_flow: false,
                 },
             ],
             ..ready()
@@ -661,6 +665,7 @@ mod tests {
                     runtime: "claude".into(),
                     state: AuthState::NotAuthorized,
                     identity: None,
+                    device_flow: false,
                 },
                 AuthProfile {
                     id: "codex".into(),
@@ -668,6 +673,7 @@ mod tests {
                     runtime: "codex".into(),
                     state: AuthState::Unavailable,
                     identity: None,
+                    device_flow: false,
                 },
             ],
             ..ready()

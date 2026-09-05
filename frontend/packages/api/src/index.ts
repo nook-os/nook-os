@@ -13,6 +13,7 @@ export type User = Schemas["User"];
 export type MeResponse = Schemas["MeResponse"];
 export type TenantMembership = Schemas["TenantMembership"];
 export type Capabilities = Schemas["Capabilities"];
+export type AuthProfile = Schemas["AuthProfile"];
 /** What optional features this deployment has wired (MAIN-171). */
 export type AppConfig = Schemas["AppConfig"];
 export type NodeInfo = Schemas["Node"];

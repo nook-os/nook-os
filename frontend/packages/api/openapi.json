@@ -10797,6 +10797,10 @@
           "state"
         ],
         "properties": {
+          "device_flow": {
+            "type": "boolean",
+            "description": "Authorize this by the control plane's DEVICE FLOW rather than by opening\na login session on the node (MAIN-650).\n\nTrue where a session on the machine would authorize the wrong thing. On\na Pod executor the agent is a Pod elsewhere in the cluster and reads only\nthe credential Secret, so `claude /login` in a terminal on the node signs\nin a container nothing will ever run work in — which is what the node\nsettings page did, and why authorizing a cluster node appeared to work\nand changed nothing.\n\nFalse for a host node, where the session flow is right and remains the\ndefault: it is the only path for a runtime with no device-flow\ndescriptor."
+          },
           "id": {
             "type": "string",
             "description": "Stable identifier, e.g. `claude` or `hermes-portal`."

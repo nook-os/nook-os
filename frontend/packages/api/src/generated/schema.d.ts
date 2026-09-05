@@ -4623,6 +4623,22 @@ export interface components {
          *     supports here.
          */
         AuthProfile: {
+            /**
+             * @description Authorize this by the control plane's DEVICE FLOW rather than by opening
+             *     a login session on the node (MAIN-650).
+             *
+             *     True where a session on the machine would authorize the wrong thing. On
+             *     a Pod executor the agent is a Pod elsewhere in the cluster and reads only
+             *     the credential Secret, so `claude /login` in a terminal on the node signs
+             *     in a container nothing will ever run work in — which is what the node
+             *     settings page did, and why authorizing a cluster node appeared to work
+             *     and changed nothing.
+             *
+             *     False for a host node, where the session flow is right and remains the
+             *     default: it is the only path for a runtime with no device-flow
+             *     descriptor.
+             */
+            device_flow?: boolean;
             /** @description Stable identifier, e.g. `claude` or `hermes-portal`. */
             id: string;
             /** @description The signed-in account, when the probe reports one. */
