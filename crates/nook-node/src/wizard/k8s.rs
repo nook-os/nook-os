@@ -286,6 +286,9 @@ pub struct Outcome {
     /// pointer in [`init`] names the flag either way, because a control plane
     /// with no node is the single most common "why is nothing building".
     pub executor_steps: Vec<String>,
+    /// What `helm uninstall` does and does not take, and the one step that must
+    /// not be repeated on a reinstall (MAIN-650).
+    pub reinstall_note: String,
 }
 
 /// CLI entry point: open a terminal if there is one, do the work, print the
@@ -325,6 +328,9 @@ pub fn init(opts: InitOptions) -> Result<()> {
         n += 1;
     }
     println!("{n}. {}", out.secret_change_note);
+    println!();
+    n += 1;
+    println!("{n}. {}", out.reinstall_note);
     println!();
     n += 1;
     // Last, and banner-wrapped when it is the warning shape: an operator scans
@@ -958,6 +964,12 @@ pub fn run(opts: InitOptions, tty: Option<Tty>, discover: &Discover) -> Result<O
     // whether THIS run captured the value — a re-run often relies on a Secret
     // already in place).
     let mut secret_keys: Vec<(&'static str, &'static str)> = Vec::new();
+    // Always. The vault key is not optional in a real deployment: omitted, the
+    // control plane DERIVES it from SESSION_SECRET and logs that as dev-only —
+    // which quietly ties every encrypted row to a value the installer mints
+    // fresh on every run, so re-running this command after a reinstall would
+    // strand the lot (MAIN-650).
+    secret_keys.push(("secretsKey", "SECRETS_KEY"));
     if oidc.is_some() {
         secret_keys.push(("oidcClientSecret", "OIDC_CLIENT_SECRET"));
     }
@@ -1078,7 +1090,9 @@ pub fn run(opts: InitOptions, tty: Option<Tty>, discover: &Discover) -> Result<O
         executor_steps_for(
             &namespace,
             &exec_namespace,
-            agent_public_url.as_deref().unwrap_or("<agent-address>:8081"),
+            agent_public_url
+                .as_deref()
+                .unwrap_or("<agent-address>:8081"),
             chart_version.trim(),
         )
     } else {
@@ -1133,7 +1147,10 @@ pub fn run(opts: InitOptions, tty: Option<Tty>, discover: &Discover) -> Result<O
     let secret_command = secret_command(
         &values,
         &meta,
-        &session_secret(),
+        BaseSecrets {
+            session_secret: &session_secret(),
+            secrets_key: &session_secret(),
+        },
         oidc_client_secret.as_deref(),
         mail_token.as_deref(),
         giphy_key.as_deref(),
@@ -1156,6 +1173,7 @@ pub fn run(opts: InitOptions, tty: Option<Tty>, discover: &Discover) -> Result<O
         dev_login_exposed: values.auth_dev_mode && !values.ingress_host.is_empty(),
         dev_login_note,
         executor_steps,
+        reinstall_note: reinstall_note(&meta.release, &meta.namespace, &values.existing_secret),
     })
 }
 
@@ -1403,7 +1421,7 @@ fn executor_steps_for(
         [
             "Install the operator node — the thing that actually runs the work:",
             "",
-            &format!("     helm install nook-operator-node \\"),
+            "     helm install nook-operator-node \\",
             &format!("       oci://ghcr.io/nook-os/charts/nook-operator-node{version} \\"),
             &format!("       -n {namespace} \\"),
             &format!("       --set server={server} \\"),
@@ -1428,6 +1446,44 @@ fn executor_steps_for(
         ]
         .join("\n"),
     ]
+}
+
+/// What survives `helm uninstall`, and the one thing that must not be re-run
+/// after it (MAIN-650).
+///
+/// Uninstall/reinstall is the operation an operator reaches for the moment
+/// anything looks wrong, so it has to be safe by construction rather than by
+/// care. It nearly is: the Secret is `kubectl`'s and not Helm's, the
+/// user-content PVC carries `helm.sh/resource-policy: keep`, and the database
+/// is external. Nothing in the release owns data.
+///
+/// The exception is the hand-off itself. Every run of this command mints a
+/// fresh SESSION_SECRET and SECRETS_KEY, and SECRETS_KEY is what decrypts what
+/// is ALREADY in the database — so an operator who reinstalls by re-running
+/// these steps top to bottom destroys every sealed value while every command
+/// they ran reported success. Saying so is the whole point of this note.
+fn reinstall_note(release: &str, namespace: &str, secret: &str) -> String {
+    [
+        "Uninstalling does NOT take your data. `helm uninstall` removes the".to_string(),
+        "   Deployments, Service and Ingress this release owns and nothing else:".to_string(),
+        "   the Secret is yours (kubectl created it, not Helm), the user-content".to_string(),
+        "   PVC is annotated helm.sh/resource-policy: keep, and the database is".to_string(),
+        "   external and never touched. Reinstall from the SAME values file and".to_string(),
+        "   the deployment comes back whole:".to_string(),
+        String::new(),
+        format!("     helm uninstall {release} -n {namespace}"),
+        "     # then the same helm install as above, same values file".to_string(),
+        String::new(),
+        "   But do NOT re-run step 2 when you reinstall. This command mints a".to_string(),
+        "   fresh SESSION_SECRET and SECRETS_KEY every time, and SECRETS_KEY is".to_string(),
+        "   what decrypts what is already in the database — replacing it signs".to_string(),
+        "   everyone out and strands every sealed value, with no error anywhere.".to_string(),
+        "   Keep the existing Secret, or read the live values back first:".to_string(),
+        String::new(),
+        format!("     kubectl -n {namespace} get secret {secret} \\"),
+        "       -o jsonpath='{.data.SECRETS_KEY}' | base64 -d".to_string(),
+    ]
+    .join("\n")
 }
 
 fn values_path(nook_dir: &Path, release: &str) -> PathBuf {
@@ -1803,12 +1859,16 @@ fn render_values(v: &Values, m: &Meta) -> String {
 fn secret_command(
     v: &Values,
     m: &Meta,
-    session_secret: &str,
+    base: BaseSecrets<'_>,
     oidc_client_secret: Option<&str>,
     mail_token: Option<&str>,
     giphy_key: Option<&str>,
     queue: QueueSecrets,
 ) -> String {
+    let BaseSecrets {
+        session_secret,
+        secrets_key,
+    } = base;
     let QueueSecrets {
         redis_url,
         aws_access_key_id,
@@ -1817,7 +1877,8 @@ fn secret_command(
     let mut s = format!(
         "kubectl create secret generic {secret} -n {ns} \\\n  \
          --from-literal=DATABASE_URL='postgres://USER:PASSWORD@HOST:5432/nook' \\\n  \
-         --from-literal=SESSION_SECRET='{session_secret}'",
+         --from-literal=SESSION_SECRET='{session_secret}' \\\n  \
+         --from-literal=SECRETS_KEY='{secrets_key}'",
         secret = v.existing_secret,
         ns = m.namespace,
     );
@@ -1857,6 +1918,15 @@ fn secret_command(
         ));
     }
     s
+}
+
+/// The two every deployment has, minted fresh by this run and printed only
+/// (NG-4). `SECRETS_KEY` is not optional in a real deployment: omitted, the
+/// control plane derives the vault key from `SESSION_SECRET` and calls that
+/// dev-only, which ties every encrypted row to a value re-minted on each run.
+struct BaseSecrets<'a> {
+    session_secret: &'a str,
+    secrets_key: &'a str,
 }
 
 /// The queue secrets captured this run — printed only (NG-4). Grouped so
@@ -2145,6 +2215,28 @@ mod tests {
     }
 
     #[test]
+    fn a_reinstall_keeps_the_data_and_the_handoff_says_which_step_not_to_repeat() {
+        let note = super::reinstall_note("nook", "nook", "nook-control-secrets");
+
+        // The three things `helm uninstall` does not take. Each is a property of
+        // something OUTSIDE the release, which is exactly why an operator has no
+        // reason to believe it without being told.
+        assert!(note.contains("kubectl created it, not Helm"), "{note}");
+        assert!(note.contains("helm.sh/resource-policy: keep"), "{note}");
+        assert!(note.contains("external and never touched"), "{note}");
+        assert!(note.contains("helm uninstall nook -n nook"), "{note}");
+
+        // The trap. Re-running the secret step is the natural thing to do on a
+        // reinstall and it is the one action that destroys data — silently,
+        // because a fresh SECRETS_KEY decrypts nothing and reports no error.
+        assert!(note.contains("do NOT re-run step 2"), "{note}");
+        assert!(note.contains("SECRETS_KEY"), "{note}");
+        assert!(note.contains("no error anywhere"), "{note}");
+        // And the way out: read the live value rather than mint a new one.
+        assert!(note.contains("get secret nook-control-secrets"), "{note}");
+    }
+
+    #[test]
     fn the_executor_handoff_names_what_makes_work_actually_run() {
         let steps = super::executor_steps_for("nook", "nook-jobs", "10.0.0.5:8081", "0.6.14");
         let all = steps.join("\n");
@@ -2162,13 +2254,19 @@ mod tests {
         assert!(all.contains("never an API key"), "{all}");
 
         // The second chart, pinned to the same version as the first.
-        assert!(all.contains("charts/nook-operator-node --version 0.6.14"), "{all}");
+        assert!(
+            all.contains("charts/nook-operator-node --version 0.6.14"),
+            "{all}"
+        );
         assert!(all.contains("--set executor.mode=kubernetes"), "{all}");
         assert!(all.contains("--set server=10.0.0.5:8081"), "{all}");
         // Without this the node cannot reach an in-cluster control plane at
         // all: the shipped egress policy drops the private address space the
         // Service lives on.
-        assert!(all.contains("networkPolicy.controlPlane.enabled=true"), "{all}");
+        assert!(
+            all.contains("networkPolicy.controlPlane.enabled=true"),
+            "{all}"
+        );
 
         // Loops ship OFF (MAIN-239), so an install that stops before this
         // queues every job forever with nothing reporting an error.
@@ -2571,10 +2669,18 @@ mod tests {
         assert!(text.contains("  logLevel: info")); // default level (AC-6)
         assert!(!text.contains("oidc:")); // OIDC skipped (AC-3)
         assert!(!text.contains("mail:")); // capture ⇒ no mail block (AC-5)
-        assert!(!text.contains("secretKeys:")); // no feature secrets wired
+                                          // No FEATURE secret is wired — but the vault key always is. It is not a
+                                          // feature: omitted, the control plane derives the vault key from
+                                          // SESSION_SECRET and calls that dev-only, which ties every encrypted row
+                                          // to a value this command re-mints on each run (MAIN-650).
+        assert!(text.contains("secretKeys:"));
+        assert!(text.contains("  secretsKey: SECRETS_KEY"));
+        assert!(!text.contains("oidcClientSecret"));
+        assert!(!text.contains("smtpPassword"));
         assert!(!text.contains("controlPlane:")); // no extra env
                                                   // The secret command is unchanged from the base wizard.
         assert!(out.secret_command.contains("SESSION_SECRET='"));
+        assert!(out.secret_command.contains("SECRETS_KEY='"));
         assert!(!out.secret_command.contains("OIDC_CLIENT_SECRET"));
         assert!(!out.secret_command.contains("SMTP_PASSWORD"));
         assert!(!out.secret_command.contains("NOOK_GIPHY_KEY")); // MAIN-171 NG-3
