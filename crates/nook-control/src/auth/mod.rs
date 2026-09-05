@@ -42,6 +42,13 @@ pub struct OidcContext {
     /// `None` for a public client — every registered one, and any explicitly
     /// configured client whose IdP wants none.
     pub client_secret: Option<String>,
+    /// The device-authorization endpoint AS THE ISSUER PUBLISHES IT.
+    ///
+    /// Read here because `CoreProviderMetadata` does not carry it — the device
+    /// grant is an extension — so the one place that already fetches the
+    /// discovery document is the only place that can see it without a second
+    /// round trip. `None` means the IdP genuinely does not offer the flow.
+    pub device_authorization_endpoint: Option<String>,
 }
 
 impl OidcContext {
@@ -59,13 +66,39 @@ impl OidcContext {
                 .await?;
         let (client_id, client_secret) =
             resolve_client(&metadata, &http, cfg, db, issuer_url).await?;
+        // Best-effort: a device endpoint the IdP does not publish is a fact
+        // about the IdP, not a failure of discovery, and a deployment that will
+        // never use the flow must not fail to boot over it.
+        let device_authorization_endpoint = discovered_device_endpoint(&http, issuer_url).await;
         Ok(Self {
             metadata,
             http,
             client_id,
             client_secret,
+            device_authorization_endpoint,
         })
     }
+}
+
+/// Pull `device_authorization_endpoint` straight out of the discovery document.
+///
+/// It used to be operator-configured ONLY, which meant an IdP that advertises
+/// the endpoint still could not be used for `nook login` until somebody set
+/// `OIDC_DEVICE_AUTHORIZATION_ENDPOINT` by hand — and the CLI then reported that
+/// the provider "does not advertise" it, sending the reader to the IdP instead
+/// of to their own values (MAIN-650).
+async fn discovered_device_endpoint(
+    http: &openidconnect::reqwest::Client,
+    issuer_url: &str,
+) -> Option<String> {
+    let url = format!(
+        "{}/.well-known/openid-configuration",
+        issuer_url.trim_end_matches('/')
+    );
+    let doc: serde_json::Value = http.get(url).send().await.ok()?.json().await.ok()?;
+    doc.get("device_authorization_endpoint")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// Which client this instance is, in precedence order: what the operator

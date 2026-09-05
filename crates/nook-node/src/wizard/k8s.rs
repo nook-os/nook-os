@@ -39,6 +39,15 @@ pub struct InitOptions {
     pub agent: bool,
     pub agent_url: Option<String>,
     pub agent_tls_secret: Option<String>,
+    /// Print the steps that make this deployment RUN work: the operator node,
+    /// its join token, the fleet's Claude session, and `executor.mode=kubernetes`
+    /// (MAIN-650). Off by default — the control plane installs fine without one,
+    /// it simply never executes anything.
+    pub executor: bool,
+    /// Namespace job Pods are created in. Default `nook-jobs`: a job Pod is the
+    /// untrusted half, and a blast radius that excludes the agent's own pod is
+    /// worth a namespace.
+    pub executor_namespace: Option<String>,
     /// `None` → default to `default_chart_version`. `Some("")` → omit `--version`
     /// so helm pulls the latest published chart (AC-3).
     pub chart_version: Option<String>,
@@ -272,6 +281,14 @@ pub struct Outcome {
     /// rather than left for the caller to re-derive from the text, so the
     /// hand-off's banner and this run's decision cannot disagree.
     pub dev_login_exposed: bool,
+    /// What it takes to make this deployment RUN work rather than merely serve
+    /// a board (MAIN-650). Empty unless `--executor` was asked for; the closing
+    /// pointer in [`init`] names the flag either way, because a control plane
+    /// with no node is the single most common "why is nothing building".
+    pub executor_steps: Vec<String>,
+    /// What `helm uninstall` does and does not take, and the one step that must
+    /// not be repeated on a reinstall (MAIN-650).
+    pub reinstall_note: String,
 }
 
 /// CLI entry point: open a terminal if there is one, do the work, print the
@@ -305,7 +322,15 @@ pub fn init(opts: InitOptions) -> Result<()> {
     println!("{}", indent(&out.helm_command));
     println!();
     n += 1;
+    for step in &out.executor_steps {
+        println!("{n}. {step}");
+        println!();
+        n += 1;
+    }
     println!("{n}. {}", out.secret_change_note);
+    println!();
+    n += 1;
+    println!("{n}. {}", out.reinstall_note);
     println!();
     n += 1;
     // Last, and banner-wrapped when it is the warning shape: an operator scans
@@ -319,6 +344,15 @@ pub fn init(opts: InitOptions) -> Result<()> {
         println!("{}", "!".repeat(72));
     }
     println!();
+    // A control plane with no node runs nothing, and says nothing about it:
+    // every promoted ticket simply sits queued. Naming the flag costs one line
+    // and is the difference between a board and a working deployment.
+    if out.executor_steps.is_empty() {
+        println!("This installs the control plane only — it will serve a board and run no");
+        println!("work. Re-run with --executor for the operator node, the fleet's Claude");
+        println!("session, and the steps that make loop jobs execute as Pods.");
+        println!();
+    }
     if !have("helm") {
         println!("Helm 3 is not installed here — get it to run the command above:");
         println!("  https://helm.sh/docs/intro/install/");
@@ -930,6 +964,12 @@ pub fn run(opts: InitOptions, tty: Option<Tty>, discover: &Discover) -> Result<O
     // whether THIS run captured the value — a re-run often relies on a Secret
     // already in place).
     let mut secret_keys: Vec<(&'static str, &'static str)> = Vec::new();
+    // Always. The vault key is not optional in a real deployment: omitted, the
+    // control plane DERIVES it from SESSION_SECRET and logs that as dev-only —
+    // which quietly ties every encrypted row to a value the installer mints
+    // fresh on every run, so re-running this command after a reinstall would
+    // strand the lot (MAIN-650).
+    secret_keys.push(("secretsKey", "SECRETS_KEY"));
     if oidc.is_some() {
         secret_keys.push(("oidcClientSecret", "OIDC_CLIENT_SECRET"));
     }
@@ -1036,6 +1076,29 @@ pub fn run(opts: InitOptions, tty: Option<Tty>, discover: &Discover) -> Result<O
         &namespace,
     );
 
+    // The node dials the agent listener, so its address is the same one the
+    // listener publishes — a placeholder here is the same placeholder the agent
+    // steps above already tell you to replace after the LoadBalancer exists.
+    let exec_namespace = opts
+        .executor_namespace
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("nook-jobs")
+        .to_string();
+    let executor_steps = if opts.executor {
+        executor_steps_for(
+            &namespace,
+            &exec_namespace,
+            agent_public_url
+                .as_deref()
+                .unwrap_or("<agent-address>:8081"),
+            chart_version.trim(),
+        )
+    } else {
+        Vec::new()
+    };
+
     let values = Values {
         existing_secret,
         public_base_url,
@@ -1084,7 +1147,10 @@ pub fn run(opts: InitOptions, tty: Option<Tty>, discover: &Discover) -> Result<O
     let secret_command = secret_command(
         &values,
         &meta,
-        &session_secret(),
+        BaseSecrets {
+            session_secret: &session_secret(),
+            secrets_key: &session_secret(),
+        },
         oidc_client_secret.as_deref(),
         mail_token.as_deref(),
         giphy_key.as_deref(),
@@ -1106,6 +1172,8 @@ pub fn run(opts: InitOptions, tty: Option<Tty>, discover: &Discover) -> Result<O
         secret_change_note,
         dev_login_exposed: values.auth_dev_mode && !values.ingress_host.is_empty(),
         dev_login_note,
+        executor_steps,
+        reinstall_note: reinstall_note(&meta.release, &meta.namespace, &values.existing_secret),
     })
 }
 
@@ -1251,6 +1319,28 @@ fn agent_steps_for(
     ]
     .join("\n")];
 
+    // The listener is self-signed, so a joining node pins it by fingerprint or
+    // trusts nothing (MAIN-650 AC-1). The chart's NOTES.txt has always said so,
+    // which is precisely why it was missing here — the knowledge existed
+    // somewhere the person following THESE steps never reads.
+    //
+    // Read off the local file rather than back out of the Secret: the step
+    // above just wrote it, it needs no cluster round trip, and it sidesteps
+    // `-o jsonpath='{.data.tls.crt}'` — where the unescaped `.` in the key
+    // silently selects nothing and hands `base64 -d` an empty string.
+    steps.push(
+        [
+            "Read the certificate's fingerprint. The listener is self-signed, so",
+            "   each node pins THIS value with --server-fingerprint; without it a",
+            "   node has nothing to authenticate the control plane against:",
+            "",
+            "     openssl x509 -in agent.crt -outform der | sha256sum | cut -d' ' -f1",
+            "",
+            "   Keep it beside the join token — `nook enroll` wants both.",
+        ]
+        .join("\n"),
+    );
+
     // A public address that does not start with a digit is a name or a
     // placeholder, not an address the LoadBalancer handed out.
     let unresolved = public_url
@@ -1276,6 +1366,124 @@ fn agent_steps_for(
         );
     }
     steps
+}
+
+/// The steps that make a deployment RUN work, rather than merely serve a board
+/// (MAIN-650).
+///
+/// `nook-dispatcher` only places a loop job on a NODE, so a control plane with
+/// none leaves every promoted ticket queued forever under "no eligible
+/// executor" — a state with no error in it anywhere, which is why it has to be
+/// named in the hand-off rather than discovered. The control-plane chart cannot
+/// do any of this because the executor is a second chart.
+///
+/// The Claude session is the one genuinely manual piece and stays that way
+/// (NG-4, and MAIN-337 owns the real credential path): it is a subscription
+/// device login, so it is a DIRECTORY of files rather than a value this wizard
+/// could mint, and nothing here ever writes secret material.
+fn executor_steps_for(
+    namespace: &str,
+    exec_namespace: &str,
+    server: &str,
+    chart_version: &str,
+) -> Vec<String> {
+    let version = if chart_version.trim().is_empty() {
+        String::new()
+    } else {
+        format!(" --version {chart_version}")
+    };
+    vec![
+        [
+            "Mint a join token for the operator node and put it in a Secret. The",
+            "   token is the node's only credential; the chart never stores one:",
+            "",
+            &format!("     kubectl create ns {exec_namespace} --dry-run=client -o yaml | kubectl apply -f -"),
+            &format!("     kubectl create secret generic nook-operator-join -n {namespace} \\"),
+            "       --from-literal=joinToken=<token from Settings → Nodes → Join token> \\",
+            "       --from-literal=ghToken=<a GitHub token, if the loop should open PRs>",
+        ]
+        .join("\n"),
+        [
+            "Create the fleet's Claude session Secret. THIS IS THE MANUAL STEP —",
+            "   a subscription device login is a directory, not a value, so log in",
+            "   once on any machine and copy the result in:",
+            "",
+            "     nook claude login          # or: ./run.sh --claude-login",
+            &format!("     kubectl create secret generic nook-job-credentials -n {exec_namespace} \\"),
+            "       --from-file=.credentials.json=.nook-secrets/claude/.credentials.json \\",
+            "       --from-file=.claude.json=.nook-secrets/claude/.claude.json",
+            "",
+            "   Subscription login only — never an API key. Without it the node",
+            "   reports its runtime unauthorized and is sent no loop work at all,",
+            "   which looks exactly like nothing being wrong.",
+        ]
+        .join("\n"),
+        [
+            "Install the operator node — the thing that actually runs the work:",
+            "",
+            "     helm install nook-operator-node \\",
+            &format!("       oci://ghcr.io/nook-os/charts/nook-operator-node{version} \\"),
+            &format!("       -n {namespace} \\"),
+            &format!("       --set server={server} \\"),
+            "       --set existingSecret=nook-operator-join \\",
+            "       --set executor.mode=kubernetes \\",
+            &format!("       --set executor.namespace={exec_namespace} \\"),
+            "       --set executor.credentialsSecret=nook-job-credentials \\",
+            "       --set networkPolicy.controlPlane.enabled=true",
+            "",
+            "   `executor.mode=kubernetes` gives each job a Pod of its own. The",
+            "   job image is derived from the chart's version, so it needs no flag.",
+            "   `networkPolicy.controlPlane.enabled=true` is what lets an",
+            "   in-cluster node reach the control plane at all — the default egress",
+            "   policy drops the private address space the Service lives on.",
+        ]
+        .join("\n"),
+        [
+            "Turn loops on for the tenant. They ship OFF, so nothing polls,",
+            "   dispatches or reaps until you do (MAIN-239):",
+            "",
+            "     nook operator loops on",
+        ]
+        .join("\n"),
+    ]
+}
+
+/// What survives `helm uninstall`, and the one thing that must not be re-run
+/// after it (MAIN-650).
+///
+/// Uninstall/reinstall is the operation an operator reaches for the moment
+/// anything looks wrong, so it has to be safe by construction rather than by
+/// care. It nearly is: the Secret is `kubectl`'s and not Helm's, the
+/// user-content PVC carries `helm.sh/resource-policy: keep`, and the database
+/// is external. Nothing in the release owns data.
+///
+/// The exception is the hand-off itself. Every run of this command mints a
+/// fresh SESSION_SECRET and SECRETS_KEY, and SECRETS_KEY is what decrypts what
+/// is ALREADY in the database — so an operator who reinstalls by re-running
+/// these steps top to bottom destroys every sealed value while every command
+/// they ran reported success. Saying so is the whole point of this note.
+fn reinstall_note(release: &str, namespace: &str, secret: &str) -> String {
+    [
+        "Uninstalling does NOT take your data. `helm uninstall` removes the".to_string(),
+        "   Deployments, Service and Ingress this release owns and nothing else:".to_string(),
+        "   the Secret is yours (kubectl created it, not Helm), the user-content".to_string(),
+        "   PVC is annotated helm.sh/resource-policy: keep, and the database is".to_string(),
+        "   external and never touched. Reinstall from the SAME values file and".to_string(),
+        "   the deployment comes back whole:".to_string(),
+        String::new(),
+        format!("     helm uninstall {release} -n {namespace}"),
+        "     # then the same helm install as above, same values file".to_string(),
+        String::new(),
+        "   But do NOT re-run step 2 when you reinstall. This command mints a".to_string(),
+        "   fresh SESSION_SECRET and SECRETS_KEY every time, and SECRETS_KEY is".to_string(),
+        "   what decrypts what is already in the database — replacing it signs".to_string(),
+        "   everyone out and strands every sealed value, with no error anywhere.".to_string(),
+        "   Keep the existing Secret, or read the live values back first:".to_string(),
+        String::new(),
+        format!("     kubectl -n {namespace} get secret {secret} \\"),
+        "       -o jsonpath='{.data.SECRETS_KEY}' | base64 -d".to_string(),
+    ]
+    .join("\n")
 }
 
 fn values_path(nook_dir: &Path, release: &str) -> PathBuf {
@@ -1651,12 +1859,16 @@ fn render_values(v: &Values, m: &Meta) -> String {
 fn secret_command(
     v: &Values,
     m: &Meta,
-    session_secret: &str,
+    base: BaseSecrets<'_>,
     oidc_client_secret: Option<&str>,
     mail_token: Option<&str>,
     giphy_key: Option<&str>,
     queue: QueueSecrets,
 ) -> String {
+    let BaseSecrets {
+        session_secret,
+        secrets_key,
+    } = base;
     let QueueSecrets {
         redis_url,
         aws_access_key_id,
@@ -1665,7 +1877,8 @@ fn secret_command(
     let mut s = format!(
         "kubectl create secret generic {secret} -n {ns} \\\n  \
          --from-literal=DATABASE_URL='postgres://USER:PASSWORD@HOST:5432/nook' \\\n  \
-         --from-literal=SESSION_SECRET='{session_secret}'",
+         --from-literal=SESSION_SECRET='{session_secret}' \\\n  \
+         --from-literal=SECRETS_KEY='{secrets_key}'",
         secret = v.existing_secret,
         ns = m.namespace,
     );
@@ -1705,6 +1918,15 @@ fn secret_command(
         ));
     }
     s
+}
+
+/// The two every deployment has, minted fresh by this run and printed only
+/// (NG-4). `SECRETS_KEY` is not optional in a real deployment: omitted, the
+/// control plane derives the vault key from `SESSION_SECRET` and calls that
+/// dev-only, which ties every encrypted row to a value re-minted on each run.
+struct BaseSecrets<'a> {
+    session_secret: &'a str,
+    secrets_key: &'a str,
 }
 
 /// The queue secrets captured this run — printed only (NG-4). Grouped so
@@ -1993,6 +2215,70 @@ mod tests {
     }
 
     #[test]
+    fn a_reinstall_keeps_the_data_and_the_handoff_says_which_step_not_to_repeat() {
+        let note = super::reinstall_note("nook", "nook", "nook-control-secrets");
+
+        // The three things `helm uninstall` does not take. Each is a property of
+        // something OUTSIDE the release, which is exactly why an operator has no
+        // reason to believe it without being told.
+        assert!(note.contains("kubectl created it, not Helm"), "{note}");
+        assert!(note.contains("helm.sh/resource-policy: keep"), "{note}");
+        assert!(note.contains("external and never touched"), "{note}");
+        assert!(note.contains("helm uninstall nook -n nook"), "{note}");
+
+        // The trap. Re-running the secret step is the natural thing to do on a
+        // reinstall and it is the one action that destroys data — silently,
+        // because a fresh SECRETS_KEY decrypts nothing and reports no error.
+        assert!(note.contains("do NOT re-run step 2"), "{note}");
+        assert!(note.contains("SECRETS_KEY"), "{note}");
+        assert!(note.contains("no error anywhere"), "{note}");
+        // And the way out: read the live value rather than mint a new one.
+        assert!(note.contains("get secret nook-control-secrets"), "{note}");
+    }
+
+    #[test]
+    fn the_executor_handoff_names_what_makes_work_actually_run() {
+        let steps = super::executor_steps_for("nook", "nook-jobs", "10.0.0.5:8081", "0.6.14");
+        let all = steps.join("\n");
+
+        // The join token: a node has no other credential, and the chart stores
+        // none.
+        assert!(all.contains("nook-operator-join"), "{all}");
+        assert!(all.contains("joinToken="), "{all}");
+
+        // The session. It is the manual step and the one that fails SILENTLY —
+        // no login means the runtime reports unauthorized and the node is simply
+        // sent nothing, which looks identical to an idle board.
+        assert!(all.contains("nook-job-credentials"), "{all}");
+        assert!(all.contains(".credentials.json"), "{all}");
+        assert!(all.contains("never an API key"), "{all}");
+
+        // The second chart, pinned to the same version as the first.
+        assert!(
+            all.contains("charts/nook-operator-node --version 0.6.14"),
+            "{all}"
+        );
+        assert!(all.contains("--set executor.mode=kubernetes"), "{all}");
+        assert!(all.contains("--set server=10.0.0.5:8081"), "{all}");
+        // Without this the node cannot reach an in-cluster control plane at
+        // all: the shipped egress policy drops the private address space the
+        // Service lives on.
+        assert!(
+            all.contains("networkPolicy.controlPlane.enabled=true"),
+            "{all}"
+        );
+
+        // Loops ship OFF (MAIN-239), so an install that stops before this
+        // queues every job forever with nothing reporting an error.
+        assert!(all.contains("nook operator loops on"), "{all}");
+
+        // An unpinned chart version omits the flag rather than emitting an
+        // empty one, exactly as the control-plane command does.
+        let latest = super::executor_steps_for("nook", "nook-jobs", "h:8081", "");
+        assert!(!latest.join("\n").contains("--version"), "{latest:?}");
+    }
+
+    #[test]
     fn the_agent_handoff_says_what_the_chart_cannot_do_for_you() {
         let steps =
             super::agent_steps_for(Some("nook-agent-tls"), Some("PLACEHOLDER:8081"), "nook");
@@ -2005,15 +2291,32 @@ mod tests {
         );
         assert!(all.contains("openssl req -x509"), "{all}");
 
+        // AC-1's other half: a self-signed listener is only safe to join if the
+        // node pins it, so the value it pins has to be printed HERE. It was
+        // documented solely in the chart's NOTES.txt, which nobody following
+        // these steps ever sees.
+        assert!(all.contains("fingerprint"), "{all}");
+        assert!(
+            all.contains("openssl x509 -in agent.crt -outform der | sha256sum"),
+            "{all}"
+        );
+        // Read off the file, never back out of the Secret. `-o jsonpath=` is
+        // fine over the Service below, whose path has no dotted KEY in it — but
+        // `{.data.tls.crt}` reads `tls` then `crt`, matches nothing, and hands
+        // `base64 -d` an empty string without failing.
+        assert!(!all.contains("{.data."), "{all}");
+
         // The ordering: the address is the LoadBalancer's, so it cannot be known
         // before the Service exists, yet it is baked into join tokens.
         assert!(all.contains("AFTER installing"), "{all}");
         assert!(all.contains("--agent-url"), "{all}");
 
-        // A real address means the second step is done; only the Secret remains.
+        // A real address settles the ordering step; the Secret and its
+        // fingerprint remain, because neither depends on the address.
         let settled =
             super::agent_steps_for(Some("nook-agent-tls"), Some("152.42.155.192:8081"), "nook");
-        assert_eq!(settled.len(), 1, "{settled:?}");
+        assert_eq!(settled.len(), 2, "{settled:?}");
+        assert!(settled.join("\n").contains("fingerprint"), "{settled:?}");
 
         // The listener is off: the hand-off says nothing about it at all.
         assert!(super::agent_steps_for(None, None, "nook").is_empty());
@@ -2030,6 +2333,8 @@ mod tests {
             web_origin: None,
             ingress_class: None,
             secret_name: None,
+            executor: false,
+            executor_namespace: None,
             agent: false,
             agent_url: None,
             agent_tls_secret: None,
@@ -2364,10 +2669,18 @@ mod tests {
         assert!(text.contains("  logLevel: info")); // default level (AC-6)
         assert!(!text.contains("oidc:")); // OIDC skipped (AC-3)
         assert!(!text.contains("mail:")); // capture ⇒ no mail block (AC-5)
-        assert!(!text.contains("secretKeys:")); // no feature secrets wired
+                                          // No FEATURE secret is wired — but the vault key always is. It is not a
+                                          // feature: omitted, the control plane derives the vault key from
+                                          // SESSION_SECRET and calls that dev-only, which ties every encrypted row
+                                          // to a value this command re-mints on each run (MAIN-650).
+        assert!(text.contains("secretKeys:"));
+        assert!(text.contains("  secretsKey: SECRETS_KEY"));
+        assert!(!text.contains("oidcClientSecret"));
+        assert!(!text.contains("smtpPassword"));
         assert!(!text.contains("controlPlane:")); // no extra env
                                                   // The secret command is unchanged from the base wizard.
         assert!(out.secret_command.contains("SESSION_SECRET='"));
+        assert!(out.secret_command.contains("SECRETS_KEY='"));
         assert!(!out.secret_command.contains("OIDC_CLIENT_SECRET"));
         assert!(!out.secret_command.contains("SMTP_PASSWORD"));
         assert!(!out.secret_command.contains("NOOK_GIPHY_KEY")); // MAIN-171 NG-3

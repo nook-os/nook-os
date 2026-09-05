@@ -39,6 +39,14 @@ struct ProviderMetadata {
     token_endpoint: String,
 }
 
+/// The refusal shape from RFC 6749 §5.2, which a device endpoint uses for
+/// `unauthorized_client`, `invalid_client` and friends.
+#[derive(serde::Deserialize)]
+struct DeviceError {
+    error: String,
+    error_description: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct DeviceStart {
     device_code: String,
@@ -106,7 +114,14 @@ pub async fn login(server: &str) -> Result<String> {
     )?;
 
     // ---- 2. start the authorization
-    let start: DeviceStart = http
+    //
+    // Read as TEXT first, because the interesting reply is the unhappy one. A
+    // refusal here is a well-formed OAuth error object, not a malformed device
+    // response — decoding straight into `DeviceStart` turned
+    // `{"error":"unauthorized_client"}` into "missing field `device_code`" and
+    // blamed the IdP's spec compliance for the operator's client registration
+    // (MAIN-650).
+    let body = http
         .post(&endpoint)
         .form(&[
             ("client_id", client_id.as_str()),
@@ -115,11 +130,26 @@ pub async fn login(server: &str) -> Result<String> {
         .send()
         .await
         .with_context(|| format!("cannot reach {endpoint}"))?
-        .json()
+        .text()
         .await
-        .context(
-            "the identity provider's device authorization reply was not what RFC 8628 describes",
-        )?;
+        .with_context(|| format!("no reply body from {endpoint}"))?;
+
+    if let Ok(err) = serde_json::from_str::<DeviceError>(&body) {
+        bail!(
+            "the identity provider refused the device grant: {}{}\n\n             Client {client_id} must be registered at {endpoint} as a PUBLIC client \
+             with the device_code grant enabled. That is usually a SECOND client, \
+             separate from the web one — then set OIDC_DEVICE_CLIENT_ID (values: \
+             config.oidc.deviceClientId) to it.",
+            err.error,
+            err.error_description
+                .map(|d| format!(" — {d}"))
+                .unwrap_or_default(),
+        );
+    }
+
+    let start: DeviceStart = serde_json::from_str(&body).context(
+        "the identity provider's device authorization reply was not what RFC 8628 describes",
+    )?;
 
     // ---- 3. tell the person what to do
     let link = start

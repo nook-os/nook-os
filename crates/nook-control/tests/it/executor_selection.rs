@@ -462,6 +462,53 @@ async fn a_shared_operator_declaring_build_is_still_refused_build_work() {
         "and it does not refuse what the operator is for"
     );
 
+    // MAIN-655: the same operator, reporting that a build here lands on a pool
+    // of its own, is allowed the kind. The wall was never about `build` being
+    // dangerous in itself — it was about a privileged agent sharing a machine
+    // with other tenants' work, and a tainted pool is the arrangement where it
+    // does not.
+    let mut isolated = caps_declaring(&["spec", "review", "build"], true);
+    isolated["isolated_builds"] = json!(true);
+    let pooled = node(&bed, tenant, None, "online", isolated).await;
+    assert!(
+        jobs::kind_wall_refusal(&state, pooled, "build")
+            .await
+            .expect("wall")
+            .is_none(),
+        "a shared operator with an isolated build pool may take build work"
+    );
+    let offered = state
+        .nodes
+        .eligible_loop_executors(tenant, person, "claude", "build")
+        .await
+        .expect("candidates");
+    assert!(
+        offered.contains(&pooled),
+        "…and it is actually offered the work: {offered:?}"
+    );
+    assert!(
+        !offered.contains(&op),
+        "while the operator WITHOUT a pool still is not"
+    );
+
+    // And the node cannot ask its way in: declaring the kind is not the thing
+    // that opens the gate, reporting the arrangement is.
+    let asked = node(
+        &bed,
+        tenant,
+        None,
+        "online",
+        caps_declaring(&["build"], true),
+    )
+    .await;
+    assert!(
+        jobs::kind_wall_refusal(&state, asked, "build")
+            .await
+            .expect("wall")
+            .is_some(),
+        "declaring loop_kinds=build without isolated_builds changes nothing"
+    );
+
     bed.teardown().await;
 }
 

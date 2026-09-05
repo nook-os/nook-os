@@ -15,6 +15,13 @@ render() { helm template operator "$chart" "$@"; }
 min=(--set server=agent.nook.example.com:8081
      --set existingSecret=nook-operator-join)
 
+# `executor.mode=kubernetes` renders only with an apiserver address — the node
+# reaches the API on a private one, which the egress deny list severs. Every
+# kubernetes-mode render below carries it; the requirement itself is asserted
+# separately.
+k8smin=("${min[@]}" --set executor.mode=kubernetes
+        --set 'networkPolicy.apiServer.cidrs={10.0.0.1/32,10.0.0.2/32}')
+
 echo "==> helm lint"
 helm lint "$chart" "${min[@]}"
 
@@ -186,7 +193,7 @@ for pattern in '^kind: Role$' '^kind: RoleBinding$' '^kind: ServiceAccount$' 'NO
 done
 echo "  ok:   local mode grants no RBAC and sets no executor env"
 
-k8s="$(render "${min[@]}" --set executor.mode=kubernetes --set executor.image=ghcr.io/x/job:1)"
+k8s="$(render "${min[@]}" "${k8smin[@]:2}" --set executor.image=ghcr.io/x/job:1)"
 kneed() {
   local label="$1" pattern="$2" want="$3" got
   got="$(grep -cE "$pattern" <<<"$k8s" || true)"
@@ -206,6 +213,42 @@ kneed "logs are read-only"    '^    verbs: \["get"\]$' 1
 kneed "two rules and no more" '^  - apiGroups:' 2
 kneed "executor env"          'NOOK_EXECUTOR$' 1
 
+# The runtime's credential directory has to be on a VOLUME. `claude` defaults to
+# $HOME/.claude, which is the container's ephemeral layer — a sign-in there is
+# lost on the next restart, silently, on a StatefulSet that promises identity
+# survives one (MAIN-650).
+credir="$(grep -A1 'name: CLAUDE_CONFIG_DIR' <<<"$out" | awk '/value:/ {print $2}')"
+mounts="$(sed -n '/volumeMounts:/,/^          [a-z]/p' <<<"$out" | awk '/mountPath:/ {print $2}')"
+if [ -z "$credir" ]; then
+  echo "  FAIL: no CLAUDE_CONFIG_DIR — the runtime would write to an ephemeral \$HOME"
+  fail=1
+elif grep -qF "$(dirname "$credir")" <<<"$mounts"; then
+  echo "  ok:   the runtime credential dir sits on a persistent volume"
+else
+  echo "  FAIL: CLAUDE_CONFIG_DIR ${credir} is on no mounted volume — a restart signs the node out"
+  fail=1
+fi
+
+# The job image (MAIN-650). `executor.mode=kubernetes` used to be unusable
+# without an `executor.image` nobody could look up — the sandbox is published in
+# lockstep with the node, so it is derived from the same registry and version.
+appver="$(awk -F'"' '/^appVersion:/ {print $2}' "$chart/Chart.yaml")"
+derived="$(render "${k8smin[@]}")"
+if grep -qF "ghcr.io/nook-os/nook-job-sandbox:${appver}" <<<"$derived"; then
+  echo "  ok:   job image defaults to the sandbox at appVersion ${appver}"
+else
+  echo "  FAIL: job image did not default to nook-job-sandbox:${appver}"
+  fail=1
+fi
+# And an explicit value still wins, for a private mirror or a sandbox built
+# from scripts/build-job-sandbox.sh.
+if grep -qF 'ghcr.io/x/job:1' <<<"$k8s"; then
+  echo "  ok:   an explicit executor.image overrides the derived default"
+else
+  echo "  FAIL: executor.image was not honoured"
+  fail=1
+fi
+
 # The permission that would make a Pod job steerable, and is deliberately not
 # granted: anything holding it can write into a running container.
 if grep -qE 'pods/(attach|exec|portforward)' <<<"$k8s"; then
@@ -220,7 +263,7 @@ fi
 # all. Unset is a WORKING state, and the chart must not invent a Secret name.
 kneed "no credential secret by default" 'NOOK_JOB_CREDENTIALS_SECRET' 0
 
-creds=$(render "${min[@]}" --set executor.mode=kubernetes --set executor.image=i:1 \
+creds=$(render "${min[@]}" "${k8smin[@]:2}" --set executor.image=i:1 \
   --set executor.credentialsSecret=nook-job-credentials)
 if grep -q 'NOOK_JOB_CREDENTIALS_SECRET' <<<"$creds" \
    && grep -q 'nook-job-credentials' <<<"$creds"; then
@@ -232,24 +275,55 @@ fi
 
 # The Role must NOT gain a secrets verb for this: the agent references a
 # hand-created Secret and never reads, writes or creates one.
-if grep -qE '^    resources: \[.*"secrets".*\]' <<<"$creds"; then
-  echo "  FAIL: the Role grants a secrets verb"
+# No credential Secret named ⇒ no secrets verb at all.
+if grep -qE '^    resources: \[.*"secrets".*\]' <<<"$k8s"; then
+  echo "  FAIL: the Role grants a secrets verb with no credentialsSecret named"
   fail=1
 else
-  echo "  ok:   no secrets verb"
+  echo "  ok:   no secrets verb by default"
 fi
 
-# MAIN-669 AC-3. Naming a Secret changes the JOB POD and must change nothing
-# about what the agent may do: the KUBELET resolves a mounted Secret, so the
-# closed verb list stays exactly what it was. Asserted as a diff of the two
-# renders' rules rather than as a repeat of the patterns above, so a verb added
-# to both would still be caught.
-rules() { sed -n '/^rules:/,/^---/p' <<<"$1"; }
-if diff <(rules "$k8s") <(rules "$creds") >/dev/null; then
-  echo "  ok:   a credential Secret adds no permission"
+# MAIN-650. Naming one DOES change the Role now, and the shape of that change is
+# the whole security argument: the control plane delivers the credential to this
+# node, and on a Pod executor the only place a job can read it is the Secret. So
+# the node may write that ONE Secret, by name.
+if grep -qE '^    resourceNames: \["nook-job-credentials"\]' <<<"$creds"; then
+  echo "  ok:   the secrets rule is pinned to the named Secret"
 else
-  echo "  FAIL: naming a credential Secret changed the Role"
-  diff <(rules "$k8s") <(rules "$creds") || true
+  echo "  FAIL: the secrets rule is not restricted by resourceNames"
+  fail=1
+fi
+# `list` and `watch` IGNORE resourceNames — either one turns "this Secret" into
+# "every Secret in the namespace" without looking like it.
+secrule="$(sed -n '/resources: \["secrets"\]/,/verbs:/p' <<<"$creds")"
+if grep -qE '"(list|watch|delete|deletecollection)"' <<<"$secrule"; then
+  echo "  FAIL: the secrets rule grants a verb resourceNames cannot restrict"
+  fail=1
+else
+  echo "  ok:   no list/watch on secrets"
+fi
+if grep -qE 'verbs: \["get", "create", "patch"\]' <<<"$secrule"; then
+  echo "  ok:   secrets verbs are exactly get/create/patch"
+else
+  echo "  FAIL: unexpected secrets verbs: $secrule"
+  fail=1
+fi
+# And the POD's own permissions are untouched — a mounted Secret is resolved by
+# the kubelet, so nothing about what the JOB may do has changed. Compared as the
+# resource/verb pairs that are not the secrets rule, so a verb quietly added to
+# the pods rule is still caught.
+podrules() {
+  # Drop the secrets stanza whole — it is three lines where a pods rule is two,
+  # so anything that pairs lines misaligns on it rather than ignoring it.
+  sed -n '/^rules:/,/^---/p' <<<"$1" \
+    | grep -E '^    (resources|verbs|resourceNames):' \
+    | awk '/"secrets"/ { skip = 3 } skip > 0 { skip--; next } { print }'
+}
+if diff <(podrules "$k8s") <(podrules "$creds") >/dev/null; then
+  echo "  ok:   naming a Secret adds no OTHER permission"
+else
+  echo "  FAIL: naming a credential Secret changed more than the secrets rule"
+  diff <(podrules "$k8s") <(podrules "$creds") | head -6
   fail=1
 fi
 
@@ -287,12 +361,78 @@ readme_says "that re-seeding is a human"     'until a human replaces the Secret'
 readme_says "who owns closing the gap"       "Automatic re-seeding is MAIN-337's"
 
 # Both or neither: half a build pool reads as protection and is not.
-if render "${min[@]}" --set executor.mode=kubernetes --set executor.image=i:1 \
+if render "${min[@]}" "${k8smin[@]:2}" --set executor.image=i:1 \
      --set executor.buildPool.taint=t >/dev/null 2>&1; then
   echo "  FAIL: a taint with no selector rendered"
   fail=1
 else
   echo "  ok:   half a build pool is refused"
+fi
+
+# ── builds in cluster (MAIN-655) ────────────────────────────────────────────
+# `build` is the one privileged kind. It is reachable here, but only with a pool
+# of its own — the chart refuses to render one half of that arrangement, because
+# a privileged Pod on a general node pool is the thing the control plane's wall
+# exists to prevent.
+# The apiserver hole is REQUIRED in kubernetes mode: without it the node joins,
+# reports healthy, and every reconcile fails against an API the policy severed.
+if render "${min[@]}" --set executor.mode=kubernetes >/dev/null 2>&1; then
+  echo "  FAIL: kubernetes mode rendered with no networkPolicy.apiServer.cidr"
+  fail=1
+else
+  echo "  ok:   kubernetes mode without an apiserver address is refused"
+fi
+# Both addresses, because the ClusterIP alone is the trap: a CNI that DNATs it
+# before evaluating policy never matches such a rule, and the failure is
+# indistinguishable from setting nothing (MAIN-650).
+apirule="$(render "${k8smin[@]}")"
+if grep -qE 'cidr: "10\.0\.0\.1/32"' <<<"$apirule" && grep -qE 'cidr: "10\.0\.0\.2/32"' <<<"$apirule"; then
+  echo "  ok:   every apiserver address renders"
+else
+  echo "  FAIL: the apiserver egress rule did not render both addresses"
+  fail=1
+fi
+# …and it is skipped entirely when the policy is off, rather than demanded.
+if render "${min[@]}" --set executor.mode=kubernetes \
+     --set networkPolicy.enabled=false >/dev/null 2>&1; then
+  echo "  ok:   networkPolicy.enabled=false needs no apiserver address"
+else
+  echo "  FAIL: kubernetes mode is blocked even with the policy off"
+  fail=1
+fi
+
+echo "==> helm template (build kind)"
+if render "${min[@]}" "${k8smin[@]:2}" --set 'loopKinds={spec,build}' \
+     >/dev/null 2>&1; then
+  echo "  FAIL: loopKinds=build rendered with no executor.buildPool"
+  fail=1
+else
+  echo "  ok:   build without a pool is refused"
+fi
+if render "${min[@]}" --set 'loopKinds={spec,build}' \
+     --set executor.buildPool.selector=nook.io/pool=build \
+     --set executor.buildPool.taint=nook.io/build >/dev/null 2>&1; then
+  echo "  FAIL: loopKinds=build rendered in local mode — a containerised node runs no builds"
+  fail=1
+else
+  echo "  ok:   build outside kubernetes mode is refused"
+fi
+pooled="$(render "${min[@]}" "${k8smin[@]:2}" --set 'loopKinds={spec,build}' \
+  --set executor.buildPool.selector=nook.io/pool=build \
+  --set executor.buildPool.taint=nook.io/build 2>/dev/null)"
+if grep -q 'value: "spec,build"' <<<"$pooled"; then
+  echo "  ok:   build renders when a pool is named"
+else
+  echo "  FAIL: build did not render even with a pool"
+  fail=1
+fi
+# The default must stay safe: nothing about installing this chart grants builds.
+if grep -qE '^loopKinds:' -A8 "$chart/values.yaml" && \
+   sed -n '/^loopKinds:/,/^[a-z]/p' "$chart/values.yaml" | grep -q '^  - build$'; then
+  echo "  FAIL: the chart's DEFAULT loopKinds offers build"
+  fail=1
+else
+  echo "  ok:   build is not a default"
 fi
 
 if [ "$fail" -ne 0 ]; then

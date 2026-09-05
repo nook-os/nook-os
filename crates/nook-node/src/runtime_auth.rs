@@ -36,6 +36,10 @@ struct Adapter {
     /// The allowlisted LOGIN subcommand — the flow the Authorize button runs in
     /// a session (MAIN-126). Fixed here; never taken from the wire.
     login: &'static str,
+    /// Argv for driving this login with PIPES instead of a terminal, when the
+    /// runtime supports it (MAIN-650). `None` means the only way to sign this
+    /// runtime in is a session.
+    managed_login: Option<&'static str>,
     parse: fn(code: Option<i32>, output: &str) -> (AuthState, Option<String>),
     /// Which stream carries this runtime's status text.
     ///
@@ -82,6 +86,13 @@ const ADAPTERS: &[Adapter] = &[
         runtime: "claude",
         probe: "auth status",
         login: "auth login",
+        // The MANAGED form: no TTY, and pinned to the subscription flow.
+        //
+        // `--claudeai` is not a nicety. Bare `auth login` offers a console
+        // (API-billing) alternative, and this fleet's rule is subscription
+        // login only — a flow nobody is watching must not be able to take the
+        // other branch.
+        managed_login: Some("auth login --claudeai"),
         parse: parse_claude,
         status_on_stderr: false,
         credential: Some(CredentialRule {
@@ -98,6 +109,7 @@ const ADAPTERS: &[Adapter] = &[
         // Present so the older per-node path stays uniform; the epic obtains
         // codex's credential from the CONTROL PLANE and delivers it (MAIN-291
         // NG-1), so nothing routine runs this.
+        managed_login: None,
         login: "login --device-auth",
         parse: parse_codex,
         // Measured on codex-cli 0.145.0: `login status` goes to stderr.
@@ -113,6 +125,7 @@ const ADAPTERS: &[Adapter] = &[
         label: "Hermes → Nous Portal",
         runtime: "hermes",
         probe: "portal status",
+        managed_login: None,
         login: "setup --portal",
         parse: parse_hermes_portal,
         status_on_stderr: false,
@@ -125,6 +138,14 @@ const ADAPTERS: &[Adapter] = &[
 /// The allowlisted login subcommand for a runtime, if we know one — the ONLY
 /// thing a node will run for an authorize request, chosen here and never from
 /// the wire (MAIN-126). `None` for an unknown runtime → refuse to launch.
+/// Argv for the piped, terminal-free login, when this runtime has one.
+pub fn managed_login_args(runtime: &str) -> Option<&'static str> {
+    ADAPTERS
+        .iter()
+        .find(|a| a.runtime == runtime)
+        .and_then(|a| a.managed_login)
+}
+
 pub fn login_args(runtime: &str) -> Option<&'static str> {
     ADAPTERS
         .iter()
@@ -164,6 +185,30 @@ pub fn credential_path(runtime: &str) -> Option<PathBuf> {
         _ => PathBuf::from(std::env::var("HOME").ok()?).join(rule.default_dir),
     };
     Some(dir.join(rule.file))
+}
+
+/// The FILE NAME a runtime's credential is known by, with no directory.
+///
+/// A Pod executor needs exactly this and not [`credential_path`]: the
+/// credential goes into a Secret, and the key it is stored under has to be the
+/// name the runtime will look for once that Secret is projected into a job Pod.
+/// Same table, so the two destinations cannot disagree about what the file is
+/// called (MAIN-650).
+pub fn credential_file(runtime: &str) -> Option<&'static str> {
+    ADAPTERS
+        .iter()
+        .find(|a| a.runtime == runtime)
+        .and_then(|a| a.credential.as_ref())
+        .map(|rule| rule.file)
+}
+
+/// The credential this node holds for `runtime`, as bytes, if there is one.
+///
+/// The read half of [`install_credential`], for the executor that has to
+/// PUBLISH what a login on this machine produced (MAIN-650). Same table, so it
+/// cannot read from somewhere the writer would not have written.
+pub fn credential_bytes(runtime: &str) -> Option<Vec<u8>> {
+    std::fs::read(credential_path(runtime)?).ok()
 }
 
 /// Install a credential payload where `runtime` expects it (MAIN-283 AC-2).
@@ -269,6 +314,13 @@ pub fn probe_all() -> Vec<AuthProfile> {
 /// last would flip the dispatcher's gate at random.
 #[cfg(feature = "kubernetes")]
 fn delivered_by_executor(probed: Vec<AuthProfile>) -> Vec<AuthProfile> {
+    // Publish what this node holds, if it changed (MAIN-650). Here because this
+    // is the ONE place all three probe pushes pass through — the connect, a
+    // credential delivery, and an authorize session ending — so a login
+    // performed by any of them reaches job Pods without a fourth call site to
+    // keep in step. Cheap and idempotent: a local read and a hash compare, and
+    // the apiserver only when the bytes actually differ.
+    crate::k8s_exec::spawn_credential_sync();
     match crate::k8s_exec::ExecutorConfig::from_env() {
         Ok(Some(cfg)) => crate::k8s_exec::delivered_runtime_auth(probed, &cfg),
         // Not a Pod executor, or one so misconfigured it will run nothing —
@@ -315,6 +367,11 @@ fn profile_for(a: &Adapter) -> AuthProfile {
         runtime: a.runtime.into(),
         state,
         identity,
+        // A session on this machine is the right flow by default — it is the
+        // only one for a runtime with no device-flow descriptor. The executor
+        // overrides it where a terminal here would sign in the wrong place
+        // (`delivered_by_executor`).
+        device_flow: false,
     }
 }
 

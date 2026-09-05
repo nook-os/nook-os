@@ -37,6 +37,27 @@ rules:
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
+{{- with .Values.executor.credentialsSecret }}
+  # ONE Secret, BY NAME (MAIN-650). The control plane runs the device
+  # authorization and hands this node the credential; on a host node that lands
+  # in a file, and here it has to land in the Secret job Pods mount — otherwise
+  # authorizing a cluster node writes a file nothing will ever open, and seeding
+  # the fleet stays a `kubectl` step performed with credentials obtained some
+  # other way.
+  #
+  # `resourceNames` is what keeps this from being "the node can read Secrets":
+  # every other Secret in this namespace is refused by the apiserver, not by our
+  # restraint. No `list` and no `watch` — both ignore `resourceNames`, so either
+  # would hand over the whole namespace through the back door.
+  #
+  # In substance this grants nothing new: the node is already given this exact
+  # credential by the delivery it is answering. It is now allowed to put it
+  # where its own jobs can read it.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ . | quote }}]
+    verbs: ["get", "create", "patch"]
+{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

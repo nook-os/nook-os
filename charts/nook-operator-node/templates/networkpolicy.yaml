@@ -57,6 +57,32 @@ spec:
         - protocol: TCP
           port: {{ .Values.networkPolicy.controlPlane.port }}
     {{- end }}
+    {{- if eq .Values.executor.mode "kubernetes" }}
+    {{- if not .Values.networkPolicy.apiServer.cidrs }}
+    {{- fail "executor.mode=kubernetes needs networkPolicy.apiServer.cidrs: the node creates job Pods through the Kubernetes API, and the apiserver answers on a PRIVATE address that networkPolicy.deniedCIDRs severs. Without it the node joins, reports healthy, and then every call fails with \"cannot reach the Kubernetes API server\". Use the SERVICE ENDPOINTS, not the ClusterIP -- a CNI that translates ClusterIP to backend before evaluating policy (Cilium does) never matches a rule naming the ClusterIP:  kubectl get endpointslice -n default -l kubernetes.io/service-name=kubernetes -o jsonpath='{.items[*].endpoints[*].addresses[*]}'  (append /32 to each). Add the ClusterIP too for a CNI that evaluates before translation. Or set networkPolicy.enabled=false." }}
+    {{- end }}
+    # The apiserver. This node's whole job in `kubernetes` mode is creating Pods
+    # through it, and it answers only on a private address — exactly what the
+    # deny list below removes.
+    #
+    # A LIST, and it must contain the Service's ENDPOINTS rather than only its
+    # ClusterIP. Under a CNI that DNATs the ClusterIP before evaluating policy
+    # — Cilium, which DOKS ships — the packet is already addressed to the
+    # backend when the rule is tested, so a rule naming the ClusterIP matches
+    # nothing and the failure looks exactly like a missing rule. Naming both
+    # covers either evaluation order.
+    #
+    # Narrow on purpose: individual addresses, not the service CIDR, because
+    # everything else in that range is other people's workloads.
+    - to:
+        {{- range .Values.networkPolicy.apiServer.cidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.apiServer.port }}
+    {{- end }}
     {{- range .Values.networkPolicy.additionalAllowedCIDRs }}
     # An explicit hole for something the deny list would otherwise sever —
     # typically a control plane that is only reachable on a private address.

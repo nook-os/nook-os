@@ -66,9 +66,26 @@ spec:
               value: "1"
             # The loop stages it runs, and how many at once (MAIN-142).
             - name: NOOK_LOOP_KINDS
+              {{- if and (has "build" .Values.loopKinds) (not (and .Values.executor.buildPool.selector .Values.executor.buildPool.taint)) }}
+              {{- fail "loopKinds includes \"build\" but executor.buildPool is not set. A build agent is privileged; without a pool of its own it would share a machine with other tenants' work, and the control plane refuses build work on a shared operator that has no isolated pool (MAIN-655). Set executor.buildPool.selector AND .taint." }}
+              {{- end }}
+              {{- if and (has "build" .Values.loopKinds) (ne .Values.executor.mode "kubernetes") }}
+              {{- fail "loopKinds includes \"build\" but executor.mode is not \"kubernetes\". A containerised node mounts no Docker socket, so it cannot run a build in-process at all — builds here exist only as Pods of their own." }}
+              {{- end }}
               value: {{ join "," .Values.loopKinds | quote }}
             - name: NOOK_MAX_LOOP_JOBS
               value: {{ .Values.maxLoopJobs | quote }}
+            # The runtime's own credential directory, on the CONFIG volume so a
+            # sign-in survives a restart (MAIN-650).
+            #
+            # `claude` writes to $HOME/.claude by default, which is the
+            # container's ephemeral layer: an operator signed the node in, the
+            # pod restarted for any reason, and it was silently signed out
+            # again — on a StatefulSet whose whole promise is that identity
+            # survives. It belongs beside node.toml, which is the other
+            # credential this node cannot be re-derived without.
+            - name: CLAUDE_CONFIG_DIR
+              value: /root/.config/nook/claude
             # tmux runtime dir on its own volume (AC-2). tmux honours TMUX_TMPDIR.
             - name: TMUX_TMPDIR
               value: /var/lib/nook/tmux
@@ -80,7 +97,7 @@ spec:
             - name: NOOK_EXECUTOR_NAMESPACE
               value: {{ .Values.executor.namespace | quote }}
             - name: NOOK_JOB_IMAGE
-              value: {{ required "executor.image is required when executor.mode=kubernetes — a default here would be this chart guessing at a registry, and a wrong guess fails at ImagePullBackOff long after the install reported success" .Values.executor.image | quote }}
+              value: {{ include "nook-operator-node.jobImage" . | quote }}
             {{- with .Values.executor.credentialsSecret }}
             # A hand-created Secret: read as the job Pod's environment (AC-10)
             # and copied into the writable CLAUDE_CONFIG_DIR, which is what

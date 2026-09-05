@@ -45,6 +45,16 @@ fn shared_operator_clause(engine: nook_db::Engine) -> String {
         &json(engine).literal("{\"shared_operator\":true}"),
     )
 }
+
+/// The `isolated_builds` containment test (MAIN-655) — the node says a build
+/// here lands on a pool of its own. Written as containment like the clause
+/// above, so a node that never reported the field reads as false.
+fn isolated_builds_clause(engine: nook_db::Engine) -> String {
+    json(engine).contains(
+        "capabilities",
+        &json(engine).literal("{\"isolated_builds\":true}"),
+    )
+}
 use crate::error::ApiResult;
 
 /// Who may use a node, as the sharing and authorization checks need it.
@@ -344,6 +354,15 @@ pub trait NodeRepository: Send + Sync {
     /// Is this node a shared operator? The wall's own question, asked of the
     /// stored row rather than of anything a caller passes in (MAIN-142 AC-3/AC-4).
     async fn is_shared_operator(&self, id: NodeId) -> ApiResult<bool>;
+
+    /// Whether this node runs builds on a dedicated pool (MAIN-655) — an
+    /// in-cluster executor with both halves of a build pool configured.
+    ///
+    /// The one capability that WIDENS what a node may be given, so it is read
+    /// here rather than inferred from `loop_kinds`: the node's kind list is a
+    /// filter the control plane applies, never a permission it takes on trust,
+    /// and this has to stay a separate question from "what did you ask for".
+    async fn runs_isolated_builds(&self, id: NodeId) -> ApiResult<bool>;
 
     /// The loop kinds a node declares, and the cap it reports. `None` capacity
     /// means an older node that never reported one.
@@ -1159,6 +1178,20 @@ impl NodeRepository for DbNodeRepository {
                 &format!(
                     "SELECT {} FROM nodes WHERE id = $1",
                     shared_operator_clause(self.db.engine())
+                ),
+                params![id],
+            )
+            .await?
+            .unwrap_or(false))
+    }
+
+    async fn runs_isolated_builds(&self, id: NodeId) -> ApiResult<bool> {
+        Ok(self
+            .db
+            .query_scalar_opt::<bool>(
+                &format!(
+                    "SELECT {} FROM nodes WHERE id = $1",
+                    isolated_builds_clause(self.db.engine())
                 ),
                 params![id],
             )
@@ -2493,6 +2526,19 @@ impl NodeRepository for FakeNodeRepository {
             .iter()
             .find(|n| n.node.id == id)
             .and_then(|n| n.node.capabilities.get("shared_operator"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false))
+    }
+
+    async fn runs_isolated_builds(&self, id: NodeId) -> ApiResult<bool> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .nodes
+            .iter()
+            .find(|n| n.node.id == id)
+            .and_then(|n| n.node.capabilities.get("isolated_builds"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false))
     }

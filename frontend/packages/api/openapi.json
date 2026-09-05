@@ -3155,6 +3155,104 @@
         }
       }
     },
+    "/api/v1/nodes/{id}/managed-login": {
+      "post": {
+        "tags": [
+          "crate::routes::runtime_auth"
+        ],
+        "summary": "Start a MANAGED login on one node (MAIN-650).",
+        "description": "The third way to authorize a runtime, and the one a Kubernetes install\nneeds. `POST /runtime-auth` requires a provider whose OAuth client this\ndeployment can be, which a Claude subscription is not. `POST\n/nodes/{id}/authorize` works but puts a terminal in front of a person. This\nruns the runtime's own login on the node with pipes, and hands the UI a link\nand — when the runtime asks for one — a box.\n\nSame authorization rule as its two siblings: a personal machine is its\nowner's alone, a shared or operator machine needs `node.manage`.",
+        "operationId": "start_managed_login",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Node id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuthorizeRuntimeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeAuthAccepted"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/nodes/{id}/managed-login/code": {
+      "post": {
+        "tags": [
+          "crate::routes::runtime_auth"
+        ],
+        "summary": "Hand a pasted code to a managed login in progress.",
+        "operationId": "submit_managed_login_code",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Node id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManagedLoginCodeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": ""
+          },
+          "400": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/nodes/{id}/placement": {
       "get": {
         "tags": [
@@ -10797,6 +10895,10 @@
           "state"
         ],
         "properties": {
+          "device_flow": {
+            "type": "boolean",
+            "description": "Authorize this by the control plane's DEVICE FLOW rather than by opening\na login session on the node (MAIN-650).\n\nTrue where a session on the machine would authorize the wrong thing. On\na Pod executor the agent is a Pod elsewhere in the cluster and reads only\nthe credential Secret, so `claude /login` in a terminal on the node signs\nin a container nothing will ever run work in — which is what the node\nsettings page did, and why authorizing a cluster node appeared to work\nand changed nothing.\n\nFalse for a host node, where the session flow is right and remains the\ndefault: it is the only path for a runtime with no device-flow\ndescriptor."
+          },
           "id": {
             "type": "string",
             "description": "Stable identifier, e.g. `claude` or `hermes-portal`."
@@ -11527,6 +11629,10 @@
           },
           "hostname": {
             "type": "string"
+          },
+          "isolated_builds": {
+            "type": "boolean",
+            "description": "Whether a BUILD here would run isolated on a dedicated node pool\n(MAIN-655): an in-cluster executor with `executor.buildPool` set, so a\nprivileged build Pod lands on tainted nodes that nothing else tolerates.\n\nThis is the one capability that OPENS a gate rather than narrowing one —\n`kind_wall_refusal` lets a shared operator take build work when it is\ntrue. It is the node's own report, at exactly the trust level\n[`Self::sandbox`] already carries: the dispatcher fails closed on that\ntoo, and a host node that claims no sandbox is sent no loop work at all.\nWhat makes it safe is not the claim but the shape it claims — a build\nPod on a pool nothing else schedules onto cannot reach another tenant's\nwork, which is the thing the wall existed to prevent.\n\nFalse on every node that predates the field, so an upgrade never turns\nthe wall off by omission."
           },
           "loop_kinds": {
             "type": "array",
@@ -14873,6 +14979,27 @@
             "type": "integer",
             "format": "int64",
             "description": "Monotonic: bumped when a newer shipped default refreshes the row (or, in\na later sub-ticket, when an operator edits it)."
+          }
+        }
+      },
+      "ManagedLoginCodeRequest": {
+        "type": "object",
+        "description": "The code an operator pasted back, for one flow.",
+        "required": [
+          "flow_id",
+          "runtime",
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "flow_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "runtime": {
+            "type": "string"
           }
         }
       },
@@ -20028,6 +20155,98 @@
                 "type": "string",
                 "enum": [
                   "runtime_auth_prompt"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A managed login is waiting on a person (MAIN-650).\n\nSeparate from [`Self::RuntimeAuthPrompt`] because the two ask for\ndifferent things: a device flow shows a code to TYPE somewhere else,\nthis shows a link to open and takes a code BACK. Overloading one on the\nother would give the panel a code field it must not display and a URL\nfield doing double duty.",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "A managed login is waiting on a person (MAIN-650).\n\nSeparate from [`Self::RuntimeAuthPrompt`] because the two ask for\ndifferent things: a device flow shows a code to TYPE somewhere else,\nthis shows a link to open and takes a code BACK. Overloading one on the\nother would give the panel a code field it must not display and a URL\nfield doing double duty.",
+                "required": [
+                  "flow_id",
+                  "node_id",
+                  "runtime",
+                  "url",
+                  "wants_code"
+                ],
+                "properties": {
+                  "flow_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "node_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "runtime": {
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string",
+                    "description": "Printed by the runtime itself, so it carries that runtime's own\nclient id and scopes. Nothing here composes an OAuth URL."
+                  },
+                  "wants_code": {
+                    "type": "boolean",
+                    "description": "The runtime is waiting for a code to be pasted back."
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "managed_login_prompt"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A managed login ended (MAIN-650). `error` absent means the runtime wrote\nits credential — and on a Pod executor the node has already published it\nto the Secret its job Pods read.",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "A managed login ended (MAIN-650). `error` absent means the runtime wrote\nits credential — and on a Pod executor the node has already published it\nto the Secret its job Pods read.",
+                "required": [
+                  "flow_id",
+                  "node_id",
+                  "runtime"
+                ],
+                "properties": {
+                  "error": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "flow_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "node_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "runtime": {
+                    "type": "string"
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "managed_login_finished"
                 ]
               }
             }

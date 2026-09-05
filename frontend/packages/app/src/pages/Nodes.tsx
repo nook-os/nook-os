@@ -11,7 +11,7 @@ import {
   SquareTerminal,
   Trash2,
 } from "lucide-react";
-import { api, type NodeInfo } from "@nookos/api";
+import { api, type NodeInfo, type AuthProfile } from "@nookos/api";
 import {
   Empty,
   Panel,
@@ -24,7 +24,7 @@ import {
 } from "@nookos/ui";
 import { AgentVersion, NodeFacts, useControlPlaneVersion } from "../NodeFacts";
 import { usePagedList } from "../paging";
-import { askConfirm, notify } from "../dialogs";
+import { askConfirm, CopyRow, notify } from "../dialogs";
 import { useLive } from "../live";
 import { AddNodeModal } from "../AddNodeModal";
 import { NodePlacement } from "../NodePlacement";
@@ -405,14 +405,43 @@ export function NodesPage() {
   );
 }
 
-/** One agent-authorization profile the node reported. */
-type AuthProfile = {
-  id: string;
-  label: string;
-  runtime: string;
-  state: "authorized" | "not_authorized" | "unknown" | "unavailable";
-  identity?: string | null;
-};
+/** One numbered step in the sign-in modal. The number and the tick carry the
+ *  progress, so the panel says where you are without a paragraph about it. */
+function Step({
+  n,
+  done,
+  children,
+}: {
+  n: number;
+  done?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+      <span
+        className={done ? "ok mono" : "muted mono"}
+        style={{ minWidth: "1.4em" }}
+      >
+        {done ? "✓" : n}
+      </span>
+      <span>{children}</span>
+    </div>
+  );
+}
+
+/** Runtimes whose login the node can drive without a terminal (MAIN-650).
+ *  Mirrors `runtime_auth::managed_login_args` on the node; a runtime absent
+ *  here falls back to the session flow, which is still the only path for one
+ *  that cannot be piped. */
+const MANAGED_LOGIN_RUNTIMES = ["claude"];
+
+/** One agent-authorization profile the node reported.
+ *
+ *  The GENERATED type, not a hand-written twin: this was a copy, and it drifted
+ *  the moment the node grew a field — `device_flow` existed in the schema and
+ *  not here, so the page could not see the one fact that decides which
+ *  authorization flow is correct (MAIN-650). */
+
 
 const AUTH_TONE: Record<AuthProfile["state"], "ok" | "warn" | "dim"> = {
   authorized: "ok",
@@ -433,6 +462,8 @@ const AUTH_LABEL: Record<AuthProfile["state"], string> = {
  *  is the follow-up (AC-2/AC-4). */
 function AgentAuthPanel({ node }: { node: { id: string; capabilities: unknown } }) {
   const navigate = useNavigate();
+  const flow = useLive((s) => s.runtimeAuth);
+  const [pastedCode, setPastedCode] = useState("");
   const profiles =
     ((node.capabilities as { runtime_auth?: AuthProfile[] })?.runtime_auth ?? []);
 
@@ -440,6 +471,44 @@ function AgentAuthPanel({ node }: { node: { id: string; capabilities: unknown } 
   // (MAIN-126 AC-2). A warning first, because on a shared machine the credential
   // becomes usable by everyone allowed to run there.
   const authorize = async (p: AuthProfile) => {
+    // Two flows, and which one is right is a property of the NODE, not a
+    // preference (MAIN-650). On a Pod executor the agent is a Pod elsewhere in
+    // the cluster and reads only the credential Secret, so a terminal here
+    // would sign in a container that runs no work — the login appears to
+    // succeed and changes nothing. Such a node asks for the control plane's
+    // device flow, which delivers the credential to where jobs actually read
+    // it.
+    // The managed login: the node runs the runtime's own sign-in with pipes and
+    // reports the link, so the operator gets a link and a box instead of a
+    // terminal. Preferred wherever the runtime supports it — a session is a
+    // heavy answer to "open this and paste what it gives you".
+    if (MANAGED_LOGIN_RUNTIMES.includes(p.runtime)) {
+      const ok = await askConfirm({
+        title: `Authorize ${p.label}?`,
+        description:
+          "Signs in through your browser — the link appears here and you paste the code back. On shared substrate the credential is usable by every workload allowed to run there.",
+        confirmLabel: "start sign-in",
+      });
+      if (!ok) return;
+      useLive.setState({
+        runtimeAuth: { flowId: "", runtime: p.runtime, state: "starting" },
+      });
+      const { data, error } = await api.POST("/api/v1/nodes/{id}/managed-login", {
+        params: { path: { id: node.id } },
+        body: { runtime: p.runtime },
+      });
+      if (error || !data) {
+        useLive.setState({ runtimeAuth: null });
+        await notify("Couldn't start sign-in", JSON.stringify(error));
+        return;
+      }
+      useLive.setState({
+        runtimeAuth: { flowId: data.flow_id, runtime: p.runtime, state: "starting" },
+      });
+      // The link arrives as a `managed_login_prompt` event and renders below.
+      return;
+    }
+
     const ok = await askConfirm({
       title: `Authorize ${p.label}?`,
       description:
@@ -463,6 +532,137 @@ function AgentAuthPanel({ node }: { node: { id: string; capabilities: unknown } 
 
   return (
     <Panel title="Agent authorization">
+      {flow && (
+        <div
+          className="modal-backdrop dialog-backdrop"
+          onMouseDown={() => {
+            // Only when the flow has settled: dismissing mid-exchange would
+            // strand a login the node is still waiting on.
+            if (flow.state === "delivered" || flow.state === "failed")
+              useLive.setState({ runtimeAuth: null });
+          }}
+        >
+          <div
+            className="modal dialog"
+            role="dialog"
+            aria-modal="true"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div className="modal-header">Sign in to {flow.runtime}</div>
+            <div className="modal-body">
+              {flow.state === "starting" && (
+                <p className="muted small">
+                  Starting the sign-in on this node — waiting for the link…
+                </p>
+              )}
+
+              {(flow.state === "prompt" || flow.state === "submitting") && (
+                <>
+                  <Step n={1} done>
+                    Open this page and approve the sign-in.
+                  </Step>
+                  <div style={{ margin: "6px 0 14px" }}>
+                    <CopyRow value={flow.verificationUri ?? ""} />
+                    <a
+                      className="small"
+                      href={flow.verificationUri}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      open in a new tab ↗
+                    </a>
+                  </div>
+
+                  <Step n={2} done={flow.state === "submitting"}>
+                    {flow.wantsCode
+                      ? "Paste the code that page gives you."
+                      : "Waiting for the page to ask for a code…"}
+                  </Step>
+
+                  {flow.wantsCode && (
+                    <form
+                      style={{ display: "flex", gap: 8, margin: "6px 0 4px" }}
+                      onSubmit={async (e) => {
+                        e.preventDefault();
+                        const code = pastedCode.trim();
+                        if (!code || flow.state === "submitting") return;
+                        setPastedCode("");
+                        useLive.setState((st) => ({
+                          runtimeAuth: st.runtimeAuth
+                            ? { ...st.runtimeAuth, state: "submitting" }
+                            : null,
+                        }));
+                        const { error } = await api.POST(
+                          "/api/v1/nodes/{id}/managed-login/code",
+                          {
+                            params: { path: { id: node.id } },
+                            body: { flow_id: flow.flowId, runtime: flow.runtime, code },
+                          },
+                        );
+                        if (error) {
+                          useLive.setState((st) => ({
+                            runtimeAuth: st.runtimeAuth
+                              ? {
+                                  ...st.runtimeAuth,
+                                  state: "failed",
+                                  error: JSON.stringify(error),
+                                }
+                              : null,
+                          }));
+                        }
+                      }}
+                    >
+                      <input
+                        className="mono"
+                        style={{ flex: 1 }}
+                        autoFocus
+                        disabled={flow.state === "submitting"}
+                        placeholder="paste the code here"
+                        value={pastedCode}
+                        onChange={(e) => setPastedCode(e.target.value)}
+                      />
+                      <button
+                        className="btn primary small"
+                        type="submit"
+                        disabled={flow.state === "submitting" || !pastedCode.trim()}
+                      >
+                        {flow.state === "submitting" ? "signing in…" : "send"}
+                      </button>
+                    </form>
+                  )}
+
+                  {flow.state === "submitting" && (
+                    <p className="muted small">
+                      Sent. Waiting for {flow.runtime} to finish signing in — this
+                      usually takes a few seconds.
+                    </p>
+                  )}
+                </>
+              )}
+
+              {flow.state === "delivered" && (
+                <p>
+                  <strong>Signed in.</strong> The credential is on this node, and
+                  an in-cluster executor has published it for its job Pods.
+                </p>
+              )}
+              {flow.state === "failed" && (
+                <p className="warn">Sign-in failed: {flow.error}</p>
+              )}
+            </div>
+            <div className="modal-footer">
+              <button
+                className="btn small"
+                onClick={() => useLive.setState({ runtimeAuth: null })}
+              >
+                {flow.state === "delivered" || flow.state === "failed"
+                  ? "close"
+                  : "cancel"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {profiles.length === 0 ? (
         <Empty>
           No agent runtimes to authorize on this machine — install claude or

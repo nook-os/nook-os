@@ -72,6 +72,36 @@ networkPolicy:
   # no warning from Kubernetes. See the chart README.
   enabled: true
 
+  # How this node reaches the Kubernetes API, and REQUIRED when
+  # `executor.mode=kubernetes` (MAIN-650).
+  #
+  # In that mode the node's entire job is creating job Pods through the
+  # apiserver — and the apiserver answers on a private address, which
+  # `deniedCIDRs` below severs. The node still joins and still reports healthy,
+  # so the symptom is every reconcile failing with "cannot reach the Kubernetes
+  # API server" long after the install said it worked. The chart refuses to
+  # render rather than ship that.
+  #
+  #   kubectl get svc kubernetes -n default -o jsonpath='{.spec.clusterIP}'
+  #
+  # One address, not the service CIDR: the rest of that range is other people's
+  # workloads, and this node has no business reaching them.
+  apiServer:
+    # The apiserver's ENDPOINTS, /32 each — not the `kubernetes` Service's
+    # ClusterIP alone. Under a CNI that translates ClusterIP to backend before
+    # evaluating policy (Cilium, which DOKS ships) a rule naming the ClusterIP
+    # is never matched, and the symptom is indistinguishable from having set
+    # nothing at all.
+    #
+    #   kubectl get endpointslice -n default \
+    #     -l kubernetes.io/service-name=kubernetes \
+    #     -o jsonpath='{.items[*].endpoints[*].addresses[*]}'
+    #
+    # Include the ClusterIP as well; it is harmless where it is not needed and
+    # required by a CNI that evaluates policy before translation.
+    cidrs: []
+    port: 443
+
   # Private ranges subtracted from the `0.0.0.0/0` egress allowance. The
   # defaults cover RFC1918, link-local (which is where the cloud metadata
   # endpoint 169.254.169.254 lives) and the carrier-grade NAT range some
@@ -154,10 +184,25 @@ executor:
   # worth a namespace.
   namespace: nook-jobs
 
-  # The image a job Pod runs. No default: naming one here would be this chart
-  # guessing at a registry, and a wrong guess fails at ImagePullBackOff, long
-  # after the install reported success.
+  # The image a job Pod runs. Empty derives it from `image.registry`,
+  # `imageRepository` below and this chart's appVersion — the same way the
+  # node's own image is derived, and correct because the release workflow
+  # publishes the sandbox in lockstep with the node at every version.
+  #
+  # It used to be `required`, on the reasoning that a default would be this
+  # chart guessing at a registry. But the chart already names
+  # `ghcr.io/nook-os/nook-operator-node` for itself two blocks up, so the guess
+  # was being made either way — and leaving THIS one blank did not avoid a bad
+  # install, it just moved the failure to `helm install` and made
+  # `executor.mode=kubernetes` unusable without a value nobody could look up.
+  #
+  # Set it explicitly for a private registry, or for a sandbox built from
+  # `scripts/build-job-sandbox.sh`.
   image: ""
+
+  # Where the job sandbox lives, when `image` above is empty. Split out so a
+  # mirror only has to restate the path, not the whole reference with its tag.
+  imageRepository: nook-os/nook-job-sandbox
 
   # The ServiceAccount the agent uses to talk to the apiserver. Created by this
   # chart unless `create: false`, which is for a cluster whose accounts are

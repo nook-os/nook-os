@@ -199,6 +199,26 @@ pub enum NodeToControl {
         #[serde(default)]
         error: Option<String>,
     },
+    /// The link a managed login is waiting on (MAIN-650). Scraped from the
+    /// runtime's own stdout, so it carries whatever client id and scopes that
+    /// runtime uses — this end invents no OAuth parameters.
+    ManagedLoginPrompt {
+        flow_id: uuid::Uuid,
+        runtime: String,
+        url: String,
+        /// True when the runtime is waiting for a code to be pasted back, which
+        /// is what tells the UI to offer the box rather than only the link.
+        wants_code: bool,
+    },
+    /// A managed login ended. `error` present means it failed; absent means the
+    /// runtime wrote its credential, and on a Pod executor the node has already
+    /// published it to the Secret its job Pods read.
+    ManagedLoginFinished {
+        flow_id: uuid::Uuid,
+        runtime: String,
+        #[serde(default)]
+        error: Option<String>,
+    },
     /// A session could not be started at all — the checkout is gone, the
     /// runtime isn't installed, tmux refused. Distinct from `Error` because it
     /// names the session, so the control plane can fail that row instead of
@@ -622,6 +642,37 @@ pub enum ControlToNode {
         /// The credential bytes, base64 so the frame stays JSON-safe whatever
         /// the runtime's file format is.
         payload_b64: String,
+    },
+    /// Drive a runtime's own login as a MANAGED PROCESS, so the operator gets a
+    /// link and a text box instead of a terminal (MAIN-650).
+    ///
+    /// The middle ground the other two miss. `InstallRuntimeCredential` needs a
+    /// provider whose client the control plane can be, which for a Claude
+    /// subscription it cannot: that login is `claude`'s own OAuth client doing a
+    /// PKCE exchange. `StartAuthSession` works but puts a tmux terminal in front
+    /// of a person for what is, in substance, "open this link and paste what it
+    /// gives you back".
+    ///
+    /// So the node runs the login itself with pipes rather than a pty —
+    /// verified: `claude auth login --claudeai` with no TTY prints the
+    /// authorize URL on stdout and then reads the code from stdin — and reports
+    /// the URL for the UI to render. The node picks the command from the same
+    /// fixed per-runtime table `StartAuthSession` uses; `runtime` is a key into
+    /// it and never a command from the wire.
+    StartManagedLogin {
+        runtime: String,
+        /// Correlates the prompt, the code and the outcome. The control plane's,
+        /// so a reply cannot claim a flow it was not started for.
+        flow_id: uuid::Uuid,
+    },
+    /// The code the operator pasted back, for a flow this node is running.
+    SubmitManagedLoginCode {
+        flow_id: uuid::Uuid,
+        code: String,
+    },
+    /// Give up on a flow — the operator closed the panel, or it expired.
+    CancelManagedLogin {
+        flow_id: uuid::Uuid,
     },
     /// Start a runtime's LOGIN flow in a session, so a headless node can be
     /// authorized from the UI (MAIN-126). The node — never the caller — chooses
@@ -1055,6 +1106,33 @@ pub enum UiEvent {
         /// rather than leave a dead code on screen.
         expires_in_secs: u64,
     },
+    /// A managed login is waiting on a person (MAIN-650).
+    ///
+    /// Separate from [`Self::RuntimeAuthPrompt`] because the two ask for
+    /// different things: a device flow shows a code to TYPE somewhere else,
+    /// this shows a link to open and takes a code BACK. Overloading one on the
+    /// other would give the panel a code field it must not display and a URL
+    /// field doing double duty.
+    ManagedLoginPrompt {
+        flow_id: uuid::Uuid,
+        node_id: uuid::Uuid,
+        runtime: String,
+        /// Printed by the runtime itself, so it carries that runtime's own
+        /// client id and scopes. Nothing here composes an OAuth URL.
+        url: String,
+        /// The runtime is waiting for a code to be pasted back.
+        wants_code: bool,
+    },
+    /// A managed login ended (MAIN-650). `error` absent means the runtime wrote
+    /// its credential — and on a Pod executor the node has already published it
+    /// to the Secret its job Pods read.
+    ManagedLoginFinished {
+        flow_id: uuid::Uuid,
+        node_id: uuid::Uuid,
+        runtime: String,
+        #[serde(default)]
+        error: Option<String>,
+    },
     /// One node's outcome for a delivery (MAIN-290).
     ///
     /// Emitted per node, not once per flow: authorize-once/deliver-to-N means
@@ -1438,6 +1516,7 @@ mod wire_tests {
                 runtime: "claude".into(),
                 state: nook_types::AuthState::Authorized,
                 identity: Some("pm@example.com".into()),
+                device_flow: false,
             }],
         };
         let json = serde_json::to_value(&msg).unwrap();

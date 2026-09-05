@@ -1552,6 +1552,51 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/nodes/{id}/managed-login": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start a MANAGED login on one node (MAIN-650).
+         * @description The third way to authorize a runtime, and the one a Kubernetes install
+         *     needs. `POST /runtime-auth` requires a provider whose OAuth client this
+         *     deployment can be, which a Claude subscription is not. `POST
+         *     /nodes/{id}/authorize` works but puts a terminal in front of a person. This
+         *     runs the runtime's own login on the node with pipes, and hands the UI a link
+         *     and — when the runtime asks for one — a box.
+         *
+         *     Same authorization rule as its two siblings: a personal machine is its
+         *     owner's alone, a shared or operator machine needs `node.manage`.
+         */
+        post: operations["start_managed_login"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/nodes/{id}/managed-login/code": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Hand a pasted code to a managed login in progress. */
+        post: operations["submit_managed_login_code"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/nodes/{id}/placement": {
         parameters: {
             query?: never;
@@ -4623,6 +4668,22 @@ export interface components {
          *     supports here.
          */
         AuthProfile: {
+            /**
+             * @description Authorize this by the control plane's DEVICE FLOW rather than by opening
+             *     a login session on the node (MAIN-650).
+             *
+             *     True where a session on the machine would authorize the wrong thing. On
+             *     a Pod executor the agent is a Pod elsewhere in the cluster and reads only
+             *     the credential Secret, so `claude /login` in a terminal on the node signs
+             *     in a container nothing will ever run work in — which is what the node
+             *     settings page did, and why authorizing a cluster node appeared to work
+             *     and changed nothing.
+             *
+             *     False for a host node, where the session flow is right and remains the
+             *     default: it is the only path for a runtime with no device-flow
+             *     descriptor.
+             */
+            device_flow?: boolean;
             /** @description Stable identifier, e.g. `claude` or `hermes-portal`. */
             id: string;
             /** @description The signed-in account, when the probe reports one. */
@@ -5028,6 +5089,24 @@ export interface components {
             git?: string | null;
             gpus?: components["schemas"]["GpuInfo"][];
             hostname: string;
+            /**
+             * @description Whether a BUILD here would run isolated on a dedicated node pool
+             *     (MAIN-655): an in-cluster executor with `executor.buildPool` set, so a
+             *     privileged build Pod lands on tainted nodes that nothing else tolerates.
+             *
+             *     This is the one capability that OPENS a gate rather than narrowing one —
+             *     `kind_wall_refusal` lets a shared operator take build work when it is
+             *     true. It is the node's own report, at exactly the trust level
+             *     [`Self::sandbox`] already carries: the dispatcher fails closed on that
+             *     too, and a host node that claims no sandbox is sent no loop work at all.
+             *     What makes it safe is not the claim but the shape it claims — a build
+             *     Pod on a pool nothing else schedules onto cannot reach another tenant's
+             *     work, which is the thing the wall existed to prevent.
+             *
+             *     False on every node that predates the field, so an upgrade never turns
+             *     the wall off by omission.
+             */
+            isolated_builds?: boolean;
             /**
              * @description Which loop stages this node will execute (MAIN-142): any of `spec`,
              *     `decompose`, `review`, `epic-run`, `build`, `investigate`. Set by
@@ -6648,6 +6727,13 @@ export interface components {
              *     a later sub-ticket, when an operator edits it).
              */
             version: number;
+        };
+        /** @description The code an operator pasted back, for one flow. */
+        ManagedLoginCodeRequest: {
+            code: string;
+            /** Format: uuid */
+            flow_id: string;
+            runtime: string;
         };
         /**
          * @description What a MANAGED session exists to do (MAIN-326).
@@ -9483,6 +9569,48 @@ export interface components {
             };
             /** @enum {string} */
             type: "runtime_auth_prompt";
+        } | {
+            /**
+             * @description A managed login is waiting on a person (MAIN-650).
+             *
+             *     Separate from [`Self::RuntimeAuthPrompt`] because the two ask for
+             *     different things: a device flow shows a code to TYPE somewhere else,
+             *     this shows a link to open and takes a code BACK. Overloading one on the
+             *     other would give the panel a code field it must not display and a URL
+             *     field doing double duty.
+             */
+            data: {
+                /** Format: uuid */
+                flow_id: string;
+                /** Format: uuid */
+                node_id: string;
+                runtime: string;
+                /**
+                 * @description Printed by the runtime itself, so it carries that runtime's own
+                 *     client id and scopes. Nothing here composes an OAuth URL.
+                 */
+                url: string;
+                /** @description The runtime is waiting for a code to be pasted back. */
+                wants_code: boolean;
+            };
+            /** @enum {string} */
+            type: "managed_login_prompt";
+        } | {
+            /**
+             * @description A managed login ended (MAIN-650). `error` absent means the runtime wrote
+             *     its credential — and on a Pod executor the node has already published it
+             *     to the Secret its job Pods read.
+             */
+            data: {
+                error?: string | null;
+                /** Format: uuid */
+                flow_id: string;
+                /** Format: uuid */
+                node_id: string;
+                runtime: string;
+            };
+            /** @enum {string} */
+            type: "managed_login_finished";
         } | {
             /**
              * @description One node's outcome for a delivery (MAIN-290).
@@ -12885,6 +13013,92 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["NodePorts"];
                 };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    start_managed_login: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Node id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AuthorizeRuntimeRequest"];
+            };
+        };
+        responses: {
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeAuthAccepted"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    submit_managed_login_code: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Node id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ManagedLoginCodeRequest"];
+            };
+        };
+        responses: {
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             403: {
                 headers: {
