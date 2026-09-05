@@ -87,7 +87,19 @@ networkPolicy:
   # One address, not the service CIDR: the rest of that range is other people's
   # workloads, and this node has no business reaching them.
   apiServer:
-    cidr: ""
+    # The apiserver's ENDPOINTS, /32 each — not the `kubernetes` Service's
+    # ClusterIP alone. Under a CNI that translates ClusterIP to backend before
+    # evaluating policy (Cilium, which DOKS ships) a rule naming the ClusterIP
+    # is never matched, and the symptom is indistinguishable from having set
+    # nothing at all.
+    #
+    #   kubectl get endpointslice -n default \
+    #     -l kubernetes.io/service-name=kubernetes \
+    #     -o jsonpath='{.items[*].endpoints[*].addresses[*]}'
+    #
+    # Include the ClusterIP as well; it is harmless where it is not needed and
+    # required by a CNI that evaluates policy before translation.
+    cidrs: []
     port: 443
 
   # Private ranges subtracted from the `0.0.0.0/0` egress allowance. The

@@ -75,6 +75,17 @@ spec:
               value: {{ join "," .Values.loopKinds | quote }}
             - name: NOOK_MAX_LOOP_JOBS
               value: {{ .Values.maxLoopJobs | quote }}
+            # The runtime's own credential directory, on the CONFIG volume so a
+            # sign-in survives a restart (MAIN-650).
+            #
+            # `claude` writes to $HOME/.claude by default, which is the
+            # container's ephemeral layer: an operator signed the node in, the
+            # pod restarted for any reason, and it was silently signed out
+            # again — on a StatefulSet whose whole promise is that identity
+            # survives. It belongs beside node.toml, which is the other
+            # credential this node cannot be re-derived without.
+            - name: CLAUDE_CONFIG_DIR
+              value: /root/.config/nook/claude
             # tmux runtime dir on its own volume (AC-2). tmux honours TMUX_TMPDIR.
             - name: TMUX_TMPDIR
               value: /var/lib/nook/tmux

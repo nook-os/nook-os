@@ -20,7 +20,7 @@ min=(--set server=agent.nook.example.com:8081
 # kubernetes-mode render below carries it; the requirement itself is asserted
 # separately.
 k8smin=("${min[@]}" --set executor.mode=kubernetes
-        --set networkPolicy.apiServer.cidr=10.0.0.1/32)
+        --set 'networkPolicy.apiServer.cidrs={10.0.0.1/32,10.0.0.2/32}')
 
 echo "==> helm lint"
 helm lint "$chart" "${min[@]}"
@@ -213,6 +213,22 @@ kneed "logs are read-only"    '^    verbs: \["get"\]$' 1
 kneed "two rules and no more" '^  - apiGroups:' 2
 kneed "executor env"          'NOOK_EXECUTOR$' 1
 
+# The runtime's credential directory has to be on a VOLUME. `claude` defaults to
+# $HOME/.claude, which is the container's ephemeral layer — a sign-in there is
+# lost on the next restart, silently, on a StatefulSet that promises identity
+# survives one (MAIN-650).
+credir="$(grep -A1 'name: CLAUDE_CONFIG_DIR' <<<"$out" | awk '/value:/ {print $2}')"
+mounts="$(sed -n '/volumeMounts:/,/^          [a-z]/p' <<<"$out" | awk '/mountPath:/ {print $2}')"
+if [ -z "$credir" ]; then
+  echo "  FAIL: no CLAUDE_CONFIG_DIR — the runtime would write to an ephemeral \$HOME"
+  fail=1
+elif grep -qF "$(dirname "$credir")" <<<"$mounts"; then
+  echo "  ok:   the runtime credential dir sits on a persistent volume"
+else
+  echo "  FAIL: CLAUDE_CONFIG_DIR ${credir} is on no mounted volume — a restart signs the node out"
+  fail=1
+fi
+
 # The job image (MAIN-650). `executor.mode=kubernetes` used to be unusable
 # without an `executor.image` nobody could look up — the sandbox is published in
 # lockstep with the node, so it is derived from the same registry and version.
@@ -366,10 +382,14 @@ if render "${min[@]}" --set executor.mode=kubernetes >/dev/null 2>&1; then
 else
   echo "  ok:   kubernetes mode without an apiserver address is refused"
 fi
-if grep -qE "cidr: .10\.0\.0\.1/32." <<<"$(render "${k8smin[@]}")"; then
-  echo "  ok:   the apiserver hole renders as one address"
+# Both addresses, because the ClusterIP alone is the trap: a CNI that DNATs it
+# before evaluating policy never matches such a rule, and the failure is
+# indistinguishable from setting nothing (MAIN-650).
+apirule="$(render "${k8smin[@]}")"
+if grep -qE 'cidr: "10\.0\.0\.1/32"' <<<"$apirule" && grep -qE 'cidr: "10\.0\.0\.2/32"' <<<"$apirule"; then
+  echo "  ok:   every apiserver address renders"
 else
-  echo "  FAIL: the apiserver egress rule did not render"
+  echo "  FAIL: the apiserver egress rule did not render both addresses"
   fail=1
 fi
 # …and it is skipped entirely when the policy is off, rather than demanded.
