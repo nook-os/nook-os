@@ -166,6 +166,21 @@ pub fn credential_path(runtime: &str) -> Option<PathBuf> {
     Some(dir.join(rule.file))
 }
 
+/// The FILE NAME a runtime's credential is known by, with no directory.
+///
+/// A Pod executor needs exactly this and not [`credential_path`]: the
+/// credential goes into a Secret, and the key it is stored under has to be the
+/// name the runtime will look for once that Secret is projected into a job Pod.
+/// Same table, so the two destinations cannot disagree about what the file is
+/// called (MAIN-650).
+pub fn credential_file(runtime: &str) -> Option<&'static str> {
+    ADAPTERS
+        .iter()
+        .find(|a| a.runtime == runtime)
+        .and_then(|a| a.credential.as_ref())
+        .map(|rule| rule.file)
+}
+
 /// Install a credential payload where `runtime` expects it (MAIN-283 AC-2).
 ///
 /// The payload is **opaque** — this neither parses nor validates it. What is

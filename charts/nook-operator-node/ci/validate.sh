@@ -259,24 +259,55 @@ fi
 
 # The Role must NOT gain a secrets verb for this: the agent references a
 # hand-created Secret and never reads, writes or creates one.
-if grep -qE '^    resources: \[.*"secrets".*\]' <<<"$creds"; then
-  echo "  FAIL: the Role grants a secrets verb"
+# No credential Secret named ⇒ no secrets verb at all.
+if grep -qE '^    resources: \[.*"secrets".*\]' <<<"$k8s"; then
+  echo "  FAIL: the Role grants a secrets verb with no credentialsSecret named"
   fail=1
 else
-  echo "  ok:   no secrets verb"
+  echo "  ok:   no secrets verb by default"
 fi
 
-# MAIN-669 AC-3. Naming a Secret changes the JOB POD and must change nothing
-# about what the agent may do: the KUBELET resolves a mounted Secret, so the
-# closed verb list stays exactly what it was. Asserted as a diff of the two
-# renders' rules rather than as a repeat of the patterns above, so a verb added
-# to both would still be caught.
-rules() { sed -n '/^rules:/,/^---/p' <<<"$1"; }
-if diff <(rules "$k8s") <(rules "$creds") >/dev/null; then
-  echo "  ok:   a credential Secret adds no permission"
+# MAIN-650. Naming one DOES change the Role now, and the shape of that change is
+# the whole security argument: the control plane delivers the credential to this
+# node, and on a Pod executor the only place a job can read it is the Secret. So
+# the node may write that ONE Secret, by name.
+if grep -qE '^    resourceNames: \["nook-job-credentials"\]' <<<"$creds"; then
+  echo "  ok:   the secrets rule is pinned to the named Secret"
 else
-  echo "  FAIL: naming a credential Secret changed the Role"
-  diff <(rules "$k8s") <(rules "$creds") || true
+  echo "  FAIL: the secrets rule is not restricted by resourceNames"
+  fail=1
+fi
+# `list` and `watch` IGNORE resourceNames — either one turns "this Secret" into
+# "every Secret in the namespace" without looking like it.
+secrule="$(sed -n '/resources: \["secrets"\]/,/verbs:/p' <<<"$creds")"
+if grep -qE '"(list|watch|delete|deletecollection)"' <<<"$secrule"; then
+  echo "  FAIL: the secrets rule grants a verb resourceNames cannot restrict"
+  fail=1
+else
+  echo "  ok:   no list/watch on secrets"
+fi
+if grep -qE 'verbs: \["get", "create", "patch"\]' <<<"$secrule"; then
+  echo "  ok:   secrets verbs are exactly get/create/patch"
+else
+  echo "  FAIL: unexpected secrets verbs: $secrule"
+  fail=1
+fi
+# And the POD's own permissions are untouched — a mounted Secret is resolved by
+# the kubelet, so nothing about what the JOB may do has changed. Compared as the
+# resource/verb pairs that are not the secrets rule, so a verb quietly added to
+# the pods rule is still caught.
+podrules() {
+  # Drop the secrets stanza whole — it is three lines where a pods rule is two,
+  # so anything that pairs lines misaligns on it rather than ignoring it.
+  sed -n '/^rules:/,/^---/p' <<<"$1" \
+    | grep -E '^    (resources|verbs|resourceNames):' \
+    | awk '/"secrets"/ { skip = 3 } skip > 0 { skip--; next } { print }'
+}
+if diff <(podrules "$k8s") <(podrules "$creds") >/dev/null; then
+  echo "  ok:   naming a Secret adds no OTHER permission"
+else
+  echo "  FAIL: naming a credential Secret changed more than the secrets rule"
+  diff <(podrules "$k8s") <(podrules "$creds") | head -6
   fail=1
 fi
 

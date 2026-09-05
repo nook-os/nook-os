@@ -26,6 +26,7 @@
 pub mod config;
 pub mod error;
 pub mod pods;
+pub mod secrets;
 
 /// The API types a caller needs to BUILD what [`pods`] sends.
 ///
@@ -48,6 +49,7 @@ pub mod types {
 pub use config::{connect, resolve, Connection, Environment, Source, SERVICE_ACCOUNT_DIR};
 pub use error::{Error, Operation, Result};
 pub use pods::Pods;
+pub use secrets::Credentials;
 
 #[cfg(test)]
 mod guards;

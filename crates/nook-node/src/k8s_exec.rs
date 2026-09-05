@@ -841,6 +841,46 @@ pub fn delivered_runtime_auth(
         .collect()
 }
 
+/// Land a delivered credential in the Secret job Pods read (MAIN-650).
+///
+/// On a host node a delivered credential goes to a FILE, and the agent that
+/// reads it runs on that machine. Neither half is true here: the agent is a Pod
+/// somewhere else in the cluster, and the only thing it reads is the Secret this
+/// node names. So the same delivery has to end somewhere else, or authorizing a
+/// cluster node writes a file that nothing will ever open — which is exactly
+/// what it did, and why seeding this Secret was a `kubectl` step an operator had
+/// to perform with credentials they obtained some other way.
+///
+/// The payload stays opaque, as it is on the file path: what is decided here is
+/// the destination and the KEY, never the contents. The key is
+/// `runtime_auth::credential_file`'s, so the name in the Secret is the name the
+/// runtime will look for once it is projected into a Pod.
+///
+/// Returns where it went, for the delivery report an operator reads.
+pub async fn deliver_credential_to_secret(runtime: &str, payload: &[u8]) -> anyhow::Result<String> {
+    let cfg = ExecutorConfig::from_env()
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .ok_or_else(|| anyhow::anyhow!("this node is not a Pod executor"))?;
+    let secret = cfg.credentials_secret.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "this node names no executor.credentialsSecret, so a delivered credential has \
+             nowhere to go that a job would ever read"
+        )
+    })?;
+    let key = crate::runtime_auth::credential_file(runtime)
+        .ok_or_else(|| anyhow::anyhow!("no credential layout is known for runtime `{runtime}`"))?;
+
+    let conn = nook_k8s::connect().await?;
+    let creds = nook_k8s::Credentials::new(conn.client, &cfg.namespace, secret);
+    creds
+        .upsert(std::collections::BTreeMap::from([(
+            key.to_string(),
+            payload.to_vec(),
+        )]))
+        .await?;
+    Ok(format!("Secret {}/{} key {key}", cfg.namespace, secret))
+}
+
 /// Describe the Pod this job runs in.
 ///
 /// The three properties worth reading off the result, because they are the
