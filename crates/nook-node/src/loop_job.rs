@@ -2916,6 +2916,10 @@ fn run_in_pod(
         args: &args,
         repo_url: run.repo_url,
         branch: run.branch,
+        // The same `Option` `job_pod` mounts the credential volumes on, so the
+        // Pod that carries a seed is the Pod whose command copies it into the
+        // writable `CLAUDE_CONFIG_DIR` (MAIN-672 AC-1).
+        seeded_session: executor.credentials_secret.is_some(),
     });
 
     note(
@@ -3064,13 +3068,20 @@ async fn drive_pod(
     };
 
     let code = exec.await_exit(name).await;
+    let tail = tail
+        .lock()
+        .map(|t| t.iter().cloned().collect::<Vec<_>>().join("\n"))
+        .unwrap_or_default();
+    // MAIN-672 AC-5. The seed step runs before the agent does, so a Pod that
+    // ends this way ran nothing: the session it was given is already dead, which
+    // is the cluster's state and not the card's. A refusal, for AC-7's reason.
+    if let Some(refusal) = crate::k8s_exec::exit_refusal(code, &tail) {
+        return Err(refusal);
+    }
     Ok(AgentEnd {
         outcome,
         code,
-        tail: tail
-            .lock()
-            .map(|t| t.iter().cloned().collect::<Vec<_>>().join("\n"))
-            .unwrap_or_default(),
+        tail,
     }
     .conclude())
 }

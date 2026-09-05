@@ -275,6 +275,17 @@ readme_says "that it is scaffolding"       'scaffolding pending MAIN-337'
 readme_says "who can read it"              'readable by any agent this node runs'
 readme_says "subscription login only"      'never an API key'
 
+# MAIN-672 AC-4. What a refresh CANNOT persist is the one property of this
+# mechanism an operator cannot discover by reading the chart: the Pod's copy of
+# the session dies with the Pod, so a refreshed credential never reaches the
+# Secret and the Secret goes stale on its own schedule. Left unsaid, a fleet
+# that worked for a fortnight stops for a reason nobody can name.
+readme_says "that the session is a snapshot" 'A Pod-mounted session is a snapshot'
+readme_says "that nothing refreshes it"      '**Nothing refreshes the Secret.**'
+readme_says "which token ends it"            'The refresh token expiring is not.'
+readme_says "that re-seeding is a human"     'until a human replaces the Secret'
+readme_says "who owns closing the gap"       "Automatic re-seeding is MAIN-337's"
+
 # Both or neither: half a build pool reads as protection and is not.
 if render "${min[@]}" --set executor.mode=kubernetes --set executor.image=i:1 \
      --set executor.buildPool.taint=t >/dev/null 2>&1; then

@@ -253,18 +253,20 @@ mode silently does nothing and every job runs locally.
 ### What a job Pod gets, and what it does not
 
 - **Its own checkout, from a fresh clone.** A job Pod mounts nothing but its
-  credential Secret, and only when one is configured, so the node's clone cache
-  and its per-job worktree are unreachable from inside one;
-  the Pod clones the workspace itself at `/home/agent/workspace`. There is no
-  PVC and no warm state carried between passes, so a repair pass on a card
-  starts cold — a review or build's warm agent session is a host-node feature
-  and does not apply here.
+  credential Secret and the writable copy seeded from it, and only when one is
+  configured, so the node's clone cache and its per-job worktree are unreachable
+  from inside one; the Pod clones the workspace itself at
+  `/home/agent/workspace`. There is no PVC and no warm state carried between
+  passes, so a repair pass on a card starts cold — a review or build's warm
+  agent session is a host-node feature and does not apply here.
 - **The same environment contract a container-confined job gets** — `HOME`,
   `CLAUDE_CONFIG_DIR`, `NOOK_SANDBOX=1`, `NOOK_SERVER`, `NOOK_JOB_ID` and the
   job's own variables. One function builds it for both, so an agent cannot tell
   which executor started it — **including the Claude session**, which the Docker
-  sandbox bind-mounts at `CLAUDE_CONFIG_DIR` and a Pod mounts a Secret at. Every
-  other credential comes from that same Secret or not at all (see below).
+  sandbox bind-mounts at `CLAUDE_CONFIG_DIR` and a Pod seeds a writable
+  directory there from a Secret. Both are writable, because that directory is
+  where `claude` keeps its own state. Every other credential comes from that
+  same Secret or not at all (see below).
 - **No leased ports.** A cluster job's port would need a Service to be
   reachable and this chart creates none, so the lease is not taken rather than
   delivered and quietly useless.
@@ -360,12 +362,21 @@ kubectl create secret generic nook-job-credentials -n nook-jobs \
 helm upgrade ... --set executor.credentialsSecret=nook-job-credentials
 ```
 
-It arrives **both ways, and both are needed**. The whole Secret is mounted
-read-only at `CLAUDE_CONFIG_DIR`, which is how `claude` finds a session here
-exactly as it does under the Docker sandbox; and every key that is a legal
-variable name *also* becomes an environment variable, which is how a token like
-`GH_TOKEN` reaches the agent. A key such as `.claude.json` is not a legal
-variable name — the kubelet skips it with an event and starts the container.
+It arrives **both ways, and both are needed**. The Secret is mounted read-only
+at a private path and **copied into a writable `emptyDir` at
+`CLAUDE_CONFIG_DIR`** before the agent starts, which is how `claude` finds a
+session here exactly as it does under the Docker sandbox; and every key that is
+a legal variable name *also* becomes an environment variable, which is how a
+token like `GH_TOKEN` reaches the agent. A key such as `.claude.json` is not a
+legal variable name — the kubelet skips it with an event and starts the
+container.
+
+**The copy is what makes it work at all.** `CLAUDE_CONFIG_DIR` is not a
+credential store: it is claude's read-write working directory, where it creates
+`projects/`, `sessions/` and `shell-snapshots/` and rewrites
+`.credentials.json` every time it refreshes its OAuth pair. A Secret volume is
+read-only whatever the spec asks for, so a Secret mounted straight there is a
+directory the agent cannot create one file in.
 
 **A human creates that Secret.** Nothing in this chart or in the agent creates,
 reads or updates one — the executor's Role grants no `secrets` verb at all, so
@@ -376,6 +387,35 @@ dispatcher will place spec, decompose, review, epic-run and investigate jobs
 here. `nook get nodes` shows the credential's source as the Secret rather than
 as an account, because the node cannot read it and has no way to learn whose
 session it holds.
+
+#### A Pod-mounted session is a snapshot, and it goes stale
+
+**Nothing refreshes the Secret.** A subscription login is an OAuth pair — a
+short-lived access token and a longer-lived refresh token — and `claude` renews
+the pair as it runs, writing the new one back into `.credentials.json`. In a
+Pod that write lands in the Pod's own copy, which is destroyed with the Pod.
+That is deliberate and is what keeps the executor's Role free of any `secrets`
+verb: nothing in this chart can write a Secret, so nothing can carry a refreshed
+credential back into one.
+
+The consequence is worth stating plainly:
+
+- **The access token expiring is fine.** Each Pod refreshes it for itself, in
+  its own copy, on its own first call. This is the ordinary case and needs
+  nobody.
+- **The refresh token expiring is not.** When it lapses, every Pod seeded from
+  that Secret has a credential it cannot renew, and no run on this node can
+  authenticate again until a human replaces the Secret. Re-seed it with the same
+  `kubectl create secret` above (`--dry-run=client -o yaml | kubectl apply -f -`
+  to replace one in place), from a machine where `claude` is currently logged
+  in.
+- **The agent refuses rather than fails in that state.** A Pod whose seeded
+  session has an expired refresh token stops before running the agent, names the
+  expiry date on the transcript, and hands the job back to the queue — so a
+  stale Secret does not spend a card's retry budget while nobody is looking.
+
+**Automatic re-seeding is MAIN-337's, not this chart's.** Until it lands,
+treat the Secret as a snapshot with a shelf life and diarise replacing it.
 
 #### What it costs you to use it
 

@@ -15,8 +15,8 @@
 //! what is written here.
 
 use nook_k8s::types::{
-    Container, EnvFromSource, EnvVar, ObjectMeta, Pod, PodSecurityContext, PodSpec,
-    SecretEnvSource, SecretVolumeSource, SecurityContext, Toleration, Volume, VolumeMount,
+    Container, EmptyDirVolumeSource, EnvFromSource, EnvVar, ObjectMeta, Pod, PodSecurityContext,
+    PodSpec, SecretEnvSource, SecretVolumeSource, SecurityContext, Toleration, Volume, VolumeMount,
 };
 use nook_types::{AuthProfile, AuthState};
 
@@ -43,7 +43,31 @@ pub const NODE_LABEL: &str = "nook.node";
 /// and the mount that reads it have to agree.
 pub const CREDENTIALS_VOLUME: &str = "nook-credentials";
 
-/// The mode every file in that volume is projected with (MAIN-669 AC-1).
+/// Where that Secret is mounted — a private path, and NOT [`CLAUDE_DIR`]
+/// (MAIN-672).
+///
+/// `CLAUDE_CONFIG_DIR` is not a credential store: it is claude's read-write
+/// working directory, and it holds `projects/`, `sessions/`,
+/// `shell-snapshots/`, a refreshed `.credentials.json` and half a dozen other
+/// things claude maintains. Mounting a Secret there — which the kubelet always
+/// projects read-only, whatever the spec asks for — gave the agent a directory
+/// it could not create a single file in, so no agent could run in a Pod at all.
+/// So the Secret lands HERE, the seed of [`SESSION_VOLUME`], and the agent
+/// never sees this path.
+pub const CREDENTIALS_SEED_DIR: &str = "/nook-credentials";
+
+/// The WRITABLE volume `CLAUDE_CONFIG_DIR` actually names (MAIN-672 AC-1).
+///
+/// An `emptyDir`, seeded from [`CREDENTIALS_SEED_DIR`] by [`pod_command`] before
+/// the agent starts. It dies with the Pod, which is what keeps AC-3 true
+/// without any Role change: a token claude refreshes into it is this Pod's
+/// copy and has nowhere to travel back to. The Secret stays the snapshot it
+/// was, and goes stale when its refresh token expires — see [`exit_refusal`]
+/// and the chart README.
+pub const SESSION_VOLUME: &str = "nook-session";
+
+/// The mode every file in the credential volume is projected with (MAIN-669
+/// AC-1).
 ///
 /// Owner-read and nothing else. The Pod's command replaces the image's
 /// entrypoint — the one that would have created the unprivileged `agent` uid —
@@ -54,18 +78,33 @@ pub const CREDENTIALS_MODE: i32 = 0o400;
 
 /// The runtime a job Pod's credential Secret authorizes (MAIN-669 AC-6).
 ///
-/// ONE runtime because the mount is one directory: the Secret lands at
-/// [`CLAUDE_DIR`], which is what `CLAUDE_CONFIG_DIR` names, and that is claude's
-/// configuration directory and no other runtime's. A second runtime would need
-/// a second mount, not a second entry here.
+/// ONE runtime because the seed is one directory: it becomes [`CLAUDE_DIR`],
+/// which is what `CLAUDE_CONFIG_DIR` names, and that is claude's configuration
+/// directory and no other runtime's. A second runtime would need a second
+/// volume, not a second entry here.
 pub const CREDENTIALS_RUNTIME: &str = "claude";
+
+/// What the seed step exits with when the session it was handed is already dead
+/// (MAIN-672 AC-5).
+///
+/// 78 is `sysexits.h`'s `EX_CONFIG`, which is what this is: a human has to
+/// re-seed the Secret, and no amount of retrying will do it for them.
+pub const SESSION_EXPIRED_EXIT: i32 = 78;
+
+/// The sentence the seed step prints before exiting with
+/// [`SESSION_EXPIRED_EXIT`], and the one [`exit_refusal`] looks for.
+///
+/// Shared rather than written twice: the classifier requires BOTH the status
+/// and this line, so that a `78` from anything else — claude's own exit codes
+/// are not ours to reserve — is not read as an expired session.
+pub const SESSION_EXPIRED_MARKER: &str = "nook: the seeded Claude session is expired";
 
 /// Where a job Pod checks the workspace out.
 ///
 /// Under [`AGENT_HOME`] rather than beside it: the Pod mounts no storage (see
-/// [`job_pod`] — a read-only credential Secret is all it can ever mount), so the
-/// checkout is the container's own writable layer and it belongs where the
-/// agent's other state does.
+/// [`job_pod`] — a credential Secret and the `emptyDir` seeded from it are all
+/// it can ever mount), so the checkout is the container's own writable layer
+/// and it belongs where the agent's other state does.
 pub const POD_WORKDIR: &str = "/home/agent/workspace";
 
 /// How long a Pod may take to reach `Running` before the job is handed back.
@@ -260,8 +299,9 @@ pub struct PodJobSpec {
     /// at least keeps them behind `get secrets`. `loop_job::pod_env` is what
     /// holds them back, and a test pins it.
     pub env: Vec<(String, String)>,
-    /// A hand-created Secret, mounted at [`CLAUDE_DIR`] and read as environment
-    /// variables (AC-10, MAIN-669). `None` delivers no credentials at all.
+    /// A hand-created Secret, read as environment variables and copied into the
+    /// writable [`CLAUDE_DIR`] before the agent starts (AC-10, MAIN-669,
+    /// MAIN-672). `None` delivers no credentials at all.
     pub credentials_secret: Option<String>,
     /// What the container runs — the agent runtime, its flags, and the opening
     /// turn among them.
@@ -422,13 +462,52 @@ fn label_value(raw: &str) -> String {
     out
 }
 
-/// What a job Pod runs: check the workspace out, then become the agent.
+/// The `node -e` program the seed step checks the session's life with.
+///
+/// **Node.js is the base image's contract, not a new dependency**: `claude` is
+/// an npm package installed by `operator-node.Dockerfile`, so a job image that
+/// can run the agent can run this. It is still guarded by `command -v` below —
+/// a check that cannot run must not refuse a job it knows nothing about.
+///
+/// Only `refreshTokenExpiresAt` is consulted, and that is the whole subtlety of
+/// AC-5. An expired ACCESS token is the ordinary state of a seeded session and
+/// claude renews it unprompted, which is exactly what AC-1's writable directory
+/// is for; an expired REFRESH token is the one there is no renewing, because
+/// the credential that would buy a new pair is itself dead.
+///
+/// A file it cannot parse, or one with no OAuth block, exits 0: a shape we do
+/// not recognise is not evidence, and letting claude try and say so beats
+/// refusing on a guess.
+///
+/// Double quotes throughout, deliberately — the program is embedded in a
+/// single-quoted shell word, so one apostrophe in it would end the string.
+const SESSION_LIFE_CHECK: &str = concat!(
+    r#"var o;try{o=JSON.parse(require("fs").readFileSync(process.env.CLAUDE_CONFIG_DIR"#,
+    r#"+"/.credentials.json","utf8")).claudeAiOauth}catch(e){process.exit(0)}"#,
+    r#"if(!o||!o.refreshTokenExpiresAt||o.refreshTokenExpiresAt>Date.now())process.exit(0);"#,
+    r#"console.error("nook: the seeded Claude session is expired: its refresh token "#,
+    r#"expired at "+new Date(o.refreshTokenExpiresAt).toISOString()+", so nothing in "#,
+    r#"this Pod can renew it. Re-seed the credentials Secret from a machine where "#,
+    r#"claude is logged in.");process.exit(1)"#,
+);
+
+/// What a job Pod runs: seed the session, check the workspace out, then become
+/// the agent.
 ///
 /// The clone is HERE and not on the node, and that is forced rather than
 /// chosen. A Pod mounts no storage (see [`job_pod`]), so the node's clone cache
 /// and its per-job worktree — the whole first half of `loop_job::run` — are simply
 /// not reachable from inside one. NG-2 settles what to do instead: every job Pod
 /// starts from a fresh clone, with no PVC and no warm state to reuse.
+///
+/// **The seed step is what makes `CLAUDE_CONFIG_DIR` usable** (MAIN-672 AC-1).
+/// A Secret volume is read-only however it is asked for, and claude's
+/// configuration directory is somewhere it writes constantly, so the Secret is
+/// mounted out of the way at [`CREDENTIALS_SEED_DIR`] and copied into the
+/// `emptyDir` at [`CLAUDE_DIR`] before the agent starts. Emitted only when a
+/// Secret is configured, which is the same condition [`job_pod`] mounts the two
+/// volumes on — a test drives both from one flag, because a Pod that mounted a
+/// seed nothing copied would be the empty directory MAIN-669 already fixed once.
 ///
 /// `exec` on the last line, so the agent is pid 1's own process: without it the
 /// shell stays as the container's root process and a `SIGTERM` from the delete
@@ -439,6 +518,35 @@ fn label_value(raw: &str) -> String {
 pub fn pod_command(launch: &AgentLaunch<'_>) -> Vec<String> {
     let quote = |s: &str| format!("'{}'", s.replace('\'', r"'\''"));
     let mut script = String::from("set -e\n");
+    if launch.seeded_session {
+        // The Secret's KEYS and nothing else. `*` misses the dotfiles that are
+        // the entire payload (`.claude.json`, `.credentials.json`) and `.*`
+        // would drag in the `..data` symlink and the timestamped directory
+        // behind it — a second copy of the credential, in the writable
+        // directory, that nothing would ever refresh. `.[!.]*` is the one glob
+        // that means "hidden, but not a `..` name".
+        //
+        // `-L` because every entry in a Secret volume is a symlink into
+        // `..data`; copying the links would leave the agent a directory of
+        // dangling pointers.
+        script.push_str(&format!(
+            "mkdir -p {claude}\nfor f in {seed}/* {seed}/.[!.]*; do\n  \
+             [ -f \"$f\" ] || continue\n  cp -L \"$f\" {claude}/\ndone\n",
+            claude = quote(CLAUDE_DIR),
+            seed = quote(CREDENTIALS_SEED_DIR),
+        ));
+        // The copy inherits the Secret's 0400, and claude has to WRITE
+        // `.credentials.json` back when it refreshes the pair. Owner only: the
+        // point of [`CREDENTIALS_MODE`] was never the write bit.
+        script.push_str(&format!("chmod -R u+rwX {}\n", quote(CLAUDE_DIR)));
+        // AC-5. A session whose refresh token has expired will fail every job
+        // this Pod is given, so the job is REFUSED here rather than failed
+        // several turns later out of the card's strike budget.
+        script.push_str(&format!(
+            "if command -v node >/dev/null 2>&1; then\n  node -e '{}' || exit {}\nfi\n",
+            SESSION_LIFE_CHECK, SESSION_EXPIRED_EXIT,
+        ));
+    }
     if !launch.repo_url.is_empty() {
         script.push_str(&format!(
             "git clone --depth 1 --branch {} {} {}\n",
@@ -470,6 +578,13 @@ pub struct AgentLaunch<'a> {
     /// empty working directory rather than a failed container.
     pub repo_url: &'a str,
     pub branch: &'a str,
+    /// Whether a credential Secret is configured, and so whether the command
+    /// begins by seeding [`CLAUDE_DIR`] from it (MAIN-672 AC-1).
+    ///
+    /// The SAME `Option::is_some` that decides the Pod's volumes. Said twice
+    /// because the command and the Pod are built by different callers, and
+    /// pinned by a test so the two spellings cannot come apart.
+    pub seeded_session: bool,
 }
 
 /// Whether a Pod has got going yet, and whether it ever will.
@@ -586,8 +701,8 @@ fn base_env(spec: &PodJobSpec) -> Vec<(String, String)> {
     env
 }
 
-/// The credential Secret as a volume and the mount that reads it, or nothing
-/// (MAIN-669 AC-1/AC-2).
+/// The credential Secret and the writable directory seeded from it, or nothing
+/// (MAIN-669 AC-1/AC-2, MAIN-672 AC-1).
 ///
 /// **A subscription Claude session is a DIRECTORY, not an environment
 /// variable** — `.claude.json` beside `.credentials.json` — which is why the
@@ -595,39 +710,94 @@ fn base_env(spec: &PodJobSpec) -> Vec<(String, String)> {
 /// equivalent, so `claude` found an empty directory, the node reported the
 /// runtime unauthorized, and every job for it stayed queued forever.
 ///
-/// **`optional: true` on the volume, while the `env_from` beside it stays
-/// `optional: false`, and the pairing is the whole of AC-4.** A missing Secret
-/// has to REFUSE the job by name; the two seams fail differently and only one
-/// of them says anything a caller can read. A failed Secret *mount* leaves the
-/// Pod in `ContainerCreating` with the reason in an Event — a resource the
-/// executor's Role deliberately cannot read (NG-3) — so the run would sit there
-/// until [`START_BUDGET`] expired ten minutes later and be handed back as a
+/// **TWO volumes, because a Secret cannot be the agent's config directory.**
+/// MAIN-669 mounted the Secret straight at [`CLAUDE_DIR`], and a Secret volume
+/// is read-only whatever the spec asks for — so the agent got 0400 files in a
+/// directory it could not add `projects/`, `sessions/` or a refreshed
+/// `.credentials.json` to, and no agent could start. The Secret therefore
+/// mounts read-only and out of sight at [`CREDENTIALS_SEED_DIR`], and
+/// [`pod_command`] copies it into the `emptyDir` the agent is pointed at. The
+/// Secret's own mount is still read-only; it is the COPY that is writable,
+/// which is what keeps the refreshed pair inside the Pod (AC-3).
+///
+/// **`optional: true` on the Secret volume, while the `env_from` beside it stays
+/// `optional: false`, and the pairing is the whole of MAIN-669's AC-4.** A
+/// missing Secret has to REFUSE the job by name; the two seams fail differently
+/// and only one of them says anything a caller can read. A failed Secret *mount*
+/// leaves the Pod in `ContainerCreating` with the reason in an Event — a resource
+/// the executor's Role deliberately cannot read (NG-3) — so the run would sit
+/// there until [`START_BUDGET`] expired ten minutes later and be handed back as a
 /// generic timeout. A missing `env_from` Secret is `CreateContainerConfigError`
 /// within seconds, which [`start_verdict`] already reads as a configuration
 /// refusal carrying the apiserver's own words. So the env seam is the DETECTOR
 /// and the volume is the DELIVERY, and neither is redundant.
-///
-/// Read-only because a Secret volume is read-only whatever is asked for; saying
-/// so is documentation that the kubelet happens to enforce.
-fn credential_volume(secret: &str) -> (Volume, VolumeMount) {
+fn credential_volumes(secret: &str) -> (Vec<Volume>, Vec<VolumeMount>) {
     (
-        Volume {
-            name: CREDENTIALS_VOLUME.to_string(),
-            secret: Some(SecretVolumeSource {
-                secret_name: Some(secret.to_string()),
-                default_mode: Some(CREDENTIALS_MODE),
-                optional: Some(true),
+        vec![
+            Volume {
+                name: CREDENTIALS_VOLUME.to_string(),
+                secret: Some(SecretVolumeSource {
+                    secret_name: Some(secret.to_string()),
+                    default_mode: Some(CREDENTIALS_MODE),
+                    optional: Some(true),
+                    ..Default::default()
+                }),
                 ..Default::default()
-            }),
-            ..Default::default()
-        },
-        VolumeMount {
-            name: CREDENTIALS_VOLUME.to_string(),
-            mount_path: CLAUDE_DIR.to_string(),
-            read_only: Some(true),
-            ..Default::default()
-        },
+            },
+            Volume {
+                name: SESSION_VOLUME.to_string(),
+                // Node-local and Pod-lifetime. Not a PVC: a session that
+                // outlived its Pod would be a credential store this ticket does
+                // not build (NG-1), and every Pod re-seeds from the Secret in
+                // under a second anyway.
+                empty_dir: Some(EmptyDirVolumeSource::default()),
+                ..Default::default()
+            },
+        ],
+        vec![
+            VolumeMount {
+                name: CREDENTIALS_VOLUME.to_string(),
+                mount_path: CREDENTIALS_SEED_DIR.to_string(),
+                read_only: Some(true),
+                ..Default::default()
+            },
+            VolumeMount {
+                name: SESSION_VOLUME.to_string(),
+                mount_path: CLAUDE_DIR.to_string(),
+                // Writable, and matching what the Docker sandbox does with the
+                // same path (`sandbox::run_args` binds it with no `:ro`). The
+                // two adapters are meant to give an agent the same world, and
+                // this is the one property that decides whether it starts.
+                read_only: Some(false),
+                ..Default::default()
+            },
+        ],
     )
+}
+
+/// Whether a concluded Pod refused the job rather than failing it (MAIN-672
+/// AC-5).
+///
+/// **A seeded session that has already expired is the cluster's state, not the
+/// card's**, exactly as a missing Secret is — so it goes back to the queue with
+/// the strike budget untouched, the way `QueuedReason::SandboxUnavailable` does
+/// on a host node. `Configuration`, not `Transient`: a refresh token does not
+/// come back by waiting, and a node that kept claiming into one would refuse in
+/// turn everything the dispatcher sent it.
+///
+/// BOTH the status and the marker line are required. [`SESSION_EXPIRED_EXIT`]
+/// is `EX_CONFIG`, which is a status claude is free to use for its own reasons;
+/// the seed step runs before the agent does, so when it is ours the marker is
+/// the only output there is.
+pub fn exit_refusal(code: Option<i32>, tail: &str) -> Option<Refusal> {
+    if code != Some(SESSION_EXPIRED_EXIT) {
+        return None;
+    }
+    let said = tail
+        .lines()
+        .find(|l| l.contains(SESSION_EXPIRED_MARKER))?
+        .trim();
+    Some(Refusal::Configuration(said.to_string()))
 }
 
 /// What this node reports for the runtimes a job Pod's Secret carries
@@ -676,11 +846,12 @@ pub fn delivered_runtime_auth(
 /// The three properties worth reading off the result, because they are the
 /// whole security argument:
 ///
-/// 1. **No host path, for any kind.** The only `volumes` entry a Pod can ever
-///    have is the credential Secret of [`credential_volume`], and only when one
-///    is configured — a container holding the host's Docker socket can start a
-///    privileged sibling and undo everything else, and the way to never do that
-///    is for `hostPath` to appear nowhere this function can reach.
+/// 1. **No host path, for any kind.** The only `volumes` entries a Pod can ever
+///    have are [`credential_volumes`]' pair — the credential Secret and the
+///    `emptyDir` seeded from it — and only when a Secret is configured. A
+///    container holding the host's Docker socket can start a privileged sibling
+///    and undo everything else, and the way to never do that is for `hostPath`
+///    to appear nowhere this function can reach.
 /// 2. **Privilege only where the profile declares a nested daemon**, which is
 ///    `build` alone. Every other kind gets `allowPrivilegeEscalation: false`.
 /// 3. **A privileged Pod is pinned to the build pool**, or refused.
@@ -701,11 +872,12 @@ pub fn job_pod(spec: &PodJobSpec) -> Result<Pod, Refusal> {
     let mut env: Vec<(String, String)> = base_env(spec);
     env.extend(spec.env.iter().cloned());
 
-    // Built together from one Option so the two seams cannot drift apart: the
-    // volume alone would deliver a session and go silent when the Secret is
+    // Built together from one Option so the seams cannot drift apart: the
+    // volumes alone would deliver a session and go silent when the Secret is
     // absent, and the env alone is what a Pod had before MAIN-669 — no session
-    // at all. See [`credential_volume`].
-    let credentials = spec.credentials_secret.as_deref().map(credential_volume);
+    // at all. The same Option is what `pod_command` seeds on. See
+    // [`credential_volumes`].
+    let credentials = spec.credentials_secret.as_deref().map(credential_volumes);
 
     let container = Container {
         name: AGENT_CONTAINER.to_string(),
@@ -743,7 +915,7 @@ pub fn job_pod(spec: &PodJobSpec) -> Result<Pod, Refusal> {
                 ..Default::default()
             }]
         }),
-        volume_mounts: credentials.as_ref().map(|(_, m)| vec![m.clone()]),
+        volume_mounts: credentials.as_ref().map(|(_, m)| m.clone()),
         security_context: Some(SecurityContext {
             privileged: Some(privileged),
             // Belt and braces with `privileged`, which already implies it: a
@@ -757,7 +929,7 @@ pub fn job_pod(spec: &PodJobSpec) -> Result<Pod, Refusal> {
 
     let pod_spec = PodSpec {
         containers: vec![container],
-        volumes: credentials.map(|(v, _)| vec![v]),
+        volumes: credentials.map(|(v, _)| v),
         // A loop job runs once. Restarting it here would re-run an agent the
         // control plane already believes finished, against a card whose state
         // has moved on.
@@ -1099,6 +1271,26 @@ mod tests {
         &pod.spec.as_ref().unwrap().containers[0]
     }
 
+    /// By NAME rather than by index: a Pod now carries two volumes, and a test
+    /// that reads `[0]` asserts an ordering nothing promises.
+    fn volume<'a>(pod: &'a Pod, name: &str) -> &'a Volume {
+        pod.spec
+            .as_ref()
+            .unwrap()
+            .volumes
+            .as_ref()
+            .and_then(|vs| vs.iter().find(|v| v.name == name))
+            .unwrap_or_else(|| panic!("no volume named {name}"))
+    }
+
+    fn mount<'a>(pod: &'a Pod, name: &str) -> &'a VolumeMount {
+        container(pod)
+            .volume_mounts
+            .as_ref()
+            .and_then(|ms| ms.iter().find(|m| m.name == name))
+            .unwrap_or_else(|| panic!("nothing mounts the volume {name}"))
+    }
+
     fn env_of(pod: &Pod) -> std::collections::BTreeMap<String, String> {
         container(pod)
             .env
@@ -1159,12 +1351,13 @@ mod tests {
         }
     }
 
-    /// …and with one configured, the credential Secret is the ONLY thing that
-    /// may appear (MAIN-669 AC-2). A `hostPath` is what the assertion above
-    /// really excludes, and the mount arriving must not become the door it
-    /// comes back through.
+    /// …and with one configured, the credential Secret and the writable copy
+    /// seeded from it are the ONLY things that may appear (MAIN-669 AC-2,
+    /// MAIN-672 AC-1). A `hostPath` is what the assertion above really
+    /// excludes, and the mounts arriving must not become the door it comes back
+    /// through.
     #[test]
-    fn a_configured_secret_is_the_only_volume_any_kind_may_have() {
+    fn a_configured_secret_and_its_copy_are_the_only_volumes_any_kind_may_have() {
         for kind in KINDS {
             let mut s = spec(kind);
             s.credentials_secret = Some("nook-job-credentials".into());
@@ -1172,28 +1365,44 @@ mod tests {
             let p = pod.spec.as_ref().unwrap();
 
             let volumes = p.volumes.as_ref().unwrap_or_else(|| panic!("{kind}"));
-            assert_eq!(volumes.len(), 1, "{kind} has more than the Secret");
-            assert!(volumes[0].host_path.is_none(), "{kind} mounts a host path");
-            assert!(volumes[0].secret.is_some(), "{kind}: not a Secret");
+            assert_eq!(volumes.len(), 2, "{kind}: not the Secret and its copy");
+            assert!(
+                volumes.iter().all(|v| v.host_path.is_none()),
+                "{kind} mounts a host path"
+            );
+            assert!(
+                volumes
+                    .iter()
+                    .all(|v| v.secret.is_some() || v.empty_dir.is_some()),
+                "{kind} mounts something that is neither the Secret nor its copy"
+            );
 
             let mounts = container(&pod).volume_mounts.as_ref().unwrap();
-            assert_eq!(mounts.len(), 1, "{kind} mounts more than the Secret");
+            assert_eq!(mounts.len(), 2, "{kind} mounts more than those two");
             assert_ne!(p.host_network, Some(true), "{kind} on the host network");
             assert_ne!(p.host_pid, Some(true), "{kind} in the host PID namespace");
         }
     }
 
-    /// AC-1. A subscription session is a DIRECTORY, so it arrives as one — at
-    /// the path `CLAUDE_CONFIG_DIR` already names, which is what makes `claude`
-    /// find it here exactly as it does under the Docker sandbox.
+    /// MAIN-672 AC-1 and AC-7, and the correction of what this test used to
+    /// assert.
+    ///
+    /// It asserted `read_only: Some(true)` on the directory the AGENT is
+    /// pointed at, and that is the defect: `CLAUDE_CONFIG_DIR` is not a
+    /// credential store but claude's read-WRITE working directory — it creates
+    /// `projects/`, `sessions/` and `shell-snapshots/` in it and rewrites
+    /// `.credentials.json` there every time it refreshes the OAuth pair. A
+    /// Secret volume is read-only whatever the spec asks for, so nothing could
+    /// start. The Secret is still read-only, at a private path of its own; what
+    /// `CLAUDE_CONFIG_DIR` names is the writable copy.
     #[test]
-    fn a_configured_secret_is_mounted_read_only_where_claude_looks_for_it() {
+    fn the_secret_is_read_only_and_what_claude_is_pointed_at_is_writable() {
         let mut s = spec("spec");
         s.credentials_secret = Some("nook-job-credentials".into());
         let pod = job_pod(&s).unwrap();
 
-        let volume = &pod.spec.as_ref().unwrap().volumes.as_ref().unwrap()[0];
-        let source = volume.secret.as_ref().expect("a Secret volume source");
+        let seed = volume(&pod, CREDENTIALS_VOLUME);
+        let source = seed.secret.as_ref().expect("a Secret volume source");
         assert_eq!(source.secret_name.as_deref(), Some("nook-job-credentials"));
         // Owner-read and nothing else: a session readable by every uid in the
         // container is one an unprivileged process in it could copy out.
@@ -1202,25 +1411,45 @@ mod tests {
         assert_eq!(mode & 0o007, 0, "world-readable: {mode:o}");
         assert_eq!(mode & 0o070, 0, "group-readable: {mode:o}");
 
-        let mount = &container(&pod).volume_mounts.as_ref().unwrap()[0];
-        assert_eq!(mount.name, volume.name, "the mount reads another volume");
-        assert_eq!(mount.read_only, Some(true));
+        let seed_mount = mount(&pod, CREDENTIALS_VOLUME);
+        assert_eq!(
+            seed_mount.read_only,
+            Some(true),
+            "the Secret became writable"
+        );
+        assert_eq!(seed_mount.mount_path, CREDENTIALS_SEED_DIR);
+        assert_ne!(
+            seed_mount.mount_path, CLAUDE_DIR,
+            "the Secret is back over the agent's own directory"
+        );
+
+        let session = volume(&pod, SESSION_VOLUME);
+        assert!(session.empty_dir.is_some(), "the copy is not an emptyDir");
+        assert!(session.secret.is_none(), "the copy is the Secret again");
+        let session_mount = mount(&pod, SESSION_VOLUME);
+        assert_ne!(
+            session_mount.read_only,
+            Some(true),
+            "claude cannot write its own configuration directory"
+        );
         // The mount path and the variable are ONE decision. Asserted against
         // the env rather than against the constant, because an agent reads the
         // variable and a mount somewhere else would leave it looking at an
         // empty directory — the exact failure MAIN-669 exists to end.
-        assert_eq!(mount.mount_path, CLAUDE_DIR);
-        assert_eq!(env_of(&pod)["CLAUDE_CONFIG_DIR"], mount.mount_path);
+        assert_eq!(session_mount.mount_path, CLAUDE_DIR);
+        assert_eq!(env_of(&pod)["CLAUDE_CONFIG_DIR"], session_mount.mount_path);
     }
 
-    /// The two seams are one decision, and AC-4 rests on their pairing: the
-    /// `env_from` is the DETECTOR — a missing Secret there is
+    /// The seams are one decision, and MAIN-669's AC-4 rests on their pairing:
+    /// the `env_from` is the DETECTOR — a missing Secret there is
     /// `CreateContainerConfigError` in seconds — and the volume is the
     /// DELIVERY, optional because a failed Secret MOUNT reports itself only in
     /// an Event, which this executor's Role cannot read, and would otherwise
     /// hang the run until the start budget expired ten minutes later.
     ///
-    /// So an edit that drops either half fails here rather than in a cluster.
+    /// MAIN-672 AC-7 adds the third: the delivery is only a delivery once
+    /// [`pod_command`] has copied it somewhere writable, so an edit that drops
+    /// any of the three fails here rather than in a cluster.
     #[test]
     fn the_secret_is_delivered_as_files_and_detected_as_environment() {
         let mut s = spec("review");
@@ -1234,20 +1463,142 @@ mod tests {
         assert_eq!(secret_ref.name, "nook-job-credentials");
         assert_eq!(secret_ref.optional, Some(false), "the detector went quiet");
 
-        let source = pod.spec.as_ref().unwrap().volumes.as_ref().unwrap()[0]
-            .secret
-            .as_ref()
-            .unwrap();
+        let source = volume(&pod, CREDENTIALS_VOLUME).secret.as_ref().unwrap();
         assert_eq!(source.optional, Some(true), "a failed mount hangs the run");
         assert_eq!(
             source.secret_name.as_deref(),
             Some(secret_ref.name.as_str())
         );
 
-        // And with none configured, neither half appears.
+        // And with none configured, no half appears.
         let pod = job_pod(&spec("review")).unwrap();
         assert!(container(&pod).env_from.is_none());
         assert!(pod.spec.as_ref().unwrap().volumes.is_none());
+    }
+
+    /// MAIN-672 AC-1. The Pod that mounts a seed is the Pod whose command
+    /// copies it, and the two are built by different callers from the same
+    /// `Option` — so this drives both from one flag. A seed nothing copied
+    /// would leave the agent the empty `CLAUDE_CONFIG_DIR` MAIN-669 already
+    /// fixed once.
+    #[test]
+    fn the_pod_that_mounts_a_seed_is_the_pod_whose_command_copies_it() {
+        for configured in [false, true] {
+            let mut s = spec("spec");
+            s.credentials_secret = configured.then(|| "nook-job-credentials".to_string());
+            let pod = job_pod(&s).unwrap();
+            let mounted = pod.spec.as_ref().unwrap().volumes.is_some();
+
+            let args = ["-p".to_string(), "/nook-spec MAIN-1".to_string()];
+            let script = pod_command(&AgentLaunch {
+                runtime: "claude",
+                args: &args,
+                repo_url: "https://git.example/acme.git",
+                branch: "main",
+                seeded_session: s.credentials_secret.is_some(),
+            })
+            .pop()
+            .unwrap();
+            let copies = script.contains(CREDENTIALS_SEED_DIR);
+
+            assert_eq!(mounted, configured, "the mount disagreed");
+            assert_eq!(copies, configured, "the copy disagreed");
+            // The seed is read BEFORE the clone and the `exec`: a session that
+            // arrives after the agent has started is one it never sees.
+            if configured {
+                let seed = script.find(CREDENTIALS_SEED_DIR).unwrap();
+                assert!(seed < script.find("git clone").unwrap(), "{script}");
+                assert!(seed < script.find("exec ").unwrap(), "{script}");
+                // Copied, never symlinked back: a link into a read-only Secret
+                // is a writable directory the writes still fail in.
+                assert!(script.contains("cp -L"), "{script}");
+                assert!(!script.contains("ln -s"), "{script}");
+                // The `..data` symlink and the timestamped directory behind it
+                // are the Secret volume's own plumbing; copying them would put
+                // a second, never-refreshed credential in the writable copy.
+                assert!(script.contains(".[!.]*"), "dotfiles unmatched: {script}");
+                assert!(
+                    !script.contains("/.*"),
+                    "`..data` would be copied: {script}"
+                );
+            }
+        }
+    }
+
+    /// MAIN-672 AC-5. A seeded session whose REFRESH token has expired will
+    /// fail every job this Pod is ever handed, so it is a refusal — the
+    /// cluster's state, like a missing Secret, and not the card's. Failing
+    /// would spend a strike from a budget that exists to catch an agent which
+    /// cannot do the work.
+    #[test]
+    fn an_expired_seeded_session_refuses_the_job_rather_than_failing_it() {
+        let said = format!(
+            "{SESSION_EXPIRED_MARKER}: its refresh token expired at \
+             2026-08-29T14:06:12.389Z, so nothing in this Pod can renew it."
+        );
+        let refusal = exit_refusal(Some(SESSION_EXPIRED_EXIT), &said).expect("a refusal");
+        // Configuration, not transient: a refresh token does not come back by
+        // waiting, and a node that kept claiming into one would refuse in turn
+        // everything the dispatcher sent it.
+        assert!(
+            !refusal.keep_claiming(),
+            "waiting cannot renew a dead token"
+        );
+        // Naming the expiry is the point — an operator has to know the Secret
+        // is stale, not merely that something went wrong.
+        assert!(refusal.to_string().contains("2026-08-29"), "{refusal}");
+
+        // An ordinary agent failure is still a failure. `EX_CONFIG` is not ours
+        // to reserve, so the status alone must not hand a card back.
+        assert_eq!(
+            exit_refusal(Some(SESSION_EXPIRED_EXIT), "claude: bad flag"),
+            None
+        );
+        assert_eq!(exit_refusal(Some(1), &said), None);
+        assert_eq!(exit_refusal(Some(0), &said), None);
+        assert_eq!(exit_refusal(None, &said), None);
+    }
+
+    /// MAIN-672 AC-6. The two executors are meant to give an agent the same
+    /// world, and this is the one property that decides whether it starts —
+    /// they diverged on it invisibly until a live container was inspected, so
+    /// the agreement is asserted rather than described.
+    #[test]
+    fn both_executors_give_the_agent_a_writable_claude_config_dir() {
+        let mut s = spec("spec");
+        s.credentials_secret = Some("nook-job-credentials".into());
+        let pod = job_pod(&s).unwrap();
+        assert_ne!(mount(&pod, SESSION_VOLUME).read_only, Some(true));
+
+        let docker = sandbox::run_args(&sandbox::SandboxSpec {
+            job_id: "job-1".into(),
+            image: "nook-job-sandbox:latest".into(),
+            profile: sandbox::profile_for("spec"),
+            isolation: sandbox::Isolation::Unprivileged,
+            worktree: std::path::PathBuf::from("/cache/worktrees/build-1"),
+            gitdir: None,
+            claude_dir: Some(std::path::PathBuf::from("/home/ryan/.nook-secrets/claude")),
+            caches: Vec::new(),
+            references: Vec::new(),
+            ports: Vec::new(),
+            allow: Vec::new(),
+            add_hosts: Vec::new(),
+            server: String::new(),
+            agent_uid: 1000,
+            agent_gid: 1000,
+        });
+        let claude_bind = docker
+            .iter()
+            .find(|a| {
+                a.ends_with(&format!(":{CLAUDE_DIR}")) || a.contains(&format!(":{CLAUDE_DIR}:"))
+            })
+            .unwrap_or_else(|| {
+                panic!("the docker sandbox stopped mounting {CLAUDE_DIR}: {docker:?}")
+            });
+        assert!(
+            !claude_bind.ends_with(":ro"),
+            "the docker sandbox made {CLAUDE_DIR} read-only; the Pod did not: {claude_bind}"
+        );
     }
 
     /// AC-6. The gate `nook get nodes` reports and the dispatcher enforces asks
@@ -1672,6 +2023,7 @@ mod tests {
             args: &args,
             repo_url: "https://github.com/nook-os/nook-os.git",
             branch: "main",
+            seeded_session: false,
         });
         assert_eq!(script[0], "/bin/sh");
         assert_eq!(script[1], "-c");
@@ -1691,6 +2043,7 @@ mod tests {
             args: &args,
             repo_url: "",
             branch: "main",
+            seeded_session: false,
         });
         assert!(!bare[2].contains("git clone"), "{}", bare[2]);
         assert!(bare[2].contains("mkdir -p"), "{}", bare[2]);
@@ -1707,6 +2060,7 @@ mod tests {
             args: &args,
             repo_url: "https://example.invalid/r.git",
             branch: "'; touch /pwned; '",
+            seeded_session: true,
         });
         let body = &script[2];
         // Neither payload can leave its quotes: a `'` inside is closed, escaped
