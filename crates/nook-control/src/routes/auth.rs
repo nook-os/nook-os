@@ -416,7 +416,19 @@ pub async fn providers(State(state): State<AppState>) -> Json<nook_types::AuthPr
         // way in, and `/auth/local/status` says whether it is usable here.
         local: true,
         oidc_issuer: state.cfg.oidc_issuer_url.clone(),
-        device_authorization_endpoint: state.cfg.oidc_device_authorization_endpoint.clone(),
+        // Configured wins, then whatever the issuer published. The override
+        // stays for an IdP that offers the flow without advertising it; it is
+        // no longer the only way to get one (MAIN-650).
+        device_authorization_endpoint: state
+            .cfg
+            .oidc_device_authorization_endpoint
+            .clone()
+            .or_else(|| {
+                state
+                    .oidc
+                    .current()
+                    .and_then(|c| c.device_authorization_endpoint.clone())
+            }),
         device_client_id: state.cfg.oidc_device_client_id.clone(),
     })
 }
