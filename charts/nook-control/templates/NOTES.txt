@@ -51,7 +51,7 @@ terminates in-process — the LB must be L4 / passthrough).
 2. Read the listener cert's fingerprint (pins the self-signed cert on each node):
 
      kubectl -n {{ .Release.Namespace }} get secret {{ .Values.agent.tlsSecret }} \
-       -o jsonpath='{.data.{{ .Values.agent.tlsCertKey }}}' | base64 -d \
+       -o jsonpath='{.data.{{ .Values.agent.tlsCertKey | replace "." "\\." }}}' | base64 -d \
        | openssl x509 -outform der | sha256sum | cut -d' ' -f1
 
 3. On each node, enrol with a join token from the UI and that fingerprint:

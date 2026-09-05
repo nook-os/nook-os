@@ -450,6 +450,24 @@ else
   echo "  ok:   NOOK_GH_TOKEN is a reference, never a literal"
 fi
 
+# ── NOTES.txt: the fingerprint command has to actually run ──────────────────
+# A dotted KEY in a kubectl jsonpath needs escaping. `{.data.tls.crt}` reads
+# `data` then `tls` then `crt`; the key is literally named `tls.crt`, so it
+# matches nothing and pipes an empty string into `base64 -d`, which succeeds.
+# This was the only documented way to obtain the fingerprint a node pins, and
+# it produced nothing (MAIN-650).
+#
+# Asserted against the TEMPLATE rather than the rendered text: `helm template`
+# does not render NOTES.txt at all, and `helm install --dry-run=client` needs a
+# reachable cluster, which CI has not got.
+notes="$chart/templates/NOTES.txt"
+if grep -q 'tlsCertKey | replace "\." "\\\\\."' "$notes"; then
+  echo "  ok:   the fingerprint jsonpath escapes the dotted key"
+else
+  echo "  FAIL: NOTES.txt fingerprint jsonpath is unescaped — it selects nothing" >&2
+  fail=1
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "chart validation FAILED"
   exit 1

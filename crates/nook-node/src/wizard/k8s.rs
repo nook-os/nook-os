@@ -1251,6 +1251,28 @@ fn agent_steps_for(
     ]
     .join("\n")];
 
+    // The listener is self-signed, so a joining node pins it by fingerprint or
+    // trusts nothing (MAIN-650 AC-1). The chart's NOTES.txt has always said so,
+    // which is precisely why it was missing here — the knowledge existed
+    // somewhere the person following THESE steps never reads.
+    //
+    // Read off the local file rather than back out of the Secret: the step
+    // above just wrote it, it needs no cluster round trip, and it sidesteps
+    // `-o jsonpath='{.data.tls.crt}'` — where the unescaped `.` in the key
+    // silently selects nothing and hands `base64 -d` an empty string.
+    steps.push(
+        [
+            "Read the certificate's fingerprint. The listener is self-signed, so",
+            "   each node pins THIS value with --server-fingerprint; without it a",
+            "   node has nothing to authenticate the control plane against:",
+            "",
+            "     openssl x509 -in agent.crt -outform der | sha256sum | cut -d' ' -f1",
+            "",
+            "   Keep it beside the join token — `nook enroll` wants both.",
+        ]
+        .join("\n"),
+    );
+
     // A public address that does not start with a digit is a name or a
     // placeholder, not an address the LoadBalancer handed out.
     let unresolved = public_url
@@ -2005,15 +2027,32 @@ mod tests {
         );
         assert!(all.contains("openssl req -x509"), "{all}");
 
+        // AC-1's other half: a self-signed listener is only safe to join if the
+        // node pins it, so the value it pins has to be printed HERE. It was
+        // documented solely in the chart's NOTES.txt, which nobody following
+        // these steps ever sees.
+        assert!(all.contains("fingerprint"), "{all}");
+        assert!(
+            all.contains("openssl x509 -in agent.crt -outform der | sha256sum"),
+            "{all}"
+        );
+        // Read off the file, never back out of the Secret. `-o jsonpath=` is
+        // fine over the Service below, whose path has no dotted KEY in it — but
+        // `{.data.tls.crt}` reads `tls` then `crt`, matches nothing, and hands
+        // `base64 -d` an empty string without failing.
+        assert!(!all.contains("{.data."), "{all}");
+
         // The ordering: the address is the LoadBalancer's, so it cannot be known
         // before the Service exists, yet it is baked into join tokens.
         assert!(all.contains("AFTER installing"), "{all}");
         assert!(all.contains("--agent-url"), "{all}");
 
-        // A real address means the second step is done; only the Secret remains.
+        // A real address settles the ordering step; the Secret and its
+        // fingerprint remain, because neither depends on the address.
         let settled =
             super::agent_steps_for(Some("nook-agent-tls"), Some("152.42.155.192:8081"), "nook");
-        assert_eq!(settled.len(), 1, "{settled:?}");
+        assert_eq!(settled.len(), 2, "{settled:?}");
+        assert!(settled.join("\n").contains("fingerprint"), "{settled:?}");
 
         // The listener is off: the hand-off says nothing about it at all.
         assert!(super::agent_steps_for(None, None, "nook").is_empty());
