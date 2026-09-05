@@ -78,11 +78,30 @@ pub async fn start(
     // Named rather than generic, so an operator can tell "we cannot authorize
     // that runtime this way" from "something went wrong".
     let Some(descriptor) = descriptor_for(&req.runtime) else {
-        return Err(ApiError::BadRequest(format!(
-            "no device-flow descriptor for runtime {:?} — this runtime cannot be \
-             authorized without a session yet",
-            req.runtime
-        )));
+        // Two very different reasons land here and the old message named only
+        // one of them, so an operator whose DEPLOYMENT was unconfigured read
+        // "this runtime cannot be authorized without a session yet" as a
+        // product limitation and went looking for a terminal (MAIN-650).
+        let known = ["claude", "codex"].contains(&req.runtime.as_str());
+        return Err(ApiError::BadRequest(if known {
+            format!(
+                "runtime {:?} has a device flow, but THIS DEPLOYMENT has not been given the \
+                 provider's endpoints. Set NOOK_{}_DEVICE_AUTH_ENDPOINT, \
+                 NOOK_{}_TOKEN_ENDPOINT and NOOK_{}_CLIENT_ID on the control plane \
+                 (chart: config.runtimeAuth) — they are the provider's, so nothing in this \
+                 repo can supply them.",
+                req.runtime,
+                req.runtime.to_uppercase(),
+                req.runtime.to_uppercase(),
+                req.runtime.to_uppercase(),
+            )
+        } else {
+            format!(
+                "no device flow is implemented for runtime {:?} — authorize it with a login \
+                 session on the node instead",
+                req.runtime
+            )
+        }));
     };
 
     // Every node is authorized BEFORE the flow starts. Checking as we deliver
