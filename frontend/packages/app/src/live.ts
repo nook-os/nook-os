@@ -41,7 +41,7 @@ export function liveAgentMark(
 export interface RuntimeAuthFlow {
   flowId: string;
   runtime: string;
-  state: "starting" | "prompt" | "delivered" | "failed";
+  state: "starting" | "prompt" | "submitting" | "delivered" | "failed";
   /** A code to TYPE somewhere else (device flow). */
   userCode?: string;
   /** A link to open — device flow's verification URI, or a managed login's

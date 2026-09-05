@@ -24,7 +24,7 @@ import {
 } from "@nookos/ui";
 import { AgentVersion, NodeFacts, useControlPlaneVersion } from "../NodeFacts";
 import { usePagedList } from "../paging";
-import { askConfirm, notify } from "../dialogs";
+import { askConfirm, CopyRow, notify } from "../dialogs";
 import { useLive } from "../live";
 import { AddNodeModal } from "../AddNodeModal";
 import { NodePlacement } from "../NodePlacement";
@@ -405,6 +405,30 @@ export function NodesPage() {
   );
 }
 
+/** One numbered step in the sign-in modal. The number and the tick carry the
+ *  progress, so the panel says where you are without a paragraph about it. */
+function Step({
+  n,
+  done,
+  children,
+}: {
+  n: number;
+  done?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+      <span
+        className={done ? "ok mono" : "muted mono"}
+        style={{ minWidth: "1.4em" }}
+      >
+        {done ? "✓" : n}
+      </span>
+      <span>{children}</span>
+    </div>
+  );
+}
+
 /** Runtimes whose login the node can drive without a terminal (MAIN-650).
  *  Mirrors `runtime_auth::managed_login_args` on the node; a runtime absent
  *  here falls back to the session flow, which is still the only path for one
@@ -509,36 +533,65 @@ function AgentAuthPanel({ node }: { node: { id: string; capabilities: unknown } 
   return (
     <Panel title="Agent authorization">
       {flow && (
-        <div className="modal-backdrop dialog-backdrop">
-          <div className="modal dialog" role="dialog" aria-modal="true">
+        <div
+          className="modal-backdrop dialog-backdrop"
+          onMouseDown={() => {
+            // Only when the flow has settled: dismissing mid-exchange would
+            // strand a login the node is still waiting on.
+            if (flow.state === "delivered" || flow.state === "failed")
+              useLive.setState({ runtimeAuth: null });
+          }}
+        >
+          <div
+            className="modal dialog"
+            role="dialog"
+            aria-modal="true"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
             <div className="modal-header">Sign in to {flow.runtime}</div>
             <div className="modal-body">
-              {flow.state === "starting" && <p>Starting sign-in on this node…</p>}
+              {flow.state === "starting" && (
+                <p className="muted small">
+                  Starting the sign-in on this node — waiting for the link…
+                </p>
+              )}
 
-              {flow.state === "prompt" && (
+              {(flow.state === "prompt" || flow.state === "submitting") && (
                 <>
-                  <p>
-                    <strong>1.</strong> Open this page and approve:
-                  </p>
-                  <p style={{ margin: "4px 0 12px" }}>
-                    <a href={flow.verificationUri} target="_blank" rel="noreferrer">
-                      {flow.verificationUri}
+                  <Step n={1} done>
+                    Open this page and approve the sign-in.
+                  </Step>
+                  <div style={{ margin: "6px 0 14px" }}>
+                    <CopyRow value={flow.verificationUri ?? ""} />
+                    <a
+                      className="small"
+                      href={flow.verificationUri}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      open in a new tab ↗
                     </a>
-                  </p>
-                  <p>
-                    <strong>2.</strong>{" "}
+                  </div>
+
+                  <Step n={2} done={flow.state === "submitting"}>
                     {flow.wantsCode
-                      ? "It gives you a code — paste it here:"
-                      : "Waiting for the sign-in page…"}
-                  </p>
+                      ? "Paste the code that page gives you."
+                      : "Waiting for the page to ask for a code…"}
+                  </Step>
+
                   {flow.wantsCode && (
                     <form
-                      style={{ display: "flex", gap: 8, marginTop: 8 }}
+                      style={{ display: "flex", gap: 8, margin: "6px 0 4px" }}
                       onSubmit={async (e) => {
                         e.preventDefault();
                         const code = pastedCode.trim();
-                        if (!code) return;
+                        if (!code || flow.state === "submitting") return;
                         setPastedCode("");
+                        useLive.setState((st) => ({
+                          runtimeAuth: st.runtimeAuth
+                            ? { ...st.runtimeAuth, state: "submitting" }
+                            : null,
+                        }));
                         const { error } = await api.POST(
                           "/api/v1/nodes/{id}/managed-login/code",
                           {
@@ -546,40 +599,65 @@ function AgentAuthPanel({ node }: { node: { id: string; capabilities: unknown } 
                             body: { flow_id: flow.flowId, runtime: flow.runtime, code },
                           },
                         );
-                        if (error)
-                          await notify("Couldn't send the code", JSON.stringify(error));
+                        if (error) {
+                          useLive.setState((st) => ({
+                            runtimeAuth: st.runtimeAuth
+                              ? {
+                                  ...st.runtimeAuth,
+                                  state: "failed",
+                                  error: JSON.stringify(error),
+                                }
+                              : null,
+                          }));
+                        }
                       }}
                     >
                       <input
                         className="mono"
                         style={{ flex: 1 }}
                         autoFocus
-                        placeholder="paste the code from that page"
+                        disabled={flow.state === "submitting"}
+                        placeholder="paste the code here"
                         value={pastedCode}
                         onChange={(e) => setPastedCode(e.target.value)}
                       />
-                      <button className="btn primary small" type="submit">
-                        send
+                      <button
+                        className="btn primary small"
+                        type="submit"
+                        disabled={flow.state === "submitting" || !pastedCode.trim()}
+                      >
+                        {flow.state === "submitting" ? "signing in…" : "send"}
                       </button>
                     </form>
+                  )}
+
+                  {flow.state === "submitting" && (
+                    <p className="muted small">
+                      Sent. Waiting for {flow.runtime} to finish signing in — this
+                      usually takes a few seconds.
+                    </p>
                   )}
                 </>
               )}
 
               {flow.state === "delivered" && (
                 <p>
-                  Signed in. The credential is on this node, and an in-cluster
-                  executor has already published it for its job Pods.
+                  <strong>Signed in.</strong> The credential is on this node, and
+                  an in-cluster executor has published it for its job Pods.
                 </p>
               )}
-              {flow.state === "failed" && <p>Sign-in failed: {flow.error}</p>}
+              {flow.state === "failed" && (
+                <p className="warn">Sign-in failed: {flow.error}</p>
+              )}
             </div>
             <div className="modal-footer">
               <button
                 className="btn small"
                 onClick={() => useLive.setState({ runtimeAuth: null })}
               >
-                {flow.state === "delivered" || flow.state === "failed" ? "close" : "cancel"}
+                {flow.state === "delivered" || flow.state === "failed"
+                  ? "close"
+                  : "cancel"}
               </button>
             </div>
           </div>
