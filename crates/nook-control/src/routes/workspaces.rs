@@ -1514,7 +1514,9 @@ pub async fn create(
                 workspace = %workspace.id.0,
                 error = %undo,
                 "could not roll back a workspace whose board failed — it is now boardless \
-                 until the boot backfill reaches it"
+                 and nothing will fix it automatically (MAIN-640 removed the boot \
+                 backfill). Give it a board with POST /api/v1/boards \
+                 {{\"workspace_id\": …}}, or delete the workspace."
             );
         }
         return Err(e);
@@ -1728,9 +1730,9 @@ pub async fn delete(
     }
 
     // Before the workspace, not after: `boards.workspace_id` is ON DELETE SET
-    // NULL, so deleting the workspace first would detach the board and leave it
-    // — and its cards — behind as an orphan the backfill then refuses to look
-    // past (AC-5). Deleting the board cascades its columns and its cards.
+    // NULL, so deleting the workspace first would detach the board rather than
+    // remove it, and its columns and cards would survive with nothing left to
+    // reach them. Deleting the board is what cascades them.
     if let Some(b) = &board {
         state.tasks.delete_board(b.id, auth.tenant_id).await?;
     }
