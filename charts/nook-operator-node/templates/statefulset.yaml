@@ -66,6 +66,12 @@ spec:
               value: "1"
             # The loop stages it runs, and how many at once (MAIN-142).
             - name: NOOK_LOOP_KINDS
+              {{- if and (has "build" .Values.loopKinds) (not (and .Values.executor.buildPool.selector .Values.executor.buildPool.taint)) }}
+              {{- fail "loopKinds includes \"build\" but executor.buildPool is not set. A build agent is privileged; without a pool of its own it would share a machine with other tenants' work, and the control plane refuses build work on a shared operator that has no isolated pool (MAIN-655). Set executor.buildPool.selector AND .taint." }}
+              {{- end }}
+              {{- if and (has "build" .Values.loopKinds) (ne .Values.executor.mode "kubernetes") }}
+              {{- fail "loopKinds includes \"build\" but executor.mode is not \"kubernetes\". A containerised node mounts no Docker socket, so it cannot run a build in-process at all — builds here exist only as Pods of their own." }}
+              {{- end }}
               value: {{ join "," .Values.loopKinds | quote }}
             - name: NOOK_MAX_LOOP_JOBS
               value: {{ .Values.maxLoopJobs | quote }}

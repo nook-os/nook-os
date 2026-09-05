@@ -5029,6 +5029,24 @@ export interface components {
             gpus?: components["schemas"]["GpuInfo"][];
             hostname: string;
             /**
+             * @description Whether a BUILD here would run isolated on a dedicated node pool
+             *     (MAIN-655): an in-cluster executor with `executor.buildPool` set, so a
+             *     privileged build Pod lands on tainted nodes that nothing else tolerates.
+             *
+             *     This is the one capability that OPENS a gate rather than narrowing one —
+             *     `kind_wall_refusal` lets a shared operator take build work when it is
+             *     true. It is the node's own report, at exactly the trust level
+             *     [`Self::sandbox`] already carries: the dispatcher fails closed on that
+             *     too, and a host node that claims no sandbox is sent no loop work at all.
+             *     What makes it safe is not the claim but the shape it claims — a build
+             *     Pod on a pool nothing else schedules onto cannot reach another tenant's
+             *     work, which is the thing the wall existed to prevent.
+             *
+             *     False on every node that predates the field, so an upgrade never turns
+             *     the wall off by omission.
+             */
+            isolated_builds?: boolean;
+            /**
              * @description Which loop stages this node will execute (MAIN-142): any of `spec`,
              *     `decompose`, `review`, `epic-run`, `build`, `investigate`. Set by
              *     `NOOK_LOOP_KINDS`.

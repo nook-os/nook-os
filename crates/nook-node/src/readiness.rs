@@ -407,6 +407,7 @@ mod tests {
             chat_runtimes: Vec::new(),
             ssh_public_key: None,
             shared_operator: false,
+            isolated_builds: false,
             loop_kinds: Vec::new(),
             max_loop_jobs: Some(2),
             max_loop_jobs_pinned: false,

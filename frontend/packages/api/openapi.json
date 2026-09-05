@@ -11528,6 +11528,10 @@
           "hostname": {
             "type": "string"
           },
+          "isolated_builds": {
+            "type": "boolean",
+            "description": "Whether a BUILD here would run isolated on a dedicated node pool\n(MAIN-655): an in-cluster executor with `executor.buildPool` set, so a\nprivileged build Pod lands on tainted nodes that nothing else tolerates.\n\nThis is the one capability that OPENS a gate rather than narrowing one —\n`kind_wall_refusal` lets a shared operator take build work when it is\ntrue. It is the node's own report, at exactly the trust level\n[`Self::sandbox`] already carries: the dispatcher fails closed on that\ntoo, and a host node that claims no sandbox is sent no loop work at all.\nWhat makes it safe is not the claim but the shape it claims — a build\nPod on a pool nothing else schedules onto cannot reach another tenant's\nwork, which is the thing the wall existed to prevent.\n\nFalse on every node that predates the field, so an upgrade never turns\nthe wall off by omission."
+          },
           "loop_kinds": {
             "type": "array",
             "items": {

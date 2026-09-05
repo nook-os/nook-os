@@ -2411,17 +2411,24 @@ mod tests {
 
     /// AC-9, and the card says "asserted, not assumed".
     ///
-    /// `build` is the one kind whose Pod is privileged, and a cluster executor
-    /// declaring it would hand privileged containers to a general node pool.
-    /// Two documents decide it — the image's default and the chart's list — and
-    /// they are the two an install actually reads, so both are checked.
+    /// `build` is the one kind whose Pod is privileged, so it is never in the
+    /// DEFAULTS: an install that says nothing about builds must not acquire the
+    /// ability to run one, and an upgrade must not hand privileged containers to
+    /// a general node pool. Two documents decide that — the image's default and
+    /// the chart's list — and they are the two an install actually reads, so
+    /// both are checked.
     ///
-    /// This is not the WALL: `jobs::placement` refuses build work on a shared
-    /// operator whatever a node declares. It is the statement of intent that
-    /// keeps the wall from ever being the only thing standing between a card
-    /// and a privileged Pod.
+    /// Since MAIN-655 builds ARE reachable here, but only deliberately: an
+    /// operator adds `build` to `loopKinds` and names a `buildPool`, and the
+    /// chart refuses to render one without the other. This test guards the
+    /// default, not the possibility.
+    ///
+    /// This is not the WALL either: `jobs::kind_wall_refusal` refuses build work
+    /// on a shared operator that reports no isolated pool, whatever a node
+    /// declares. It is the statement of intent that keeps the wall from ever
+    /// being the only thing standing between a card and a privileged Pod.
     #[test]
-    fn a_build_is_never_offered_to_this_executor() {
+    fn a_build_is_never_offered_to_this_executor_by_default() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(|p| p.parent())

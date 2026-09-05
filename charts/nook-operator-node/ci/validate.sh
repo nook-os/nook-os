@@ -315,6 +315,45 @@ else
   echo "  ok:   half a build pool is refused"
 fi
 
+# ── builds in cluster (MAIN-655) ────────────────────────────────────────────
+# `build` is the one privileged kind. It is reachable here, but only with a pool
+# of its own — the chart refuses to render one half of that arrangement, because
+# a privileged Pod on a general node pool is the thing the control plane's wall
+# exists to prevent.
+echo "==> helm template (build kind)"
+if render "${min[@]}" --set executor.mode=kubernetes --set 'loopKinds={spec,build}' \
+     >/dev/null 2>&1; then
+  echo "  FAIL: loopKinds=build rendered with no executor.buildPool"
+  fail=1
+else
+  echo "  ok:   build without a pool is refused"
+fi
+if render "${min[@]}" --set 'loopKinds={spec,build}' \
+     --set executor.buildPool.selector=nook.io/pool=build \
+     --set executor.buildPool.taint=nook.io/build >/dev/null 2>&1; then
+  echo "  FAIL: loopKinds=build rendered in local mode — a containerised node runs no builds"
+  fail=1
+else
+  echo "  ok:   build outside kubernetes mode is refused"
+fi
+pooled="$(render "${min[@]}" --set executor.mode=kubernetes --set 'loopKinds={spec,build}' \
+  --set executor.buildPool.selector=nook.io/pool=build \
+  --set executor.buildPool.taint=nook.io/build 2>/dev/null)"
+if grep -q 'value: "spec,build"' <<<"$pooled"; then
+  echo "  ok:   build renders when a pool is named"
+else
+  echo "  FAIL: build did not render even with a pool"
+  fail=1
+fi
+# The default must stay safe: nothing about installing this chart grants builds.
+if grep -qE '^loopKinds:' -A8 "$chart/values.yaml" && \
+   sed -n '/^loopKinds:/,/^[a-z]/p' "$chart/values.yaml" | grep -q '^  - build$'; then
+  echo "  FAIL: the chart's DEFAULT loopKinds offers build"
+  fail=1
+else
+  echo "  ok:   build is not a default"
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "chart validation FAILED"
   exit 1

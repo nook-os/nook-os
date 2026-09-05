@@ -101,6 +101,7 @@ pub fn detect() -> Capabilities {
                 .as_deref(),
         ),
         shared_operator: shared_operator(),
+        isolated_builds: isolated_builds(),
         loop_kinds: loop_kinds(),
         max_loop_jobs: Some(max_loop_jobs()),
         max_loop_jobs_pinned: max_loop_jobs_pinned(),
@@ -121,6 +122,25 @@ pub fn detect() -> Capabilities {
             .ok()
             .and_then(|c| crate::selfupdate::supervision(&c)),
     }
+}
+
+/// Whether a build here lands on a pool of its own (MAIN-655).
+///
+/// True only for an in-cluster executor that names BOTH halves of a build pool
+/// — a selector and the taint those nodes carry. `ExecutorConfig::from_env`
+/// already refuses half of one, so reaching `Some` here means both were given.
+///
+/// A host node is always false: its builds run in a nested Docker daemon beside
+/// everything else on the machine, which is the arrangement the shared-operator
+/// wall exists for.
+fn isolated_builds() -> bool {
+    #[cfg(feature = "kubernetes")]
+    {
+        if let Ok(Some(cfg)) = crate::k8s_exec::ExecutorConfig::from_env() {
+            return cfg.build_pool.is_some();
+        }
+    }
+    false
 }
 
 /// What this node confines a loop-job agent with.
