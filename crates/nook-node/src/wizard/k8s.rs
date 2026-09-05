@@ -39,6 +39,15 @@ pub struct InitOptions {
     pub agent: bool,
     pub agent_url: Option<String>,
     pub agent_tls_secret: Option<String>,
+    /// Print the steps that make this deployment RUN work: the operator node,
+    /// its join token, the fleet's Claude session, and `executor.mode=kubernetes`
+    /// (MAIN-650). Off by default — the control plane installs fine without one,
+    /// it simply never executes anything.
+    pub executor: bool,
+    /// Namespace job Pods are created in. Default `nook-jobs`: a job Pod is the
+    /// untrusted half, and a blast radius that excludes the agent's own pod is
+    /// worth a namespace.
+    pub executor_namespace: Option<String>,
     /// `None` → default to `default_chart_version`. `Some("")` → omit `--version`
     /// so helm pulls the latest published chart (AC-3).
     pub chart_version: Option<String>,
@@ -272,6 +281,11 @@ pub struct Outcome {
     /// rather than left for the caller to re-derive from the text, so the
     /// hand-off's banner and this run's decision cannot disagree.
     pub dev_login_exposed: bool,
+    /// What it takes to make this deployment RUN work rather than merely serve
+    /// a board (MAIN-650). Empty unless `--executor` was asked for; the closing
+    /// pointer in [`init`] names the flag either way, because a control plane
+    /// with no node is the single most common "why is nothing building".
+    pub executor_steps: Vec<String>,
 }
 
 /// CLI entry point: open a terminal if there is one, do the work, print the
@@ -305,6 +319,11 @@ pub fn init(opts: InitOptions) -> Result<()> {
     println!("{}", indent(&out.helm_command));
     println!();
     n += 1;
+    for step in &out.executor_steps {
+        println!("{n}. {step}");
+        println!();
+        n += 1;
+    }
     println!("{n}. {}", out.secret_change_note);
     println!();
     n += 1;
@@ -319,6 +338,15 @@ pub fn init(opts: InitOptions) -> Result<()> {
         println!("{}", "!".repeat(72));
     }
     println!();
+    // A control plane with no node runs nothing, and says nothing about it:
+    // every promoted ticket simply sits queued. Naming the flag costs one line
+    // and is the difference between a board and a working deployment.
+    if out.executor_steps.is_empty() {
+        println!("This installs the control plane only — it will serve a board and run no");
+        println!("work. Re-run with --executor for the operator node, the fleet's Claude");
+        println!("session, and the steps that make loop jobs execute as Pods.");
+        println!();
+    }
     if !have("helm") {
         println!("Helm 3 is not installed here — get it to run the command above:");
         println!("  https://helm.sh/docs/intro/install/");
@@ -1036,6 +1064,27 @@ pub fn run(opts: InitOptions, tty: Option<Tty>, discover: &Discover) -> Result<O
         &namespace,
     );
 
+    // The node dials the agent listener, so its address is the same one the
+    // listener publishes — a placeholder here is the same placeholder the agent
+    // steps above already tell you to replace after the LoadBalancer exists.
+    let exec_namespace = opts
+        .executor_namespace
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("nook-jobs")
+        .to_string();
+    let executor_steps = if opts.executor {
+        executor_steps_for(
+            &namespace,
+            &exec_namespace,
+            agent_public_url.as_deref().unwrap_or("<agent-address>:8081"),
+            chart_version.trim(),
+        )
+    } else {
+        Vec::new()
+    };
+
     let values = Values {
         existing_secret,
         public_base_url,
@@ -1106,6 +1155,7 @@ pub fn run(opts: InitOptions, tty: Option<Tty>, discover: &Discover) -> Result<O
         secret_change_note,
         dev_login_exposed: values.auth_dev_mode && !values.ingress_host.is_empty(),
         dev_login_note,
+        executor_steps,
     })
 }
 
@@ -1298,6 +1348,86 @@ fn agent_steps_for(
         );
     }
     steps
+}
+
+/// The steps that make a deployment RUN work, rather than merely serve a board
+/// (MAIN-650).
+///
+/// `nook-dispatcher` only places a loop job on a NODE, so a control plane with
+/// none leaves every promoted ticket queued forever under "no eligible
+/// executor" — a state with no error in it anywhere, which is why it has to be
+/// named in the hand-off rather than discovered. The control-plane chart cannot
+/// do any of this because the executor is a second chart.
+///
+/// The Claude session is the one genuinely manual piece and stays that way
+/// (NG-4, and MAIN-337 owns the real credential path): it is a subscription
+/// device login, so it is a DIRECTORY of files rather than a value this wizard
+/// could mint, and nothing here ever writes secret material.
+fn executor_steps_for(
+    namespace: &str,
+    exec_namespace: &str,
+    server: &str,
+    chart_version: &str,
+) -> Vec<String> {
+    let version = if chart_version.trim().is_empty() {
+        String::new()
+    } else {
+        format!(" --version {chart_version}")
+    };
+    vec![
+        [
+            "Mint a join token for the operator node and put it in a Secret. The",
+            "   token is the node's only credential; the chart never stores one:",
+            "",
+            &format!("     kubectl create ns {exec_namespace} --dry-run=client -o yaml | kubectl apply -f -"),
+            &format!("     kubectl create secret generic nook-operator-join -n {namespace} \\"),
+            "       --from-literal=joinToken=<token from Settings → Nodes → Join token> \\",
+            "       --from-literal=ghToken=<a GitHub token, if the loop should open PRs>",
+        ]
+        .join("\n"),
+        [
+            "Create the fleet's Claude session Secret. THIS IS THE MANUAL STEP —",
+            "   a subscription device login is a directory, not a value, so log in",
+            "   once on any machine and copy the result in:",
+            "",
+            "     nook claude login          # or: ./run.sh --claude-login",
+            &format!("     kubectl create secret generic nook-job-credentials -n {exec_namespace} \\"),
+            "       --from-file=.credentials.json=.nook-secrets/claude/.credentials.json \\",
+            "       --from-file=.claude.json=.nook-secrets/claude/.claude.json",
+            "",
+            "   Subscription login only — never an API key. Without it the node",
+            "   reports its runtime unauthorized and is sent no loop work at all,",
+            "   which looks exactly like nothing being wrong.",
+        ]
+        .join("\n"),
+        [
+            "Install the operator node — the thing that actually runs the work:",
+            "",
+            &format!("     helm install nook-operator-node \\"),
+            &format!("       oci://ghcr.io/nook-os/charts/nook-operator-node{version} \\"),
+            &format!("       -n {namespace} \\"),
+            &format!("       --set server={server} \\"),
+            "       --set existingSecret=nook-operator-join \\",
+            "       --set executor.mode=kubernetes \\",
+            &format!("       --set executor.namespace={exec_namespace} \\"),
+            "       --set executor.credentialsSecret=nook-job-credentials \\",
+            "       --set networkPolicy.controlPlane.enabled=true",
+            "",
+            "   `executor.mode=kubernetes` gives each job a Pod of its own. The",
+            "   job image is derived from the chart's version, so it needs no flag.",
+            "   `networkPolicy.controlPlane.enabled=true` is what lets an",
+            "   in-cluster node reach the control plane at all — the default egress",
+            "   policy drops the private address space the Service lives on.",
+        ]
+        .join("\n"),
+        [
+            "Turn loops on for the tenant. They ship OFF, so nothing polls,",
+            "   dispatches or reaps until you do (MAIN-239):",
+            "",
+            "     nook operator loops on",
+        ]
+        .join("\n"),
+    ]
 }
 
 fn values_path(nook_dir: &Path, release: &str) -> PathBuf {
@@ -2015,6 +2145,42 @@ mod tests {
     }
 
     #[test]
+    fn the_executor_handoff_names_what_makes_work_actually_run() {
+        let steps = super::executor_steps_for("nook", "nook-jobs", "10.0.0.5:8081", "0.6.14");
+        let all = steps.join("\n");
+
+        // The join token: a node has no other credential, and the chart stores
+        // none.
+        assert!(all.contains("nook-operator-join"), "{all}");
+        assert!(all.contains("joinToken="), "{all}");
+
+        // The session. It is the manual step and the one that fails SILENTLY —
+        // no login means the runtime reports unauthorized and the node is simply
+        // sent nothing, which looks identical to an idle board.
+        assert!(all.contains("nook-job-credentials"), "{all}");
+        assert!(all.contains(".credentials.json"), "{all}");
+        assert!(all.contains("never an API key"), "{all}");
+
+        // The second chart, pinned to the same version as the first.
+        assert!(all.contains("charts/nook-operator-node --version 0.6.14"), "{all}");
+        assert!(all.contains("--set executor.mode=kubernetes"), "{all}");
+        assert!(all.contains("--set server=10.0.0.5:8081"), "{all}");
+        // Without this the node cannot reach an in-cluster control plane at
+        // all: the shipped egress policy drops the private address space the
+        // Service lives on.
+        assert!(all.contains("networkPolicy.controlPlane.enabled=true"), "{all}");
+
+        // Loops ship OFF (MAIN-239), so an install that stops before this
+        // queues every job forever with nothing reporting an error.
+        assert!(all.contains("nook operator loops on"), "{all}");
+
+        // An unpinned chart version omits the flag rather than emitting an
+        // empty one, exactly as the control-plane command does.
+        let latest = super::executor_steps_for("nook", "nook-jobs", "h:8081", "");
+        assert!(!latest.join("\n").contains("--version"), "{latest:?}");
+    }
+
+    #[test]
     fn the_agent_handoff_says_what_the_chart_cannot_do_for_you() {
         let steps =
             super::agent_steps_for(Some("nook-agent-tls"), Some("PLACEHOLDER:8081"), "nook");
@@ -2069,6 +2235,8 @@ mod tests {
             web_origin: None,
             ingress_class: None,
             secret_name: None,
+            executor: false,
+            executor_namespace: None,
             agent: false,
             agent_url: None,
             agent_tls_secret: None,

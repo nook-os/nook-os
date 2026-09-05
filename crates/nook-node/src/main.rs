@@ -1017,6 +1017,8 @@ async fn main() -> Result<()> {
             agent,
             agent_url,
             agent_tls_secret,
+            executor,
+            executor_namespace,
             chart_version,
             advanced,
             app_env,
@@ -1095,6 +1097,11 @@ async fn main() -> Result<()> {
                 agent: agent || agent_url.is_some() || agent_tls_secret.is_some(),
                 agent_url,
                 agent_tls_secret,
+                // Naming the jobs namespace is meaningless unless the executor
+                // hand-off is printed, so it implies the flag — the same rule
+                // --agent-url follows for --agent.
+                executor: executor || executor_namespace.is_some(),
+                executor_namespace,
                 chart_version,
                 advanced,
                 app_env,
@@ -2255,6 +2262,15 @@ enum K8sCommand {
         /// Name of the TLS Secret holding the agent cert. Implies --agent.
         #[arg(long)]
         agent_tls_secret: Option<String>,
+        /// Also print the steps that make this deployment RUN work: the operator
+        /// node, its join token, the fleet's Claude session, and job Pods.
+        /// Without it the control plane serves a board and executes nothing.
+        #[arg(long)]
+        executor: bool,
+        /// Namespace job Pods are created in. Default: nook-jobs. Implies
+        /// --executor.
+        #[arg(long)]
+        executor_namespace: Option<String>,
         /// Chart version to pin (helm --version). Empty pulls the latest chart.
         /// Defaults to this binary's build version.
         #[arg(long)]
