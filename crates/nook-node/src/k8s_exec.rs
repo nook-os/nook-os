@@ -586,6 +586,21 @@ pub fn pod_command(launch: &AgentLaunch<'_>) -> Vec<String> {
             SESSION_LIFE_CHECK, SESSION_EXPIRED_EXIT,
         ));
     }
+    // The skills, into the SAME writable config dir the session was copied to
+    // (MAIN-650).
+    //
+    // A job Pod is a fresh container. The node installs the embedded skills at
+    // startup and a host sandbox inherits them; a Pod inherits nothing, so the
+    // agent came up with no `/nook-build` and answered `Unknown command` —
+    // after cloning, authenticating and starting, which is an expensive place
+    // to discover it.
+    //
+    // Ordered after the credential seed because both write to
+    // `CLAUDE_CONFIG_DIR` and the seed is what creates it. Not guarded by
+    // `set -e` escape: an agent with no skills cannot do the job it was sent,
+    // so failing here is better than the confusing success that follows.
+    script.push_str("nook skills install --quiet\n");
+
     if !launch.repo_url.is_empty() {
         // Teach git the forge token the Secret carries, when there is one
         // (MAIN-650). Without this a Pod can only clone a PUBLIC repo: it mounts
@@ -2376,6 +2391,40 @@ mod tests {
     /// A private job image needs registry credentials, and the cost of not
     /// having them is not a fast failure: the pool scales a node up first, and
     /// only then does the Pod report ErrImagePull (MAIN-650).
+    /// A Pod inherits nothing (MAIN-650). The node installs the embedded skills
+    /// at startup and a host sandbox inherits them; a fresh container does not,
+    /// so the agent answered `Unknown command: /nook-build` — after cloning,
+    /// authenticating and starting, which is an expensive place to find out.
+    #[test]
+    fn the_agent_gets_its_skills_before_it_is_asked_for_one() {
+        let args = ["-p".to_string(), "/nook-build MAIN-1".to_string()];
+        let body = pod_command(&AgentLaunch {
+            runtime: "claude",
+            args: &args,
+            repo_url: "git@github.com:acme/private.git",
+            branch: "main",
+            seeded_session: true,
+        })[2]
+            .clone();
+
+        let install = body
+            .find("nook skills install")
+            .expect("the skills install");
+        // After the seed, because both write to CLAUDE_CONFIG_DIR and the seed
+        // is what creates it.
+        let seed = body.find("mkdir -p").expect("the credential seed");
+        assert!(
+            seed < install,
+            "skills must land after the config dir exists: {body}"
+        );
+        // …and before the agent is asked to run one.
+        let exec = body.find("\nexec ").expect("the exec");
+        assert!(
+            install < exec,
+            "skills must be installed before the agent starts: {body}"
+        );
+    }
+
     #[test]
     fn a_job_pod_can_pull_from_a_private_registry() {
         let mut sp = spec("build");
