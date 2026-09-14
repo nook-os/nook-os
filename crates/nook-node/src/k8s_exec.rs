@@ -548,6 +548,35 @@ pub fn pod_command(launch: &AgentLaunch<'_>) -> Vec<String> {
         ));
     }
     if !launch.repo_url.is_empty() {
+        // Teach git the forge token the Secret carries, when there is one
+        // (MAIN-650). Without this a Pod can only clone a PUBLIC repo: it mounts
+        // no SSH key, runs no askpass and inherits no credential helper, so a
+        // private checkout fails at the first step with a bare permission
+        // error that says nothing about the cause.
+        //
+        // `GH_TOKEN` reaches the Pod through `env_from` on the credential
+        // Secret, never through the Pod's `env` — `loop_job::pod_env` withholds
+        // it there on purpose, because a Pod's environment is readable by
+        // anything holding pod-read in the namespace.
+        //
+        // The `insteadOf` rewrite is what makes an `ssh://` or `git@` remote
+        // usable here at all. A workspace records whatever remote a human
+        // pasted, and for a Pod that has no key, SSH is not a transport it can
+        // reach the forge on — so the token's transport is substituted rather
+        // than the operator being asked to re-record the remote.
+        //
+        // Written under $HOME rather than /tmp so it lands in the same private
+        // per-Pod filesystem as everything else here, and `0600` before the
+        // token is in it.
+        script.push_str(
+            "if [ -n \"${GH_TOKEN:-}\" ]; then\n  \
+             umask 077\n  \
+             printf 'https://x-access-token:%s@github.com\\n' \"$GH_TOKEN\" > \"$HOME/.git-credentials\"\n  \
+             git config --global credential.helper 'store'\n  \
+             git config --global url.'https://github.com/'.insteadOf 'git@github.com:'\n  \
+             git config --global url.'https://github.com/'.insteadOf 'ssh://git@github.com/'\n\
+             fi\n",
+        );
         script.push_str(&format!(
             "git clone --depth 1 --branch {} {} {}\n",
             quote(launch.branch),
@@ -2152,6 +2181,52 @@ mod tests {
     /// A Pod mounts no storage, so the node's clone cache and its per-job
     /// worktree are unreachable from inside one: the checkout happens IN the
     /// Pod, from a fresh clone (NG-2).
+    /// A Pod mounts no SSH key and runs no askpass, so a private repo is
+    /// reachable only if the forge token the Secret carries is wired into git
+    /// (MAIN-650). Asserted on the SHAPE, because the failure it prevents is a
+    /// clone that dies with a permission error naming nothing.
+    #[test]
+    fn a_private_checkout_gets_the_forge_token_and_a_transport_it_can_use() {
+        let args = ["-p".to_string(), "/nook-build MAIN-1".to_string()];
+        let body = pod_command(&AgentLaunch {
+            runtime: "claude",
+            args: &args,
+            repo_url: "git@github.com:acme/private.git",
+            branch: "main",
+            seeded_session: true,
+        })[2]
+            .clone();
+
+        // Guarded, so a public checkout with no token in the Secret is
+        // unaffected rather than failing on an empty credential.
+        assert!(body.contains("if [ -n \"${GH_TOKEN:-}\" ]; then"), "{body}");
+        assert!(body.contains("x-access-token:%s@github.com"), "{body}");
+        assert!(body.contains("credential.helper"), "{body}");
+
+        // The rewrite is the load-bearing half for a workspace whose recorded
+        // remote is SSH: without it the token is irrelevant, because the Pod
+        // cannot speak that transport at all.
+        assert!(body.contains("insteadOf 'git@github.com:'"), "{body}");
+        assert!(body.contains("insteadOf 'ssh://git@github.com/'"), "{body}");
+
+        // The token is never echoed into the script itself — it is read from the
+        // environment the Secret supplies, so `kubectl get pod -o yaml` shows a
+        // command with no credential in it.
+        assert!(!body.contains("ghp_"), "{body}");
+        assert!(body.contains("\"$GH_TOKEN\""), "{body}");
+
+        // …and the credential file is private BEFORE the token is written.
+        let umask = body.find("umask 077").expect("a umask");
+        let write = body.find("git-credentials").expect("the credential write");
+        assert!(umask < write, "umask must precede the write: {body}");
+
+        // The clone still happens, after all of it.
+        assert!(
+            body.contains("git clone --depth 1 --branch 'main'"),
+            "{body}"
+        );
+    }
+
     #[test]
     fn the_pod_clones_its_own_checkout_and_then_becomes_the_agent() {
         let args = ["-p".to_string(), "/nook-spec MAIN-1".to_string()];
@@ -2616,5 +2691,38 @@ mod tests {
                 "{kind} is declared but needs a build pool to run"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod pod_script_syntax {
+    /// The generated script has to be valid `sh`. It is assembled from escaped
+    /// Rust literals, and a quoting slip there produces a Pod that starts and
+    /// dies on a syntax error with the reason only in its logs.
+    #[test]
+    fn the_generated_script_parses_as_sh() {
+        let args = ["-p".to_string(), "/nook-build MAIN-1".to_string()];
+        let body = super::pod_command(&super::AgentLaunch {
+            runtime: "claude",
+            args: &args,
+            repo_url: "git@github.com:acme/private.git",
+            branch: "main",
+            seeded_session: true,
+        })[2]
+            .clone();
+
+        let dir = std::env::temp_dir().join(format!("nook-pod-script-{}", std::process::id()));
+        std::fs::write(&dir, &body).expect("write the script");
+        let out = std::process::Command::new("sh")
+            .arg("-n")
+            .arg(&dir)
+            .output()
+            .expect("run sh -n");
+        let _ = std::fs::remove_file(&dir);
+        assert!(
+            out.status.success(),
+            "the Pod script is not valid sh:\n{}\n--- script ---\n{body}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 }
