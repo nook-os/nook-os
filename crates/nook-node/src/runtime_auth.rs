@@ -194,6 +194,10 @@ pub fn credential_path(runtime: &str) -> Option<PathBuf> {
 /// name the runtime will look for once that Secret is projected into a job Pod.
 /// Same table, so the two destinations cannot disagree about what the file is
 /// called (MAIN-650).
+// Only the Pod executor asks: a host node writes the credential to a PATH and
+// never needs its bare name. Gated so a build without the feature does not carry
+// a function nothing can call.
+#[cfg(feature = "kubernetes")]
 pub fn credential_file(runtime: &str) -> Option<&'static str> {
     ADAPTERS
         .iter()
@@ -207,6 +211,9 @@ pub fn credential_file(runtime: &str) -> Option<&'static str> {
 /// The read half of [`install_credential`], for the executor that has to
 /// PUBLISH what a login on this machine produced (MAIN-650). Same table, so it
 /// cannot read from somewhere the writer would not have written.
+// Likewise — reading the credential back is the executor's need, for publishing
+// it where job Pods can see it.
+#[cfg(feature = "kubernetes")]
 pub fn credential_bytes(runtime: &str) -> Option<Vec<u8>> {
     std::fs::read(credential_path(runtime)?).ok()
 }

@@ -1124,7 +1124,14 @@ impl NodeRepository for DbNodeRepository {
         );
         // The build wall (AC-3), in the WHERE clause rather than in a caller:
         // a shared operator drops out of the candidate set for a `build` job
-        // before anything it declared is even read.
+        // before anything it declared is even read — UNLESS it reports that a
+        // build there lands on a pool of its own (MAIN-655).
+        //
+        // The same condition `jobs::kind_wall_refusal` applies, and it has to be
+        // spelled here too: the wall is asked about a node somebody already
+        // chose, and this is what decides whether it is ever chosen. Lifting one
+        // without the other is a node that passes the wall and is never offered
+        // the work — which is exactly what the first cut of MAIN-655 did.
         //
         // The tenancy clause reads as two legs. Inside `tenant`, unchanged:
         // your node or the shared operator.
@@ -1154,7 +1161,7 @@ impl NodeRepository for DbNodeRepository {
                                        SELECT person_id FROM users
                                        WHERE tenant_id = $1 AND person_id IS NOT NULL
                                      )) )
-                       AND NOT ($4 = 'build' AND {operator})
+                       AND NOT ($4 = 'build' AND {operator} AND NOT {isolated})
                        AND EXISTS (
                              SELECT 1
                              FROM {runtime_auth} e
@@ -1163,6 +1170,7 @@ impl NodeRepository for DbNodeRepository {
                        AND {declares_kind}
                      ORDER BY (owner_person_id = $2) DESC NULLS LAST, id",
                     operator = shared_operator_clause(self.db.engine()),
+                    isolated = isolated_builds_clause(self.db.engine()),
                     rt = json(self.db.engine()).get_text(&element, "runtime"),
                     state = json(self.db.engine()).get_text(&element, "state"),
                 ),
