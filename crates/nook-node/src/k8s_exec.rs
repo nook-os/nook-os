@@ -15,8 +15,8 @@
 //! what is written here.
 
 use nook_k8s::types::{
-    Container, EmptyDirVolumeSource, EnvFromSource, EnvVar, ObjectMeta, Pod, PodSecurityContext,
-    PodSpec, SecretEnvSource, SecretVolumeSource, SecurityContext, Toleration, Volume, VolumeMount,
+    Container, EmptyDirVolumeSource, EnvVar, ObjectMeta, Pod, PodSecurityContext, PodSpec,
+    SecretVolumeSource, SecurityContext, Toleration, Volume, VolumeMount,
 };
 use nook_types::{AuthProfile, AuthState};
 
@@ -645,6 +645,10 @@ pub enum StartVerdict {
     Waiting,
     /// It will not start. The job goes back to the queue (AC-7).
     Refused(Refusal),
+    /// Nowhere to run it AT THIS MOMENT. Distinct from a refusal because an
+    /// autoscaler answers exactly this condition, and only while the Pod is
+    /// still pending — see `start_verdict`.
+    Unschedulable(String),
 }
 
 /// Reasons a container is `Waiting` for that mean it will not stop waiting.
@@ -686,17 +690,30 @@ pub fn start_verdict(pod: &Pod) -> StartVerdict {
             )));
         }
     }
-    // Nothing will schedule it. A cluster that is full clears itself, so this
-    // is the shortage the queue is for rather than a deployment to fix.
+    // Nothing can schedule it YET, which is not the same as never — and the
+    // difference is the whole of whether an autoscaled pool can ever run a
+    // build (MAIN-650).
+    //
+    // This used to refuse here. Kubernetes sets `Unschedulable` within seconds
+    // of a Pod having nowhere to go, while a cluster autoscaler takes a minute
+    // or three to provision a node — and it only does so while a PENDING POD is
+    // applying the pressure. Refusing immediately deleted that Pod, so the
+    // autoscaler never saw a reason to act, so no node ever appeared. A build
+    // pool scaled to zero could not run a build, ever, and the 600s
+    // [`START_BUDGET`] that exists for exactly this wait was never reached.
+    //
+    // So it waits, and the caller's deadline is what eventually gives up. The
+    // reason is carried out so the refusal that follows names it rather than
+    // saying only that the budget expired.
     for cond in status.conditions.iter().flatten() {
         if cond.type_ == "PodScheduled"
             && cond.status == "False"
             && cond.reason.as_deref() == Some("Unschedulable")
         {
-            return StartVerdict::Refused(Refusal::Transient(format!(
+            return StartVerdict::Unschedulable(format!(
                 "no node can take this job Pod: {}",
                 cond.message.as_deref().unwrap_or("Unschedulable")
-            )));
+            ));
         }
     }
     StartVerdict::Waiting
@@ -783,7 +800,11 @@ fn credential_volumes(secret: &str) -> (Vec<Volume>, Vec<VolumeMount>) {
                 secret: Some(SecretVolumeSource {
                     secret_name: Some(secret.to_string()),
                     default_mode: Some(CREDENTIALS_MODE),
-                    optional: Some(true),
+                    // `false`: with `env_from` gone this mount is the only thing
+                    // that notices a Secret that is not there, and a Pod that
+                    // started with no session would burn a pass discovering it
+                    // (MAIN-669 AC-4).
+                    optional: Some(false),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -1151,28 +1172,30 @@ pub fn job_pod(spec: &PodJobSpec) -> Result<Pod, Refusal> {
                 .collect(),
         ),
         // The credential seam (AC-10), and the ORDER matters: Kubernetes applies
-        // `env_from` first and lets `env` override it, so a Secret key colliding
-        // with `NOOK_JOB_ID` or `NOOK_SERVER` loses. A hand-created Secret is
-        // scaffolding, and scaffolding must not be able to redirect a run at the
-        // wrong control plane.
+        // NO `env_from`, and that is the fix rather than an omission
+        // (MAIN-650).
         //
-        // `optional: false` deliberately, and it is what makes AC-4 hold for the
-        // MOUNT as well: a named Secret that does not exist keeps the Pod in
-        // `CreateContainerConfigError`, which `start_verdict` reads as a
-        // configuration refusal naming it — far better than an agent that
-        // starts, silently has no credentials, and burns a pass finding out.
-        // Keys a Secret carries for the session rather than the environment
-        // (`.claude.json`) are not legal variable names; the kubelet skips
-        // those with an event and starts the container.
-        env_from: spec.credentials_secret.as_ref().map(|name| {
-            vec![EnvFromSource {
-                secret_ref: Some(SecretEnvSource {
-                    name: name.clone(),
-                    optional: Some(false),
-                }),
-                ..Default::default()
-            }]
-        }),
+        // It used to load the whole credential Secret, on the reasoning that
+        // keys which are not legal variable names — `.credentials.json` — would
+        // be skipped by the kubelet. MEASURED ON A REAL CLUSTER, THEY ARE NOT:
+        // every key arrives, dots and dashes and all. So a Pod for one
+        // workspace received every OTHER workspace's forge token, and the
+        // Claude session arrived as a plain variable — the exact exposure
+        // `loop_job::pod_env` withholds credentials from `env` to prevent,
+        // handed back by the seam beside it.
+        //
+        // A credential now reaches a Pod two ways and no third: the session as
+        // a MOUNTED FILE, copied into the writable config dir by `pod_command`;
+        // and this workspace's forge token as ONE named `secretKeyRef` above.
+        // Both name what they deliver, so nothing arrives by accident.
+        //
+        // The cost is the loud failure `optional: false` used to buy. A missing
+        // Secret now fails the MOUNT, which leaves the Pod in
+        // `ContainerCreating` with the reason in an Event this executor's Role
+        // deliberately cannot read — so the run waits out `START_BUDGET` and is
+        // refused for the timeout rather than by name. Worse diagnostics, and
+        // the right trade against handing every job every tenant's credential.
+        env_from: None,
         volume_mounts: credentials.as_ref().map(|(_, m)| m.clone()),
         security_context: Some(SecurityContext {
             privileged: Some(privileged),
@@ -1368,16 +1391,26 @@ impl PodExecutor {
     /// failed the card — and [`start_verdict`] is where the reading lives.
     pub async fn await_start(&self, name: &str) -> Result<(), Refusal> {
         let deadline = std::time::Instant::now() + START_BUDGET;
+        let mut unschedulable: Option<String> = None;
         loop {
             let pod = self.pods.get(name).await.map_err(|e| refusal_for(&e))?;
             match start_verdict(&pod) {
                 StartVerdict::Started => return Ok(()),
                 StartVerdict::Refused(r) => return Err(r),
+                // Kept, so the refusal below says WHY nothing took it rather
+                // than only that time ran out.
+                StartVerdict::Unschedulable(why) => unschedulable = Some(why),
                 StartVerdict::Waiting => {}
             }
             if std::time::Instant::now() >= deadline {
                 // Transient: a cluster busy enough to take ten minutes over a
                 // Pod is a shortage, and the queue is where a job waits one out.
+                if let Some(why) = unschedulable {
+                    return Err(Refusal::Transient(format!(
+                        "{why} — still true after {}s",
+                        START_BUDGET.as_secs()
+                    )));
+                }
                 return Err(Refusal::Transient(format!(
                     "the job Pod did not start within {}s",
                     START_BUDGET.as_secs()
@@ -1717,19 +1750,27 @@ mod tests {
         s.credentials_secret = Some("nook-job-credentials".into());
         let pod = job_pod(&s).unwrap();
 
-        let secret_ref = container(&pod).env_from.as_ref().expect("an env_from")[0]
-            .secret_ref
-            .clone()
-            .expect("a secret ref");
-        assert_eq!(secret_ref.name, "nook-job-credentials");
-        assert_eq!(secret_ref.optional, Some(false), "the detector went quiet");
+        // NO `env_from`. Measured on a real cluster, the kubelet does NOT skip
+        // keys that are not legal variable names — it exposed `.credentials.json`
+        // and every `gh-token.<workspace>` as plain environment. So a Pod for one
+        // workspace held every other workspace's forge token, and the session
+        // arrived as a variable (MAIN-650). The Secret now reaches a Pod as a
+        // mounted FILE and as NAMED references, never wholesale.
+        assert!(
+            container(&pod).env_from.is_none(),
+            "env_from hands a Pod every key in the Secret, including other \
+             workspaces' credentials"
+        );
 
         let source = volume(&pod, CREDENTIALS_VOLUME).secret.as_ref().unwrap();
-        assert_eq!(source.optional, Some(true), "a failed mount hangs the run");
+        // With `env_from` gone this mount is the only thing that notices a
+        // Secret that is not there.
         assert_eq!(
-            source.secret_name.as_deref(),
-            Some(secret_ref.name.as_str())
+            source.optional,
+            Some(false),
+            "a missing Secret must be loud"
         );
+        assert_eq!(source.secret_name.as_deref(), Some("nook-job-credentials"));
 
         // And with none configured, no half appears.
         let pod = job_pod(&spec("review")).unwrap();
@@ -2505,12 +2546,16 @@ mod tests {
                 "message": "0/3 nodes are available: insufficient cpu",
             }],
         }));
+        // NOT a refusal, and the distinction is what lets an autoscaled pool
+        // work at all (MAIN-650): Kubernetes sets this within seconds, while a
+        // cluster autoscaler takes minutes and only acts while the pending Pod
+        // is applying pressure. Refusing here deleted that Pod and the node
+        // never came, so a pool scaled to zero could never run a build.
         match start_verdict(&unschedulable) {
-            StartVerdict::Refused(r) => {
-                assert!(r.keep_claiming(), "a full cluster clears itself");
-                assert!(r.to_string().contains("insufficient cpu"), "{r}");
+            StartVerdict::Unschedulable(why) => {
+                assert!(why.contains("insufficient cpu"), "{why}");
             }
-            other => panic!("an unschedulable Pod was not refused: {other:?}"),
+            other => panic!("an unschedulable Pod must be waited on, not refused: {other:?}"),
         }
 
         for phase in ["Running", "Succeeded", "Failed"] {
@@ -2707,21 +2752,25 @@ mod tests {
         s.credentials_secret = Some("nook-job-credentials".into());
         let pod = job_pod(&s).unwrap();
 
-        let from = container(&pod)
-            .env_from
+        // The credential seam is the MOUNT plus named references — never
+        // `env_from`, which hands a Pod every key the Secret holds including
+        // other workspaces' tokens (MAIN-650).
+        assert!(container(&pod).env_from.is_none(), "env_from is the leak");
+        let mount = volume(&pod, CREDENTIALS_VOLUME)
+            .secret
             .as_ref()
-            .expect("a credential seam");
-        let secret = from[0].secret_ref.as_ref().expect("a secretRef");
-        assert_eq!(secret.name, "nook-job-credentials");
+            .expect("the credential mount");
+        assert_eq!(mount.secret_name.as_deref(), Some("nook-job-credentials"));
         // A named Secret that is absent must stop the Pod, not start an agent
         // that quietly has no credentials and spends a pass finding out.
-        assert_eq!(secret.optional, Some(false));
+        assert_eq!(mount.optional, Some(false));
 
-        // Not a value anywhere: the seam is a REFERENCE, and every ordinary
-        // pair still carries its own literal value rather than going through it.
+        // Every env pair the NODE writes carries its own literal value. The one
+        // reference is the forge token, and only when a workspace has one —
+        // asserted on its own above.
         for var in container(&pod).env.as_ref().unwrap() {
             assert!(
-                var.value_from.is_none(),
+                var.value_from.is_none() || var.name == "GH_TOKEN",
                 "{} reaches for a value source it does not have",
                 var.name
             );
