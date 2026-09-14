@@ -2942,27 +2942,32 @@ fn run_in_pod(
     // needs the reason on the card, not in a node's log. AC-10 ships no
     // credential path, so this is the normal state of a cluster job rather than
     // an incident.
-    if !withheld.is_empty() {
+    // SILENT when the credentials are in place, which is the ordinary case
+    // (MAIN-650).
+    //
+    // This used to announce, on every single run, that two variables were
+    // withheld and read from "a hand-created fixture, not a shipped credential
+    // path". Both halves stopped being true: the node creates that Secret,
+    // publishes the fleet's session into it, and publishes this workspace's
+    // forge token per run — nothing about it is hand-created any more. What was
+    // left was a paragraph of self-description on a healthy run, which is the
+    // kind of note a reader learns to skip, and skipping it is how the one that
+    // matters gets missed.
+    //
+    // So it speaks only when something is actually wrong: no Secret configured
+    // at all. `withheld` is then the list of what the agent will not have.
+    if executor.credentials_secret.is_none() && !withheld.is_empty() {
         note(
             out,
             job_id,
-            match &executor.credentials_secret {
-                Some(secret) => format!(
-                    "{} credential(s) are not written into this Pod ({}); it reads them from \
-                     Secret {secret} instead — a hand-created fixture, not a shipped \
-                     credential path (MAIN-337/339)",
-                    withheld.len(),
-                    withheld.join(", ")
-                ),
-                None => format!(
-                    "this Pod gets NO credentials: {} were withheld ({}) and no \
-                     executor.credentialsSecret is configured. A Pod's env is readable by \
-                     anything with pod-read in this namespace, so they are not written \
-                     there. Expect the agent to fail authenticating.",
-                    withheld.len(),
-                    withheld.join(", ")
-                ),
-            },
+            format!(
+                "this Pod has no credentials: {} withheld ({}) and no \
+                 executor.credentialsSecret is set, so nothing delivers them. A Pod's \
+                 environment is readable by anything holding pod-read here, which is why \
+                 they are not simply written there. The agent will fail to authenticate.",
+                withheld.len(),
+                withheld.join(", ")
+            ),
         );
     }
 
