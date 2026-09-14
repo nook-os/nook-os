@@ -56,7 +56,24 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     resourceNames: [{{ . | quote }}]
-    verbs: ["get", "create", "patch"]
+    verbs: ["get", "patch"]
+  # `create` CANNOT be pinned by name, and that is Kubernetes' rule rather than
+  # an omission here: the object's name lives in the request body, which RBAC
+  # has not parsed when it authorizes, so a `create` rule carrying
+  # `resourceNames` matches nothing and every create is denied.
+  #
+  # Worth knowing because the obvious check agrees with the wrong answer —
+  # `kubectl auth can-i create secrets/<name>` returns YES for a rule the
+  # apiserver then refuses, because can-i is told a name the real request has
+  # not yet supplied.
+  #
+  # So creation is namespace-scoped and nothing else is: the node may bring a
+  # Secret into existence in the jobs namespace, and may read or change exactly
+  # one. It cannot read another Secret here, cannot alter one, and cannot list
+  # what exists — so the widening is "may add", not "may see".
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
 {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1

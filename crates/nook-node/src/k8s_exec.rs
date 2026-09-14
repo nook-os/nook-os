@@ -927,43 +927,46 @@ pub fn spawn_credential_sync() {
         return;
     };
 
+    // A runtime FIRST, before anything is recorded. Ordering matters here and
+    // got it wrong once: the stamp used to be written before this check, so a
+    // call made outside the runtime marked the bytes published and returned —
+    // and every later call short-circuited on that stamp. One early call
+    // poisoned the sync for the life of the process, silently.
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+
     // Change detection only — never a security claim, and deliberately not a
     // cryptographic digest: the question is "are these the bytes I last sent",
     // which a collision-prone hash answers well enough to save an apiserver
-    // round trip on every sweep.
+    // round trip on every probe.
     use std::hash::{Hash as _, Hasher as _};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     bytes.hash(&mut h);
     let stamp = h.finish();
-    {
-        let last = last_published();
-        let mut last = last.lock().expect("credential stamp");
-        if *last == Some(stamp) {
-            return;
-        }
-        // Recorded BEFORE the write, so a failing apiserver cannot make this a
-        // hot loop against it; the next change re-arms it either way.
-        *last = Some(stamp);
+    if *last_published().lock().expect("credential stamp") == Some(stamp) {
+        return;
     }
 
-    let Ok(handle) = tokio::runtime::Handle::try_current() else {
-        return;
-    };
     handle.spawn(async move {
         match deliver_credential_to_secret(CREDENTIALS_RUNTIME, &bytes).await {
-            Ok(target) => tracing::info!(
-                runtime = CREDENTIALS_RUNTIME, %target, key,
-                "published this node's runtime credential for its job Pods"
-            ),
-            Err(e) => {
-                // Reported, never fatal: a node that cannot publish keeps
-                // running sessions, and the operator is told why.
-                *last_published().lock().expect("credential stamp") = None;
-                tracing::warn!(
-                    runtime = CREDENTIALS_RUNTIME, error = %e,
-                    "cannot publish this node's runtime credential"
+            Ok(target) => {
+                // Recorded only on SUCCESS. A failure leaves the stamp unset so
+                // the next probe tries again — which is what makes a permission
+                // that was missing, or an apiserver that was briefly away, heal
+                // without a restart.
+                *last_published().lock().expect("credential stamp") = Some(stamp);
+                tracing::info!(
+                    runtime = CREDENTIALS_RUNTIME, %target, key,
+                    "published this node's runtime credential for its job Pods"
                 );
             }
+            // Reported, never fatal: a node that cannot publish keeps running
+            // sessions, and the operator is told why.
+            Err(e) => tracing::warn!(
+                runtime = CREDENTIALS_RUNTIME, error = %e,
+                "cannot publish this node's runtime credential"
+            ),
         }
     });
 }

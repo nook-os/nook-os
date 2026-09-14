@@ -135,6 +135,13 @@ pub fn sweep_job_sandboxes() {
     //
     // The node's NAME goes with it: a namespace can hold two agents' job Pods,
     // and without it each would read the other's running work as an orphan.
+    // Retry the credential publish on the same cadence (MAIN-650). The probe
+    // path covers a login and a reconnect; this covers everything else — a
+    // permission granted after the node started, an apiserver that was briefly
+    // away, a token the runtime refreshed on its own. Free when there is
+    // nothing to do: a local read and a hash compare.
+    #[cfg(feature = "kubernetes")]
+    crate::k8s_exec::spawn_credential_sync();
     #[cfg(feature = "kubernetes")]
     crate::k8s_exec::spawn_orphan_sweep(
         NodeConfig::load()

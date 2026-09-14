@@ -302,11 +302,20 @@ if grep -qE '"(list|watch|delete|deletecollection)"' <<<"$secrule"; then
 else
   echo "  ok:   no list/watch on secrets"
 fi
-if grep -qE 'verbs: \["get", "create", "patch"\]' <<<"$secrule"; then
-  echo "  ok:   secrets verbs are exactly get/create/patch"
+if grep -qE 'verbs: \["get", "patch"\]' <<<"$creds"; then
+  echo "  ok:   the pinned secrets rule is get/patch only"
 else
-  echo "  FAIL: unexpected secrets verbs: $secrule"
+  echo "  FAIL: unexpected verbs on the pinned secrets rule"
   fail=1
+fi
+# `create` sits in its own UNPINNED rule, because RBAC ignores resourceNames on
+# create — a pinned create rule matches nothing and every create is denied,
+# while `kubectl auth can-i create secrets/<name>` still answers yes.
+if grep -A2 'resources: \["secrets"\]' <<<"$creds" | grep -B1 'verbs: \["create"\]' | grep -q resourceNames; then
+  echo "  FAIL: the create rule is pinned by name — the apiserver will deny every create"
+  fail=1
+else
+  echo "  ok:   create is unpinned, as RBAC requires"
 fi
 # And the POD's own permissions are untouched — a mounted Secret is resolved by
 # the kubelet, so nothing about what the JOB may do has changed. Compared as the
