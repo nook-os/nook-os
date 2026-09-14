@@ -631,6 +631,23 @@ pub fn pod_command(launch: &AgentLaunch<'_>) -> Vec<String> {
         // Written under $HOME rather than /tmp so it lands in the same private
         // per-Pod filesystem as everything else here, and `0600` before the
         // token is in it.
+        // An identity to commit with (MAIN-650).
+        //
+        // A Pod has no `~/.gitconfig` and inherits none, so `git commit` fails
+        // with "Please tell me who you are" — at the END of a run, after the
+        // agent has done the work. The first build to get this far set it
+        // repo-locally itself to get the commit through, which worked and is
+        // not something each agent should have to rediscover.
+        //
+        // `nook@nookos.local` / `NookOS` is the identity `gitops` already uses
+        // for commits this system makes; a second spelling would be a second
+        // answer to the same question. `--global`, so the agent may still set a
+        // repo-local one if a workspace wants its own.
+        script.push_str(
+            "git config --global user.email 'nook@nookos.local'\n\
+             git config --global user.name 'NookOS'\n",
+        );
+
         // The transport rewrite is UNCONDITIONAL; only the credential is gated.
         //
         // A Pod has no SSH key and no known_hosts, so an `ssh://` or `git@`
@@ -2660,6 +2677,12 @@ mod tests {
         let umask = body.find("umask 077").expect("a umask");
         let write = body.find("git-credentials").expect("the credential write");
         assert!(umask < write, "umask must precede the write: {body}");
+
+        // An identity, or `git commit` fails at the END of a run with "Please
+        // tell me who you are" — after the agent has done the work. The same
+        // one `gitops` uses for commits this system makes.
+        assert!(body.contains("user.email 'nook@nookos.local'"), "{body}");
+        assert!(body.contains("user.name 'NookOS'"), "{body}");
 
         // The clone still happens, after all of it.
         assert!(
