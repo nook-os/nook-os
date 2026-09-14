@@ -3001,7 +3001,13 @@ fn run_in_pod(
         let forge_key = match (run.workspace_id, run.gh_token) {
             (Some(ws), Some(token)) => {
                 match k8s_exec::publish_forge_token(executor, ws, token).await {
-                    Ok(key) => Some(key),
+                    Ok(key) => {
+                        tracing::info!(
+                            workspace = %ws, %key,
+                            "published this workspace's forge token for its job Pod"
+                        );
+                        Some(key)
+                    }
                     Err(e) => {
                         note(
                             out,
@@ -3015,7 +3021,21 @@ fn run_in_pod(
                     }
                 }
             }
-            _ => None,
+            // Said rather than passed over. A Pod with no forge token cannot
+            // clone a private repo, and the failure lands several minutes later
+            // as a bare `Host key verification failed` — which names neither the
+            // token nor the workspace.
+            _ => {
+                note(
+                    out,
+                    job_id,
+                    "this run carries no forge token, so a private checkout will fail to \
+                     clone: either the workspace has none recorded, or the one it has \
+                     could not be decrypted (the control plane logs which)"
+                        .to_string(),
+                );
+                None
+            }
         };
         let name = exec
             .start(job_id, run.kind, env, command, forge_key)

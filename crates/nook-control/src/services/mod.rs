@@ -24,12 +24,33 @@ pub async fn workspace_gh_token(
     tenant: nook_types::TenantId,
     workspace: nook_types::WorkspaceId,
 ) -> Option<String> {
-    let sealed = state
-        .workspaces
-        .gh_token_sealed(tenant, workspace)
-        .await
-        .ok()??;
-    state.vault.decrypt_string(&sealed).ok()
+    let sealed = match state.workspaces.gh_token_sealed(tenant, workspace).await {
+        Ok(Some(s)) => s,
+        // No token recorded is the ordinary state and says nothing.
+        Ok(None) => return None,
+        Err(e) => {
+            tracing::warn!(%workspace, error = ?e, "could not read this workspace's forge token");
+            return None;
+        }
+    };
+    // A token that is RECORDED but will not decrypt is a different fact from
+    // having none, and it used to read as the same one: `.ok()?` turned "your
+    // PAT is unreadable" into "there is no PAT", and every caller then behaved
+    // as though the workspace had never been given one. The usual cause is a
+    // SECRETS_KEY that changed under rows sealed with the old one — silent, and
+    // indistinguishable from an empty field until somebody reads the database.
+    match state.vault.decrypt_string(&sealed) {
+        Ok(token) => Some(token),
+        Err(e) => {
+            tracing::warn!(
+                %workspace, error = ?e,
+                "this workspace has a forge token that cannot be decrypted — it was \
+                 sealed with a different SECRETS_KEY. Re-enter it on the workspace; \
+                 until then runs here have no forge credential"
+            );
+            None
+        }
+    }
 }
 
 pub async fn workspace_git_key(
