@@ -303,6 +303,21 @@ pub struct PodJobSpec {
     /// writable [`CLAUDE_DIR`] before the agent starts (AC-10, MAIN-669,
     /// MAIN-672). `None` delivers no credentials at all.
     pub credentials_secret: Option<String>,
+    /// The key inside [`Self::credentials_secret`] holding THIS WORKSPACE's
+    /// forge token, surfaced to the agent as `GH_TOKEN` (MAIN-650).
+    ///
+    /// Per workspace rather than one shared `GH_TOKEN`, because the Secret is
+    /// one object serving every workspace on the node: a single key would mean
+    /// the last job to start decides which repo every other job can reach, and
+    /// two jobs from different workspaces would race. A key apiece makes that
+    /// impossible rather than unlikely.
+    ///
+    /// A REFERENCE, never a value — the token reaches the container through
+    /// `secretKeyRef`, so it is absent from the Pod manifest that this
+    /// executor's own `pods get` can read back. `optional` at the reference, so
+    /// a workspace with no token configured still starts (and its agent simply
+    /// cannot reach a private repo).
+    pub forge_token_key: Option<String>,
     /// What the container runs — the agent runtime, its flags, and the opening
     /// turn among them.
     ///
@@ -881,6 +896,64 @@ pub fn delivered_runtime_auth(
         .collect()
 }
 
+/// The Secret key holding one workspace's forge token (MAIN-650).
+///
+/// Per workspace, because the credential Secret is one object serving every
+/// workspace this node runs: a single `GH_TOKEN` would mean the last job to
+/// start decides which repos every other job can reach, and two jobs from
+/// different workspaces would race over it. A key apiece makes that impossible
+/// rather than unlikely.
+///
+/// A Secret key may hold only `[-._a-zA-Z0-9]`, and a workspace id is a UUID,
+/// so the prefix is the whole of the shaping — but it is filtered anyway rather
+/// than trusted, because the id arrives over the wire.
+pub fn forge_token_key(workspace_id: &str) -> String {
+    let id: String = workspace_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .collect();
+    format!("gh-token.{id}")
+}
+
+/// Put this workspace's forge token in the Secret its job Pods read, so an
+/// operator never writes one by hand (MAIN-650).
+///
+/// The control plane already holds the token — a workspace records it, encrypted
+/// — and already sends it with every run. Before this it reached the node and
+/// stopped there: `loop_job::pod_env` withholds it from the Pod's environment,
+/// correctly, because a Pod's env is readable by anything with pod-read in the
+/// namespace. So the token had nowhere to go and a cluster install needed a
+/// `kubectl create secret` an operator had to perform by hand with a credential
+/// they obtained some other way.
+///
+/// Now it takes the same road the Claude session takes: the node writes it into
+/// the Secret, under this workspace's own key, and the Pod reads it by
+/// reference. Add a PAT to a workspace and the next run has it.
+///
+/// Awaited by the caller rather than spawned, and that is deliberate: the Pod is
+/// about to be created and would otherwise race the write, starting with a stale
+/// token or none. It is one merge patch against one Secret.
+pub async fn publish_forge_token(
+    cfg: &ExecutorConfig,
+    workspace_id: &str,
+    token: &str,
+) -> anyhow::Result<String> {
+    let secret = cfg.credentials_secret.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no executor.credentialsSecret is configured, so a forge token has nowhere to go"
+        )
+    })?;
+    let key = forge_token_key(workspace_id);
+    let conn = nook_k8s::connect().await?;
+    nook_k8s::Credentials::new(conn.client, &cfg.namespace, secret)
+        .upsert(std::collections::BTreeMap::from([(
+            key.clone(),
+            token.as_bytes().to_vec(),
+        )]))
+        .await?;
+    Ok(key)
+}
+
 /// Land a delivered credential in the Secret job Pods read (MAIN-650).
 ///
 /// On a host node a delivered credential goes to a FILE, and the agent that
@@ -1054,6 +1127,27 @@ pub fn job_pod(spec: &PodJobSpec) -> Result<Pod, Refusal> {
                     value: Some(value),
                     value_from: None,
                 })
+                // This workspace's forge token, BY REFERENCE (MAIN-650). In
+                // `env` rather than left to `env_from` because the key is named
+                // per workspace and the variable is not: this is what maps one
+                // to the other, and being in `env` also means it beats any
+                // `GH_TOKEN` a hand-edited Secret happens to carry.
+                .chain(spec.forge_token_key.iter().map(|key| EnvVar {
+                    name: "GH_TOKEN".to_string(),
+                    value: None,
+                    value_from: Some(nook_k8s::types::EnvVarSource {
+                        secret_key_ref: Some(nook_k8s::types::SecretKeySelector {
+                            name: spec.credentials_secret.clone().unwrap_or_default(),
+                            key: key.clone(),
+                            // A workspace with no token configured still starts.
+                            // Its agent cannot reach a private repo, which the
+                            // clone reports plainly — better than a Pod that
+                            // never starts over a credential it may not need.
+                            optional: Some(true),
+                        }),
+                        ..Default::default()
+                    }),
+                }))
                 .collect(),
         ),
         // The credential seam (AC-10), and the ORDER matters: Kubernetes applies
@@ -1243,6 +1337,7 @@ impl PodExecutor {
         kind: &str,
         env: Vec<(String, String)>,
         command: Vec<String>,
+        forge_token_key: Option<String>,
     ) -> Result<String, Refusal> {
         let pod = job_pod(&PodJobSpec {
             job_id: job_id.to_string(),
@@ -1254,6 +1349,7 @@ impl PodExecutor {
             command,
             build_pool: self.cfg.build_pool.clone(),
             credentials_secret: self.cfg.credentials_secret.clone(),
+            forge_token_key,
         })?;
         let name = pod
             .metadata
@@ -1428,6 +1524,7 @@ mod tests {
                 taint_key: "nook.io/build-only".into(),
             }),
             credentials_secret: None,
+            forge_token_key: None,
         }
     }
 
@@ -2185,6 +2282,66 @@ mod tests {
     /// reachable only if the forge token the Secret carries is wired into git
     /// (MAIN-650). Asserted on the SHAPE, because the failure it prevents is a
     /// clone that dies with a permission error naming nothing.
+    /// The token reaches the container BY REFERENCE and is keyed per workspace
+    /// (MAIN-650). Both halves matter: a value would be readable through the
+    /// executor's own `pods get`, and one shared key would let the last job to
+    /// start decide which repos every other job can reach.
+    #[test]
+    fn the_forge_token_is_referenced_per_workspace_never_inlined() {
+        let mut sp = spec("build");
+        sp.credentials_secret = Some("nook-job-credentials".into());
+        sp.forge_token_key = Some(forge_token_key("01a03499-9d0e-7ec0-a576-44c7a5934166"));
+        let pod = job_pod(&sp).unwrap();
+        let env = container(&pod).env.as_ref().expect("env");
+
+        let gh = env
+            .iter()
+            .find(|e| e.name == "GH_TOKEN")
+            .expect("GH_TOKEN is wired");
+        assert!(
+            gh.value.is_none(),
+            "the token must not be a literal: {gh:?}"
+        );
+        let sel = gh
+            .value_from
+            .as_ref()
+            .and_then(|v| v.secret_key_ref.as_ref())
+            .expect("a secretKeyRef");
+        assert_eq!(sel.name, "nook-job-credentials");
+        assert_eq!(sel.key, "gh-token.01a03499-9d0e-7ec0-a576-44c7a5934166");
+        // A workspace with no token still starts; its clone reports what it
+        // could not reach.
+        assert_eq!(sel.optional, Some(true));
+
+        // No key configured ⇒ no GH_TOKEN entry at all, so a public checkout is
+        // untouched by any of this.
+        let mut bare = spec("build");
+        bare.credentials_secret = Some("nook-job-credentials".into());
+        let pod = job_pod(&bare).unwrap();
+        assert!(
+            !container(&pod)
+                .env
+                .as_ref()
+                .expect("env")
+                .iter()
+                .any(|e| e.name == "GH_TOKEN"),
+            "no workspace token means no GH_TOKEN entry"
+        );
+    }
+
+    /// A Secret key may hold only `[-._a-zA-Z0-9]`, and the id comes off the
+    /// wire, so it is filtered rather than trusted.
+    #[test]
+    fn a_forge_token_key_is_always_a_legal_secret_key() {
+        let key = forge_token_key("../../etc/passwd nasty");
+        assert_eq!(key, "gh-token.....etcpasswdnasty");
+        assert!(
+            key.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')),
+            "{key}"
+        );
+    }
+
     #[test]
     fn a_private_checkout_gets_the_forge_token_and_a_transport_it_can_use() {
         let args = ["-p".to_string(), "/nook-build MAIN-1".to_string()];
@@ -2460,6 +2617,12 @@ mod tests {
             Some(i) => &src[..i],
             None => &src[..],
         };
+
+        // Whitespace-insensitive: these are calls, and rustfmt is free to break
+        // one across lines the moment its arguments grow. A guard that a
+        // formatting pass can trip is a guard that gets weakened to silence it.
+        let src: String = src.split_whitespace().collect::<Vec<_>>().join(" ");
+        let src = src.replace(" .", ".").replace(". ", ".").replace("( ", "(");
 
         for reached in [
             // AC-3: a Pod is created for the job.

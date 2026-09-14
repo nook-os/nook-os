@@ -2990,7 +2990,36 @@ fn run_in_pod(
         // the `?` may return straight out. Every path AFTER it goes through the
         // delete below — which is why the driving is its own function rather
         // than inline `?`s that would each need remembering.
-        let name = exec.start(job_id, run.kind, env, command).await?;
+        // This workspace's forge token into the Secret its Pod reads, BEFORE
+        // the Pod exists (MAIN-650). Awaited rather than spawned on purpose: a
+        // Pod created first would race the write and start with a stale token
+        // or none.
+        //
+        // A failure here is reported and not fatal — a run that needs no private
+        // checkout should not be refused over a credential it will never use,
+        // and the clone says plainly what it could not reach.
+        let forge_key = match (run.workspace_id, run.gh_token) {
+            (Some(ws), Some(token)) => {
+                match k8s_exec::publish_forge_token(executor, ws, token).await {
+                    Ok(key) => Some(key),
+                    Err(e) => {
+                        note(
+                            out,
+                            job_id,
+                            format!(
+                                "could not put this workspace's forge token in the credential \
+                                 Secret ({e}); a private checkout will fail to clone"
+                            ),
+                        );
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+        let name = exec
+            .start(job_id, run.kind, env, command, forge_key)
+            .await?;
         let driven = drive_pod(out, job_id, &exec, &name).await;
         // AC-5, on success, on failure and on cancel. AWAITED rather than
         // spawned: the run is over, so there is nothing to be quick for, and a
