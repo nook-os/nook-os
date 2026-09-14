@@ -607,13 +607,30 @@ pub fn pod_command(launch: &AgentLaunch<'_>) -> Vec<String> {
         // Written under $HOME rather than /tmp so it lands in the same private
         // per-Pod filesystem as everything else here, and `0600` before the
         // token is in it.
+        // The transport rewrite is UNCONDITIONAL; only the credential is gated.
+        //
+        // A Pod has no SSH key and no known_hosts, so an `ssh://` or `git@`
+        // remote fails at `Host key verification failed` whatever the repo's
+        // visibility — a PUBLIC repo recorded with an SSH remote cannot be
+        // cloned here either, and gating the rewrite on having a token made
+        // that failure depend on something unrelated to it.
+        //
+        // `insteadOf` is a MULTI-VALUE key and plain `git config` REPLACES it,
+        // so the two forms need `--replace-all` then `--add`: written in turn
+        // the second silently cleared the first, and the one lost was
+        // `git@github.com:`, which is the form a recorded remote almost always
+        // has.
+        script.push_str(
+            "git config --global --replace-all url.'https://github.com/'.insteadOf 'git@github.com:'\n\
+             git config --global --add url.'https://github.com/'.insteadOf 'ssh://git@github.com/'\n",
+        );
+        // The credential, when this workspace has one. A public checkout needs
+        // none and must not be blocked for the want of it.
         script.push_str(
             "if [ -n \"${GH_TOKEN:-}\" ]; then\n  \
              umask 077\n  \
              printf 'https://x-access-token:%s@github.com\\n' \"$GH_TOKEN\" > \"$HOME/.git-credentials\"\n  \
-             git config --global credential.helper 'store'\n  \
-             git config --global --replace-all url.'https://github.com/'.insteadOf 'git@github.com:'\n  \
-             git config --global --add url.'https://github.com/'.insteadOf 'ssh://git@github.com/'\n\
+             git config --global credential.helper 'store'\n\
              fi\n",
         );
         script.push_str(&format!(
@@ -2455,9 +2472,17 @@ mod tests {
         })[2]
             .clone();
 
-        // Guarded, so a public checkout with no token in the Secret is
-        // unaffected rather than failing on an empty credential.
+        // The CREDENTIAL is guarded; the rewrite is not. A public repo recorded
+        // with an SSH remote has no token and still cannot be cloned by a Pod
+        // that holds no key — gating the rewrite made that failure depend on
+        // something unrelated to it.
         assert!(body.contains("if [ -n \"${GH_TOKEN:-}\" ]; then"), "{body}");
+        let guard = body.find("if [ -n").expect("the credential guard");
+        let rewrite = body.find("--replace-all").expect("the rewrite");
+        assert!(
+            rewrite < guard,
+            "the transport rewrite must run whether or not there is a token: {body}"
+        );
         assert!(body.contains("x-access-token:%s@github.com"), "{body}");
         assert!(body.contains("credential.helper"), "{body}");
 
