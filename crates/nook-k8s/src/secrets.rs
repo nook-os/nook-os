@@ -124,6 +124,27 @@ impl Credentials {
     }
 }
 
+impl Credentials {
+    /// Drop one key from the Secret.
+    ///
+    /// A merge patch with a NULL value is how a Secret loses a key — a patch
+    /// that simply omits it leaves it exactly where it was, which is the shape
+    /// of bug that leaves a spent per-job credential lying around forever.
+    pub async fn forget(&self, key: &str) -> Result<()> {
+        let body = serde_json::json!({ "data": { key: serde_json::Value::Null } });
+        self.api
+            .patch(&self.name, &PatchParams::default(), &Patch::Merge(&body))
+            .await
+            .map(|_| ())
+            .map_err(|e| {
+                Error::classify(
+                    crate::error::Operation::new("patch", "secrets", &self.namespace),
+                    e,
+                )
+            })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

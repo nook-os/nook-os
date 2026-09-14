@@ -3042,8 +3042,31 @@ fn run_in_pod(
                 None
             }
         };
+        // The run's own control-plane token, by the same road (MAIN-650). Without
+        // it the agent cannot read the card it was sent to build, nor report its
+        // outcome — and a well-behaved skill then refuses the pass rather than
+        // inventing the brief, which is right and still a wasted run.
+        //
+        // Per JOB, so it is written before the Pod and forgotten after it.
+        let nook_key = match run.nook_token {
+            Some(token) => match k8s_exec::publish_nook_token(executor, job_id, token).await {
+                Ok(key) => Some(key),
+                Err(e) => {
+                    note(
+                        out,
+                        job_id,
+                        format!(
+                            "could not put this run's control-plane token in the credential \
+                             Secret ({e}); the agent will not be able to read its card"
+                        ),
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
         let name = exec
-            .start(job_id, run.kind, env, command, forge_key)
+            .start(job_id, run.kind, env, command, forge_key, nook_key)
             .await?;
         let driven = drive_pod(out, job_id, &exec, &name).await;
         // AC-5, on success, on failure and on cancel. AWAITED rather than
@@ -3058,6 +3081,17 @@ fn run_in_pod(
     });
 
     unregister(run.dirname, job_id);
+    // The run's token is spent the moment its Pod is gone, and a key left in a
+    // shared Secret outlives the thing it was for. Best-effort: an untidy key is
+    // not a reason to fail a concluded run.
+    if run.nook_token.is_some() {
+        // Recomputed rather than carried out of the block: the key is a pure
+        // function of the job id, so deriving it twice cannot disagree with
+        // itself the way a threaded-through value could.
+        let key = k8s_exec::nook_token_key(job_id);
+        let cfg = executor.clone();
+        rt.spawn(async move { k8s_exec::forget_secret_key(&cfg, &key).await });
+    }
     match outcome {
         Ok((ok, message)) => finished(out, job_id, ok, message),
         // AC-7. A Pod that never ran cannot have failed the card, so the job

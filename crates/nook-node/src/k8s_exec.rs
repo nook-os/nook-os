@@ -332,6 +332,15 @@ pub struct PodJobSpec {
     /// a workspace with no token configured still starts (and its agent simply
     /// cannot reach a private repo).
     pub forge_token_key: Option<String>,
+    /// The key inside [`Self::credentials_secret`] holding THIS RUN's
+    /// control-plane token, surfaced as `NOOK_TOKEN` (MAIN-650).
+    ///
+    /// Per job, because the token is issued as this run's initiator and is good
+    /// for this run alone. Without it the agent can reach neither the card it
+    /// was sent to build nor `nook builds outcome` — and a well-behaved skill
+    /// then refuses the pass rather than inventing the brief, which is a correct
+    /// outcome and a wasted run.
+    pub nook_token_key: Option<String>,
     /// Secrets the kubelet authenticates to the registry with (MAIN-650).
     ///
     /// Without these a job Pod can only run an image from a PUBLIC registry —
@@ -984,12 +993,29 @@ pub fn delivered_runtime_auth(
 /// A Secret key may hold only `[-._a-zA-Z0-9]`, and a workspace id is a UUID,
 /// so the prefix is the whole of the shaping — but it is filtered anyway rather
 /// than trusted, because the id arrives over the wire.
+pub fn nook_token_key(job_id: &str) -> String {
+    secret_key("nook-token", job_id)
+}
+
+/// The Secret key holding the run's own control-plane token (MAIN-650).
+///
+/// Per JOB, not per workspace: the token is issued as this run's initiator and
+/// is only good for this run, so it is written before the Pod and removed when
+/// the Pod is gone. Without it the agent can reach neither the card it was sent
+/// to build nor `nook builds outcome`, and a well-behaved skill then refuses
+/// the pass rather than inventing the brief — which is exactly what happened.
 pub fn forge_token_key(workspace_id: &str) -> String {
-    let id: String = workspace_id
+    secret_key("gh-token", workspace_id)
+}
+
+/// One Secret key, shaped so the apiserver will take it: `[-._a-zA-Z0-9]` only.
+/// The id arrives over the wire, so it is filtered rather than trusted.
+fn secret_key(prefix: &str, id: &str) -> String {
+    let id: String = id
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
         .collect();
-    format!("gh-token.{id}")
+    format!("{prefix}.{id}")
 }
 
 /// Put this workspace's forge token in the Secret its job Pods read, so an
@@ -1015,18 +1041,54 @@ pub async fn publish_forge_token(
     workspace_id: &str,
     token: &str,
 ) -> anyhow::Result<String> {
+    publish_secret_key(
+        cfg,
+        forge_token_key(workspace_id),
+        token.as_bytes().to_vec(),
+    )
+    .await
+}
+
+/// The run's own control-plane token, under a key of this job's own.
+pub async fn publish_nook_token(
+    cfg: &ExecutorConfig,
+    job_id: &str,
+    token: &str,
+) -> anyhow::Result<String> {
+    publish_secret_key(cfg, nook_token_key(job_id), token.as_bytes().to_vec()).await
+}
+
+/// Drop a key once the Pod that read it is gone. A merge patch with a null
+/// value is how a Secret loses one; best-effort, because a key left behind is
+/// untidy rather than dangerous and must never fail a concluded run.
+pub async fn forget_secret_key(cfg: &ExecutorConfig, key: &str) {
+    let Some(secret) = cfg.credentials_secret.as_deref() else {
+        return;
+    };
+    let Ok(conn) = nook_k8s::connect().await else {
+        return;
+    };
+    if let Err(e) = nook_k8s::Credentials::new(conn.client, &cfg.namespace, secret)
+        .forget(key)
+        .await
+    {
+        tracing::warn!(%key, error = %e, "could not remove a spent credential key");
+    }
+}
+
+async fn publish_secret_key(
+    cfg: &ExecutorConfig,
+    key: String,
+    value: Vec<u8>,
+) -> anyhow::Result<String> {
     let secret = cfg.credentials_secret.as_deref().ok_or_else(|| {
         anyhow::anyhow!(
-            "no executor.credentialsSecret is configured, so a forge token has nowhere to go"
+            "no executor.credentialsSecret is configured, so a credential has nowhere to go"
         )
     })?;
-    let key = forge_token_key(workspace_id);
     let conn = nook_k8s::connect().await?;
     nook_k8s::Credentials::new(conn.client, &cfg.namespace, secret)
-        .upsert(std::collections::BTreeMap::from([(
-            key.clone(),
-            token.as_bytes().to_vec(),
-        )]))
+        .upsert(std::collections::BTreeMap::from([(key.clone(), value)]))
         .await?;
     Ok(key)
 }
@@ -1209,6 +1271,18 @@ pub fn job_pod(spec: &PodJobSpec) -> Result<Pod, Refusal> {
                 // per workspace and the variable is not: this is what maps one
                 // to the other, and being in `env` also means it beats any
                 // `GH_TOKEN` a hand-edited Secret happens to carry.
+                .chain(spec.nook_token_key.iter().map(|key| EnvVar {
+                    name: "NOOK_TOKEN".to_string(),
+                    value: None,
+                    value_from: Some(nook_k8s::types::EnvVarSource {
+                        secret_key_ref: Some(nook_k8s::types::SecretKeySelector {
+                            name: spec.credentials_secret.clone().unwrap_or_default(),
+                            key: key.clone(),
+                            optional: Some(true),
+                        }),
+                        ..Default::default()
+                    }),
+                }))
                 .chain(spec.forge_token_key.iter().map(|key| EnvVar {
                     name: "GH_TOKEN".to_string(),
                     value: None,
@@ -1423,6 +1497,7 @@ impl PodExecutor {
         env: Vec<(String, String)>,
         command: Vec<String>,
         forge_token_key: Option<String>,
+        nook_token_key: Option<String>,
     ) -> Result<String, Refusal> {
         let pod = job_pod(&PodJobSpec {
             job_id: job_id.to_string(),
@@ -1435,6 +1510,7 @@ impl PodExecutor {
             build_pool: self.cfg.build_pool.clone(),
             credentials_secret: self.cfg.credentials_secret.clone(),
             forge_token_key,
+            nook_token_key,
             image_pull_secrets: self.cfg.image_pull_secrets.clone(),
         })?;
         let name = pod
@@ -1621,6 +1697,7 @@ mod tests {
             }),
             credentials_secret: None,
             forge_token_key: None,
+            nook_token_key: None,
             image_pull_secrets: Vec::new(),
         }
     }
@@ -2460,6 +2537,25 @@ mod tests {
         sp.forge_token_key = Some(forge_token_key("01a03499-9d0e-7ec0-a576-44c7a5934166"));
         let pod = job_pod(&sp).unwrap();
         let env = container(&pod).env.as_ref().expect("env");
+
+        // The run's own token rides the same road, keyed per JOB rather than per
+        // workspace — without it the agent cannot read the card it was sent to
+        // build, and refuses the pass (MAIN-650).
+        sp.nook_token_key = Some(nook_token_key("01a0a017-23a6-7823-93ff-46679015ea38"));
+        let pod = job_pod(&sp).unwrap();
+        let env = container(&pod).env.as_ref().expect("env");
+        let nook = env
+            .iter()
+            .find(|e| e.name == "NOOK_TOKEN")
+            .expect("NOOK_TOKEN is wired");
+        assert!(nook.value.is_none(), "the run token must not be a literal");
+        assert_eq!(
+            nook.value_from
+                .as_ref()
+                .and_then(|v| v.secret_key_ref.as_ref())
+                .map(|r| r.key.as_str()),
+            Some("nook-token.01a0a017-23a6-7823-93ff-46679015ea38")
+        );
 
         let gh = env
             .iter()
