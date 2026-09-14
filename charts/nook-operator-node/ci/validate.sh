@@ -336,9 +336,9 @@ else
   fail=1
 fi
 
-# MAIN-669 AC-5. The Secret carries the fleet's Claude SESSION, which is a
-# directory and not a variable — so the README has to say what goes in it, who
-# creates it, what it is (scaffolding), and who can read it. Every one of those
+# MAIN-669 AC-5, MAIN-650. The Secret carries the fleet's Claude SESSION, which
+# is a directory and not a variable — so the README has to say what goes in it,
+# who puts it there, how a Pod reads it, and who can read it. Every one of those
 # is a thing an operator gets wrong silently, and the last is a security
 # property nobody should have to infer.
 readme="$chart/README.md"
@@ -353,21 +353,28 @@ readme_says() {
 readme_says "what the Secret must contain" '.credentials.json'
 readme_says "…and its configuration half"  '.claude.json'
 readme_says "where it is mounted"          'CLAUDE_CONFIG_DIR'
-readme_says "that a human creates it"      '**A human creates that Secret.**'
-readme_says "that it is scaffolding"       'scaffolding pending MAIN-337'
+readme_says "that the NODE writes it"      '**the node writes and keeps current**'
+readme_says "where you start the login"    'Settings → Nodes'
 readme_says "who can read it"              'readable by any agent this node runs'
 readme_says "subscription login only"      'never an API key'
 
-# MAIN-672 AC-4. What a refresh CANNOT persist is the one property of this
-# mechanism an operator cannot discover by reading the chart: the Pod's copy of
-# the session dies with the Pod, so a refreshed credential never reaches the
-# Secret and the Secret goes stale on its own schedule. Left unsaid, a fleet
-# that worked for a fortnight stops for a reason nobody can name.
-readme_says "that the session is a snapshot" 'A Pod-mounted session is a snapshot'
-readme_says "that nothing refreshes it"      '**Nothing refreshes the Secret.**'
-readme_says "which token ends it"            'The refresh token expiring is not.'
-readme_says "that re-seeding is a human"     'until a human replaces the Secret'
-readme_says "who owns closing the gap"       "Automatic re-seeding is MAIN-337's"
+# The two traps this arrangement sets, neither of which an operator can see from
+# the chart. `create` cannot be pinned — Kubernetes ignores `resourceNames` on
+# it, and `kubectl auth can-i` says yes while the apiserver says no. And no key
+# may become an environment variable: `envFrom` publishes EVERY key, so one
+# workspace's token would land in every Pod's readable `env`.
+readme_says "why create is unpinned"       'does not apply'
+readme_says "that nothing is in the env"   '**No key becomes an environment variable.**'
+
+# MAIN-672 AC-4, MAIN-650. The node re-seeds the Secret now, so the fortnight-
+# long silent stall this guarded against is gone — but only for the half a Pod
+# renews itself. A lapsed REFRESH token still needs a human, once, and that is
+# the property an operator cannot discover by reading the chart.
+readme_says "that the session goes stale"    'The session goes stale'
+readme_says "which half a Pod renews itself" 'The access token expiring is fine.'
+readme_says "which half needs a human"       'The refresh token expiring needs a human'
+readme_says "that a refusal is not a strike" 'hands the job back to the queue'
+readme_says "who owns per-agent credentials" "MAIN-337/339's"
 
 # Both or neither: half a build pool reads as protection and is not.
 if render "${min[@]}" "${k8smin[@]:2}" --set executor.image=i:1 \

@@ -1404,18 +1404,17 @@ fn executor_steps_for(
         ]
         .join("\n"),
         [
-            "Create the fleet's Claude session Secret. THIS IS THE MANUAL STEP —",
-            "   a subscription device login is a directory, not a value, so log in",
-            "   once on any machine and copy the result in:",
+            "Sign the fleet in to Claude, from the Nodes page — after the node",
+            "   below is up. There is nothing to paste and nothing to copy: the",
+            "   node drives the login itself and writes the result into the",
+            &format!("   `nook-job-credentials` Secret in {exec_namespace}, which its job Pods"),
+            "   mount. Re-authorizing there replaces it in place.",
             "",
-            "     nook claude login          # or: ./run.sh --claude-login",
-            &format!("     kubectl create secret generic nook-job-credentials -n {exec_namespace} \\"),
-            "       --from-file=.credentials.json=.nook-secrets/claude/.credentials.json \\",
-            "       --from-file=.claude.json=.nook-secrets/claude/.claude.json",
+            "     Settings → Nodes → the operator node → Authorize",
             "",
-            "   Subscription login only — never an API key. Without it the node",
-            "   reports its runtime unauthorized and is sent no loop work at all,",
-            "   which looks exactly like nothing being wrong.",
+            "   Subscription login only — never an API key. Until it is done the",
+            "   node reports its runtime unauthorized and is sent no loop work at",
+            "   all, which looks exactly like nothing being wrong.",
         ]
         .join("\n"),
         [
@@ -2246,12 +2245,15 @@ mod tests {
         assert!(all.contains("nook-operator-join"), "{all}");
         assert!(all.contains("joinToken="), "{all}");
 
-        // The session. It is the manual step and the one that fails SILENTLY —
-        // no login means the runtime reports unauthorized and the node is simply
-        // sent nothing, which looks identical to an idle board.
+        // The session: the step that fails SILENTLY — no login means the runtime
+        // reports unauthorized and the node is simply sent nothing, which looks
+        // identical to an idle board. It is no longer a hand-built Secret, so
+        // the handoff must not read like one: the node publishes
+        // `nook-job-credentials` itself once somebody authorizes it in the UI.
         assert!(all.contains("nook-job-credentials"), "{all}");
-        assert!(all.contains(".credentials.json"), "{all}");
+        assert!(all.contains("Settings \u{2192} Nodes"), "{all}");
         assert!(all.contains("never an API key"), "{all}");
+        assert!(!all.contains("--from-file=.credentials.json"), "{all}");
 
         // The second chart, pinned to the same version as the first.
         assert!(

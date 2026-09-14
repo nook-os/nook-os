@@ -301,13 +301,7 @@ silently dropped.
 no ServiceAccount, no Role, no RoleBinding, no new environment. An upgrade
 cannot be the thing that quietly grants a cluster permission.
 
-### Builds need a pool of their own — and are not run here yet
-
-`build` is **not** in `loopKinds` and this executor does not offer it, so
-everything in this subsection is inert today: it is the ground MAIN-655 builds
-on, and configuring a pool now changes nothing. The one thing it does change is
-the refusal you get if a build ever is placed here — with no pool it is
-*refused* rather than mis-scheduled.
+### Builds need a pool of their own
 
 A build Pod runs a nested Docker daemon and is **privileged**, so it must never
 share a node with anything else:
@@ -324,120 +318,95 @@ install by name. Declaring neither is fine and means this cluster runs no
 builds — a build job is then *refused* rather than mis-scheduled, which leaves
 the card's strike budget alone.
 
+A build is also the one kind that must reach a node the cluster may not have
+yet. The Pod stays `Pending` while the autoscaler brings a pool node up, and the
+node **waits** rather than refusing: an empty pool is a delay, not a verdict.
+
 Even on its own pool, a privileged build Pod can reach the node it runs on
 (MAIN-612). The mitigation is blast radius — a dedicated, disposable pool — and
 **not** confinement. Do not describe it as a boundary against a hostile agent.
 
-### Credentials are not a shipped path yet
+### Credentials
 
-**By default a job Pod gets no credentials at all, this node reports the loop
-runtime unauthorized, and the control plane places no loop work on it.** That is
-the honest state of this mode, not an oversight — a node that claimed work it
-could not authenticate would fail every job it was handed in turn.
+**A job Pod is handed exactly what it needs to do its job, by the node, and
+nothing else.** Every one of them arrives in one Secret in
+`executor.namespace` — `executor.credentialsSecret`, conventionally
+`nook-job-credentials` — which **the node writes and keeps current**. There is
+nothing to create by hand and nothing to re-seed on a schedule.
 
-The credentials a job would want — the fleet's GitHub token, the run's own
-`NOOK_TOKEN`, the workspace's secret items — are **deliberately not written into
-the Pod's environment** by the chart. A Pod's `env` values are returned by `get pods` and
-printed by `kubectl describe pod`, and the Role above grants `pods
-get/list/watch` across `executor.namespace`; putting a token there would publish
-it to every principal with pod-read, a far lower bar than `get secrets`, and
-store it in etcd under a resource that is not encrypted at rest by default. The
-run records on its transcript which credentials it held back.
+The node needs `get`, `patch` and `create` on secrets in that namespace to do
+it. `create` is granted **unpinned**, because Kubernetes does not apply
+`resourceNames` to `create` — a pinned create rule denies every create,
+including the one it names, and `kubectl auth can-i create secrets/<name>`
+answers *yes* while the apiserver refuses. `get` and `patch` are pinned to the
+one Secret.
 
-What exists instead is a **seam**: create a Secret by hand and name it.
+#### What is in it, and who puts it there
 
-#### What the Secret must contain
+| Key | Written when | Used for |
+| --- | --- | --- |
+| `.credentials.json`, `.claude.json` | somebody authorizes the node in the UI, and on every refresh | the fleet's Claude session |
+| `gh-token.<workspace id>` | a workspace's forge token is set or changed | cloning and opening PRs for that workspace |
+| `nook-token.<job id>` | a run starts; forgotten when it ends | the run's own control-plane token |
 
-The fleet's **Claude session**, which is a *directory* and not a variable:
-`.credentials.json` is the session itself and `.claude.json` its configuration.
-Take them from a machine where `claude` is logged in — in this repo's dev stack
-that is `.nook-secrets/claude/`, which `./run.sh --claude-login` creates.
-**Subscription device-login only, never an API key.**
+The session is a **subscription device login, never an API key**. Start it at
+**Settings → Nodes → the operator node → Authorize**: the node runs the login
+itself, prints the URL for you to open, takes the code back, and writes the
+result into the Secret. No terminal, no directory to copy, no `kubectl`. Until
+it is done the node reports its runtime unauthorized and the control plane
+places no loop work here at all — which looks exactly like an idle board, so it
+is worth checking first.
 
-```bash
-kubectl create secret generic nook-job-credentials -n nook-jobs \
-  --from-file=.credentials.json=.nook-secrets/claude/.credentials.json \
-  --from-file=.claude.json=.nook-secrets/claude/.claude.json \
-  --from-literal=GH_TOKEN=...
-helm upgrade ... --set executor.credentialsSecret=nook-job-credentials
-```
+#### How a Pod reads it
 
-It arrives **both ways, and both are needed**. The Secret is mounted read-only
-at a private path and **copied into a writable `emptyDir` at
-`CLAUDE_CONFIG_DIR`** before the agent starts, which is how `claude` finds a
-session here exactly as it does under the Docker sandbox; and every key that is
-a legal variable name *also* becomes an environment variable, which is how a
-token like `GH_TOKEN` reaches the agent. A key such as `.claude.json` is not a
-legal variable name — the kubelet skips it with an event and starts the
-container.
+The Secret is mounted read-only at a private path and **copied into a writable
+directory at `CLAUDE_CONFIG_DIR`** before the agent starts, which is how
+`claude` finds a session here exactly as it does under the Docker sandbox.
+`CLAUDE_CONFIG_DIR` is not a credential store: it is claude's read-write working
+directory, where it creates `projects/`, `sessions/` and `shell-snapshots/` and
+rewrites `.credentials.json` every time it refreshes its OAuth pair. A Secret
+volume is read-only whatever the spec asks for, so a Secret mounted straight
+there is a directory the agent cannot create one file in.
 
-**The copy is what makes it work at all.** `CLAUDE_CONFIG_DIR` is not a
-credential store: it is claude's read-write working directory, where it creates
-`projects/`, `sessions/` and `shell-snapshots/` and rewrites
-`.credentials.json` every time it refreshes its OAuth pair. A Secret volume is
-read-only whatever the spec asks for, so a Secret mounted straight there is a
-directory the agent cannot create one file in.
+**No key becomes an environment variable.** The Pod sets `envFrom` on nothing,
+deliberately: `envFrom` publishes *every* key in the Secret, so one added for
+one workspace would land in every Pod's environment — and a Pod's `env` is
+returned by `get pods` and printed by `kubectl describe pod`, a far lower bar
+than `get secrets`. The tokens a run needs are read from the mounted files by
+the run's own script instead, and the run records on its transcript which
+credentials it held back.
 
-**A human creates that Secret.** Nothing in this chart or in the agent creates,
-reads or updates one — the executor's Role grants no `secrets` verb at all, so
-the agent could not if it tried, and the kubelet is what resolves the mount.
+#### The session goes stale, and the node re-seeds it
 
-With it named, this node reports the loop runtime **authorized** and the
-dispatcher will place spec, decompose, review, epic-run and investigate jobs
-here. `nook get nodes` shows the credential's source as the Secret rather than
-as an account, because the node cannot read it and has no way to learn whose
-session it holds.
-
-#### A Pod-mounted session is a snapshot, and it goes stale
-
-**Nothing refreshes the Secret.** A subscription login is an OAuth pair — a
-short-lived access token and a longer-lived refresh token — and `claude` renews
-the pair as it runs, writing the new one back into `.credentials.json`. In a
-Pod that write lands in the Pod's own copy, which is destroyed with the Pod.
-That is deliberate and is what keeps the executor's Role free of any `secrets`
-verb: nothing in this chart can write a Secret, so nothing can carry a refreshed
-credential back into one.
-
-The consequence is worth stating plainly:
+A subscription login is an OAuth pair — a short-lived access token and a
+longer-lived refresh token.
 
 - **The access token expiring is fine.** Each Pod refreshes it for itself, in
-  its own copy, on its own first call. This is the ordinary case and needs
-  nobody.
-- **The refresh token expiring is not.** When it lapses, every Pod seeded from
-  that Secret has a credential it cannot renew, and no run on this node can
-  authenticate again until a human replaces the Secret. Re-seed it with the same
-  `kubectl create secret` above (`--dry-run=client -o yaml | kubectl apply -f -`
-  to replace one in place), from a machine where `claude` is currently logged
-  in.
+  its own copy, on its own first call. The ordinary case; it needs nobody.
+- **The refresh token expiring needs a human, once.** Re-authorize on the Nodes
+  page and the node replaces the Secret in place; running Pods keep the copy
+  they started with, and the next Pod gets the new one.
 - **The agent refuses rather than fails in that state.** A Pod whose seeded
   session has an expired refresh token stops before running the agent, names the
   expiry date on the transcript, and hands the job back to the queue — so a
-  stale Secret does not spend a card's retry budget while nobody is looking.
-
-**Automatic re-seeding is MAIN-337's, not this chart's.** Until it lands,
-treat the Secret as a snapshot with a shelf life and diarise replacing it.
+  stale credential does not spend a card's retry budget while nobody is looking.
 
 #### What it costs you to use it
-
-**This is scaffolding pending MAIN-337, not a supported way to run in
-production.** A hand-created Secret is not a credential store: it is
-namespace-wide, static, unrotated and unaudited. MAIN-337/339 own the real path;
-until they land, treat cluster-executed jobs as a capability you are trying out
-rather than one you depend on.
 
 **Everything in that Secret is readable by any agent this node runs.** A loop
 agent's instructions are untrusted input — a card body, a PR comment, a
 dependency's README — and an agent handed a session can copy it out. The Pod
 confines what an agent can *reach*; it does nothing about what an agent was
-*given*. So the account in that Secret should be one you are willing to treat as
-shared by every job this cluster runs, and the GitHub token beside it should
-carry the narrowest scopes that work.
+*given*. So the account behind it should be one you are willing to treat as
+shared by every job this cluster runs, and a workspace's forge token should
+carry the narrowest scopes that work. Per-agent credentials are MAIN-337/339's.
 
-A `credentialsSecret` naming a Secret that does not exist — or one with a typo
-in the name — keeps the Pod in `CreateContainerConfigError`, and the agent
-**refuses** the job naming it rather than failing it, so a cluster-side gap does
-not spend the card's strike budget. Better than starting, silently having no
-credentials, and spending a pass finding out.
+A `credentialsSecret` naming a Secret the node cannot write — an RBAC gap, a
+namespace mismatch — keeps the Pod in `CreateContainerConfigError`, and the
+agent **refuses** the job naming it rather than failing it, so a cluster-side
+gap does not spend the card's strike budget. Better than starting, silently
+having no credentials, and spending a pass finding out.
+
 
 ## What it is not
 
