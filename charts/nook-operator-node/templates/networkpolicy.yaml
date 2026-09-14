@@ -58,24 +58,40 @@ spec:
           port: {{ .Values.networkPolicy.controlPlane.port }}
     {{- end }}
     {{- if eq .Values.executor.mode "kubernetes" }}
-    {{- if not .Values.networkPolicy.apiServer.cidrs }}
-    {{- fail "executor.mode=kubernetes needs networkPolicy.apiServer.cidrs: the node creates job Pods through the Kubernetes API, and the apiserver answers on a PRIVATE address that networkPolicy.deniedCIDRs severs. Without it the node joins, reports healthy, and then every call fails with \"cannot reach the Kubernetes API server\". Use the SERVICE ENDPOINTS, not the ClusterIP -- a CNI that translates ClusterIP to backend before evaluating policy (Cilium does) never matches a rule naming the ClusterIP:  kubectl get endpointslice -n default -l kubernetes.io/service-name=kubernetes -o jsonpath='{.items[*].endpoints[*].addresses[*]}'  (append /32 to each). Add the ClusterIP too for a CNI that evaluates before translation. Or set networkPolicy.enabled=false." }}
+    {{- /*
+      DISCOVERED, not asked for (MAIN-650). An operator should not have to run
+      `kubectl get endpointslice` and paste the answer into values to make an
+      install work — that is a step a chart can take itself, and one nobody can
+      get right from the documentation alone.
+
+      `lookup` reads the live cluster at INSTALL time and returns nothing during
+      `helm template`, which is why the explicit list stays: it is the override
+      for a rendered manifest, an apiserver behind a VIP the Endpoints do not
+      name, and any cluster where reading `default/kubernetes` is refused.
+    */}}
+    {{- $cidrs := .Values.networkPolicy.apiServer.cidrs }}
+    {{- if not $cidrs }}
+    {{- $ep := lookup "v1" "Endpoints" "default" "kubernetes" }}
+    {{- range $subset := (default (list) $ep.subsets) }}
+    {{- range $addr := (default (list) $subset.addresses) }}
+    {{- $cidrs = append $cidrs (printf "%s/32" $addr.ip) }}
+    {{- end }}
+    {{- end }}
+    {{- end }}
+    {{- if not $cidrs }}
+    {{- fail "executor.mode=kubernetes needs the apiserver's address, and this chart could not discover it. It reads default/kubernetes Endpoints at install time; a rendered manifest (helm template) or a cluster that refuses that read has to be told. Use the ENDPOINTS, not the Service ClusterIP -- a CNI that translates ClusterIP to backend before evaluating policy (Cilium does) never matches a rule naming the ClusterIP:  kubectl get endpointslice -n default -l kubernetes.io/service-name=kubernetes -o jsonpath='{.items[*].endpoints[*].addresses[*]}'  (append /32 to each), as networkPolicy.apiServer.cidrs. Or set networkPolicy.enabled=false." }}
     {{- end }}
     # The apiserver. This node's whole job in `kubernetes` mode is creating Pods
     # through it, and it answers only on a private address — exactly what the
     # deny list below removes.
     #
-    # A LIST, and it must contain the Service's ENDPOINTS rather than only its
-    # ClusterIP. Under a CNI that DNATs the ClusterIP before evaluating policy
-    # — Cilium, which DOKS ships — the packet is already addressed to the
-    # backend when the rule is tested, so a rule naming the ClusterIP matches
-    # nothing and the failure looks exactly like a missing rule. Naming both
-    # covers either evaluation order.
-    #
-    # Narrow on purpose: individual addresses, not the service CIDR, because
-    # everything else in that range is other people's workloads.
+    # These are the Service's ENDPOINTS rather than its ClusterIP. Under a CNI
+    # that DNATs the ClusterIP before evaluating policy — Cilium, which DOKS
+    # ships — the packet is already addressed to the backend when the rule is
+    # tested, so a rule naming the ClusterIP matches nothing and the failure
+    # looks exactly like a missing rule.
     - to:
-        {{- range .Values.networkPolicy.apiServer.cidrs }}
+        {{- range $cidrs }}
         - ipBlock:
             cidr: {{ . | quote }}
         {{- end }}

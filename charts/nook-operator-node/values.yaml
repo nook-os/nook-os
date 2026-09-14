@@ -87,6 +87,14 @@ networkPolicy:
   # One address, not the service CIDR: the rest of that range is other people's
   # workloads, and this node has no business reaching them.
   apiServer:
+    # DISCOVERED at install time from `default/kubernetes` Endpoints — leave this
+    # empty and the chart finds the apiserver itself. An operator should not have
+    # to look an address up and paste it in to make an install work.
+    #
+    # Set it only where discovery cannot run or is wrong: a rendered manifest
+    # (`helm template` performs no lookup), a cluster that refuses the read, or
+    # an apiserver behind a VIP the Endpoints do not name.
+    #
     # The apiserver's ENDPOINTS, /32 each — not the `kubernetes` Service's
     # ClusterIP alone. Under a CNI that translates ClusterIP to backend before
     # evaluating policy (Cilium, which DOKS ships) a rule naming the ClusterIP
