@@ -374,11 +374,10 @@ fn profile_for(a: &Adapter) -> AuthProfile {
         runtime: a.runtime.into(),
         state,
         identity,
-        // A session on this machine is the right flow by default — it is the
-        // only one for a runtime with no device-flow descriptor. The executor
-        // overrides it where a terminal here would sign in the wrong place
-        // (`delivered_by_executor`).
-        device_flow: false,
+        // Whether THIS node can drive that runtime's login with pipes, which is
+        // a fact about the node's own build and table — not about the runtime's
+        // name, which is what the UI used to guess from.
+        managed_login: managed_login_args(a.runtime).is_some(),
     }
 }
 

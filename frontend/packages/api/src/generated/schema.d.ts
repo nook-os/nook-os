@@ -4668,28 +4668,27 @@ export interface components {
          *     supports here.
          */
         AuthProfile: {
-            /**
-             * @description Authorize this by the control plane's DEVICE FLOW rather than by opening
-             *     a login session on the node (MAIN-650).
-             *
-             *     True where a session on the machine would authorize the wrong thing. On
-             *     a Pod executor the agent is a Pod elsewhere in the cluster and reads only
-             *     the credential Secret, so `claude /login` in a terminal on the node signs
-             *     in a container nothing will ever run work in — which is what the node
-             *     settings page did, and why authorizing a cluster node appeared to work
-             *     and changed nothing.
-             *
-             *     False for a host node, where the session flow is right and remains the
-             *     default: it is the only path for a runtime with no device-flow
-             *     descriptor.
-             */
-            device_flow?: boolean;
             /** @description Stable identifier, e.g. `claude` or `hermes-portal`. */
             id: string;
             /** @description The signed-in account, when the probe reports one. */
             identity?: string | null;
             /** @description Human label, e.g. `Claude Code` or `Hermes → Nous Portal`. */
             label: string;
+            /**
+             * @description This node can drive the runtime's own login WITHOUT a terminal
+             *     (MAIN-650), so the UI offers a link and a box instead of a session.
+             *
+             *     Reported rather than assumed, and that is the point: the page used to
+             *     decide from a hardcoded list of runtime names, so clicking Authorize on
+             *     a node running an OLDER build sent it a message that build has never
+             *     heard of. In a fleet where the control plane and the nodes do not
+             *     upgrade together — which is every real fleet — that is a broken button
+             *     with no way to tell from the outside.
+             *
+             *     False on any node that predates the field, which is exactly the answer
+             *     that makes such a node fall back to the session flow it does understand.
+             */
+            managed_login?: boolean;
             /** @description The runtime executable this profile authorizes (`claude`, `hermes`). */
             runtime: string;
             state: components["schemas"]["AuthState"];

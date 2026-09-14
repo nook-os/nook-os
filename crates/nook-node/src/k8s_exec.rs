@@ -959,17 +959,12 @@ pub fn delivered_runtime_auth(
             }
             AuthProfile {
                 state: AuthState::Authorized,
-                // The SESSION flow, deliberately — see `sync_local_credential`.
-                //
-                // A terminal here does sign in the node's own container rather
-                // than a job Pod, but that is the only place a Claude
-                // subscription login can happen at all: it is `claude`'s own
-                // OAuth client doing a PKCE/loopback exchange, so the control
-                // plane has no client to be and its device flow (which expects
-                // endpoints an operator registered) cannot mint one. The node
-                // closes the gap afterwards by publishing what it just obtained
-                // into the Secret job Pods read.
-                device_flow: false,
+                // Unchanged by the executor: whether a login can be driven
+                // with pipes is a property of the runtime's own CLI, and a Pod
+                // executor does not alter it. A Claude subscription login is
+                // `claude`'s own OAuth client either way — the control plane has
+                // no client to be, which is why its device flow cannot serve
+                // this runtime and the session is driven instead.
                 // Not an account: this node cannot read the Secret and has no
                 // way to learn whose session is in it. Saying where the
                 // credential came from is the true thing available, and it is
@@ -2058,7 +2053,7 @@ mod tests {
                     runtime: "claude".into(),
                     state: AuthState::Unavailable,
                     identity: None,
-                    device_flow: false,
+                    managed_login: false,
                 },
                 AuthProfile {
                     id: "codex".into(),
@@ -2066,7 +2061,7 @@ mod tests {
                     runtime: "codex".into(),
                     state: AuthState::Unavailable,
                     identity: None,
-                    device_flow: false,
+                    managed_login: false,
                 },
             ]
         };
@@ -2535,9 +2530,6 @@ mod tests {
         let mut sp = spec("build");
         sp.credentials_secret = Some("nook-job-credentials".into());
         sp.forge_token_key = Some(forge_token_key("01a03499-9d0e-7ec0-a576-44c7a5934166"));
-        let pod = job_pod(&sp).unwrap();
-        let env = container(&pod).env.as_ref().expect("env");
-
         // The run's own token rides the same road, keyed per JOB rather than per
         // workspace — without it the agent cannot read the card it was sent to
         // build, and refuses the pass (MAIN-650).

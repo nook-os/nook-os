@@ -1516,7 +1516,7 @@ mod wire_tests {
                 runtime: "claude".into(),
                 state: nook_types::AuthState::Authorized,
                 identity: Some("pm@example.com".into()),
-                device_flow: false,
+                managed_login: false,
             }],
         };
         let json = serde_json::to_value(&msg).unwrap();

@@ -429,12 +429,6 @@ function Step({
   );
 }
 
-/** Runtimes whose login the node can drive without a terminal (MAIN-650).
- *  Mirrors `runtime_auth::managed_login_args` on the node; a runtime absent
- *  here falls back to the session flow, which is still the only path for one
- *  that cannot be piped. */
-const MANAGED_LOGIN_RUNTIMES = ["claude"];
-
 /** One agent-authorization profile the node reported.
  *
  *  The GENERATED type, not a hand-written twin: this was a copy, and it drifted
@@ -482,7 +476,7 @@ function AgentAuthPanel({ node }: { node: { id: string; capabilities: unknown } 
     // reports the link, so the operator gets a link and a box instead of a
     // terminal. Preferred wherever the runtime supports it — a session is a
     // heavy answer to "open this and paste what it gives you".
-    if (MANAGED_LOGIN_RUNTIMES.includes(p.runtime)) {
+    if (p.managed_login) {
       const ok = await askConfirm({
         title: `Authorize ${p.label}?`,
         description:

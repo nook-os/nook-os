@@ -10895,10 +10895,6 @@
           "state"
         ],
         "properties": {
-          "device_flow": {
-            "type": "boolean",
-            "description": "Authorize this by the control plane's DEVICE FLOW rather than by opening\na login session on the node (MAIN-650).\n\nTrue where a session on the machine would authorize the wrong thing. On\na Pod executor the agent is a Pod elsewhere in the cluster and reads only\nthe credential Secret, so `claude /login` in a terminal on the node signs\nin a container nothing will ever run work in — which is what the node\nsettings page did, and why authorizing a cluster node appeared to work\nand changed nothing.\n\nFalse for a host node, where the session flow is right and remains the\ndefault: it is the only path for a runtime with no device-flow\ndescriptor."
-          },
           "id": {
             "type": "string",
             "description": "Stable identifier, e.g. `claude` or `hermes-portal`."
@@ -10913,6 +10909,10 @@
           "label": {
             "type": "string",
             "description": "Human label, e.g. `Claude Code` or `Hermes → Nous Portal`."
+          },
+          "managed_login": {
+            "type": "boolean",
+            "description": "This node can drive the runtime's own login WITHOUT a terminal\n(MAIN-650), so the UI offers a link and a box instead of a session.\n\nReported rather than assumed, and that is the point: the page used to\ndecide from a hardcoded list of runtime names, so clicking Authorize on\na node running an OLDER build sent it a message that build has never\nheard of. In a fleet where the control plane and the nodes do not\nupgrade together — which is every real fleet — that is a broken button\nwith no way to tell from the outside.\n\nFalse on any node that predates the field, which is exactly the answer\nthat makes such a node fall back to the session flow it does understand."
           },
           "runtime": {
             "type": "string",
