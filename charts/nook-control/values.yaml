@@ -254,6 +254,31 @@ config:
     scopes: "openid profile email"
     # -- OIDC_DEVICE_CLIENT_ID (the public client for native/device sign-in).
     deviceClientId: ""
+
+  # -- Sessionless runtime authorization, per runtime (MAIN-282, MAIN-650).
+  #    Keyed by runtime name (`claude`, `codex`); the keys become
+  #    NOOK_<RUNTIME>_DEVICE_AUTH_ENDPOINT / _TOKEN_ENDPOINT / _CLIENT_ID /
+  #    _SCOPES.
+  #
+  #    Required to authorize an agent on a KUBERNETES executor: a login session
+  #    there runs in the node's container, and a job is a Pod elsewhere that
+  #    reads only the credential Secret, so the session flow signs in something
+  #    that runs no work. With these set the control plane runs the device flow
+  #    itself and delivers the credential where jobs read it.
+  #
+  #    These are the PROVIDER's values and none are defaulted — a wrong guess
+  #    would send an operator's device code to somebody else's endpoint. Unset,
+  #    the runtime simply keeps the session flow.
+  #
+  #    Mind the SCOPES: they decide what kind of credential comes back. A
+  #    subscription login and an API-key issuance are different scope sets, and
+  #    NookOS's own rule is subscription login only.
+  runtimeAuth: {}
+  #  claude:
+  #    deviceAuthEndpoint: ""
+  #    tokenEndpoint: ""
+  #    clientId: ""
+  #    scopes: ""
   # -- NOOK_ARTIFACT_STORE: "disk" or "s3". Exactly what this names is what is
   #    used — an S3 that cannot be reached is reported broken at boot, never
   #    quietly swapped for local disk (MAIN-598).

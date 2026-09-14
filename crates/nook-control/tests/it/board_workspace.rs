@@ -550,3 +550,120 @@ async fn a_boardless_workspace_still_deletes_unprompted() {
 
     bed.teardown().await;
 }
+
+/// The SEEDED board — the first one a fresh install has — must carry the same
+/// typed columns as one a person creates (MAIN-650).
+///
+/// It did not. The seed kept its own copy of the column list and that copy was
+/// missing `review`, so on every deployment made after 0010 the bootstrap board
+/// had four columns. A build run on such a board opens its PR, records
+/// `pr_opened`, and `record_build_outcome` then fails resolving a column of
+/// that type — the card stays in In Progress with no PR link, and the only
+/// trace is an ERROR in the control plane's log. Measured on a real cluster,
+/// twice, before this was found.
+///
+/// Asserting the TYPES and not a count: a count passes for four columns and one
+/// duplicate, which is the shape a careless edit produces.
+#[tokio::test]
+async fn the_seeded_board_has_every_column_type_automation_resolves() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let state = bed.app_state().await;
+
+    let board: BoardId = bed
+        .db()
+        .query_scalar(
+            "SELECT id FROM boards WHERE name = 'NookOS Bootstrap' LIMIT 1",
+            params![],
+        )
+        .await
+        .expect("the seed made a bootstrap board");
+
+    let cols = state.tasks.board_columns(board).await.expect("cols");
+    for (_, kind) in services::boards::DEFAULT_COLUMNS {
+        assert!(
+            cols.iter().any(|c| c.r#type == kind),
+            "the seeded board has no {kind:?} column — it has {:?}",
+            cols.iter().map(|c| &c.r#type).collect::<Vec<_>>()
+        );
+    }
+
+    // The call `record_build_outcome` makes. It is the one that failed.
+    services::tasks::column_of_type(state.tasks.as_ref(), board, "review")
+        .await
+        .expect("a build run can park its card for review");
+
+    bed.teardown().await;
+}
+
+/// A column added through the API carries the type its creator asked for, and
+/// an unknown type is refused by name (MAIN-650).
+///
+/// The request used to take a name and nothing else, so the only way to repair
+/// a board missing a typed column was to write SQL: what the endpoint produced
+/// was an `unstarted` column with a promising name, which automation still
+/// cannot resolve. "Add an In Review column" looked like it worked and did not.
+#[tokio::test]
+async fn a_column_can_be_given_the_type_automation_resolves() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let state = bed.app_state().await;
+    let tenant = bed.tenant("typed-column").await;
+    let (user, _) = bed.user(tenant, "owner").await;
+    let c = ctx(tenant, user);
+    let board = raw_board(&bed.db(), tenant, "TYPD", None).await;
+
+    let Json(col) = boards::add_column(
+        State(state.clone()),
+        c,
+        Path(board),
+        Json(CreateColumnRequest {
+            name: "In Review".into(),
+            r#type: Some("review".into()),
+        }),
+    )
+    .await
+    .expect("a typed column");
+    assert_eq!(col.r#type, "review");
+
+    // And it is findable the way `record_build_outcome` finds it.
+    let found = services::tasks::column_of_type(state.tasks.as_ref(), board, "review")
+        .await
+        .expect("resolvable");
+    assert_eq!(found, col.id);
+
+    // Saying nothing still works, and keeps the schema's default.
+    let Json(plain) = boards::add_column(
+        State(state.clone()),
+        c,
+        Path(board),
+        Json(CreateColumnRequest {
+            name: "Parked".into(),
+            r#type: None,
+        }),
+    )
+    .await
+    .expect("an untyped column");
+    assert_eq!(plain.r#type, services::boards::UNTYPED_COLUMN);
+
+    // A typo is a 400 naming the vocabulary, not a 500 from the CHECK.
+    let err = boards::add_column(
+        State(state.clone()),
+        c,
+        Path(board),
+        Json(CreateColumnRequest {
+            name: "Nope".into(),
+            r#type: Some("reviewing".into()),
+        }),
+    )
+    .await
+    .expect_err("an unknown type is refused");
+    assert!(
+        format!("{err:?}").contains("unknown column type"),
+        "{err:?}"
+    );
+
+    bed.teardown().await;
+}

@@ -606,14 +606,14 @@ async fn columns_append_after_the_last_position() {
     let bare = f.repo.with_board(f.tenant, "Bare", "BARE").id;
 
     assert_eq!(f.repo.max_column_position(bare).await.unwrap(), None);
-    let first = f.repo.append_column(bare, "Todo", 0).await.unwrap();
+    let first = f.repo.append_column(bare, "Todo", 0, None).await.unwrap();
     assert_eq!(first.position, 0);
 
     let max = f.repo.max_column_position(bare).await.unwrap();
     assert_eq!(max, Some(0));
     let second = f
         .repo
-        .append_column(bare, "Doing", max.unwrap_or(-1) + 1)
+        .append_column(bare, "Doing", max.unwrap_or(-1) + 1, None)
         .await
         .unwrap();
     assert_eq!(second.position, 1);

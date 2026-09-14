@@ -11,10 +11,11 @@
 //! held open for that. Everything after `begin()` reports through `UiEvent`s
 //! keyed by the flow id.
 
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
-use nook_types::NodeId;
+use nook_proto::ControlToNode;
+use nook_types::{AuthorizeRuntimeRequest, NodeId};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -78,11 +79,30 @@ pub async fn start(
     // Named rather than generic, so an operator can tell "we cannot authorize
     // that runtime this way" from "something went wrong".
     let Some(descriptor) = descriptor_for(&req.runtime) else {
-        return Err(ApiError::BadRequest(format!(
-            "no device-flow descriptor for runtime {:?} — this runtime cannot be \
-             authorized without a session yet",
-            req.runtime
-        )));
+        // Two very different reasons land here and the old message named only
+        // one of them, so an operator whose DEPLOYMENT was unconfigured read
+        // "this runtime cannot be authorized without a session yet" as a
+        // product limitation and went looking for a terminal (MAIN-650).
+        let known = ["claude", "codex"].contains(&req.runtime.as_str());
+        return Err(ApiError::BadRequest(if known {
+            format!(
+                "runtime {:?} has a device flow, but THIS DEPLOYMENT has not been given the \
+                 provider's endpoints. Set NOOK_{}_DEVICE_AUTH_ENDPOINT, \
+                 NOOK_{}_TOKEN_ENDPOINT and NOOK_{}_CLIENT_ID on the control plane \
+                 (chart: config.runtimeAuth) — they are the provider's, so nothing in this \
+                 repo can supply them.",
+                req.runtime,
+                req.runtime.to_uppercase(),
+                req.runtime.to_uppercase(),
+                req.runtime.to_uppercase(),
+            )
+        } else {
+            format!(
+                "no device flow is implemented for runtime {:?} — authorize it with a login \
+                 session on the node instead",
+                req.runtime
+            )
+        }));
     };
 
     // Every node is authorized BEFORE the flow starts. Checking as we deliver
@@ -139,4 +159,126 @@ pub async fn start(
             runtime: req.runtime,
         }),
     ))
+}
+
+/// The code an operator pasted back, for one flow.
+#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct ManagedLoginCodeRequest {
+    pub flow_id: Uuid,
+    pub runtime: String,
+    pub code: String,
+}
+
+/// Start a MANAGED login on one node (MAIN-650).
+///
+/// The third way to authorize a runtime, and the one a Kubernetes install
+/// needs. `POST /runtime-auth` requires a provider whose OAuth client this
+/// deployment can be, which a Claude subscription is not. `POST
+/// /nodes/{id}/authorize` works but puts a terminal in front of a person. This
+/// runs the runtime's own login on the node with pipes, and hands the UI a link
+/// and — when the runtime asks for one — a box.
+///
+/// Same authorization rule as its two siblings: a personal machine is its
+/// owner's alone, a shared or operator machine needs `node.manage`.
+#[utoipa::path(post, path = "/api/v1/nodes/{id}/managed-login",
+    operation_id = "start_managed_login",
+    params(("id" = Uuid, Path, description = "Node id")),
+    request_body = AuthorizeRuntimeRequest,
+    responses((status = 202, body = RuntimeAuthAccepted), (status = 400), (status = 403), (status = 404)))]
+pub async fn start_managed(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<NodeId>,
+    Json(req): Json<AuthorizeRuntimeRequest>,
+) -> ApiResult<(StatusCode, Json<RuntimeAuthAccepted>)> {
+    let runtime = require_node_authorization(&state, &auth, id, &req.runtime).await?;
+
+    let flow_id = uuid::Uuid::now_v7();
+    if !state.registry.send_to_node(
+        id,
+        ControlToNode::StartManagedLogin {
+            runtime: runtime.clone(),
+            flow_id,
+        },
+    ) {
+        return Err(ApiError::BadRequest(
+            "that node is not connected right now".into(),
+        ));
+    }
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(RuntimeAuthAccepted { flow_id, runtime }),
+    ))
+}
+
+/// Hand a pasted code to a managed login in progress.
+#[utoipa::path(post, path = "/api/v1/nodes/{id}/managed-login/code",
+    operation_id = "submit_managed_login_code",
+    params(("id" = Uuid, Path, description = "Node id")),
+    request_body = ManagedLoginCodeRequest,
+    responses((status = 202), (status = 400), (status = 403), (status = 404)))]
+pub async fn submit_managed_code(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<NodeId>,
+    Json(req): Json<ManagedLoginCodeRequest>,
+) -> ApiResult<StatusCode> {
+    // The code is a bearer of the login: whoever can send it can complete the
+    // sign-in. So it takes the same gate as starting one, not a weaker one.
+    require_node_authorization(&state, &auth, id, &req.runtime).await?;
+
+    if !state.registry.send_to_node(
+        id,
+        ControlToNode::SubmitManagedLoginCode {
+            flow_id: req.flow_id,
+            code: req.code,
+        },
+    ) {
+        return Err(ApiError::BadRequest(
+            "that node is not connected right now".into(),
+        ));
+    }
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// The shared gate: who may authorize a runtime on THIS node, and is the
+/// runtime one this node could sign in at all.
+///
+/// Factored out because the start and the code submission have to agree — a
+/// weaker check on the code would mean the gate on starting a flow decided
+/// nothing.
+async fn require_node_authorization(
+    state: &AppState,
+    auth: &AuthCtx,
+    id: NodeId,
+    runtime: &str,
+) -> ApiResult<String> {
+    use crate::auth::perm::{Permission, Scope};
+    auth.require_user()?;
+
+    let Some((sharing, caps)) = state
+        .nodes
+        .sharing_and_capabilities(id, auth.tenant_id)
+        .await?
+    else {
+        // Unknown/invisible node is a 404, not a 403 — no existence oracle.
+        return Err(ApiError::NotFound);
+    };
+    let is_operator = caps
+        .get("shared_operator")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if sharing.shared || is_operator {
+        auth.require(state, Permission::NodeManage, Scope::Tenant(auth.tenant_id))
+            .await?;
+    } else {
+        crate::auth::require_person_owns_node(state, auth.tenant_id, Some(auth.user_id), id)
+            .await?;
+    }
+
+    let runtime = runtime.trim();
+    if runtime.is_empty() {
+        return Err(ApiError::BadRequest("name a runtime".into()));
+    }
+    Ok(runtime.to_string())
 }

@@ -1552,6 +1552,51 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/nodes/{id}/managed-login": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start a MANAGED login on one node (MAIN-650).
+         * @description The third way to authorize a runtime, and the one a Kubernetes install
+         *     needs. `POST /runtime-auth` requires a provider whose OAuth client this
+         *     deployment can be, which a Claude subscription is not. `POST
+         *     /nodes/{id}/authorize` works but puts a terminal in front of a person. This
+         *     runs the runtime's own login on the node with pipes, and hands the UI a link
+         *     and — when the runtime asks for one — a box.
+         *
+         *     Same authorization rule as its two siblings: a personal machine is its
+         *     owner's alone, a shared or operator machine needs `node.manage`.
+         */
+        post: operations["start_managed_login"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/nodes/{id}/managed-login/code": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Hand a pasted code to a managed login in progress. */
+        post: operations["submit_managed_login_code"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/nodes/{id}/placement": {
         parameters: {
             query?: never;
@@ -4629,6 +4674,21 @@ export interface components {
             identity?: string | null;
             /** @description Human label, e.g. `Claude Code` or `Hermes → Nous Portal`. */
             label: string;
+            /**
+             * @description This node can drive the runtime's own login WITHOUT a terminal
+             *     (MAIN-650), so the UI offers a link and a box instead of a session.
+             *
+             *     Reported rather than assumed, and that is the point: the page used to
+             *     decide from a hardcoded list of runtime names, so clicking Authorize on
+             *     a node running an OLDER build sent it a message that build has never
+             *     heard of. In a fleet where the control plane and the nodes do not
+             *     upgrade together — which is every real fleet — that is a broken button
+             *     with no way to tell from the outside.
+             *
+             *     False on any node that predates the field, which is exactly the answer
+             *     that makes such a node fall back to the session flow it does understand.
+             */
+            managed_login?: boolean;
             /** @description The runtime executable this profile authorizes (`claude`, `hermes`). */
             runtime: string;
             state: components["schemas"]["AuthState"];
@@ -5029,6 +5089,24 @@ export interface components {
             gpus?: components["schemas"]["GpuInfo"][];
             hostname: string;
             /**
+             * @description Whether a BUILD here would run isolated on a dedicated node pool
+             *     (MAIN-655): an in-cluster executor with `executor.buildPool` set, so a
+             *     privileged build Pod lands on tainted nodes that nothing else tolerates.
+             *
+             *     This is the one capability that OPENS a gate rather than narrowing one —
+             *     `kind_wall_refusal` lets a shared operator take build work when it is
+             *     true. It is the node's own report, at exactly the trust level
+             *     [`Self::sandbox`] already carries: the dispatcher fails closed on that
+             *     too, and a host node that claims no sandbox is sent no loop work at all.
+             *     What makes it safe is not the claim but the shape it claims — a build
+             *     Pod on a pool nothing else schedules onto cannot reach another tenant's
+             *     work, which is the thing the wall existed to prevent.
+             *
+             *     False on every node that predates the field, so an upgrade never turns
+             *     the wall off by omission.
+             */
+            isolated_builds?: boolean;
+            /**
              * @description Which loop stages this node will execute (MAIN-142): any of `spec`,
              *     `decompose`, `review`, `epic-run`, `build`, `investigate`. Set by
              *     `NOOK_LOOP_KINDS`.
@@ -5066,6 +5144,26 @@ export interface components {
             max_loop_jobs_pinned?: boolean;
             /** Format: int64 */
             memory: number;
+            /**
+             * @description Placement labels this node was DEPLOYED with (MAIN-650), from
+             *     `NOOK_NODE_LABELS`.
+             *
+             *     The reason they exist: a chart-installed node could declare
+             *     `loopKinds: [build]` and an `executor.buildPool` and still never be
+             *     offered build work, because placement also needs `role/build` — which
+             *     only a person clicking the Nodes page could set. Two places had to agree
+             *     and the install could only reach one, so every Helm install ended with an
+             *     undocumented manual step.
+             *
+             *     SEEDED, not enforced: the control plane applies these only when the node
+             *     has no labels yet, so a values file can stand a node up complete while a
+             *     later edit in the UI stays authoritative and is never clobbered by a
+             *     reconnect. A values file is an owner's explicit act in the same way a
+             *     click is — and it is in version control, which a click is not.
+             */
+            placement_labels?: {
+                [key: string]: string;
+            };
             platform: string;
             /**
              * @description The port range this node offers sessions, `[start, end]` inclusive
@@ -5499,6 +5597,19 @@ export interface components {
         };
         CreateColumnRequest: {
             name: string;
+            /**
+             * @description `backlog` | `unstarted` | `started` | `review` | `completed` | `canceled`.
+             *
+             *     The NAME is what a person reads and may change freely; the TYPE is what
+             *     automation targets — "park this card for review" resolves a type, never
+             *     a name. Adding a column without one produced an `unstarted` column with
+             *     a promising name, which is a board a build run still cannot conclude on
+             *     (MAIN-650).
+             *
+             *     Optional, because the existing callers name a column and mean nothing
+             *     more by it. Absent keeps the column's default.
+             */
+            type?: string | null;
         };
         CreateCommentRequest: {
             /**
@@ -6648,6 +6759,13 @@ export interface components {
              *     a later sub-ticket, when an operator edits it).
              */
             version: number;
+        };
+        /** @description The code an operator pasted back, for one flow. */
+        ManagedLoginCodeRequest: {
+            code: string;
+            /** Format: uuid */
+            flow_id: string;
+            runtime: string;
         };
         /**
          * @description What a MANAGED session exists to do (MAIN-326).
@@ -9483,6 +9601,48 @@ export interface components {
             };
             /** @enum {string} */
             type: "runtime_auth_prompt";
+        } | {
+            /**
+             * @description A managed login is waiting on a person (MAIN-650).
+             *
+             *     Separate from [`Self::RuntimeAuthPrompt`] because the two ask for
+             *     different things: a device flow shows a code to TYPE somewhere else,
+             *     this shows a link to open and takes a code BACK. Overloading one on the
+             *     other would give the panel a code field it must not display and a URL
+             *     field doing double duty.
+             */
+            data: {
+                /** Format: uuid */
+                flow_id: string;
+                /** Format: uuid */
+                node_id: string;
+                runtime: string;
+                /**
+                 * @description Printed by the runtime itself, so it carries that runtime's own
+                 *     client id and scopes. Nothing here composes an OAuth URL.
+                 */
+                url: string;
+                /** @description The runtime is waiting for a code to be pasted back. */
+                wants_code: boolean;
+            };
+            /** @enum {string} */
+            type: "managed_login_prompt";
+        } | {
+            /**
+             * @description A managed login ended (MAIN-650). `error` absent means the runtime wrote
+             *     its credential — and on a Pod executor the node has already published it
+             *     to the Secret its job Pods read.
+             */
+            data: {
+                error?: string | null;
+                /** Format: uuid */
+                flow_id: string;
+                /** Format: uuid */
+                node_id: string;
+                runtime: string;
+            };
+            /** @enum {string} */
+            type: "managed_login_finished";
         } | {
             /**
              * @description One node's outcome for a delivery (MAIN-290).
@@ -12885,6 +13045,92 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["NodePorts"];
                 };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    start_managed_login: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Node id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AuthorizeRuntimeRequest"];
+            };
+        };
+        responses: {
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeAuthAccepted"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    submit_managed_login_code: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Node id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ManagedLoginCodeRequest"];
+            };
+        };
+        responses: {
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             403: {
                 headers: {

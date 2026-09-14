@@ -542,6 +542,40 @@ pub struct Capabilities {
     /// container; false everywhere else.
     #[serde(default)]
     pub shared_operator: bool,
+    /// Whether a BUILD here would run isolated on a dedicated node pool
+    /// (MAIN-655): an in-cluster executor with `executor.buildPool` set, so a
+    /// privileged build Pod lands on tainted nodes that nothing else tolerates.
+    ///
+    /// This is the one capability that OPENS a gate rather than narrowing one —
+    /// `kind_wall_refusal` lets a shared operator take build work when it is
+    /// true. It is the node's own report, at exactly the trust level
+    /// [`Self::sandbox`] already carries: the dispatcher fails closed on that
+    /// too, and a host node that claims no sandbox is sent no loop work at all.
+    /// What makes it safe is not the claim but the shape it claims — a build
+    /// Pod on a pool nothing else schedules onto cannot reach another tenant's
+    /// work, which is the thing the wall existed to prevent.
+    ///
+    /// False on every node that predates the field, so an upgrade never turns
+    /// the wall off by omission.
+    #[serde(default)]
+    pub isolated_builds: bool,
+    /// Placement labels this node was DEPLOYED with (MAIN-650), from
+    /// `NOOK_NODE_LABELS`.
+    ///
+    /// The reason they exist: a chart-installed node could declare
+    /// `loopKinds: [build]` and an `executor.buildPool` and still never be
+    /// offered build work, because placement also needs `role/build` — which
+    /// only a person clicking the Nodes page could set. Two places had to agree
+    /// and the install could only reach one, so every Helm install ended with an
+    /// undocumented manual step.
+    ///
+    /// SEEDED, not enforced: the control plane applies these only when the node
+    /// has no labels yet, so a values file can stand a node up complete while a
+    /// later edit in the UI stays authoritative and is never clobbered by a
+    /// reconnect. A values file is an owner's explicit act in the same way a
+    /// click is — and it is in version control, which a click is not.
+    #[serde(default)]
+    pub placement_labels: std::collections::BTreeMap<String, String>,
     /// Which loop stages this node will execute (MAIN-142): any of `spec`,
     /// `decompose`, `review`, `epic-run`, `build`, `investigate`. Set by
     /// `NOOK_LOOP_KINDS`.
@@ -767,6 +801,20 @@ pub struct AuthProfile {
     /// The signed-in account, when the probe reports one.
     #[serde(default)]
     pub identity: Option<String>,
+    /// This node can drive the runtime's own login WITHOUT a terminal
+    /// (MAIN-650), so the UI offers a link and a box instead of a session.
+    ///
+    /// Reported rather than assumed, and that is the point: the page used to
+    /// decide from a hardcoded list of runtime names, so clicking Authorize on
+    /// a node running an OLDER build sent it a message that build has never
+    /// heard of. In a fleet where the control plane and the nodes do not
+    /// upgrade together — which is every real fleet — that is a broken button
+    /// with no way to tell from the outside.
+    ///
+    /// False on any node that predates the field, which is exactly the answer
+    /// that makes such a node fall back to the session flow it does understand.
+    #[serde(default)]
+    pub managed_login: bool,
 }
 
 /// Live resource sample a node reports on each heartbeat, so both humans and
@@ -3884,6 +3932,18 @@ pub struct UpdateBoardRequest {
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct CreateColumnRequest {
     pub name: String,
+    /// `backlog` | `unstarted` | `started` | `review` | `completed` | `canceled`.
+    ///
+    /// The NAME is what a person reads and may change freely; the TYPE is what
+    /// automation targets — "park this card for review" resolves a type, never
+    /// a name. Adding a column without one produced an `unstarted` column with
+    /// a promising name, which is a board a build run still cannot conclude on
+    /// (MAIN-650).
+    ///
+    /// Optional, because the existing callers name a column and mean nothing
+    /// more by it. Absent keeps the column's default.
+    #[serde(default)]
+    pub r#type: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, ToSchema)]

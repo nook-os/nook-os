@@ -54,6 +54,23 @@ The operator-node image reference. Tag defaults to the chart's appVersion.
 {{- end -}}
 
 {{/*
+The image a job Pod runs (NOOK_JOB_IMAGE).
+
+Derived the same way the node's own image is — same registry, same version —
+because the job sandbox is published in lockstep with it by the release
+workflow. `executor.image` overrides it for a private registry or a sandbox
+built from `scripts/build-job-sandbox.sh`.
+*/}}
+{{- define "nook-operator-node.jobImage" -}}
+{{- if .Values.executor.image -}}
+{{- .Values.executor.image -}}
+{{- else -}}
+{{- $img := .Values.image -}}
+{{- printf "%s/%s:%s" $img.registry .Values.executor.imageRepository (default .Chart.AppVersion $img.tag) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Guardrails: the node cannot join without a server address and a join token.
 Refuse to render half a configuration.
 */}}

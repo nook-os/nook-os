@@ -2806,19 +2806,39 @@ fn declares_kind(node: &Node, kind: &str) -> bool {
 /// (MAIN-142 AC-2/AC-3), or `None` when this node may run this kind.
 ///
 /// Two rules, and their order is the whole point. The build rule is checked
-/// FIRST and reads only `shared_operator`, so a node declaring
-/// `loop_kinds=build` changes nothing about it — the wall is the control
-/// plane's, and a node cannot configure its way through. Only then is the
-/// node's own declaration consulted, which is a filter we apply on its behalf
-/// rather than a permission we take its word for.
+/// FIRST, so a node declaring `loop_kinds=build` changes nothing about it — the
+/// wall is the control plane's, and a node cannot ASK its way through. Only
+/// then is the node's own declaration consulted, which is a filter we apply on
+/// its behalf rather than a permission we take its word for.
+///
+/// **What the build rule now asks (MAIN-655).** It used to be "is this a shared
+/// operator", full stop, because a build agent is privileged and a shared
+/// operator is shared substrate: an escape there reaches every tenant's work on
+/// that machine. That is a statement about ARRANGEMENT, not about the kind — so
+/// it lifts exactly when the arrangement changes. An in-cluster executor with a
+/// build pool puts each build in a Pod of its own, on tainted nodes nothing
+/// else tolerates; there is no neighbouring work to reach. So the question
+/// became "is this a shared operator that would run the build BESIDE other
+/// work", and `isolated_builds` is the node saying it would not.
+///
+/// It is the node's word, at the trust level `sandbox` already carries — the
+/// dispatcher fails closed on that for host nodes and always has. A node that
+/// lies about its pool gets Pods the scheduler then refuses to place, because
+/// the taint it claimed to tolerate is the cluster's, not its own.
 pub async fn kind_wall_refusal(
     state: &AppState,
     node: NodeId,
     kind: &str,
 ) -> ApiResult<Option<String>> {
-    if kind == "build" && state.nodes.is_shared_operator(node).await? {
+    if kind == "build"
+        && state.nodes.is_shared_operator(node).await?
+        && !state.nodes.runs_isolated_builds(node).await?
+    {
         return Ok(Some(format!(
-            "refused: node {node} is a shared operator, and shared operators never run build work"
+            "refused: node {node} is a shared operator with no isolated build pool, and a \
+             privileged build there would share a machine with other tenants' work. Give it \
+             an in-cluster executor with executor.buildPool set, or send builds to a node of \
+             your own"
         )));
     }
     let declared = state

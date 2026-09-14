@@ -37,6 +37,21 @@ export function liveAgentMark(
   return dead ? undefined : agent;
 }
 
+/** A control-plane device authorization, as the UI follows it. */
+export interface RuntimeAuthFlow {
+  flowId: string;
+  runtime: string;
+  state: "starting" | "prompt" | "submitting" | "delivered" | "failed";
+  /** A code to TYPE somewhere else (device flow). */
+  userCode?: string;
+  /** A link to open — device flow's verification URI, or a managed login's
+   *  authorize URL. */
+  verificationUri?: string;
+  /** The runtime is waiting for a code to be pasted BACK (managed login). */
+  wantsCode?: boolean;
+  error?: string;
+}
+
 export interface AgentState {
   /** `running` | `waiting`. `idle` is represented by absence. */
   state: string;
@@ -71,6 +86,9 @@ interface LiveState {
   /** Live turn state per loop job id. Absence means "no adapter reported". */
   jobTurn: Record<string, JobTurn>;
   activity: EventItem[];
+  /** The device-flow authorization in progress, if any (MAIN-650). One at a
+   *  time: it is a person at a browser approving a code, not a queue. */
+  runtimeAuth: RuntimeAuthFlow | null;
   seedActivity(events: EventItem[]): void;
   seedAgentStates(items: { session_id: string; window?: number | null; state: string }[]): void;
 }
@@ -83,6 +101,7 @@ export const useLive = create<LiveState>(() => ({
   agentState: {},
   jobTurn: {},
   activity: [],
+  runtimeAuth: null,
   seedActivity(events) {
     useLive.setState((s) => {
       const known = new Set(s.activity.map((e) => e.id));
@@ -126,6 +145,68 @@ export function startLive(queryClient: QueryClient) {
           ...s.nodeResources,
           [event.data.node_id]: event.data.resources,
         },
+      }));
+    } else if (event.type === "runtime_auth_prompt") {
+      // The code and link the person has to act on. Held in the store rather
+      // than pushed as a toast: it stays on screen until the flow ends, because
+      // a code that vanishes is a code nobody can type.
+      useLive.setState({
+        runtimeAuth: {
+          flowId: event.data.flow_id,
+          runtime: event.data.runtime,
+          state: "prompt",
+          userCode: event.data.user_code,
+          verificationUri: event.data.verification_uri,
+        },
+      });
+    } else if (event.type === "managed_login_prompt") {
+      // The link the runtime itself printed. Re-sent when it starts asking for
+      // a code, so `wantsCode` flipping is what opens the box.
+      useLive.setState({
+        runtimeAuth: {
+          flowId: event.data.flow_id,
+          runtime: event.data.runtime,
+          state: "prompt",
+          verificationUri: event.data.url,
+          wantsCode: event.data.wants_code,
+        },
+      });
+    } else if (event.type === "managed_login_finished") {
+      const failed = (event.data as { error?: string | null }).error;
+      useLive.setState((s) => ({
+        runtimeAuth: s.runtimeAuth
+          ? {
+              ...s.runtimeAuth,
+              state: failed ? "failed" : "delivered",
+              wantsCode: false,
+              error: failed ?? undefined,
+            }
+          : null,
+      }));
+      // The node re-probes after a login and pushes fresh profiles, so the
+      // panel's authorized state comes from the refetch rather than from here.
+      queryClient.invalidateQueries({ queryKey: ["nodes"] });
+    } else if (event.type === "runtime_auth_delivered") {
+      useLive.setState((s) => ({
+        runtimeAuth: s.runtimeAuth
+          ? { ...s.runtimeAuth, state: "delivered", userCode: undefined }
+          : null,
+      }));
+      // The node re-probes and pushes a fresh profile set after a delivery, so
+      // the panel's state comes from the refetch rather than from this event.
+      queryClient.invalidateQueries({ queryKey: ["nodes"] });
+    } else if (event.type === "runtime_auth_failed") {
+      useLive.setState((s) => ({
+        runtimeAuth: s.runtimeAuth
+          ? {
+              ...s.runtimeAuth,
+              state: "failed",
+              userCode: undefined,
+              error: String(
+                (event.data as { error?: string }).error ?? "authorization failed",
+              ),
+            }
+          : null,
       }));
     } else if (event.type === "session_status") {
       useLive.setState((s) => ({

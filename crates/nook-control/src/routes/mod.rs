@@ -413,6 +413,17 @@ pub fn build_router(state: AppState) -> Router {
             get(nodes::get_capacity).put(nodes::set_capacity),
         )
         .route("/nodes/{id}/authorize", post(nodes::authorize))
+        // The terminal-free login (MAIN-650): the node drives the runtime's own
+        // sign-in with pipes and the UI renders a link plus, when the runtime
+        // asks for one, a box for the code.
+        .route(
+            "/nodes/{id}/managed-login",
+            post(runtime_auth::start_managed),
+        )
+        .route(
+            "/nodes/{id}/managed-login/code",
+            post(runtime_auth::submit_managed_code),
+        )
         .route(
             "/nodes/{id}/operator-authorize-optout",
             post(nodes::set_operator_authorize_optout),

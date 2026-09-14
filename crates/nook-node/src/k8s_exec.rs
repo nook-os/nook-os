@@ -15,8 +15,8 @@
 //! what is written here.
 
 use nook_k8s::types::{
-    Container, EmptyDirVolumeSource, EnvFromSource, EnvVar, ObjectMeta, Pod, PodSecurityContext,
-    PodSpec, SecretEnvSource, SecretVolumeSource, SecurityContext, Toleration, Volume, VolumeMount,
+    Container, EmptyDirVolumeSource, EnvVar, ObjectMeta, Pod, PodSecurityContext, PodSpec,
+    SecretVolumeSource, SecurityContext, Toleration, Volume, VolumeMount,
 };
 use nook_types::{AuthProfile, AuthState};
 
@@ -153,6 +153,13 @@ pub struct ExecutorConfig {
     /// the loop runtime unauthorized (see [`delivered_runtime_auth`]) and is
     /// sent no loop work, instead of claiming jobs it cannot run.
     pub credentials_secret: Option<String>,
+    /// Registry credentials for the job image, from
+    /// `NOOK_JOB_IMAGE_PULL_SECRETS` (comma separated).
+    ///
+    /// Empty means the image must be public. A private one then fails as
+    /// `ErrImagePull` AFTER the pool has scaled a node up for it — a machine
+    /// booted to run nothing.
+    pub image_pull_secrets: Vec<String>,
 }
 
 impl ExecutorConfig {
@@ -226,6 +233,13 @@ impl ExecutorConfig {
             namespace,
             image,
             build_pool,
+            image_pull_secrets: std::env::var("NOOK_JOB_IMAGE_PULL_SECRETS")
+                .unwrap_or_default()
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect(),
             credentials_secret: trimmed("NOOK_JOB_CREDENTIALS_SECRET"),
         }))
     }
@@ -303,6 +317,40 @@ pub struct PodJobSpec {
     /// writable [`CLAUDE_DIR`] before the agent starts (AC-10, MAIN-669,
     /// MAIN-672). `None` delivers no credentials at all.
     pub credentials_secret: Option<String>,
+    /// The key inside [`Self::credentials_secret`] holding THIS WORKSPACE's
+    /// forge token, surfaced to the agent as `GH_TOKEN` (MAIN-650).
+    ///
+    /// Per workspace rather than one shared `GH_TOKEN`, because the Secret is
+    /// one object serving every workspace on the node: a single key would mean
+    /// the last job to start decides which repo every other job can reach, and
+    /// two jobs from different workspaces would race. A key apiece makes that
+    /// impossible rather than unlikely.
+    ///
+    /// A REFERENCE, never a value — the token reaches the container through
+    /// `secretKeyRef`, so it is absent from the Pod manifest that this
+    /// executor's own `pods get` can read back. `optional` at the reference, so
+    /// a workspace with no token configured still starts (and its agent simply
+    /// cannot reach a private repo).
+    pub forge_token_key: Option<String>,
+    /// The key inside [`Self::credentials_secret`] holding THIS RUN's
+    /// control-plane token, surfaced as `NOOK_TOKEN` (MAIN-650).
+    ///
+    /// Per job, because the token is issued as this run's initiator and is good
+    /// for this run alone. Without it the agent can reach neither the card it
+    /// was sent to build nor `nook builds outcome` — and a well-behaved skill
+    /// then refuses the pass rather than inventing the brief, which is a correct
+    /// outcome and a wasted run.
+    pub nook_token_key: Option<String>,
+    /// Secrets the kubelet authenticates to the registry with (MAIN-650).
+    ///
+    /// Without these a job Pod can only run an image from a PUBLIC registry —
+    /// and it fails as `ErrImagePull` AFTER the pool has scaled a node up for
+    /// it, so the cost of the omission is a machine booted to run nothing.
+    ///
+    /// The node's own image comes from the same registry and the StatefulSet
+    /// has always been able to name pull secrets; the Pod it creates could not,
+    /// which is the asymmetry this closes.
+    pub image_pull_secrets: Vec<String>,
     /// What the container runs — the agent runtime, its flags, and the opening
     /// turn among them.
     ///
@@ -547,7 +595,85 @@ pub fn pod_command(launch: &AgentLaunch<'_>) -> Vec<String> {
             SESSION_LIFE_CHECK, SESSION_EXPIRED_EXIT,
         ));
     }
+    // The skills, into the SAME writable config dir the session was copied to
+    // (MAIN-650).
+    //
+    // A job Pod is a fresh container. The node installs the embedded skills at
+    // startup and a host sandbox inherits them; a Pod inherits nothing, so the
+    // agent came up with no `/nook-build` and answered `Unknown command` —
+    // after cloning, authenticating and starting, which is an expensive place
+    // to discover it.
+    //
+    // Ordered after the credential seed because both write to
+    // `CLAUDE_CONFIG_DIR` and the seed is what creates it. Not guarded by
+    // `set -e` escape: an agent with no skills cannot do the job it was sent,
+    // so failing here is better than the confusing success that follows.
+    script.push_str("nook skills install --quiet\n");
+
     if !launch.repo_url.is_empty() {
+        // Teach git the forge token the Secret carries, when there is one
+        // (MAIN-650). Without this a Pod can only clone a PUBLIC repo: it mounts
+        // no SSH key, runs no askpass and inherits no credential helper, so a
+        // private checkout fails at the first step with a bare permission
+        // error that says nothing about the cause.
+        //
+        // `GH_TOKEN` reaches the Pod through `env_from` on the credential
+        // Secret, never through the Pod's `env` — `loop_job::pod_env` withholds
+        // it there on purpose, because a Pod's environment is readable by
+        // anything holding pod-read in the namespace.
+        //
+        // The `insteadOf` rewrite is what makes an `ssh://` or `git@` remote
+        // usable here at all. A workspace records whatever remote a human
+        // pasted, and for a Pod that has no key, SSH is not a transport it can
+        // reach the forge on — so the token's transport is substituted rather
+        // than the operator being asked to re-record the remote.
+        //
+        // Written under $HOME rather than /tmp so it lands in the same private
+        // per-Pod filesystem as everything else here, and `0600` before the
+        // token is in it.
+        // An identity to commit with (MAIN-650).
+        //
+        // A Pod has no `~/.gitconfig` and inherits none, so `git commit` fails
+        // with "Please tell me who you are" — at the END of a run, after the
+        // agent has done the work. The first build to get this far set it
+        // repo-locally itself to get the commit through, which worked and is
+        // not something each agent should have to rediscover.
+        //
+        // `nook@nookos.local` / `NookOS` is the identity `gitops` already uses
+        // for commits this system makes; a second spelling would be a second
+        // answer to the same question. `--global`, so the agent may still set a
+        // repo-local one if a workspace wants its own.
+        script.push_str(
+            "git config --global user.email 'nook@nookos.local'\n\
+             git config --global user.name 'NookOS'\n",
+        );
+
+        // The transport rewrite is UNCONDITIONAL; only the credential is gated.
+        //
+        // A Pod has no SSH key and no known_hosts, so an `ssh://` or `git@`
+        // remote fails at `Host key verification failed` whatever the repo's
+        // visibility — a PUBLIC repo recorded with an SSH remote cannot be
+        // cloned here either, and gating the rewrite on having a token made
+        // that failure depend on something unrelated to it.
+        //
+        // `insteadOf` is a MULTI-VALUE key and plain `git config` REPLACES it,
+        // so the two forms need `--replace-all` then `--add`: written in turn
+        // the second silently cleared the first, and the one lost was
+        // `git@github.com:`, which is the form a recorded remote almost always
+        // has.
+        script.push_str(
+            "git config --global --replace-all url.'https://github.com/'.insteadOf 'git@github.com:'\n\
+             git config --global --add url.'https://github.com/'.insteadOf 'ssh://git@github.com/'\n",
+        );
+        // The credential, when this workspace has one. A public checkout needs
+        // none and must not be blocked for the want of it.
+        script.push_str(
+            "if [ -n \"${GH_TOKEN:-}\" ]; then\n  \
+             umask 077\n  \
+             printf 'https://x-access-token:%s@github.com\\n' \"$GH_TOKEN\" > \"$HOME/.git-credentials\"\n  \
+             git config --global credential.helper 'store'\n\
+             fi\n",
+        );
         script.push_str(&format!(
             "git clone --depth 1 --branch {} {} {}\n",
             quote(launch.branch),
@@ -601,6 +727,10 @@ pub enum StartVerdict {
     Waiting,
     /// It will not start. The job goes back to the queue (AC-7).
     Refused(Refusal),
+    /// Nowhere to run it AT THIS MOMENT. Distinct from a refusal because an
+    /// autoscaler answers exactly this condition, and only while the Pod is
+    /// still pending — see `start_verdict`.
+    Unschedulable(String),
 }
 
 /// Reasons a container is `Waiting` for that mean it will not stop waiting.
@@ -642,17 +772,30 @@ pub fn start_verdict(pod: &Pod) -> StartVerdict {
             )));
         }
     }
-    // Nothing will schedule it. A cluster that is full clears itself, so this
-    // is the shortage the queue is for rather than a deployment to fix.
+    // Nothing can schedule it YET, which is not the same as never — and the
+    // difference is the whole of whether an autoscaled pool can ever run a
+    // build (MAIN-650).
+    //
+    // This used to refuse here. Kubernetes sets `Unschedulable` within seconds
+    // of a Pod having nowhere to go, while a cluster autoscaler takes a minute
+    // or three to provision a node — and it only does so while a PENDING POD is
+    // applying the pressure. Refusing immediately deleted that Pod, so the
+    // autoscaler never saw a reason to act, so no node ever appeared. A build
+    // pool scaled to zero could not run a build, ever, and the 600s
+    // [`START_BUDGET`] that exists for exactly this wait was never reached.
+    //
+    // So it waits, and the caller's deadline is what eventually gives up. The
+    // reason is carried out so the refusal that follows names it rather than
+    // saying only that the budget expired.
     for cond in status.conditions.iter().flatten() {
         if cond.type_ == "PodScheduled"
             && cond.status == "False"
             && cond.reason.as_deref() == Some("Unschedulable")
         {
-            return StartVerdict::Refused(Refusal::Transient(format!(
+            return StartVerdict::Unschedulable(format!(
                 "no node can take this job Pod: {}",
                 cond.message.as_deref().unwrap_or("Unschedulable")
-            )));
+            ));
         }
     }
     StartVerdict::Waiting
@@ -739,7 +882,11 @@ fn credential_volumes(secret: &str) -> (Vec<Volume>, Vec<VolumeMount>) {
                 secret: Some(SecretVolumeSource {
                     secret_name: Some(secret.to_string()),
                     default_mode: Some(CREDENTIALS_MODE),
-                    optional: Some(true),
+                    // `false`: with `env_from` gone this mount is the only thing
+                    // that notices a Secret that is not there, and a Pod that
+                    // started with no session would burn a pass discovering it
+                    // (MAIN-669 AC-4).
+                    optional: Some(false),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -829,6 +976,12 @@ pub fn delivered_runtime_auth(
             }
             AuthProfile {
                 state: AuthState::Authorized,
+                // Unchanged by the executor: whether a login can be driven
+                // with pipes is a property of the runtime's own CLI, and a Pod
+                // executor does not alter it. A Claude subscription login is
+                // `claude`'s own OAuth client either way — the control plane has
+                // no client to be, which is why its device flow cannot serve
+                // this runtime and the session is driven instead.
                 // Not an account: this node cannot read the Secret and has no
                 // way to learn whose session is in it. Saying where the
                 // credential came from is the true thing available, and it is
@@ -839,6 +992,241 @@ pub fn delivered_runtime_auth(
             }
         })
         .collect()
+}
+
+/// The Secret key holding one workspace's forge token (MAIN-650).
+///
+/// Per workspace, because the credential Secret is one object serving every
+/// workspace this node runs: a single `GH_TOKEN` would mean the last job to
+/// start decides which repos every other job can reach, and two jobs from
+/// different workspaces would race over it. A key apiece makes that impossible
+/// rather than unlikely.
+///
+/// A Secret key may hold only `[-._a-zA-Z0-9]`, and a workspace id is a UUID,
+/// so the prefix is the whole of the shaping — but it is filtered anyway rather
+/// than trusted, because the id arrives over the wire.
+pub fn nook_token_key(job_id: &str) -> String {
+    secret_key("nook-token", job_id)
+}
+
+/// The Secret key holding the run's own control-plane token (MAIN-650).
+///
+/// Per JOB, not per workspace: the token is issued as this run's initiator and
+/// is only good for this run, so it is written before the Pod and removed when
+/// the Pod is gone. Without it the agent can reach neither the card it was sent
+/// to build nor `nook builds outcome`, and a well-behaved skill then refuses
+/// the pass rather than inventing the brief — which is exactly what happened.
+pub fn forge_token_key(workspace_id: &str) -> String {
+    secret_key("gh-token", workspace_id)
+}
+
+/// One Secret key, shaped so the apiserver will take it: `[-._a-zA-Z0-9]` only.
+/// The id arrives over the wire, so it is filtered rather than trusted.
+fn secret_key(prefix: &str, id: &str) -> String {
+    let id: String = id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .collect();
+    format!("{prefix}.{id}")
+}
+
+/// Put this workspace's forge token in the Secret its job Pods read, so an
+/// operator never writes one by hand (MAIN-650).
+///
+/// The control plane already holds the token — a workspace records it, encrypted
+/// — and already sends it with every run. Before this it reached the node and
+/// stopped there: `loop_job::pod_env` withholds it from the Pod's environment,
+/// correctly, because a Pod's env is readable by anything with pod-read in the
+/// namespace. So the token had nowhere to go and a cluster install needed a
+/// `kubectl create secret` an operator had to perform by hand with a credential
+/// they obtained some other way.
+///
+/// Now it takes the same road the Claude session takes: the node writes it into
+/// the Secret, under this workspace's own key, and the Pod reads it by
+/// reference. Add a PAT to a workspace and the next run has it.
+///
+/// Awaited by the caller rather than spawned, and that is deliberate: the Pod is
+/// about to be created and would otherwise race the write, starting with a stale
+/// token or none. It is one merge patch against one Secret.
+pub async fn publish_forge_token(
+    cfg: &ExecutorConfig,
+    workspace_id: &str,
+    token: &str,
+) -> anyhow::Result<String> {
+    publish_secret_key(
+        cfg,
+        forge_token_key(workspace_id),
+        token.as_bytes().to_vec(),
+    )
+    .await
+}
+
+/// The run's own control-plane token, under a key of this job's own.
+pub async fn publish_nook_token(
+    cfg: &ExecutorConfig,
+    job_id: &str,
+    token: &str,
+) -> anyhow::Result<String> {
+    publish_secret_key(cfg, nook_token_key(job_id), token.as_bytes().to_vec()).await
+}
+
+/// Drop a key once the Pod that read it is gone. A merge patch with a null
+/// value is how a Secret loses one; best-effort, because a key left behind is
+/// untidy rather than dangerous and must never fail a concluded run.
+pub async fn forget_secret_key(cfg: &ExecutorConfig, key: &str) {
+    let Some(secret) = cfg.credentials_secret.as_deref() else {
+        return;
+    };
+    let Ok(conn) = nook_k8s::connect().await else {
+        return;
+    };
+    if let Err(e) = nook_k8s::Credentials::new(conn.client, &cfg.namespace, secret)
+        .forget(key)
+        .await
+    {
+        tracing::warn!(%key, error = %e, "could not remove a spent credential key");
+    }
+}
+
+async fn publish_secret_key(
+    cfg: &ExecutorConfig,
+    key: String,
+    value: Vec<u8>,
+) -> anyhow::Result<String> {
+    let secret = cfg.credentials_secret.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no executor.credentialsSecret is configured, so a credential has nowhere to go"
+        )
+    })?;
+    let conn = nook_k8s::connect().await?;
+    nook_k8s::Credentials::new(conn.client, &cfg.namespace, secret)
+        .upsert(std::collections::BTreeMap::from([(key.clone(), value)]))
+        .await?;
+    Ok(key)
+}
+
+/// Land a delivered credential in the Secret job Pods read (MAIN-650).
+///
+/// On a host node a delivered credential goes to a FILE, and the agent that
+/// reads it runs on that machine. Neither half is true here: the agent is a Pod
+/// somewhere else in the cluster, and the only thing it reads is the Secret this
+/// node names. So the same delivery has to end somewhere else, or authorizing a
+/// cluster node writes a file that nothing will ever open — which is exactly
+/// what it did, and why seeding this Secret was a `kubectl` step an operator had
+/// to perform with credentials they obtained some other way.
+///
+/// The payload stays opaque, as it is on the file path: what is decided here is
+/// the destination and the KEY, never the contents. The key is
+/// `runtime_auth::credential_file`'s, so the name in the Secret is the name the
+/// runtime will look for once it is projected into a Pod.
+///
+/// Returns where it went, for the delivery report an operator reads.
+pub async fn deliver_credential_to_secret(runtime: &str, payload: &[u8]) -> anyhow::Result<String> {
+    let cfg = ExecutorConfig::from_env()
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .ok_or_else(|| anyhow::anyhow!("this node is not a Pod executor"))?;
+    let secret = cfg.credentials_secret.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "this node names no executor.credentialsSecret, so a delivered credential has \
+             nowhere to go that a job would ever read"
+        )
+    })?;
+    let key = crate::runtime_auth::credential_file(runtime)
+        .ok_or_else(|| anyhow::anyhow!("no credential layout is known for runtime `{runtime}`"))?;
+
+    let conn = nook_k8s::connect().await?;
+    let creds = nook_k8s::Credentials::new(conn.client, &cfg.namespace, secret);
+    creds
+        .upsert(std::collections::BTreeMap::from([(
+            key.to_string(),
+            payload.to_vec(),
+        )]))
+        .await?;
+    Ok(format!("Secret {}/{} key {key}", cfg.namespace, secret))
+}
+
+/// Publish the credential this node holds into the Secret job Pods read
+/// (MAIN-650).
+///
+/// This is what closes the loop for a cluster install done entirely from the
+/// web UI. A Claude subscription login can only be performed by `claude` itself
+/// — it is that CLI's own OAuth client doing a PKCE/loopback exchange, so the
+/// control plane has no client to be and its device flow cannot mint one. So
+/// the login happens where `claude` is, in a session on this node, exactly as
+/// it does on a laptop; and then this carries the result to where the agents
+/// actually read it.
+///
+/// Without it a Pod executor is authorized in name only: the operator signs in,
+/// the node reports authorized, and every job Pod still starts with nothing —
+/// which is what made seeding a `kubectl create secret` step performed with
+/// credentials obtained some other way.
+///
+/// Cheap and idempotent, so it can be called from anything periodic: the file
+/// read and the change check are synchronous and local, and the apiserver is
+/// touched ONLY when the bytes actually differ from the last publish. A token
+/// `claude` refreshes on this node therefore reaches job Pods on its own.
+pub fn spawn_credential_sync() {
+    let Ok(Some(cfg)) = ExecutorConfig::from_env() else {
+        return;
+    };
+    if cfg.credentials_secret.is_none() {
+        return;
+    }
+    let Some(key) = crate::runtime_auth::credential_file(CREDENTIALS_RUNTIME) else {
+        return;
+    };
+    // No credential here yet is the ordinary pre-login state, not an error.
+    let Some(bytes) = crate::runtime_auth::credential_bytes(CREDENTIALS_RUNTIME) else {
+        return;
+    };
+
+    // A runtime FIRST, before anything is recorded. Ordering matters here and
+    // got it wrong once: the stamp used to be written before this check, so a
+    // call made outside the runtime marked the bytes published and returned —
+    // and every later call short-circuited on that stamp. One early call
+    // poisoned the sync for the life of the process, silently.
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+
+    // Change detection only — never a security claim, and deliberately not a
+    // cryptographic digest: the question is "are these the bytes I last sent",
+    // which a collision-prone hash answers well enough to save an apiserver
+    // round trip on every probe.
+    use std::hash::{Hash as _, Hasher as _};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut h);
+    let stamp = h.finish();
+    if *last_published().lock().expect("credential stamp") == Some(stamp) {
+        return;
+    }
+
+    handle.spawn(async move {
+        match deliver_credential_to_secret(CREDENTIALS_RUNTIME, &bytes).await {
+            Ok(target) => {
+                // Recorded only on SUCCESS. A failure leaves the stamp unset so
+                // the next probe tries again — which is what makes a permission
+                // that was missing, or an apiserver that was briefly away, heal
+                // without a restart.
+                *last_published().lock().expect("credential stamp") = Some(stamp);
+                tracing::info!(
+                    runtime = CREDENTIALS_RUNTIME, %target, key,
+                    "published this node's runtime credential for its job Pods"
+                );
+            }
+            // Reported, never fatal: a node that cannot publish keeps running
+            // sessions, and the operator is told why.
+            Err(e) => tracing::warn!(
+                runtime = CREDENTIALS_RUNTIME, error = %e,
+                "cannot publish this node's runtime credential"
+            ),
+        }
+    });
+}
+
+fn last_published() -> &'static std::sync::Mutex<Option<u64>> {
+    static LAST: std::sync::OnceLock<std::sync::Mutex<Option<u64>>> = std::sync::OnceLock::new();
+    LAST.get_or_init(|| std::sync::Mutex::new(None))
 }
 
 /// Describe the Pod this job runs in.
@@ -890,31 +1278,66 @@ pub fn job_pod(spec: &PodJobSpec) -> Result<Pod, Refusal> {
                     value: Some(value),
                     value_from: None,
                 })
+                // This workspace's forge token, BY REFERENCE (MAIN-650). In
+                // `env` rather than left to `env_from` because the key is named
+                // per workspace and the variable is not: this is what maps one
+                // to the other, and being in `env` also means it beats any
+                // `GH_TOKEN` a hand-edited Secret happens to carry.
+                .chain(spec.nook_token_key.iter().map(|key| EnvVar {
+                    name: "NOOK_TOKEN".to_string(),
+                    value: None,
+                    value_from: Some(nook_k8s::types::EnvVarSource {
+                        secret_key_ref: Some(nook_k8s::types::SecretKeySelector {
+                            name: spec.credentials_secret.clone().unwrap_or_default(),
+                            key: key.clone(),
+                            optional: Some(true),
+                        }),
+                        ..Default::default()
+                    }),
+                }))
+                .chain(spec.forge_token_key.iter().map(|key| EnvVar {
+                    name: "GH_TOKEN".to_string(),
+                    value: None,
+                    value_from: Some(nook_k8s::types::EnvVarSource {
+                        secret_key_ref: Some(nook_k8s::types::SecretKeySelector {
+                            name: spec.credentials_secret.clone().unwrap_or_default(),
+                            key: key.clone(),
+                            // A workspace with no token configured still starts.
+                            // Its agent cannot reach a private repo, which the
+                            // clone reports plainly — better than a Pod that
+                            // never starts over a credential it may not need.
+                            optional: Some(true),
+                        }),
+                        ..Default::default()
+                    }),
+                }))
                 .collect(),
         ),
         // The credential seam (AC-10), and the ORDER matters: Kubernetes applies
-        // `env_from` first and lets `env` override it, so a Secret key colliding
-        // with `NOOK_JOB_ID` or `NOOK_SERVER` loses. A hand-created Secret is
-        // scaffolding, and scaffolding must not be able to redirect a run at the
-        // wrong control plane.
+        // NO `env_from`, and that is the fix rather than an omission
+        // (MAIN-650).
         //
-        // `optional: false` deliberately, and it is what makes AC-4 hold for the
-        // MOUNT as well: a named Secret that does not exist keeps the Pod in
-        // `CreateContainerConfigError`, which `start_verdict` reads as a
-        // configuration refusal naming it — far better than an agent that
-        // starts, silently has no credentials, and burns a pass finding out.
-        // Keys a Secret carries for the session rather than the environment
-        // (`.claude.json`) are not legal variable names; the kubelet skips
-        // those with an event and starts the container.
-        env_from: spec.credentials_secret.as_ref().map(|name| {
-            vec![EnvFromSource {
-                secret_ref: Some(SecretEnvSource {
-                    name: name.clone(),
-                    optional: Some(false),
-                }),
-                ..Default::default()
-            }]
-        }),
+        // It used to load the whole credential Secret, on the reasoning that
+        // keys which are not legal variable names — `.credentials.json` — would
+        // be skipped by the kubelet. MEASURED ON A REAL CLUSTER, THEY ARE NOT:
+        // every key arrives, dots and dashes and all. So a Pod for one
+        // workspace received every OTHER workspace's forge token, and the
+        // Claude session arrived as a plain variable — the exact exposure
+        // `loop_job::pod_env` withholds credentials from `env` to prevent,
+        // handed back by the seam beside it.
+        //
+        // A credential now reaches a Pod two ways and no third: the session as
+        // a MOUNTED FILE, copied into the writable config dir by `pod_command`;
+        // and this workspace's forge token as ONE named `secretKeyRef` above.
+        // Both name what they deliver, so nothing arrives by accident.
+        //
+        // The cost is the loud failure `optional: false` used to buy. A missing
+        // Secret now fails the MOUNT, which leaves the Pod in
+        // `ContainerCreating` with the reason in an Event this executor's Role
+        // deliberately cannot read — so the run waits out `START_BUDGET` and is
+        // refused for the timeout rather than by name. Worse diagnostics, and
+        // the right trade against handing every job every tenant's credential.
+        env_from: None,
         volume_mounts: credentials.as_ref().map(|(_, m)| m.clone()),
         security_context: Some(SecurityContext {
             privileged: Some(privileged),
@@ -936,6 +1359,12 @@ pub fn job_pod(spec: &PodJobSpec) -> Result<Pod, Refusal> {
         restart_policy: Some("Never".to_string()),
         node_selector: pool.map(|p| {
             std::collections::BTreeMap::from([(p.selector_key.clone(), p.selector_value.clone())])
+        }),
+        image_pull_secrets: (!spec.image_pull_secrets.is_empty()).then(|| {
+            spec.image_pull_secrets
+                .iter()
+                .map(|name| nook_k8s::types::LocalObjectReference { name: name.clone() })
+                .collect()
         }),
         tolerations: pool.map(|p| {
             vec![Toleration {
@@ -1079,6 +1508,8 @@ impl PodExecutor {
         kind: &str,
         env: Vec<(String, String)>,
         command: Vec<String>,
+        forge_token_key: Option<String>,
+        nook_token_key: Option<String>,
     ) -> Result<String, Refusal> {
         let pod = job_pod(&PodJobSpec {
             job_id: job_id.to_string(),
@@ -1090,6 +1521,9 @@ impl PodExecutor {
             command,
             build_pool: self.cfg.build_pool.clone(),
             credentials_secret: self.cfg.credentials_secret.clone(),
+            forge_token_key,
+            nook_token_key,
+            image_pull_secrets: self.cfg.image_pull_secrets.clone(),
         })?;
         let name = pod
             .metadata
@@ -1108,16 +1542,26 @@ impl PodExecutor {
     /// failed the card — and [`start_verdict`] is where the reading lives.
     pub async fn await_start(&self, name: &str) -> Result<(), Refusal> {
         let deadline = std::time::Instant::now() + START_BUDGET;
+        let mut unschedulable: Option<String> = None;
         loop {
             let pod = self.pods.get(name).await.map_err(|e| refusal_for(&e))?;
             match start_verdict(&pod) {
                 StartVerdict::Started => return Ok(()),
                 StartVerdict::Refused(r) => return Err(r),
+                // Kept, so the refusal below says WHY nothing took it rather
+                // than only that time ran out.
+                StartVerdict::Unschedulable(why) => unschedulable = Some(why),
                 StartVerdict::Waiting => {}
             }
             if std::time::Instant::now() >= deadline {
                 // Transient: a cluster busy enough to take ten minutes over a
                 // Pod is a shortage, and the queue is where a job waits one out.
+                if let Some(why) = unschedulable {
+                    return Err(Refusal::Transient(format!(
+                        "{why} — still true after {}s",
+                        START_BUDGET.as_secs()
+                    )));
+                }
                 return Err(Refusal::Transient(format!(
                     "the job Pod did not start within {}s",
                     START_BUDGET.as_secs()
@@ -1264,6 +1708,9 @@ mod tests {
                 taint_key: "nook.io/build-only".into(),
             }),
             credentials_secret: None,
+            forge_token_key: None,
+            nook_token_key: None,
+            image_pull_secrets: Vec::new(),
         }
     }
 
@@ -1456,19 +1903,27 @@ mod tests {
         s.credentials_secret = Some("nook-job-credentials".into());
         let pod = job_pod(&s).unwrap();
 
-        let secret_ref = container(&pod).env_from.as_ref().expect("an env_from")[0]
-            .secret_ref
-            .clone()
-            .expect("a secret ref");
-        assert_eq!(secret_ref.name, "nook-job-credentials");
-        assert_eq!(secret_ref.optional, Some(false), "the detector went quiet");
+        // NO `env_from`. Measured on a real cluster, the kubelet does NOT skip
+        // keys that are not legal variable names — it exposed `.credentials.json`
+        // and every `gh-token.<workspace>` as plain environment. So a Pod for one
+        // workspace held every other workspace's forge token, and the session
+        // arrived as a variable (MAIN-650). The Secret now reaches a Pod as a
+        // mounted FILE and as NAMED references, never wholesale.
+        assert!(
+            container(&pod).env_from.is_none(),
+            "env_from hands a Pod every key in the Secret, including other \
+             workspaces' credentials"
+        );
 
         let source = volume(&pod, CREDENTIALS_VOLUME).secret.as_ref().unwrap();
-        assert_eq!(source.optional, Some(true), "a failed mount hangs the run");
+        // With `env_from` gone this mount is the only thing that notices a
+        // Secret that is not there.
         assert_eq!(
-            source.secret_name.as_deref(),
-            Some(secret_ref.name.as_str())
+            source.optional,
+            Some(false),
+            "a missing Secret must be loud"
         );
+        assert_eq!(source.secret_name.as_deref(), Some("nook-job-credentials"));
 
         // And with none configured, no half appears.
         let pod = job_pod(&spec("review")).unwrap();
@@ -1615,6 +2070,7 @@ mod tests {
                     runtime: "claude".into(),
                     state: AuthState::Unavailable,
                     identity: None,
+                    managed_login: false,
                 },
                 AuthProfile {
                     id: "codex".into(),
@@ -1622,6 +2078,7 @@ mod tests {
                     runtime: "codex".into(),
                     state: AuthState::Unavailable,
                     identity: None,
+                    managed_login: false,
                 },
             ]
         };
@@ -1630,6 +2087,7 @@ mod tests {
             image: "img:1".into(),
             build_pool: None,
             credentials_secret: None,
+            image_pull_secrets: Vec::new(),
         };
 
         // No Secret: the probe stands, so the dispatcher passes this node over
@@ -2015,6 +2473,224 @@ mod tests {
     /// A Pod mounts no storage, so the node's clone cache and its per-job
     /// worktree are unreachable from inside one: the checkout happens IN the
     /// Pod, from a fresh clone (NG-2).
+    /// A Pod mounts no SSH key and runs no askpass, so a private repo is
+    /// reachable only if the forge token the Secret carries is wired into git
+    /// (MAIN-650). Asserted on the SHAPE, because the failure it prevents is a
+    /// clone that dies with a permission error naming nothing.
+    /// A private job image needs registry credentials, and the cost of not
+    /// having them is not a fast failure: the pool scales a node up first, and
+    /// only then does the Pod report ErrImagePull (MAIN-650).
+    /// A Pod inherits nothing (MAIN-650). The node installs the embedded skills
+    /// at startup and a host sandbox inherits them; a fresh container does not,
+    /// so the agent answered `Unknown command: /nook-build` — after cloning,
+    /// authenticating and starting, which is an expensive place to find out.
+    #[test]
+    fn the_agent_gets_its_skills_before_it_is_asked_for_one() {
+        let args = ["-p".to_string(), "/nook-build MAIN-1".to_string()];
+        let body = pod_command(&AgentLaunch {
+            runtime: "claude",
+            args: &args,
+            repo_url: "git@github.com:acme/private.git",
+            branch: "main",
+            seeded_session: true,
+        })[2]
+            .clone();
+
+        let install = body
+            .find("nook skills install")
+            .expect("the skills install");
+        // After the seed, because both write to CLAUDE_CONFIG_DIR and the seed
+        // is what creates it.
+        let seed = body.find("mkdir -p").expect("the credential seed");
+        assert!(
+            seed < install,
+            "skills must land after the config dir exists: {body}"
+        );
+        // …and before the agent is asked to run one.
+        let exec = body.find("\nexec ").expect("the exec");
+        assert!(
+            install < exec,
+            "skills must be installed before the agent starts: {body}"
+        );
+    }
+
+    #[test]
+    fn a_job_pod_can_pull_from_a_private_registry() {
+        let mut sp = spec("build");
+        sp.image_pull_secrets = vec!["ghcr".into(), "mirror".into()];
+        let pod = job_pod(&sp).unwrap();
+        let refs = pod
+            .spec
+            .as_ref()
+            .unwrap()
+            .image_pull_secrets
+            .as_ref()
+            .expect("pull secrets");
+        assert_eq!(
+            refs.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            ["ghcr", "mirror"],
+            "every named secret reaches the Pod, in order"
+        );
+
+        // None configured ⇒ the field is absent rather than an empty list, so a
+        // public image renders exactly what it always did.
+        let pod = job_pod(&spec("build")).unwrap();
+        assert!(pod.spec.as_ref().unwrap().image_pull_secrets.is_none());
+    }
+
+    /// The token reaches the container BY REFERENCE and is keyed per workspace
+    /// (MAIN-650). Both halves matter: a value would be readable through the
+    /// executor's own `pods get`, and one shared key would let the last job to
+    /// start decide which repos every other job can reach.
+    #[test]
+    fn the_forge_token_is_referenced_per_workspace_never_inlined() {
+        let mut sp = spec("build");
+        sp.credentials_secret = Some("nook-job-credentials".into());
+        sp.forge_token_key = Some(forge_token_key("01a03499-9d0e-7ec0-a576-44c7a5934166"));
+        // The run's own token rides the same road, keyed per JOB rather than per
+        // workspace — without it the agent cannot read the card it was sent to
+        // build, and refuses the pass (MAIN-650).
+        sp.nook_token_key = Some(nook_token_key("01a0a017-23a6-7823-93ff-46679015ea38"));
+        let pod = job_pod(&sp).unwrap();
+        let env = container(&pod).env.as_ref().expect("env");
+        let nook = env
+            .iter()
+            .find(|e| e.name == "NOOK_TOKEN")
+            .expect("NOOK_TOKEN is wired");
+        assert!(nook.value.is_none(), "the run token must not be a literal");
+        assert_eq!(
+            nook.value_from
+                .as_ref()
+                .and_then(|v| v.secret_key_ref.as_ref())
+                .map(|r| r.key.as_str()),
+            Some("nook-token.01a0a017-23a6-7823-93ff-46679015ea38")
+        );
+
+        let gh = env
+            .iter()
+            .find(|e| e.name == "GH_TOKEN")
+            .expect("GH_TOKEN is wired");
+        assert!(
+            gh.value.is_none(),
+            "the token must not be a literal: {gh:?}"
+        );
+        let sel = gh
+            .value_from
+            .as_ref()
+            .and_then(|v| v.secret_key_ref.as_ref())
+            .expect("a secretKeyRef");
+        assert_eq!(sel.name, "nook-job-credentials");
+        assert_eq!(sel.key, "gh-token.01a03499-9d0e-7ec0-a576-44c7a5934166");
+        // A workspace with no token still starts; its clone reports what it
+        // could not reach.
+        assert_eq!(sel.optional, Some(true));
+
+        // No key configured ⇒ no GH_TOKEN entry at all, so a public checkout is
+        // untouched by any of this.
+        let mut bare = spec("build");
+        bare.credentials_secret = Some("nook-job-credentials".into());
+        let pod = job_pod(&bare).unwrap();
+        assert!(
+            !container(&pod)
+                .env
+                .as_ref()
+                .expect("env")
+                .iter()
+                .any(|e| e.name == "GH_TOKEN"),
+            "no workspace token means no GH_TOKEN entry"
+        );
+    }
+
+    /// A Secret key may hold only `[-._a-zA-Z0-9]`, and the id comes off the
+    /// wire, so it is filtered rather than trusted.
+    #[test]
+    fn a_forge_token_key_is_always_a_legal_secret_key() {
+        let key = forge_token_key("../../etc/passwd nasty");
+        assert_eq!(key, "gh-token.....etcpasswdnasty");
+        assert!(
+            key.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')),
+            "{key}"
+        );
+    }
+
+    #[test]
+    fn a_private_checkout_gets_the_forge_token_and_a_transport_it_can_use() {
+        let args = ["-p".to_string(), "/nook-build MAIN-1".to_string()];
+        let body = pod_command(&AgentLaunch {
+            runtime: "claude",
+            args: &args,
+            repo_url: "git@github.com:acme/private.git",
+            branch: "main",
+            seeded_session: true,
+        })[2]
+            .clone();
+
+        // The CREDENTIAL is guarded; the rewrite is not. A public repo recorded
+        // with an SSH remote has no token and still cannot be cloned by a Pod
+        // that holds no key — gating the rewrite made that failure depend on
+        // something unrelated to it.
+        assert!(body.contains("if [ -n \"${GH_TOKEN:-}\" ]; then"), "{body}");
+        let guard = body.find("if [ -n").expect("the credential guard");
+        let rewrite = body.find("--replace-all").expect("the rewrite");
+        assert!(
+            rewrite < guard,
+            "the transport rewrite must run whether or not there is a token: {body}"
+        );
+        assert!(body.contains("x-access-token:%s@github.com"), "{body}");
+        assert!(body.contains("credential.helper"), "{body}");
+
+        // The rewrite is the load-bearing half for a workspace whose recorded
+        // remote is SSH: without it the token is irrelevant, because the Pod
+        // cannot speak that transport at all.
+        // BOTH rewrites must survive. `insteadOf` is a MULTI-VALUE key and a
+        // plain `git config` REPLACES it, so writing the two in turn left only
+        // the last — and the one that lost was `git@github.com:`, the scp-like
+        // form a workspace's recorded remote almost always uses. The token was
+        // present and the clone still went to SSH.
+        assert!(
+            body.contains("--replace-all url.'https://github.com/'.insteadOf 'git@github.com:'"),
+            "{body}"
+        );
+        assert!(
+            body.contains("--add url.'https://github.com/'.insteadOf 'ssh://git@github.com/'"),
+            "{body}"
+        );
+        let scp = body
+            .find("'git@github.com:'")
+            .expect("the scp-like rewrite");
+        let ssh = body
+            .find("'ssh://git@github.com/'")
+            .expect("the ssh rewrite");
+        assert!(
+            scp < ssh,
+            "replace-all must come first or it clears the add"
+        );
+
+        // The token is never echoed into the script itself — it is read from the
+        // environment the Secret supplies, so `kubectl get pod -o yaml` shows a
+        // command with no credential in it.
+        assert!(!body.contains("ghp_"), "{body}");
+        assert!(body.contains("\"$GH_TOKEN\""), "{body}");
+
+        // …and the credential file is private BEFORE the token is written.
+        let umask = body.find("umask 077").expect("a umask");
+        let write = body.find("git-credentials").expect("the credential write");
+        assert!(umask < write, "umask must precede the write: {body}");
+
+        // An identity, or `git commit` fails at the END of a run with "Please
+        // tell me who you are" — after the agent has done the work. The same
+        // one `gitops` uses for commits this system makes.
+        assert!(body.contains("user.email 'nook@nookos.local'"), "{body}");
+        assert!(body.contains("user.name 'NookOS'"), "{body}");
+
+        // The clone still happens, after all of it.
+        assert!(
+            body.contains("git clone --depth 1 --branch 'main'"),
+            "{body}"
+        );
+    }
+
     #[test]
     fn the_pod_clones_its_own_checkout_and_then_becomes_the_agent() {
         let args = ["-p".to_string(), "/nook-spec MAIN-1".to_string()];
@@ -2136,12 +2812,16 @@ mod tests {
                 "message": "0/3 nodes are available: insufficient cpu",
             }],
         }));
+        // NOT a refusal, and the distinction is what lets an autoscaled pool
+        // work at all (MAIN-650): Kubernetes sets this within seconds, while a
+        // cluster autoscaler takes minutes and only acts while the pending Pod
+        // is applying pressure. Refusing here deleted that Pod and the node
+        // never came, so a pool scaled to zero could never run a build.
         match start_verdict(&unschedulable) {
-            StartVerdict::Refused(r) => {
-                assert!(r.keep_claiming(), "a full cluster clears itself");
-                assert!(r.to_string().contains("insufficient cpu"), "{r}");
+            StartVerdict::Unschedulable(why) => {
+                assert!(why.contains("insufficient cpu"), "{why}");
             }
-            other => panic!("an unschedulable Pod was not refused: {other:?}"),
+            other => panic!("an unschedulable Pod must be waited on, not refused: {other:?}"),
         }
 
         for phase in ["Running", "Succeeded", "Failed"] {
@@ -2249,6 +2929,12 @@ mod tests {
             None => &src[..],
         };
 
+        // Whitespace-insensitive: these are calls, and rustfmt is free to break
+        // one across lines the moment its arguments grow. A guard that a
+        // formatting pass can trip is a guard that gets weakened to silence it.
+        let src: String = src.split_whitespace().collect::<Vec<_>>().join(" ");
+        let src = src.replace(" .", ".").replace(". ", ".").replace("( ", "(");
+
         for reached in [
             // AC-3: a Pod is created for the job.
             "exec.start(",
@@ -2332,21 +3018,25 @@ mod tests {
         s.credentials_secret = Some("nook-job-credentials".into());
         let pod = job_pod(&s).unwrap();
 
-        let from = container(&pod)
-            .env_from
+        // The credential seam is the MOUNT plus named references — never
+        // `env_from`, which hands a Pod every key the Secret holds including
+        // other workspaces' tokens (MAIN-650).
+        assert!(container(&pod).env_from.is_none(), "env_from is the leak");
+        let mount = volume(&pod, CREDENTIALS_VOLUME)
+            .secret
             .as_ref()
-            .expect("a credential seam");
-        let secret = from[0].secret_ref.as_ref().expect("a secretRef");
-        assert_eq!(secret.name, "nook-job-credentials");
+            .expect("the credential mount");
+        assert_eq!(mount.secret_name.as_deref(), Some("nook-job-credentials"));
         // A named Secret that is absent must stop the Pod, not start an agent
         // that quietly has no credentials and spends a pass finding out.
-        assert_eq!(secret.optional, Some(false));
+        assert_eq!(mount.optional, Some(false));
 
-        // Not a value anywhere: the seam is a REFERENCE, and every ordinary
-        // pair still carries its own literal value rather than going through it.
+        // Every env pair the NODE writes carries its own literal value. The one
+        // reference is the forge token, and only when a workspace has one —
+        // asserted on its own above.
         for var in container(&pod).env.as_ref().unwrap() {
             assert!(
-                var.value_from.is_none(),
+                var.value_from.is_none() || var.name == "GH_TOKEN",
                 "{} reaches for a value source it does not have",
                 var.name
             );
@@ -2411,17 +3101,24 @@ mod tests {
 
     /// AC-9, and the card says "asserted, not assumed".
     ///
-    /// `build` is the one kind whose Pod is privileged, and a cluster executor
-    /// declaring it would hand privileged containers to a general node pool.
-    /// Two documents decide it — the image's default and the chart's list — and
-    /// they are the two an install actually reads, so both are checked.
+    /// `build` is the one kind whose Pod is privileged, so it is never in the
+    /// DEFAULTS: an install that says nothing about builds must not acquire the
+    /// ability to run one, and an upgrade must not hand privileged containers to
+    /// a general node pool. Two documents decide that — the image's default and
+    /// the chart's list — and they are the two an install actually reads, so
+    /// both are checked.
     ///
-    /// This is not the WALL: `jobs::placement` refuses build work on a shared
-    /// operator whatever a node declares. It is the statement of intent that
-    /// keeps the wall from ever being the only thing standing between a card
-    /// and a privileged Pod.
+    /// Since MAIN-655 builds ARE reachable here, but only deliberately: an
+    /// operator adds `build` to `loopKinds` and names a `buildPool`, and the
+    /// chart refuses to render one without the other. This test guards the
+    /// default, not the possibility.
+    ///
+    /// This is not the WALL either: `jobs::kind_wall_refusal` refuses build work
+    /// on a shared operator that reports no isolated pool, whatever a node
+    /// declares. It is the statement of intent that keeps the wall from ever
+    /// being the only thing standing between a card and a privileged Pod.
     #[test]
-    fn a_build_is_never_offered_to_this_executor() {
+    fn a_build_is_never_offered_to_this_executor_by_default() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(|p| p.parent())
@@ -2472,5 +3169,38 @@ mod tests {
                 "{kind} is declared but needs a build pool to run"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod pod_script_syntax {
+    /// The generated script has to be valid `sh`. It is assembled from escaped
+    /// Rust literals, and a quoting slip there produces a Pod that starts and
+    /// dies on a syntax error with the reason only in its logs.
+    #[test]
+    fn the_generated_script_parses_as_sh() {
+        let args = ["-p".to_string(), "/nook-build MAIN-1".to_string()];
+        let body = super::pod_command(&super::AgentLaunch {
+            runtime: "claude",
+            args: &args,
+            repo_url: "git@github.com:acme/private.git",
+            branch: "main",
+            seeded_session: true,
+        })[2]
+            .clone();
+
+        let dir = std::env::temp_dir().join(format!("nook-pod-script-{}", std::process::id()));
+        std::fs::write(&dir, &body).expect("write the script");
+        let out = std::process::Command::new("sh")
+            .arg("-n")
+            .arg(&dir)
+            .output()
+            .expect("run sh -n");
+        let _ = std::fs::remove_file(&dir);
+        assert!(
+            out.status.success(),
+            "the Pod script is not valid sh:\n{}\n--- script ---\n{body}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 }

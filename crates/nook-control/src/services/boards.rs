@@ -22,6 +22,23 @@ pub const DEFAULT_COLUMNS: [(&str, &str); 5] = [
     ("Done", "completed"),
 ];
 
+/// What a column gets when its creator says nothing about its type — the
+/// schema's own default for `board_columns.type`, named once so the two cannot
+/// disagree.
+pub const UNTYPED_COLUMN: &str = "unstarted";
+
+/// Every type a column may carry. The board's vocabulary for automation, and
+/// the set `POST /boards/{id}/columns` validates against — an unknown type is
+/// refused by the CHECK constraint as a 500, which tells the caller nothing.
+pub const COLUMN_TYPES: [&str; 6] = [
+    "backlog",
+    "unstarted",
+    "started",
+    "review",
+    "completed",
+    "canceled",
+];
+
 /// The first word of a board's name, as a key.
 ///
 /// "NookOS Bootstrap" → `NOOK`. Deliberately not the whole name flattened and

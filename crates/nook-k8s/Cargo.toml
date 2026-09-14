@@ -32,6 +32,9 @@ futures-util = { workspace = true }
 rustls-pemfile = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+# Removing a Secret key needs a merge patch with a NULL value, and the typed
+# `Secret` cannot express one — its data map holds bytes, not absence.
+serde_json = { workspace = true }
 
 [dev-dependencies]
 # The API surface is asserted against `tower_test::mock` — the same harness

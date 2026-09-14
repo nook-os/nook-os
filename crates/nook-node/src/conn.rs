@@ -1420,64 +1420,167 @@ pub async fn connect_once(cfg: &NodeConfig, min_free_disk: u64) -> Result<()> {
                 // logged, because a credential in a log is a credential on
                 // disk somewhere nobody chose (AC-4).
                 use base64::Engine as _;
-                let report = match base64::engine::general_purpose::STANDARD
+                let decoded = base64::engine::general_purpose::STANDARD
                     .decode(payload_b64.as_bytes())
                     .map_err(|e| {
                         anyhow::anyhow!("the credential payload was not valid base64: {e}")
-                    })
-                    .and_then(|payload| crate::runtime_auth::install_credential(&runtime, &payload))
-                {
-                    Ok(path) => {
-                        // A write that the runtime does not accept is a FAILED
-                        // delivery. Reporting success on the write alone would
-                        // tell an operator the fleet is authorized when it is
-                        // not, which is the one wrong answer here.
-                        if crate::runtime_auth::is_authorized(&runtime) {
-                            tracing::info!(
-                                %runtime, path = %path.display(),
-                                "installed a runtime credential"
-                            );
-                            NodeToControl::RuntimeCredentialInstalled {
-                                runtime: runtime.clone(),
-                                path: path.display().to_string(),
-                                error: None,
-                            }
-                        } else {
-                            tracing::warn!(
-                                %runtime, path = %path.display(),
-                                "credential installed but the runtime still reports not authorized"
-                            );
-                            NodeToControl::RuntimeCredentialInstalled {
-                                runtime: runtime.clone(),
-                                path: path.display().to_string(),
-                                error: Some(
-                                    "the credential was written but the runtime still reports \
-                                     not authorized"
-                                        .into(),
-                                ),
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(%runtime, error = %e, "cannot install runtime credential");
-                        NodeToControl::RuntimeCredentialInstalled {
-                            runtime: runtime.clone(),
-                            path: String::new(),
-                            error: Some(e.to_string()),
-                        }
-                    }
-                };
-                ctl_tx.send(report).await.ok();
+                    });
 
-                // Re-probe and push the fresh set either way (AC-3), the same
-                // path an authorize session uses when it ends. On success this
-                // is what flips the panel to authorized; on failure it is what
-                // stops the panel claiming a state the node does not have.
-                let profiles = crate::runtime_auth::probe_all();
-                ctl_tx
-                    .send(NodeToControl::RuntimeAuthStatus { profiles })
-                    .await
-                    .ok();
+                // A Pod executor's agent is a Pod elsewhere in the cluster, and
+                // the only credential it ever reads is the Secret this node
+                // names — so a file written here would be opened by nothing
+                // (MAIN-650). Same delivery, different destination.
+                //
+                // SPAWNED, never awaited: this arm runs on the socket's only
+                // reader, and an apiserver round trip inline freezes every
+                // terminal on this machine. The report goes out from the task,
+                // exactly as the git arms above do.
+                #[cfg(feature = "kubernetes")]
+                let to_secret = crate::k8s_exec::ExecutorConfig::from_env()
+                    .ok()
+                    .flatten()
+                    .is_some_and(|c| c.credentials_secret.is_some());
+                #[cfg(not(feature = "kubernetes"))]
+                let to_secret = false;
+
+                if to_secret {
+                    #[cfg(feature = "kubernetes")]
+                    {
+                        let tx = ctl_tx.clone();
+                        let runtime = runtime.clone();
+                        tokio::spawn(async move {
+                            let report = match decoded {
+                                Ok(payload) => match crate::k8s_exec::deliver_credential_to_secret(
+                                    &runtime, &payload,
+                                )
+                                .await
+                                {
+                                    Ok(target) => {
+                                        tracing::info!(
+                                            %runtime, %target,
+                                            "delivered a runtime credential to the \
+                                             executor's Secret"
+                                        );
+                                        NodeToControl::RuntimeCredentialInstalled {
+                                            runtime: runtime.clone(),
+                                            path: target,
+                                            error: None,
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            %runtime, error = %e,
+                                            "cannot deliver the runtime credential"
+                                        );
+                                        NodeToControl::RuntimeCredentialInstalled {
+                                            runtime: runtime.clone(),
+                                            path: String::new(),
+                                            error: Some(e.to_string()),
+                                        }
+                                    }
+                                },
+                                Err(e) => NodeToControl::RuntimeCredentialInstalled {
+                                    runtime: runtime.clone(),
+                                    path: String::new(),
+                                    error: Some(e.to_string()),
+                                },
+                            };
+                            tx.send(report).await.ok();
+                            // The node's own probe is unchanged by this write —
+                            // it has no login of its own and reports what a Pod
+                            // will carry — but the push is what refreshes the
+                            // panel, so it happens on both paths.
+                            let profiles = crate::runtime_auth::probe_all();
+                            tx.send(NodeToControl::RuntimeAuthStatus { profiles })
+                                .await
+                                .ok();
+                        });
+                    }
+                } else {
+                    let report = match decoded.and_then(|payload| {
+                        crate::runtime_auth::install_credential(&runtime, &payload)
+                    }) {
+                        Ok(path) => {
+                            // A write that the runtime does not accept is a FAILED
+                            // delivery. Reporting success on the write alone would
+                            // tell an operator the fleet is authorized when it is
+                            // not, which is the one wrong answer here.
+                            if crate::runtime_auth::is_authorized(&runtime) {
+                                tracing::info!(
+                                    %runtime, path = %path.display(),
+                                    "installed a runtime credential"
+                                );
+                                NodeToControl::RuntimeCredentialInstalled {
+                                    runtime: runtime.clone(),
+                                    path: path.display().to_string(),
+                                    error: None,
+                                }
+                            } else {
+                                tracing::warn!(
+                                    %runtime, path = %path.display(),
+                                    "credential installed but the runtime still reports not authorized"
+                                );
+                                NodeToControl::RuntimeCredentialInstalled {
+                                    runtime: runtime.clone(),
+                                    path: path.display().to_string(),
+                                    error: Some(
+                                        "the credential was written but the runtime still reports \
+                                         not authorized"
+                                            .into(),
+                                    ),
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(%runtime, error = %e, "cannot install runtime credential");
+                            NodeToControl::RuntimeCredentialInstalled {
+                                runtime: runtime.clone(),
+                                path: String::new(),
+                                error: Some(e.to_string()),
+                            }
+                        }
+                    };
+                    ctl_tx.send(report).await.ok();
+
+                    // Re-probe and push the fresh set either way (AC-3), the same
+                    // path an authorize session uses when it ends. On success this
+                    // is what flips the panel to authorized; on failure it is what
+                    // stops the panel claiming a state the node does not have.
+                    let profiles = crate::runtime_auth::probe_all();
+                    ctl_tx
+                        .send(NodeToControl::RuntimeAuthStatus { profiles })
+                        .await
+                        .ok();
+                }
+            }
+            ControlToNode::StartManagedLogin { runtime, flow_id } => {
+                // Spawned, never awaited: this arm holds the socket's only
+                // reader and the flow lasts as long as a person takes to open a
+                // link and paste something back.
+                let tx = ctl_tx.clone();
+                tokio::spawn(crate::managed_login::run(flow_id, runtime, tx));
+            }
+            ControlToNode::SubmitManagedLoginCode { flow_id, code } => {
+                if !crate::managed_login::submit_code(flow_id, code) {
+                    // Not fatal, and worth saying: the usual cause is a flow
+                    // that already finished or expired, and the operator is
+                    // looking at a box that no longer goes anywhere.
+                    ctl_tx
+                        .send(NodeToControl::ManagedLoginFinished {
+                            flow_id,
+                            runtime: String::new(),
+                            error: Some(
+                                "no login is waiting for a code on this node — it finished, \
+                                 expired, or was started somewhere else"
+                                    .into(),
+                            ),
+                        })
+                        .await
+                        .ok();
+                }
+            }
+            ControlToNode::CancelManagedLogin { flow_id } => {
+                crate::managed_login::cancel(flow_id);
             }
             ControlToNode::InstallHooks { content, sha256 } => {
                 // Reported, never fatal (AC-2). A machine whose settings.json is

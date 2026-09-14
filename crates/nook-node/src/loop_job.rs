@@ -135,6 +135,13 @@ pub fn sweep_job_sandboxes() {
     //
     // The node's NAME goes with it: a namespace can hold two agents' job Pods,
     // and without it each would read the other's running work as an orphan.
+    // Retry the credential publish on the same cadence (MAIN-650). The probe
+    // path covers a login and a reconnect; this covers everything else — a
+    // permission granted after the node started, an apiserver that was briefly
+    // away, a token the runtime refreshed on its own. Free when there is
+    // nothing to do: a local read and a hash compare.
+    #[cfg(feature = "kubernetes")]
+    crate::k8s_exec::spawn_credential_sync();
     #[cfg(feature = "kubernetes")]
     crate::k8s_exec::spawn_orphan_sweep(
         NodeConfig::load()
@@ -2935,27 +2942,32 @@ fn run_in_pod(
     // needs the reason on the card, not in a node's log. AC-10 ships no
     // credential path, so this is the normal state of a cluster job rather than
     // an incident.
-    if !withheld.is_empty() {
+    // SILENT when the credentials are in place, which is the ordinary case
+    // (MAIN-650).
+    //
+    // This used to announce, on every single run, that two variables were
+    // withheld and read from "a hand-created fixture, not a shipped credential
+    // path". Both halves stopped being true: the node creates that Secret,
+    // publishes the fleet's session into it, and publishes this workspace's
+    // forge token per run — nothing about it is hand-created any more. What was
+    // left was a paragraph of self-description on a healthy run, which is the
+    // kind of note a reader learns to skip, and skipping it is how the one that
+    // matters gets missed.
+    //
+    // So it speaks only when something is actually wrong: no Secret configured
+    // at all. `withheld` is then the list of what the agent will not have.
+    if executor.credentials_secret.is_none() && !withheld.is_empty() {
         note(
             out,
             job_id,
-            match &executor.credentials_secret {
-                Some(secret) => format!(
-                    "{} credential(s) are not written into this Pod ({}); it reads them from \
-                     Secret {secret} instead — a hand-created fixture, not a shipped \
-                     credential path (MAIN-337/339)",
-                    withheld.len(),
-                    withheld.join(", ")
-                ),
-                None => format!(
-                    "this Pod gets NO credentials: {} were withheld ({}) and no \
-                     executor.credentialsSecret is configured. A Pod's env is readable by \
-                     anything with pod-read in this namespace, so they are not written \
-                     there. Expect the agent to fail authenticating.",
-                    withheld.len(),
-                    withheld.join(", ")
-                ),
-            },
+            format!(
+                "this Pod has no credentials: {} withheld ({}) and no \
+                 executor.credentialsSecret is set, so nothing delivers them. A Pod's \
+                 environment is readable by anything holding pod-read here, which is why \
+                 they are not simply written there. The agent will fail to authenticate.",
+                withheld.len(),
+                withheld.join(", ")
+            ),
         );
     }
 
@@ -2983,7 +2995,79 @@ fn run_in_pod(
         // the `?` may return straight out. Every path AFTER it goes through the
         // delete below — which is why the driving is its own function rather
         // than inline `?`s that would each need remembering.
-        let name = exec.start(job_id, run.kind, env, command).await?;
+        // This workspace's forge token into the Secret its Pod reads, BEFORE
+        // the Pod exists (MAIN-650). Awaited rather than spawned on purpose: a
+        // Pod created first would race the write and start with a stale token
+        // or none.
+        //
+        // A failure here is reported and not fatal — a run that needs no private
+        // checkout should not be refused over a credential it will never use,
+        // and the clone says plainly what it could not reach.
+        let forge_key = match (run.workspace_id, run.gh_token) {
+            (Some(ws), Some(token)) => {
+                match k8s_exec::publish_forge_token(executor, ws, token).await {
+                    Ok(key) => {
+                        tracing::info!(
+                            workspace = %ws, %key,
+                            "published this workspace's forge token for its job Pod"
+                        );
+                        Some(key)
+                    }
+                    Err(e) => {
+                        note(
+                            out,
+                            job_id,
+                            format!(
+                                "could not put this workspace's forge token in the credential \
+                                 Secret ({e}); a private checkout will fail to clone"
+                            ),
+                        );
+                        None
+                    }
+                }
+            }
+            // Said rather than passed over. A Pod with no forge token cannot
+            // clone a private repo, and the failure lands several minutes later
+            // as a bare `Host key verification failed` — which names neither the
+            // token nor the workspace.
+            _ => {
+                note(
+                    out,
+                    job_id,
+                    "this run carries no forge token, so a private checkout will fail to \
+                     clone: either the workspace has none recorded, or the one it has \
+                     could not be decrypted (the control plane logs which)"
+                        .to_string(),
+                );
+                None
+            }
+        };
+        // The run's own control-plane token, by the same road (MAIN-650). Without
+        // it the agent cannot read the card it was sent to build, nor report its
+        // outcome — and a well-behaved skill then refuses the pass rather than
+        // inventing the brief, which is right and still a wasted run.
+        //
+        // Per JOB, so it is written before the Pod and forgotten after it.
+        let nook_key = match run.nook_token {
+            Some(token) => match k8s_exec::publish_nook_token(executor, job_id, token).await {
+                Ok(key) => Some(key),
+                Err(e) => {
+                    note(
+                        out,
+                        job_id,
+                        format!(
+                            "could not put this run's control-plane token in the credential \
+                             Secret ({e}); the agent will not be able to read its card"
+                        ),
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
+        let name = exec
+            .start(job_id, run.kind, env, command, forge_key, nook_key)
+            .await?;
         let driven = drive_pod(out, job_id, &exec, &name).await;
         // AC-5, on success, on failure and on cancel. AWAITED rather than
         // spawned: the run is over, so there is nothing to be quick for, and a
@@ -2997,6 +3081,17 @@ fn run_in_pod(
     });
 
     unregister(run.dirname, job_id);
+    // The run's token is spent the moment its Pod is gone, and a key left in a
+    // shared Secret outlives the thing it was for. Best-effort: an untidy key is
+    // not a reason to fail a concluded run.
+    if run.nook_token.is_some() {
+        // Recomputed rather than carried out of the block: the key is a pure
+        // function of the job id, so deriving it twice cannot disagree with
+        // itself the way a threaded-through value could.
+        let key = k8s_exec::nook_token_key(job_id);
+        let cfg = executor.clone();
+        rt.spawn(async move { k8s_exec::forget_secret_key(&cfg, &key).await });
+    }
     match outcome {
         Ok((ok, message)) => finished(out, job_id, ok, message),
         // AC-7. A Pod that never ran cannot have failed the card, so the job

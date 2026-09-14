@@ -72,6 +72,44 @@ networkPolicy:
   # no warning from Kubernetes. See the chart README.
   enabled: true
 
+  # How this node reaches the Kubernetes API, and REQUIRED when
+  # `executor.mode=kubernetes` (MAIN-650).
+  #
+  # In that mode the node's entire job is creating job Pods through the
+  # apiserver — and the apiserver answers on a private address, which
+  # `deniedCIDRs` below severs. The node still joins and still reports healthy,
+  # so the symptom is every reconcile failing with "cannot reach the Kubernetes
+  # API server" long after the install said it worked. The chart refuses to
+  # render rather than ship that.
+  #
+  #   kubectl get svc kubernetes -n default -o jsonpath='{.spec.clusterIP}'
+  #
+  # One address, not the service CIDR: the rest of that range is other people's
+  # workloads, and this node has no business reaching them.
+  apiServer:
+    # DISCOVERED at install time from `default/kubernetes` Endpoints — leave this
+    # empty and the chart finds the apiserver itself. An operator should not have
+    # to look an address up and paste it in to make an install work.
+    #
+    # Set it only where discovery cannot run or is wrong: a rendered manifest
+    # (`helm template` performs no lookup), a cluster that refuses the read, or
+    # an apiserver behind a VIP the Endpoints do not name.
+    #
+    # The apiserver's ENDPOINTS, /32 each — not the `kubernetes` Service's
+    # ClusterIP alone. Under a CNI that translates ClusterIP to backend before
+    # evaluating policy (Cilium, which DOKS ships) a rule naming the ClusterIP
+    # is never matched, and the symptom is indistinguishable from having set
+    # nothing at all.
+    #
+    #   kubectl get endpointslice -n default \
+    #     -l kubernetes.io/service-name=kubernetes \
+    #     -o jsonpath='{.items[*].endpoints[*].addresses[*]}'
+    #
+    # Include the ClusterIP as well; it is harmless where it is not needed and
+    # required by a CNI that evaluates policy before translation.
+    cidrs: []
+    port: 443
+
   # Private ranges subtracted from the `0.0.0.0/0` egress allowance. The
   # defaults cover RFC1918, link-local (which is where the cloud metadata
   # endpoint 169.254.169.254 lives) and the carrier-grade NAT range some
@@ -135,6 +173,18 @@ loopKinds:
 # chart must keep the last word.
 maxLoopJobs: 2
 
+# Placement labels for this node (MAIN-650) — how the control plane decides
+# WHERE a kind may run, as opposed to `loopKinds`, which is what this node is
+# willing to run.
+#
+# Seeded at join and only when the node has none, so a values file stands a node
+# up complete while a later edit on the Nodes page stays authoritative. Adding
+# `build` to loopKinds implies `role/build` automatically: declaring that this
+# node builds and then not labelling it for build placement is a configuration
+# that cannot work.
+placement:
+  labels: {}
+
 # How this node RUNS a loop job (MAIN-623).
 #
 # `local` (the default) is what this chart has always done: the agent runs each
@@ -154,10 +204,36 @@ executor:
   # worth a namespace.
   namespace: nook-jobs
 
-  # The image a job Pod runs. No default: naming one here would be this chart
-  # guessing at a registry, and a wrong guess fails at ImagePullBackOff, long
-  # after the install reported success.
+  # The image a job Pod runs. Empty derives it from `image.registry`,
+  # `imageRepository` below and this chart's appVersion — the same way the
+  # node's own image is derived, and correct because the release workflow
+  # publishes the sandbox in lockstep with the node at every version.
+  #
+  # It used to be `required`, on the reasoning that a default would be this
+  # chart guessing at a registry. But the chart already names
+  # `ghcr.io/nook-os/nook-operator-node` for itself two blocks up, so the guess
+  # was being made either way — and leaving THIS one blank did not avoid a bad
+  # install, it just moved the failure to `helm install` and made
+  # `executor.mode=kubernetes` unusable without a value nobody could look up.
+  #
+  # Set it explicitly for a private registry, or for a sandbox built from
+  # `scripts/build-job-sandbox.sh`.
   image: ""
+
+  # Secrets the kubelet pulls the JOB image with, by name, in
+  # `executor.namespace`. Empty means the image must be public.
+  #
+  # Separate from the top-level `imagePullSecrets`, which covers this node's own
+  # image: the job Pod lives in a different namespace, and a Secret is not
+  # visible across one. Create it where the jobs run:
+  #
+  #   kubectl create secret docker-registry ghcr -n nook-jobs \
+  #     --docker-server=ghcr.io --docker-username=<user> --docker-password=<token>
+  imagePullSecrets: []
+
+  # Where the job sandbox lives, when `image` above is empty. Split out so a
+  # mirror only has to restate the path, not the whole reference with its tag.
+  imageRepository: nook-os/nook-job-sandbox
 
   # The ServiceAccount the agent uses to talk to the apiserver. Created by this
   # chart unless `create: false`, which is for a cluster whose accounts are
@@ -179,24 +255,31 @@ executor:
   # unable to start (MAIN-672). Without the session a cluster node reports the
   # runtime unauthorized and is sent no loop work at all.
   #
-  # The copy dies with the Pod, so a token claude refreshes never travels back
-  # here: the Secret is a SNAPSHOT and goes stale when its refresh token
-  # expires. See the chart README.
+  # NAME IT AND THE NODE FILLS IT (MAIN-650). Nothing here is created by hand:
+  # the node writes the fleet's session in after a sign-in, and writes this
+  # workspace's forge token in before each run, under a key of that workspace's
+  # own. Add a PAT to a workspace and the next run has it.
   #
-  # SCAFFOLDING, and it is named that way on purpose. Create it by hand; nothing
-  # in this chart or in the agent writes one, and the executor's Role grants no
-  # `secrets` verb at all — the agent could not create, read or update it if it
-  # tried. MAIN-337/339 own the real credential path. Everything in it is
-  # readable by every agent this node runs; see the chart README.
+  # The Secret need not exist beforehand — the node creates it. What the chart
+  # needs is the NAME, because the Pod spec references it before anything has
+  # been written.
+  #
+  # The agent itself still cannot reach it: the Role grants `get`/`patch` on
+  # this one Secret by name and `create`, and no `list` or `watch` — so the node
+  # can fill it and nothing can enumerate what else the namespace holds. The Pod
+  # receives the session as a mounted FILE and its own workspace's token as one
+  # named reference; it is never loaded wholesale, which would hand every job
+  # every workspace's credential.
+  #
+  # A token `claude` refreshes inside a Pod dies with that Pod, so what is
+  # stored here is a SNAPSHOT: it goes stale when its own refresh token expires,
+  # and re-signing in on the Nodes page replaces it. MAIN-337/339 own the
+  # durable credential path.
   #
   # Empty (the default) means a job Pod gets NO credentials and its agent will
-  # fail to authenticate. That is deliberate: the alternative is writing the
-  # fleet's GitHub token into the Pod's `env`, where `kubectl describe pod` and
-  # anything holding this Role's own `pods get` can read it back.
-  #
-  # A name that does not exist keeps the Pod in CreateContainerConfigError, and
-  # the agent refuses the job naming it — rather than starting, silently having
-  # no credentials, and spending a pass discovering that.
+  # fail to authenticate — deliberate, because the alternative is writing them
+  # into the Pod's `env`, where `kubectl describe pod` and anything holding this
+  # Role's own `pods get` can read them back.
   credentialsSecret: ""
 
   # Where BUILD Pods may run (MAIN-655). A build Pod is privileged, so it must

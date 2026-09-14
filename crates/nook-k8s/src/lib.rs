@@ -26,6 +26,7 @@
 pub mod config;
 pub mod error;
 pub mod pods;
+pub mod secrets;
 
 /// The API types a caller needs to BUILD what [`pods`] sends.
 ///
@@ -39,8 +40,9 @@ pub mod pods;
 /// field it forgot would be one a caller could not set.
 pub mod types {
     pub use k8s_openapi::api::core::v1::{
-        Container, EmptyDirVolumeSource, EnvFromSource, EnvVar, Pod, PodSecurityContext, PodSpec,
-        SecretEnvSource, SecretVolumeSource, SecurityContext, Toleration, Volume, VolumeMount,
+        Container, EmptyDirVolumeSource, EnvFromSource, EnvVar, EnvVarSource, LocalObjectReference,
+        Pod, PodSecurityContext, PodSpec, SecretEnvSource, SecretKeySelector, SecretVolumeSource,
+        SecurityContext, Toleration, Volume, VolumeMount,
     };
     pub use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 }
@@ -48,6 +50,7 @@ pub mod types {
 pub use config::{connect, resolve, Connection, Environment, Source, SERVICE_ACCOUNT_DIR};
 pub use error::{Error, Operation, Result};
 pub use pods::Pods;
+pub use secrets::Credentials;
 
 #[cfg(test)]
 mod guards;
