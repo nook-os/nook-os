@@ -40,8 +40,8 @@ pub mod secrets;
 /// field it forgot would be one a caller could not set.
 pub mod types {
     pub use k8s_openapi::api::core::v1::{
-        Container, EmptyDirVolumeSource, EnvFromSource, EnvVar, EnvVarSource, Pod,
-        PodSecurityContext, PodSpec, SecretEnvSource, SecretKeySelector, SecretVolumeSource,
+        Container, EmptyDirVolumeSource, EnvFromSource, EnvVar, EnvVarSource, LocalObjectReference,
+        Pod, PodSecurityContext, PodSpec, SecretEnvSource, SecretKeySelector, SecretVolumeSource,
         SecurityContext, Toleration, Volume, VolumeMount,
     };
     pub use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;

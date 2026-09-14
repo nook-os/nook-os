@@ -153,6 +153,13 @@ pub struct ExecutorConfig {
     /// the loop runtime unauthorized (see [`delivered_runtime_auth`]) and is
     /// sent no loop work, instead of claiming jobs it cannot run.
     pub credentials_secret: Option<String>,
+    /// Registry credentials for the job image, from
+    /// `NOOK_JOB_IMAGE_PULL_SECRETS` (comma separated).
+    ///
+    /// Empty means the image must be public. A private one then fails as
+    /// `ErrImagePull` AFTER the pool has scaled a node up for it — a machine
+    /// booted to run nothing.
+    pub image_pull_secrets: Vec<String>,
 }
 
 impl ExecutorConfig {
@@ -226,6 +233,13 @@ impl ExecutorConfig {
             namespace,
             image,
             build_pool,
+            image_pull_secrets: std::env::var("NOOK_JOB_IMAGE_PULL_SECRETS")
+                .unwrap_or_default()
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect(),
             credentials_secret: trimmed("NOOK_JOB_CREDENTIALS_SECRET"),
         }))
     }
@@ -318,6 +332,16 @@ pub struct PodJobSpec {
     /// a workspace with no token configured still starts (and its agent simply
     /// cannot reach a private repo).
     pub forge_token_key: Option<String>,
+    /// Secrets the kubelet authenticates to the registry with (MAIN-650).
+    ///
+    /// Without these a job Pod can only run an image from a PUBLIC registry —
+    /// and it fails as `ErrImagePull` AFTER the pool has scaled a node up for
+    /// it, so the cost of the omission is a machine booted to run nothing.
+    ///
+    /// The node's own image comes from the same registry and the StatefulSet
+    /// has always been able to name pull secrets; the Pod it creates could not,
+    /// which is the asymmetry this closes.
+    pub image_pull_secrets: Vec<String>,
     /// What the container runs — the agent runtime, its flags, and the opening
     /// turn among them.
     ///
@@ -1218,6 +1242,12 @@ pub fn job_pod(spec: &PodJobSpec) -> Result<Pod, Refusal> {
         node_selector: pool.map(|p| {
             std::collections::BTreeMap::from([(p.selector_key.clone(), p.selector_value.clone())])
         }),
+        image_pull_secrets: (!spec.image_pull_secrets.is_empty()).then(|| {
+            spec.image_pull_secrets
+                .iter()
+                .map(|name| nook_k8s::types::LocalObjectReference { name: name.clone() })
+                .collect()
+        }),
         tolerations: pool.map(|p| {
             vec![Toleration {
                 key: Some(p.taint_key.clone()),
@@ -1373,6 +1403,7 @@ impl PodExecutor {
             build_pool: self.cfg.build_pool.clone(),
             credentials_secret: self.cfg.credentials_secret.clone(),
             forge_token_key,
+            image_pull_secrets: self.cfg.image_pull_secrets.clone(),
         })?;
         let name = pod
             .metadata
@@ -1558,6 +1589,7 @@ mod tests {
             }),
             credentials_secret: None,
             forge_token_key: None,
+            image_pull_secrets: Vec::new(),
         }
     }
 
@@ -1934,6 +1966,7 @@ mod tests {
             image: "img:1".into(),
             build_pool: None,
             credentials_secret: None,
+            image_pull_secrets: Vec::new(),
         };
 
         // No Secret: the probe stands, so the dispatcher passes this node over
@@ -2323,6 +2356,33 @@ mod tests {
     /// reachable only if the forge token the Secret carries is wired into git
     /// (MAIN-650). Asserted on the SHAPE, because the failure it prevents is a
     /// clone that dies with a permission error naming nothing.
+    /// A private job image needs registry credentials, and the cost of not
+    /// having them is not a fast failure: the pool scales a node up first, and
+    /// only then does the Pod report ErrImagePull (MAIN-650).
+    #[test]
+    fn a_job_pod_can_pull_from_a_private_registry() {
+        let mut sp = spec("build");
+        sp.image_pull_secrets = vec!["ghcr".into(), "mirror".into()];
+        let pod = job_pod(&sp).unwrap();
+        let refs = pod
+            .spec
+            .as_ref()
+            .unwrap()
+            .image_pull_secrets
+            .as_ref()
+            .expect("pull secrets");
+        assert_eq!(
+            refs.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            ["ghcr", "mirror"],
+            "every named secret reaches the Pod, in order"
+        );
+
+        // None configured ⇒ the field is absent rather than an empty list, so a
+        // public image renders exactly what it always did.
+        let pod = job_pod(&spec("build")).unwrap();
+        assert!(pod.spec.as_ref().unwrap().image_pull_secrets.is_none());
+    }
+
     /// The token reaches the container BY REFERENCE and is keyed per workspace
     /// (MAIN-650). Both halves matter: a value would be readable through the
     /// executor's own `pods get`, and one shared key would let the last job to

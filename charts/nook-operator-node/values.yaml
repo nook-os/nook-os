@@ -212,6 +212,17 @@ executor:
   # `scripts/build-job-sandbox.sh`.
   image: ""
 
+  # Secrets the kubelet pulls the JOB image with, by name, in
+  # `executor.namespace`. Empty means the image must be public.
+  #
+  # Separate from the top-level `imagePullSecrets`, which covers this node's own
+  # image: the job Pod lives in a different namespace, and a Secret is not
+  # visible across one. Create it where the jobs run:
+  #
+  #   kubectl create secret docker-registry ghcr -n nook-jobs \
+  #     --docker-server=ghcr.io --docker-username=<user> --docker-password=<token>
+  imagePullSecrets: []
+
   # Where the job sandbox lives, when `image` above is empty. Split out so a
   # mirror only has to restate the path, not the whole reference with its tag.
   imageRepository: nook-os/nook-job-sandbox

@@ -113,6 +113,14 @@ spec:
               value: kubernetes
             - name: NOOK_EXECUTOR_NAMESPACE
               value: {{ .Values.executor.namespace | quote }}
+            {{- with .Values.executor.imagePullSecrets }}
+            # Registry credentials for the JOB image. Without them a job Pod can
+            # only run a public image — and it fails as ErrImagePull after the
+            # pool has scaled a node up for it, which is a machine booted to run
+            # nothing (MAIN-650).
+            - name: NOOK_JOB_IMAGE_PULL_SECRETS
+              value: {{ join "," . | quote }}
+            {{- end }}
             - name: NOOK_JOB_IMAGE
               value: {{ include "nook-operator-node.jobImage" . | quote }}
             {{- with .Values.executor.credentialsSecret }}
