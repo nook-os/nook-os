@@ -825,11 +825,14 @@ pub trait TaskRepository: Send + Sync {
     /// Add a column at an explicit position, letting the column type default —
     /// distinct from [`TaskRepository::create_column`], which the board
     /// bootstrap uses to set the type as well.
+    /// `kind` is the board-column TYPE automation resolves. `None` keeps the
+    /// column's default.
     async fn append_column(
         &self,
         board: BoardId,
         name: &str,
         position: i32,
+        kind: Option<&str>,
     ) -> ApiResult<BoardColumn>;
 
     /// Rename/reposition a column, scoped through its board's tenant because
@@ -2935,13 +2938,15 @@ impl TaskRepository for DbTaskRepository {
         board: BoardId,
         name: &str,
         position: i32,
+        kind: Option<&str>,
     ) -> ApiResult<BoardColumn> {
+        let kind = kind.unwrap_or(crate::services::boards::UNTYPED_COLUMN);
         Ok(self
             .db
             .query_one(
-                "INSERT INTO board_columns (id, board_id, name, position)
-         VALUES ($1, $2, $3, $4) RETURNING *",
-                params![ColumnId::new(), board, name, position],
+                "INSERT INTO board_columns (id, board_id, name, position, type)
+         VALUES ($1, $2, $3, $4, $5) RETURNING *",
+                params![ColumnId::new(), board, name, position, kind],
             )
             .await?)
     }
@@ -4999,6 +5004,7 @@ impl TaskRepository for FakeTaskRepository {
         board: BoardId,
         name: &str,
         position: i32,
+        kind: Option<&str>,
     ) -> ApiResult<BoardColumn> {
         let mut st = self.inner.lock().unwrap();
         let c = BoardColumn {
@@ -5006,8 +5012,9 @@ impl TaskRepository for FakeTaskRepository {
             board_id: board,
             name: name.into(),
             position,
-            // The column DEFAULT the INSERT relies on by omitting the field.
-            r#type: "unstarted".into(),
+            r#type: kind
+                .unwrap_or(crate::services::boards::UNTYPED_COLUMN)
+                .into(),
         };
         st.columns.push(c.clone());
         Ok(c)

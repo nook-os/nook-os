@@ -582,10 +582,26 @@ pub async fn add_column(
     {
         return Err(ApiError::NotFound);
     }
+    // Refuse an unknown type here rather than letting the CHECK constraint do
+    // it: that surfaces as a 500, which tells the caller nothing about what it
+    // got wrong.
+    if let Some(kind) = req.r#type.as_deref() {
+        if !crate::services::boards::COLUMN_TYPES.contains(&kind) {
+            return Err(ApiError::BadRequest(format!(
+                "unknown column type {kind:?} — one of {}",
+                crate::services::boards::COLUMN_TYPES.join(", ")
+            )));
+        }
+    }
     let max_pos = state.tasks.max_column_position(board_id).await?;
     let col = state
         .tasks
-        .append_column(board_id, &req.name, max_pos.unwrap_or(-1) + 1)
+        .append_column(
+            board_id,
+            &req.name,
+            max_pos.unwrap_or(-1) + 1,
+            req.r#type.as_deref(),
+        )
         .await?;
     Ok(Json(col))
 }

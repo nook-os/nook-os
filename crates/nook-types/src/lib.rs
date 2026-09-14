@@ -3932,6 +3932,18 @@ pub struct UpdateBoardRequest {
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct CreateColumnRequest {
     pub name: String,
+    /// `backlog` | `unstarted` | `started` | `review` | `completed` | `canceled`.
+    ///
+    /// The NAME is what a person reads and may change freely; the TYPE is what
+    /// automation targets — "park this card for review" resolves a type, never
+    /// a name. Adding a column without one produced an `unstarted` column with
+    /// a promising name, which is a board a build run still cannot conclude on
+    /// (MAIN-650).
+    ///
+    /// Optional, because the existing callers name a column and mean nothing
+    /// more by it. Absent keeps the column's default.
+    #[serde(default)]
+    pub r#type: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, ToSchema)]

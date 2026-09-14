@@ -12546,6 +12546,13 @@
         "properties": {
           "name": {
             "type": "string"
+          },
+          "type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`backlog` | `unstarted` | `started` | `review` | `completed` | `canceled`.\n\nThe NAME is what a person reads and may change freely; the TYPE is what\nautomation targets — \"park this card for review\" resolves a type, never\na name. Adding a column without one produced an `unstarted` column with\na promising name, which is a board a build run still cannot conclude on\n(MAIN-650).\n\nOptional, because the existing callers name a column and mean nothing\nmore by it. Absent keeps the column's default."
           }
         }
       },
