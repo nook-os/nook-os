@@ -612,8 +612,8 @@ pub fn pod_command(launch: &AgentLaunch<'_>) -> Vec<String> {
              umask 077\n  \
              printf 'https://x-access-token:%s@github.com\\n' \"$GH_TOKEN\" > \"$HOME/.git-credentials\"\n  \
              git config --global credential.helper 'store'\n  \
-             git config --global url.'https://github.com/'.insteadOf 'git@github.com:'\n  \
-             git config --global url.'https://github.com/'.insteadOf 'ssh://git@github.com/'\n\
+             git config --global --replace-all url.'https://github.com/'.insteadOf 'git@github.com:'\n  \
+             git config --global --add url.'https://github.com/'.insteadOf 'ssh://git@github.com/'\n\
              fi\n",
         );
         script.push_str(&format!(
@@ -2464,8 +2464,29 @@ mod tests {
         // The rewrite is the load-bearing half for a workspace whose recorded
         // remote is SSH: without it the token is irrelevant, because the Pod
         // cannot speak that transport at all.
-        assert!(body.contains("insteadOf 'git@github.com:'"), "{body}");
-        assert!(body.contains("insteadOf 'ssh://git@github.com/'"), "{body}");
+        // BOTH rewrites must survive. `insteadOf` is a MULTI-VALUE key and a
+        // plain `git config` REPLACES it, so writing the two in turn left only
+        // the last — and the one that lost was `git@github.com:`, the scp-like
+        // form a workspace's recorded remote almost always uses. The token was
+        // present and the clone still went to SSH.
+        assert!(
+            body.contains("--replace-all url.'https://github.com/'.insteadOf 'git@github.com:'"),
+            "{body}"
+        );
+        assert!(
+            body.contains("--add url.'https://github.com/'.insteadOf 'ssh://git@github.com/'"),
+            "{body}"
+        );
+        let scp = body
+            .find("'git@github.com:'")
+            .expect("the scp-like rewrite");
+        let ssh = body
+            .find("'ssh://git@github.com/'")
+            .expect("the ssh rewrite");
+        assert!(
+            scp < ssh,
+            "replace-all must come first or it clears the add"
+        );
 
         // The token is never echoed into the script itself — it is read from the
         // environment the Secret supplies, so `kubectl get pod -o yaml` shows a
