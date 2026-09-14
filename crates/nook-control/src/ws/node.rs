@@ -343,6 +343,40 @@ async fn handle_message(
                 )
                 .await?;
 
+            // Seed the placement labels this node was DEPLOYED with, if it has
+            // none (MAIN-650).
+            //
+            // A chart-installed node could declare `loopKinds: [build]` and a
+            // build pool and still never be offered build work, because
+            // placement also wants `role/build` — which only a click could set.
+            // Two places had to agree and an install could reach one, so every
+            // Helm install ended in an undocumented manual step.
+            //
+            // ONLY when it has none. A values file stands a node up complete; a
+            // later edit in the UI is authoritative and must not be undone by
+            // the next reconnect, which is exactly what applying these every
+            // time would do.
+            if !capabilities.placement_labels.is_empty() {
+                match state.nodes.get(tenant, node_id).await {
+                    Ok(Some(n)) if n.labels.as_object().is_none_or(|l| l.is_empty()) => {
+                        let labels = serde_json::to_value(&capabilities.placement_labels)?;
+                        if let Err(e) = state
+                            .nodes
+                            .set_placement(node_id, tenant, labels, n.taints.clone())
+                            .await
+                        {
+                            tracing::warn!(node = %name, error = ?e, "could not seed this node's placement labels");
+                        } else {
+                            tracing::info!(
+                                node = %name, labels = ?capabilities.placement_labels,
+                                "seeded the placement labels this node was deployed with"
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
             // Reconcile: node-reported tmux state is the truth. Any session
             // this node owns whose tmux session no longer exists has exited.
             state

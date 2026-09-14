@@ -11659,6 +11659,16 @@
             "format": "int64",
             "minimum": 0
           },
+          "placement_labels": {
+            "type": "object",
+            "description": "Placement labels this node was DEPLOYED with (MAIN-650), from\n`NOOK_NODE_LABELS`.\n\nThe reason they exist: a chart-installed node could declare\n`loopKinds: [build]` and an `executor.buildPool` and still never be\noffered build work, because placement also needs `role/build` — which\nonly a person clicking the Nodes page could set. Two places had to agree\nand the install could only reach one, so every Helm install ended with an\nundocumented manual step.\n\nSEEDED, not enforced: the control plane applies these only when the node\nhas no labels yet, so a values file can stand a node up complete while a\nlater edit in the UI stays authoritative and is never clobbered by a\nreconnect. A values file is an owner's explicit act in the same way a\nclick is — and it is in version control, which a click is not.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
           "platform": {
             "type": "string"
           },

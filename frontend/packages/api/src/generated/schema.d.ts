@@ -5145,6 +5145,26 @@ export interface components {
             max_loop_jobs_pinned?: boolean;
             /** Format: int64 */
             memory: number;
+            /**
+             * @description Placement labels this node was DEPLOYED with (MAIN-650), from
+             *     `NOOK_NODE_LABELS`.
+             *
+             *     The reason they exist: a chart-installed node could declare
+             *     `loopKinds: [build]` and an `executor.buildPool` and still never be
+             *     offered build work, because placement also needs `role/build` — which
+             *     only a person clicking the Nodes page could set. Two places had to agree
+             *     and the install could only reach one, so every Helm install ended with an
+             *     undocumented manual step.
+             *
+             *     SEEDED, not enforced: the control plane applies these only when the node
+             *     has no labels yet, so a values file can stand a node up complete while a
+             *     later edit in the UI stays authoritative and is never clobbered by a
+             *     reconnect. A values file is an owner's explicit act in the same way a
+             *     click is — and it is in version control, which a click is not.
+             */
+            placement_labels?: {
+                [key: string]: string;
+            };
             platform: string;
             /**
              * @description The port range this node offers sessions, `[start, end]` inclusive

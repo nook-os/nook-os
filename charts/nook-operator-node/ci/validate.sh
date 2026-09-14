@@ -410,6 +410,24 @@ else
   fail=1
 fi
 
+# Placement labels (MAIN-650). Declaring `build` has to imply `role/build`, or
+# the install completes and the node is never offered a build — the manual step
+# this removes.
+labelled="$(render "${k8smin[@]}" --set 'loopKinds={spec,build}' \
+  --set executor.buildPool.selector=w=b --set executor.buildPool.taint=w 2>/dev/null)"
+if grep -A1 'name: NOOK_NODE_LABELS' <<<"$labelled" | grep -q 'role/build=true'; then
+  echo "  ok:   declaring build implies the role/build placement label"
+else
+  echo "  FAIL: loopKinds includes build but no role/build label is declared"
+  fail=1
+fi
+if grep -q 'NOOK_NODE_LABELS' <<<"$out"; then
+  echo "  FAIL: a node that runs no builds still declares placement labels"
+  fail=1
+else
+  echo "  ok:   no placement labels when none are wanted"
+fi
+
 echo "==> helm template (build kind)"
 if render "${min[@]}" "${k8smin[@]:2}" --set 'loopKinds={spec,build}' \
      >/dev/null 2>&1; then

@@ -102,6 +102,7 @@ pub fn detect() -> Capabilities {
         ),
         shared_operator: shared_operator(),
         isolated_builds: isolated_builds(),
+        placement_labels: placement_labels(),
         loop_kinds: loop_kinds(),
         max_loop_jobs: Some(max_loop_jobs()),
         max_loop_jobs_pinned: max_loop_jobs_pinned(),
@@ -122,6 +123,23 @@ pub fn detect() -> Capabilities {
             .ok()
             .and_then(|c| crate::selfupdate::supervision(&c)),
     }
+}
+
+/// Placement labels this node was deployed with, from `NOOK_NODE_LABELS`
+/// (MAIN-650) — `key=value`, comma separated.
+///
+/// Parsed permissively and reported as data: the control plane decides what to
+/// do with them, and seeds them only onto a node that has none.
+fn placement_labels() -> std::collections::BTreeMap<String, String> {
+    std::env::var("NOOK_NODE_LABELS")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|pair| {
+            let (k, v) = pair.split_once('=')?;
+            let (k, v) = (k.trim(), v.trim());
+            (!k.is_empty() && !v.is_empty()).then(|| (k.to_string(), v.to_string()))
+        })
+        .collect()
 }
 
 /// Whether a build here lands on a pool of its own (MAIN-655).

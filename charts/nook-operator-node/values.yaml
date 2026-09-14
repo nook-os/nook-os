@@ -165,6 +165,18 @@ loopKinds:
 # chart must keep the last word.
 maxLoopJobs: 2
 
+# Placement labels for this node (MAIN-650) — how the control plane decides
+# WHERE a kind may run, as opposed to `loopKinds`, which is what this node is
+# willing to run.
+#
+# Seeded at join and only when the node has none, so a values file stands a node
+# up complete while a later edit on the Nodes page stays authoritative. Adding
+# `build` to loopKinds implies `role/build` automatically: declaring that this
+# node builds and then not labelling it for build placement is a configuration
+# that cannot work.
+placement:
+  labels: {}
+
 # How this node RUNS a loop job (MAIN-623).
 #
 # `local` (the default) is what this chart has always done: the agent runs each
