@@ -441,16 +441,17 @@ pub async fn run(db: &DbPool, cfg: &Config) -> Result<()> {
         // rename freely; the type is what automation targets, and seeding it
         // here is what stops the very first board from being one an agent
         // cannot navigate.
+        //
+        // The set is `boards::DEFAULT_COLUMNS` and not a copy of it (MAIN-650).
+        // A copy is what this was, and it had drifted: it was missing the
+        // `review` column, so the FIRST board of every fresh install could not
+        // receive a build run's conclusion. The run opens its PR, reports
+        // `pr_opened`, and `record_build_outcome` then fails looking for a
+        // column of that type — the outcome recorded, the card left in In
+        // Progress with no PR link, and the only trace an ERROR in the control
+        // plane's log. Measured on a fresh cluster, twice.
         let mut column_ids = Vec::new();
-        for (i, (name, kind)) in [
-            ("Triage", "backlog"),
-            ("Todo", "unstarted"),
-            ("In Progress", "started"),
-            ("Done", "completed"),
-        ]
-        .iter()
-        .enumerate()
-        {
+        for (i, (name, kind)) in crate::services::boards::DEFAULT_COLUMNS.iter().enumerate() {
             let id: ColumnId = db
                 .query_scalar(
                     "INSERT INTO board_columns (id, board_id, name, position, type)
@@ -461,6 +462,8 @@ pub async fn run(db: &DbPool, cfg: &Config) -> Result<()> {
             column_ids.push(id);
         }
 
+        // Indices into `column_ids`, which is `DEFAULT_COLUMNS` in order:
+        // 0 Triage, 1 Todo, 2 In Progress, 3 In Review, 4 Done.
         let tasks: [(&str, &str, usize); 6] = [
             (
                 "Wire a second node",
@@ -490,7 +493,7 @@ pub async fn run(db: &DbPool, cfg: &Config) -> Result<()> {
             (
                 "Boot the stack",
                 "docker compose up — you already did this one.",
-                3,
+                4,
             ),
         ];
         for (i, (title, desc, col)) in tasks.iter().enumerate() {

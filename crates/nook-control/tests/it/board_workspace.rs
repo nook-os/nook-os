@@ -550,3 +550,49 @@ async fn a_boardless_workspace_still_deletes_unprompted() {
 
     bed.teardown().await;
 }
+
+/// The SEEDED board — the first one a fresh install has — must carry the same
+/// typed columns as one a person creates (MAIN-650).
+///
+/// It did not. The seed kept its own copy of the column list and that copy was
+/// missing `review`, so on every deployment made after 0010 the bootstrap board
+/// had four columns. A build run on such a board opens its PR, records
+/// `pr_opened`, and `record_build_outcome` then fails resolving a column of
+/// that type — the card stays in In Progress with no PR link, and the only
+/// trace is an ERROR in the control plane's log. Measured on a real cluster,
+/// twice, before this was found.
+///
+/// Asserting the TYPES and not a count: a count passes for four columns and one
+/// duplicate, which is the shape a careless edit produces.
+#[tokio::test]
+async fn the_seeded_board_has_every_column_type_automation_resolves() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let state = bed.app_state().await;
+
+    let board: BoardId = bed
+        .db()
+        .query_scalar(
+            "SELECT id FROM boards WHERE name = 'NookOS Bootstrap' LIMIT 1",
+            params![],
+        )
+        .await
+        .expect("the seed made a bootstrap board");
+
+    let cols = state.tasks.board_columns(board).await.expect("cols");
+    for (_, kind) in services::boards::DEFAULT_COLUMNS {
+        assert!(
+            cols.iter().any(|c| c.r#type == kind),
+            "the seeded board has no {kind:?} column — it has {:?}",
+            cols.iter().map(|c| &c.r#type).collect::<Vec<_>>()
+        );
+    }
+
+    // The call `record_build_outcome` makes. It is the one that failed.
+    services::tasks::column_of_type(state.tasks.as_ref(), board, "review")
+        .await
+        .expect("a build run can park its card for review");
+
+    bed.teardown().await;
+}
